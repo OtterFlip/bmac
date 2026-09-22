@@ -1,0 +1,10 @@
+*.env
+*.key
+secrets.env
+cluster_state.txt
+__pycache__/
+artifacts/
+!hosts/artifacts/
+hosts/artifacts/*
+!hosts/artifacts/used-tailscale-auth-key-sha256
+hosts/artifacts/used-tailscale-auth-key-sha256.lock
