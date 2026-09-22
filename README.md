@@ -282,3 +282,7 @@ Kubernetes also doesn't, by itself, solve persistent-storage or database failove
 BMAC also provides a production-derived staging model that Kubernetes does not provide out of the box. Replicated production storage on a standby host can be turned into a lightweight Copy-on-Write staging VM, patched with a unique machine identity, tested independently, and discarded when no longer needed. The standby hardware therefore remains useful during normal operation while still being available for production failover.
 
 BMAC doesn't prevent you from using Kubernetes. If your application benefits from containers, horizontal scaling, service orchestration, or Kubernetes deployment tooling, you can run Kubernetes inside VMs hosted by BMAC. The two systems solve different layers of the problem.
+
+## Future
+
+We have many more improvements planned for BMAC, including support for integrated CEPH.  For FiberState deployments, BMAC could be improved significantly if FiberState makes adds ingress/egress capability from the VLAN.  This would drammatically-simplify the BMAC implementation, doing away with the need for HAProxy and VRRP+keepalived for ingress/egress routing, and the complex coordination and syncing these currently require.  More details on low-hanging-fruit changes that FiberState could make are in [`FUGURE.md`](FUTURE.md).
