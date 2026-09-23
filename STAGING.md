@@ -38,6 +38,8 @@ A lightweight Copy-on-Write linked-clone of the temporary staging snapshot on th
 
 This linked-clone zvol is then mounted on the standby host and it EXT4 OS file system is patched in order to alter the machine identity (MAC address, IP address, machine ID, etc) so that the new staging VM, based on this linked clone,  After patching the linked-clone zvol, it's then dismounted from the standby host and then attached to a newly-created staging VM on the standby host.  This new staging VM on the standby host is then started.  It's available on the network and its webapp (the mirror-image of the production webapp including all of its state, database and all) is accessible through your browser at https://stage1prod1.yourdomain.com
 
+If a failover occurs, which requires bringing prod1 online on the standby host, a startup hook will run before the prod VM is powered on, and this startup hook will ensure that if there are any active staging guests running on the standby host that those staging VMs will be powered off and removed before the prod VM is powered on.  This is a fast operation which ensures that the standby host has all of the RAM and CPU resources needed by the prod VM.
+
 <p align="center">
   <img src="media/staging5.png" width="800">
 </p>
