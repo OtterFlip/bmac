@@ -1,6 +1,15 @@
+# Copy this example file to env/mox2.conf (the copy goes in the same directory),
+# and then fill in the mox1.conf copy with the actual correct values that match
+# your first proxmox host's settings.  Make sure you fill in the serial number
+# and byte capacities for both members of mirror 1, as well as MAC addresses
+# for the primary NIC which has your public IP and gateway, and your
+# secondary NIC which is used for private communication within the cluster.
+# Compare this file with mox1_dot_conf to get a feel for how the other
+# values such as the HAPROXY_* values should be set for each proxmos host.
+
 # IDRAC_IP is optional and is required only when setup_proxmox_host.sh is run
 # with iDRAC/Redfish inventory (the script prompts for this choice).
-#IDRAC_IP=10.20.30.1
+#IDRAC_IP=10.20.30.2
 
 # Mirror 1 *_SERIAL_* values are mandatory; mirror 1 becomes the bootable rpool
 # mirror. Mirrors 2-5 are optional but must be complete and contiguous. Every
@@ -9,8 +18,8 @@
 # Corresponding *_CAPACITY_BYTES_* values are required only when running
 # setup_proxmox_host.sh without iDRAC/Redfish inventory; gather them with
 # hosts/inventory_disks.sh.
-NVME_MIRROR_1_SERIAL_1=ABCD012345678900BGN
-NVME_MIRROR_1_SERIAL_2=DEFD012345678900BGN
+NVME_MIRROR_1_SERIAL_1=GHID012345678900BGN
+NVME_MIRROR_1_SERIAL_2=JKLD012345678900BGN
 NVME_MIRROR_1_CAPACITY_BYTES_1=2000398934016
 NVME_MIRROR_1_CAPACITY_BYTES_2=2000398934016
 #NVME_MIRROR_2_SERIAL_1=
@@ -31,28 +40,28 @@ NVME_MIRROR_1_CAPACITY_BYTES_2=2000398934016
 #NVME_MIRROR_5_CAPACITY_BYTES_2=
 
 # Public IP and Internet Gateway on NIC 1
-PROXMOX_IP=32.99.26.33
-PROXMOX_GATEWAY=32.99.26.1
+PROXMOX_IP=38.12.33.234
+PROXMOX_GATEWAY=38.12.33.1
 PROXMOX_NETMASK=255.255.255.0
 PROXMOX_PREFIX=24
 
-TAILSCALE_HOSTNAME=mox1
+TAILSCALE_HOSTNAME=mox2
 
 # NICs are selected by permanent MAC, never by unstable enoN names.
-PROXMOX_PUBLIC_MAC=AA:BB:CC:DD:EE:FF
-PROXMOX_SECONDARY_MAC=BB:AA:BB:CC:DD:EE
-PROXMOX_SECONDARY_IP=10.213.0.11/24
+PROXMOX_PUBLIC_MAC=CC:DD:EE:FF:AA:BB
+PROXMOX_SECONDARY_MAC=DD:EE:FF:AA:BB:CC
+PROXMOX_SECONDARY_IP=10.213.0.12/24
 
-# Ingress: this host's public TCP 80/443 is DNATed to fixed local haproxy1 at
-# .21. Its gateway MUST be mox1's fixed .11 so replies traverse this host's
+# Ingress: this host's public TCP 80/443 is DNATed to fixed local haproxy2 at
+# .22. Its gateway MUST be mox2's fixed .12 so replies traverse this host's
 # conntrack state. It must not use floating guest-egress VIP .10.
-# Egress: production/staging guests use .10; Keepalived may make mox1 the
+# Egress: production/staging guests use .10; Keepalived may make mox2 the
 # current router and nftables then SNATs those guests through PROXMOX_IP.
-HAPROXY_LXC_VMID=9111
-HAPROXY_LXC_HOSTNAME=haproxy1
-HAPROXY_LXC_IP=10.213.0.21/24
-HAPROXY_LXC_GATEWAY=10.213.0.11
-VRRP_PRIORITY=199
+HAPROXY_LXC_VMID=9112
+HAPROXY_LXC_HOSTNAME=haproxy2
+HAPROXY_LXC_IP=10.213.0.22/24
+HAPROXY_LXC_GATEWAY=10.213.0.12
+VRRP_PRIORITY=198
 
 # Specifies how many staging VMs can be created on this host
 # When this value is set it should factor in the host's available RAM

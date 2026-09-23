@@ -1,6 +1,7 @@
 *.env
 *.key
 secrets.env
+env/*.conf
 cluster_state.txt
 __pycache__/
 artifacts/
