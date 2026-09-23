@@ -6,6 +6,7 @@
 # secondary NIC which is used for private communication within the cluster.
 # Compare this file with mox2_dot_conf to get a feel for how the other
 # values such as the HAPROXY_* values should be set for each proxmos host.
+# REMOVE THIS COMMENT FROM THE TOP OF YOUR env/mox1.conf file
 
 # IDRAC_IP is optional and is required only when setup_proxmox_host.sh is run
 # with iDRAC/Redfish inventory (the script prompts for this choice).
