@@ -1,4 +1,4 @@
-# Lightweight Staging
+# Lightweight Staging with Full Production State
 
 BMAC can quickly-create lightweight staging VMs for testing changes before pushing them to prod, using all of prod's data and state but without actually affecting prod.  The data state of the staging VMs contains *exactly* the data of the production VM at the time the staging VM is created.  This means that if youre production VM contains your database, then your staging VM will instantly have the exact same data in the exact same database, without any actual extra copy operation.  This enables you to truly test out changes against the real production state without actually affecting production itself, prior to making those changes to the actual production node.
 
