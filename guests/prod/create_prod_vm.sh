@@ -957,12 +957,21 @@ collect_new_request() {
   validate_positive_integer "disk size" "$VM_DISK_GIB"
   VM_MEMORY_MB=$((VM_MEMORY_GIB * 1024))
 
+  # Sparse is the default because a guest fstrim can then return freed blocks
+  # to rpool, which top-level vdev removal (hosts/decommission_disks.sh)
+  # depends on. Resumed allocations keep whatever policy the registry recorded.
+  info "Sparse allocation lets an fstrim inside the guest return freed space to rpool."
+  info "With full allocation, the disks of this VM's hosts cannot later be decommissioned"
+  info "easily, and not with any BMAC script."
   local allocation_choice
   prompt_with_default allocation_choice \
-    "Disk allocation (sparse or full/refreservation)" "full"
+    "Disk allocation (sparse or full/refreservation)" "sparse"
   case "${allocation_choice,,}" in
     sparse) DISK_ALLOCATION="sparse" ;;
-    full | reserved | refreservation) DISK_ALLOCATION="reserved" ;;
+    full | reserved | refreservation)
+      DISK_ALLOCATION="reserved"
+      warn "Full allocation keeps freed space reserved to this VM; hosts/decommission_disks.sh cannot reclaim it"
+      ;;
     *) die "Disk allocation must be sparse or full" ;;
   esac
 

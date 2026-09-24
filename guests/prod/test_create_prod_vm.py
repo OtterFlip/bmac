@@ -1057,6 +1057,7 @@ else:
             )
             self.assertIn("Dry run complete", completed.stdout)
             self.assertIn("not reserved", completed.stdout)
+            self.assertIn("Allocation: sparse;", completed.stdout)
             self.assertNotIn(
                 "synthetic-test-value", completed.stdout + completed.stderr
             )

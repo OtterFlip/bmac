@@ -4176,7 +4176,7 @@ replication_minutes="${replication_schedule##*/}"
   --prod-cores "$prod_cores" \
   --prod-memory-mb "$prod_memory" \
   --prod-disk-gib "$prod_disk" \
-  --prod-disk-allocation reserved \
+  --prod-disk-allocation sparse \
   --staging-cores "$staging_cores" \
   --staging-memory-mb "$staging_memory" \
   --staging-disk-gib "$staging_disk" \

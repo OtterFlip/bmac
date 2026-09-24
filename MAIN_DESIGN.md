@@ -1190,7 +1190,10 @@ The script prompts for:
   that role;
 - at least two HA placement nodes and an initial/preferred node;
 - primary FQDN and zero or more exact aliases;
-- vCPU, RAM in whole GiB, root-disk GiB, and sparse or full/refreserved ZFS;
+- vCPU, RAM in whole GiB, root-disk GiB, and sparse (default) or
+  full/refreserved ZFS. Sparse lets a guest `fstrim` return space to `rpool`;
+  with full allocation the host's disks cannot later be decommissioned with
+  the BMAC scripts;
 - replication interval in minutes;
 - optional local regular file named exactly `startup.sh`;
 - final VM network enabled/disabled policy.
@@ -1314,9 +1317,9 @@ After guest verification:
    no error before the timeout.
 4. Require owner plus healthy targets to equal placement exactly.
 5. Verify source and every replica have the exact zvol size and allocation
-   policy. Full allocation uses `refreservation=auto` and requires the numeric
-   reservation to be at least `volsize` (OpenZFS may include metadata
-   overhead); sparse means no refreservation.
+   policy. Sparse, the default, means no refreservation. Full allocation uses
+   `refreservation=auto` and requires the numeric reservation to be at least
+   `volsize` (OpenZFS may include metadata overhead).
 6. Recheck all placement nodes online and quorum votes from every node.
 7. Add the VM as an HA resource in `ignored` state with `max_restart=3`,
    `max_relocate=1`, `failback=0`, and `auto_rebalance=0`.
@@ -2170,8 +2173,9 @@ while a staging dependency exists.
 
 ### Pool capacity or local-storage failure
 
-Sparse production can exhaust space at runtime; full allocation can fail
-initially or during replication due to reservation needs. A staging snapshot
+Sparse production can exhaust space at runtime, so pool free space must be
+monitored; full allocation can fail initially or during replication due to
+reservation needs. A staging snapshot
 can pin unexpectedly large changed blocks. Losing both members of one
 top-level mirror can lose all striped `rpool` data.
 

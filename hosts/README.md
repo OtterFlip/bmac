@@ -330,9 +330,11 @@ does it create replication jobs, verify an initial sync to every placement
 node, add a strict HA node-affinity rule, request HA start, and publish exact
 Host/SNI routes.
 
-Every production placement node needs enough CPU, RAM, `local-zfs` space, and
-full-allocation reservation capacity to run all production resources assigned
-to it. Staging eviction is emergency reclamation, not production capacity.
+Every production placement node needs enough CPU, RAM, and `local-zfs` space
+to run all production resources assigned to it. Production root zvols are
+sparse by default, so `rpool` can be overcommitted; monitor pool free space on every
+placement node. Staging eviction is emergency reclamation, not production
+capacity.
 
 `guests/staging/create_staging_vm.sh` selects an active production source and
 an online placement standby, takes a unique source-owned Proxmox snapshot,

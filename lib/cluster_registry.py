@@ -4059,7 +4059,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--prod-memory-mb", type=int, default=8192)
     init.add_argument("--prod-disk-gib", type=int, default=64)
     init.add_argument(
-        "--prod-disk-allocation", choices=("sparse", "reserved"), default="reserved"
+        "--prod-disk-allocation", choices=("sparse", "reserved"), default="sparse"
     )
     init.add_argument("--staging-cores", type=int, default=2)
     init.add_argument("--staging-memory-mb", type=int, default=4096)

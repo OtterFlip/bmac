@@ -66,8 +66,10 @@ The script prompts for:
 - eligible HA placement nodes (at least two) and the initial node
 - unique application/workload purpose slug, a primary FQDN, and optional
   alias FQDNs
-- CPU cores, RAM in GiB, root disk in GiB, and sparse or
-  full/refreserved ZFS allocation
+- CPU cores, RAM in GiB, root disk in GiB, and sparse (the default) or
+  full/refreserved ZFS allocation. The prompt warns that with full
+  allocation the host's disks cannot later be decommissioned easily, and
+  not with any BMAC script
 - replication interval in minutes
 - an optional local regular file named `startup.sh`
 - whether the final VM network link is enabled (default: yes)
@@ -92,9 +94,15 @@ including the complete Microsoft 2023 certificate/KEK set
 (`ms-cert=2023k`), the configured cluster-safe CPU type, QGA, the generic
 production tag, a purpose tag, and the installed
 production-first lifecycle hook. It starts with autostart disabled and is not
-HA-managed yet. Full allocation applies and verifies a ZFS refreservation on
-every replica, so placement nodes need enough free pool space for both that
-reservation and replication snapshots.
+HA-managed yet. The chosen allocation is applied and verified on every
+replica. Sparse (no ZFS refreservation) is the default because it lets an
+`fstrim` inside the guest return freed blocks to `rpool`, which top-level
+vdev removal (`hosts/decommission_disks.sh`) depends on. The cost is that
+`rpool` can be overcommitted: monitor pool free space on every placement
+node, including room for replication snapshots. Full allocation applies a
+ZFS refreservation instead, so placement nodes need free space for that
+reservation, and space freed inside the guest stays reserved to it.
+Existing VMs are not converted.
 
 The selected initial Proxmox node downloads the configured source directly
 over HTTPS. A root-only helper uses
