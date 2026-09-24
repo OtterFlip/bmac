@@ -113,6 +113,16 @@ for its local node. It revalidates QEMU, HA, ZFS, snapshot GUID, route, and
 registry identity before every destructive action. Offline or ambiguous work
 remains pending; it never invents completion evidence.
 
+## `host_storage.py`
+
+`collect` runs on a Proxmox host, fed over SSH as `python3 - collect`. It runs
+only read-only `zpool`, `zfs`, and `lsblk` queries and prints one JSON layout
+of `rpool`: capacity and ZFS available space, every top-level vdev with its
+members resolved through LUKS to physical disk serials, the vdev that holds
+the proxmox-boot-tool ESPs, device-removal progress, disks outside `rpool`,
+and per-zvol allocation and snapshot usage. `render` prints that layout on
+the workstation. `diagnostics/show_proxmox_host_state.sh` uses both.
+
 ## Tests
 
 ```bash

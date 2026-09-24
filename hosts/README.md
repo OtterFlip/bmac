@@ -578,6 +578,15 @@ HAProxy generation agreement, failed units, shared ingress state, and joined
 registered/live production and staging guest inventory.
 Uninstalled or unreachable mox slots are reported and skipped.
 
+For one host in depth, including every `rpool` vdev resolved to physical disk
+serials, the boot/ESP vdev, disks outside the pool, per-zvol allocation, the
+guests it runs, and the replicas it stores, run:
+
+```bash
+diagnostics/show_proxmox_host_state.sh mox1 \
+  >mox1_state.txt
+```
+
 Routine verification must establish:
 
 1. every configured cluster node is online and contiguous;

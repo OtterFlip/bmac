@@ -175,6 +175,9 @@ Expected to work on macOS, not yet run there against a cluster:
   check was the macOS-specific part; it is covered by unit tests only;
 - `diagnostics/show_cluster_state.sh`. Its only local work is the config load
   and two `sha256sum` calls. It needs a terminal;
+- `diagnostics/show_proxmox_host_state.sh`. It uses the same strict SSH
+  helpers as `show_prod_vm_state.sh`, plus local `python3`, and is covered by
+  fake-SSH unit tests only;
 - `hosts/update_cluster_runtime.sh`. Local commands are portable and its unit
   tests pass on macOS. It rewrites the runtime on every node, so treat the
   first macOS run as a test, not as routine;
@@ -872,6 +875,22 @@ scripts/libraries named in their descriptions.
     >prod1_state.txt
   ```
 
+- `diagnostics/show_proxmox_host_state.sh moxN` is a read-only report for one
+  host: versions, CPU and RAM, quorum, HA and app-ha services, failed units,
+  network and egress VIP ownership, the guests it runs with their registry
+  roles, the production replicas it stores, pending deferred cleanup, and its
+  `rpool` layout. `lib/host_storage.py` resolves every vdev through LUKS to
+  physical disk serials, marks the boot/ESP vdev, and shows device-removal
+  progress, disks outside `rpool`, ZFS available space in bytes, MiB, and
+  GiB, and each zvol's allocation, snapshots, and last replication. When
+  `env/moxN.conf` is present it compares the configured `NVME_MIRROR_*`
+  serials with the pool. It exits 1 when anything needs attention:
+
+  ```bash
+  diagnostics/show_proxmox_host_state.sh mox1 \
+    >mox1_state.txt
+  ```
+
 - `qdevice/purge_qdevice.sh` is an intentionally destructive maintenance tool
   for teardown or clean-room retesting. It first removes the QDevice through
   the supported Proxmox cluster command and refuses to purge the external host
@@ -950,9 +969,14 @@ scripts/libraries named in their descriptions.
   run by the installed systemd timer; unsafe or unreachable work stays
   pending. It depends on `config.sh`, the registry and route synchronizer, plus
   Proxmox, QEMU, ZFS, and block-device inspection tools.
-- `lib/test_shared_libs.py`, `lib/test_haproxy_routes.py`, and
-  `lib/test_process_deferred_cleanup.py` test configuration, pmxcfs semantics,
-  registry/IPAM, route rendering, transactions, and cleanup guards.
+- `lib/host_storage.py` collects a read-only JSON layout of one host's
+  `rpool` (vdevs, member disk serials through LUKS, the boot/ESP vdev,
+  removal progress, disks outside the pool, zvols) and renders it for
+  `diagnostics/show_proxmox_host_state.sh`.
+- `lib/test_shared_libs.py`, `lib/test_haproxy_routes.py`,
+  `lib/test_process_deferred_cleanup.py`, and `lib/test_host_storage.py` test
+  configuration, pmxcfs semantics, registry/IPAM, route rendering,
+  transactions, cleanup guards, and `rpool` layout parsing.
 - [`lib/README.md`](lib/README.md) documents direct library interfaces.
 
 `env/` is the only repository configuration layer for these workflows:
@@ -2446,7 +2470,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
   guests/staging/test_staging_vm.py \
   lib/test_shared_libs.py \
   lib/test_haproxy_routes.py \
-  lib/test_process_deferred_cleanup.py -v
+  lib/test_process_deferred_cleanup.py \
+  lib/test_host_storage.py \
+  diagnostics/test_show_proxmox_host_state.py -v
 ```
 
 On a Mac, `dev/run-tests-in-vm.sh` runs `bash -n` on every tracked script and
@@ -2482,6 +2508,13 @@ Coverage by test helper:
 - `lib/test_process_deferred_cleanup.py`: exact VM/volume/snapshot/route
   cleanup, offline-source deferral, lifecycle-lock scope, failed route sync,
   GUID protection, first-host no-op, restart finalization, and syntax.
+- `lib/test_host_storage.py`: `zpool status` topology, resilver nesting and
+  auxiliary sections, removal progress, LUKS and by-id member resolution to
+  disk serials, boot/ESP vdev detection, disks outside `rpool`, zvol
+  allocation and snapshots, configured-serial comparison, and render output.
+- `diagnostics/test_show_proxmox_host_state.py`: the host report against a
+  fake SSH that rejects any non-read-only command, attention exit status, the
+  optional `moxN.conf` serial comparison, and usage errors.
 
 These tests mock destructive Proxmox, ZFS, iDRAC, QDevice, and network
 behavior. They do not replace real media, 10-Gbps Layer-2, LUKS boot,

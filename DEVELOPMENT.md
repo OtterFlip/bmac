@@ -82,8 +82,8 @@ For a quick loop while editing, run one module natively:
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest lib/test_shared_libs.py
 ```
 
-A full native run of all 172 tests reports one failure (a lifecycle-hook test
-that needs GNU `stat -c`) and 11 skips. Those are the gaps the VM closes.
+A full native run of all 191 tests reports two failures (lifecycle-hook
+tests that need GNU `stat -c`) and 11 skips. Those are the gaps the VM closes.
 
 ## 2. The Lima VM: the complete suite
 
