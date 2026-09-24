@@ -205,110 +205,6 @@ zfs_object_exists() {
   zfs list -Hp -o name "$1" >/dev/null 2>&1
 }
 
-clone_is_quiescent() {
-  local path="$1" dataset="$2" fuser_status findmnt_status mounts device
-  local -a devices=("$path")
-  [[ "$dataset" =~ ^[A-Za-z0-9._/+:-]+$ && "$path" == /dev/zvol/* ]] ||
-    return 1
-  if [[ "$TEST_MODE" != 1 ]]; then
-    [[ -b "$path" ]] || {
-      log "refusing to remove $dataset; zvol device is not a block device"
-      return 1
-    }
-  fi
-  set +e
-  mounts="$(findmnt -rn -S "$path" -o TARGET 2>/dev/null)"
-  findmnt_status=$?
-  set -e
-  case "$findmnt_status" in
-    0)
-      [[ -z "$mounts" ]] || {
-        log "refusing to remove $dataset; its zvol is mounted"
-        return 1
-      }
-      ;;
-    1) ;;
-    *)
-      log "refusing to remove $dataset; mount state could not be checked"
-      return 1
-      ;;
-  esac
-  if [[ -b "$path" ]]; then
-    mounts="$(lsblk -nrpo MOUNTPOINT "$path" 2>/dev/null)" || {
-      log "refusing to remove $dataset; child mount state could not be checked"
-      return 1
-    }
-    if awk 'NF { found=1 } END { exit !found }' <<<"$mounts"; then
-      log "refusing to remove $dataset; a child block device is mounted"
-      return 1
-    fi
-    mapfile -t devices < <(lsblk -nrpo PATH "$path" 2>/dev/null) || {
-      log "refusing to remove $dataset; child device state could not be checked"
-      return 1
-    }
-    ((${#devices[@]} > 0)) || {
-      log "refusing to remove $dataset; no block-device identity was returned"
-      return 1
-    }
-  fi
-  for device in "${devices[@]}"; do
-    [[ "$device" == /dev/* ]] || return 1
-    set +e
-    fuser "$device" >/dev/null 2>&1
-    fuser_status=$?
-    set -e
-    case "$fuser_status" in
-      1) ;;
-      0)
-        log "refusing to remove $dataset; $device is open by a process"
-        return 1
-        ;;
-      *)
-        log "refusing to remove $dataset; open-writer state could not be checked"
-        return 1
-        ;;
-    esac
-  done
-}
-
-volume_unreferenced_by_any_vm() {
-  local volume="$1" rows vmids vmid config
-  rows="$(pvesh get /cluster/resources --type vm --output-format json)" ||
-    return 1
-  vmids="$(
-    python3 - "$rows" <<'PY'
-import json
-import sys
-rows = json.loads(sys.argv[1])
-if not isinstance(rows, list):
-    raise SystemExit("malformed cluster VM inventory")
-for row in rows:
-    if row.get("type") == "qemu" and str(row.get("vmid", "")).isdigit():
-        print(row["vmid"])
-PY
-  )" || return 1
-  while IFS= read -r vmid; do
-    [[ -n "$vmid" ]] || continue
-    config="$(qm config "$vmid")" || return 1
-    python3 - "$volume" "$vmid" "$config" <<'PY' || return 1
-import re
-import sys
-volume, vmid, text = sys.argv[1:]
-for line in text.splitlines():
-    key, separator, value = line.partition(": ")
-    if (
-        separator
-        and re.fullmatch(
-            r"(?:(?:scsi|sata|virtio|ide|unused|efidisk|tpmstate)[0-9]+)",
-            key,
-        )
-        and value.split(",", 1)[0] == volume
-    ):
-        raise SystemExit(f"VM {vmid} still references {volume}")
-PY
-  done <<<"$vmids"
-}
-
 write_reservation() {
   local name="$1" temporary
   install -d -m 0700 "$RESERVATION_DIR"
@@ -611,16 +507,6 @@ PY
     die "could not disable the registry route for $name"
 }
 
-verify_vm_config_absent() {
-  local vmid="$1" status
-  if qm status "$vmid" >/dev/null 2>&1; then
-    return 1
-  fi
-  status=0
-  vm_is_local_qemu "$vmid" || status=$?
-  ((status == 1))
-}
-
 queue_cleanup_plan() {
   local vmid="$1" metadata configured_text
   metadata="${WORK_DIR}/candidate-${vmid}.json"
@@ -652,35 +538,26 @@ PY
     die "configured node inventory was unexpectedly empty"
   [[ "$snapshot" != __replicate_* ]] ||
     die "refusing to queue Proxmox reserved replication snapshot"
-  local node result
-  local ids_file="${WORK_DIR}/candidate-${vmid}.local-cleanup-ids"
-  : >"$ids_file"
+  local node
 
-  result="$(
-    registry defer-cleanup \
-      --resource "$name" \
-      --node "$LOCAL_NODE" \
-      --action destroy-vm \
-      --target "vm:${vmid}" \
-      --reason "production start must remove the local staging VM config"
-  )" || die "could not queue fallback VM cleanup for $name"
-  python3 -c \
-    'import json,sys; print(json.loads(sys.argv[1])["cleanup"]["id"])' \
-    "$result" >>"$ids_file" ||
-    die "could not parse fallback VM cleanup identity"
-
-  result="$(
-    registry defer-cleanup \
-      --resource "$name" \
-      --node "$LOCAL_NODE" \
-      --action destroy-volume \
-      --target "$volume" \
-      --reason "production start must remove the local staging linked clone"
-  )" || die "could not queue fallback volume cleanup for $name"
-  python3 -c \
-    'import json,sys; print(json.loads(sys.argv[1])["cleanup"]["id"])' \
-    "$result" >>"$ids_file" ||
-    die "could not parse fallback volume cleanup identity"
+  # The local worker destroys the stopped VM config and its linked clone once
+  # the production reservation is gone, i.e. after production has started.
+  registry defer-cleanup \
+    --resource "$name" \
+    --node "$LOCAL_NODE" \
+    --action destroy-vm \
+    --target "vm:${vmid}" \
+    --reason "production start evicted the local staging VM config" \
+    >/dev/null ||
+    die "could not queue VM cleanup for $name"
+  registry defer-cleanup \
+    --resource "$name" \
+    --node "$LOCAL_NODE" \
+    --action destroy-volume \
+    --target "$volume" \
+    --reason "production start evicted the local staging linked clone" \
+    >/dev/null ||
+    die "could not queue volume cleanup for $name"
 
   for node in "${nodes[@]}"; do
     array_contains "$node" "${configured_nodes[@]}" ||
@@ -732,53 +609,6 @@ PY
   registry "${update_args[@]}" >/dev/null ||
     die "could not commit cleanup_pending for $name"
   log "committed durable cleanup plan for $name"
-}
-
-complete_local_cleanup_records() {
-  local vmid="$1" ids_file
-  ids_file="${WORK_DIR}/candidate-${vmid}.local-cleanup-ids"
-  local -a ids=()
-  mapfile -t ids <"$ids_file"
-  ((${#ids[@]} == 2)) || return 1
-  python3 - "${ids[@]}" <<'PY' |
-import json
-import sys
-json.dump({"schema_version": 1, "cleanup_completed": sys.argv[1:]}, sys.stdout)
-PY
-    registry reconcile --observed - --apply >/dev/null
-}
-
-clear_destroyed_local_identity() {
-  local vmid="$1" metadata current_file
-  metadata="${WORK_DIR}/candidate-${vmid}.json"
-  current_file="${WORK_DIR}/candidate-${vmid}.destroyed.json"
-  local name resource_id
-  read -r name resource_id < <(
-    python3 - "$metadata" <<'PY'
-import json
-import sys
-row = json.load(open(sys.argv[1], encoding="utf-8"))
-print(row["name"], row["resource_id"])
-PY
-  ) || return 1
-  registry get "$name" >"$current_file" || return 1
-  local revision state
-  read -r revision state < <(
-    python3 - "$current_file" "$resource_id" <<'PY'
-import json
-import sys
-row = json.load(open(sys.argv[1], encoding="utf-8"))
-if row["id"] != sys.argv[2]:
-    raise SystemExit("resource identity changed")
-print(row["revision"], row["state"])
-PY
-  ) || return 1
-  [[ "$state" == cleanup_pending ]] || return 1
-  registry update "$name" \
-    --expected-revision "$revision" \
-    --routes-disabled \
-    --clear-owner-node \
-    --clear-volume >/dev/null
 }
 
 validate_production_authority() {
@@ -853,27 +683,29 @@ if data_disks != [("scsi0", prod["proxmox"]["volume_id"])]:
 PY
 }
 
-evict_staging_candidate() {
-  local vmid="$1" metadata storage
-  metadata="${WORK_DIR}/candidate-${vmid}.json"
-  storage="${WORK_DIR}/candidate-${vmid}.storage"
-  local ha_status
-  local -a fields=() storage_fields=()
-  refresh_candidate_validation "$vmid"
-  local name
-  name="$(python3 -c \
+staging_candidate_name() {
+  python3 -c \
     'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["name"])' \
-    "$metadata")" || die "could not parse staging name"
+    "${WORK_DIR}/candidate-${1}.json" || die "could not parse staging name"
+}
+
+force_stop_staging_candidate() {
+  local vmid="$1" name
+  name="$(staging_candidate_name "$vmid")"
   if ! vm_is_stopped "$vmid"; then
     log "force-stopping disposable staging VM $vmid ($name), ignoring its staging lock by policy"
     qm stop "$vmid" --skiplock true --timeout 30 ||
       die "force-stop failed for staging VM $vmid"
   fi
-  vm_is_stopped "$vmid" ||
-    die "staging VM $vmid remained running after force-stop"
+}
 
-  # Revalidate the complete identity after stop and immediately before the
-  # irreversible config/storage operations.
+queue_staging_eviction() {
+  local vmid="$1" ha_status name
+  vm_is_stopped "$vmid" ||
+    die "staging VM $vmid is running again before its eviction was queued"
+
+  # Revalidate the complete identity after the stop and before committing the
+  # durable cleanup plan that authorizes its destruction.
   refresh_candidate_validation "$vmid"
   ha_status=0
   vm_is_ha "$vmid" || ha_status=$?
@@ -882,80 +714,11 @@ evict_staging_candidate() {
   disable_staging_route "$vmid"
 
   # Route state changed in pmxcfs; validate live QEMU, HA, registry identity,
-  # volume, origin, and snapshot GUID once more before destruction.
+  # volume, origin, and snapshot GUID once more before the commit.
   refresh_candidate_validation "$vmid"
-  fields=()
-  storage_fields=()
-  mapfile -d '' -t fields < <(
-    python3 - "$metadata" <<'PY'
-import json
-import sys
-row = json.load(open(sys.argv[1], encoding="utf-8"))
-for value in (row["name"], row["volume"], row["snapshot"], row["snapshot_guid"]):
-    sys.stdout.buffer.write(str(value).encode() + b"\0")
-PY
-  )
-  mapfile -t storage_fields <"$storage"
-  ((${#fields[@]} == 4 && ${#storage_fields[@]} == 3)) ||
-    die "could not parse validated staging storage identity"
-  name="${fields[0]}"
-  local snapshot="${fields[2]}" expected_guid="${fields[3]}"
-  local clone_dataset="${storage_fields[0]}" clone_path="${storage_fields[1]}"
-  local source_dataset="${storage_fields[2]}" origin guid
-
-  clone_is_quiescent "$clone_path" "$clone_dataset" ||
-    die "staging clone $clone_dataset is mounted or open"
   queue_cleanup_plan "$vmid"
-  origin="$(zfs get -Hp -o value origin "$clone_dataset")" ||
-    die "could not re-read staging clone origin after cleanup-plan commit"
-  [[ "$origin" == "${source_dataset}@${snapshot}" ]] ||
-    die "staging clone origin changed after cleanup-plan commit"
-  guid="$(zfs get -Hp -o value guid "${source_dataset}@${snapshot}")" ||
-    die "could not re-read snapshot GUID after cleanup-plan commit"
-  [[ "$guid" == "$expected_guid" ]] ||
-    die "staging snapshot GUID changed after cleanup-plan commit"
-  clone_is_quiescent "$clone_path" "$clone_dataset" ||
-    die "staging clone became mounted or open after cleanup-plan commit"
-  log "destroying validated staging VM config $vmid ($name)"
-  qm destroy "$vmid" --purge 1 --destroy-unreferenced-disks 0 \
-    --skiplock true ||
-    die "could not destroy staging VM config $vmid"
-  verify_vm_config_absent "$vmid" ||
-    die "staging VM config $vmid remains after qm destroy"
-
-  if zfs_object_exists "$clone_dataset"; then
-    [[ "$(zfs list -Hp -o type "$clone_dataset")" == volume ]] ||
-      die "staging clone changed type before explicit destruction"
-    origin="$(zfs get -Hp -o value origin "$clone_dataset")" ||
-      die "could not re-read staging clone origin"
-    [[ "$origin" == "${source_dataset}@${snapshot}" ]] ||
-      die "staging clone origin changed before explicit destruction"
-    guid="$(zfs get -Hp -o value guid "${source_dataset}@${snapshot}")" ||
-      die "could not re-read staging snapshot GUID"
-    [[ "$guid" == "$expected_guid" ]] ||
-      die "staging snapshot GUID changed before clone destruction"
-    clone_is_quiescent "$clone_path" "$clone_dataset" ||
-      die "staging clone became mounted or open"
-    volume_unreferenced_by_any_vm "${fields[1]}" ||
-      die "another VM still references the staging clone"
-    log "destroying validated linked-clone zvol $clone_dataset"
-    zfs destroy "$clone_dataset" ||
-      die "could not destroy linked-clone zvol $clone_dataset"
-  fi
-  ! zfs_object_exists "$clone_dataset" ||
-    die "linked-clone zvol $clone_dataset remains after destruction"
-  if [[ "$TEST_MODE" != 1 ]]; then
-    [[ ! -e "$clone_path" ]] ||
-      die "linked-clone block path remains after destruction: $clone_path"
-  fi
-
-  if complete_local_cleanup_records "$vmid"; then
-    clear_destroyed_local_identity "$vmid" ||
-      log "local cleanup is complete but registry metadata clearing will retry asynchronously"
-  else
-    log "local cleanup is complete but completion recording will retry asynchronously"
-  fi
-  log "evicted $name; remote snapshot and HAProxy cleanup is queued"
+  name="$(staging_candidate_name "$vmid")"
+  log "stopped $name; its destruction is queued for after production starts"
 }
 
 production_pre_start() {
@@ -967,18 +730,28 @@ production_pre_start() {
   if ((${#STAGING_CANDIDATES[@]} > 0)); then
     refresh_registry_resources
     local candidate
-    # Validate all candidates before the first destructive operation.
+    # Validate all candidates before the first stop.
     for candidate in "${STAGING_CANDIDATES[@]}"; do
       validate_staging_candidate "$candidate"
     done
+    # Free CPU and RAM first: power off every candidate, then prove that all
+    # of them are off. Destroying their configs and clones is slower and is
+    # left to the deferred-cleanup worker after production has started.
     for candidate in "${STAGING_CANDIDATES[@]}"; do
-      evict_staging_candidate "$candidate"
+      force_stop_staging_candidate "$candidate"
+    done
+    for candidate in "${STAGING_CANDIDATES[@]}"; do
+      vm_is_stopped "$candidate" ||
+        die "staging VM $candidate remained running after force-stop"
+    done
+    for candidate in "${STAGING_CANDIDATES[@]}"; do
+      queue_staging_eviction "$candidate"
     done
   else
     log "no registered disposable staging guests require eviction"
   fi
   PRESERVE_RESERVATION=true
-  log "production pre-start cleanup completed; reservation remains through post-start"
+  log "production pre-start completed; reservation remains through post-start"
 }
 
 staging_pre_start() {
@@ -1091,7 +864,7 @@ main() {
   exec 9>"${LOCK_DIR}/app-ha-guest-role-hook.lock"
   flock -w 180 9 || die "timed out waiting for the guest lifecycle lock"
 
-  require_commands findmnt flock fuser lsblk pvesh pvesm python3 qm zfs
+  require_commands flock pvesh pvesm python3 qm zfs
   WORK_DIR="$(mktemp -d "${WORK_ROOT}/app-ha-guest-hook.XXXXXX")"
   trap cleanup EXIT
   local self_config="${WORK_DIR}/self.conf" role_data role name

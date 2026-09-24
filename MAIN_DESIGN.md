@@ -1522,21 +1522,29 @@ Before a production start, it:
 2. writes a mode-`0600` start reservation under
    `/run/app-ha-production-starting/<VMID>.reservation`;
 3. discovers local `stageNprodN` VMs with staging and evictable tags;
-4. validates every candidate before the first destructive action: unique
-   registry UUID/VMID/name, local owner/placement, non-HA state, exact tags,
-   exact `scsi0`/fresh EFI identity, verified source snapshot dependency,
-   matching origin and GUID, and quiescent/unreferenced storage;
-5. force-stops the disposable staging VM if necessary;
-6. disables its route, commits a durable cleanup plan, destroys the QEMU
-   config without implicit disk deletion, explicitly destroys the proven
-   linked clone, records local completions, and queues remote snapshot/route
-   cleanup;
-7. leaves the production reservation through `post-start`.
+4. validates every candidate before the first stop: unique registry
+   UUID/VMID/name, local owner/placement, non-HA state, exact tags, exact
+   `scsi0`/fresh EFI identity, verified source snapshot dependency, and
+   matching origin and GUID;
+5. force-stops (`qm stop`, a hard power-off) every candidate that is running,
+   then verifies that all of them are stopped;
+6. for each candidate, revalidates it, disables its route, and commits a
+   durable cleanup plan: local `destroy-vm` and `destroy-volume` records plus
+   snapshot and route cleanup on every node;
+7. returns so production starts, and leaves the production reservation
+   through `post-start`.
 
-An unreachable peer or remote snapshot does not keep a positively identified
-local staging clone alive; remote work remains queued. Ambiguous staging
-identity, HA membership, disks, origin, GUID, registry, or cleanup-plan commit
-blocks the production start rather than destroying an uncertain resource.
+The hook does not destroy anything itself. Stopping frees the CPU and RAM that
+production needs; destroying the QEMU config and linked clone is slower, so
+the local deferred-cleanup worker does it after production has started. The
+worker defers local `destroy-vm` and `destroy-volume` work while any
+production-start reservation on that node is younger than 900 seconds, and
+`post-start` removes the reservation and triggers the worker.
+
+An unreachable peer or remote snapshot does not delay the production start;
+remote work remains queued. Ambiguous staging identity, HA membership, disks,
+origin, GUID, registry, or cleanup-plan commit blocks the production start
+rather than queuing destruction of an uncertain resource.
 
 Before a staging start, the hook:
 
@@ -1561,8 +1569,9 @@ If a mox hosting production fails:
 3. Cloudflare independently marks the failed host/HAProxy origin unhealthy and
    directs new ingress to another origin.
 4. Proxmox HA chooses an eligible node with a replica.
-5. The production pre-start hook evicts any verified disposable staging on
-   that destination and queues cross-node cleanup.
+5. The production pre-start hook force-stops any verified disposable
+   staging on that destination and queues its destruction and cross-node
+   cleanup for after production starts.
 6. Proxmox starts production from the most recent successful replica with the
    same VMID, MAC, private IP, and route.
 7. The private switch relearns the production MAC. Both fixed proxies continue
@@ -1584,7 +1593,10 @@ planner.
 seconds random delay. The oneshot worker defaults to a 120-second bounded
 window; `--max-seconds` accepts 5 through 900. One local lock prevents
 concurrent workers, and the lifecycle lock serializes only destructive local
-VM/volume work.
+VM/volume work. Local `destroy-vm` and `destroy-volume` records also wait
+while a production-start reservation younger than 900 seconds exists on the
+node, so staging evicted by a production start is destroyed only after that
+production VM has started.
 
 Pending local records are ordered:
 
@@ -2448,7 +2460,9 @@ Coverage by test helper:
   selection, strict SSH, VRRP peers/priorities, and host safety invariants.
 - `hosts/test_app_ha_guest_role_hook.py`: exact role identity, no destructive
   authority without registry/HA, staging disk/volume/GUID guards, production
-  reservations, force-stop/destruction order, and remote deferral.
+  reservations, stopping every staging guest before queuing any destruction,
+  the real cleanup worker deferring destruction until post-start, and remote
+  deferral.
 - `guests/prod/test_create_prod_vm.py`: autoinstall network/root/QGA/SSH,
   startup retry semantics, ISO hash/release/boot metadata/atomicity, contiguous
   nodes, QDevice gate, resume sentinels, exact VM/Secure Boot contract,

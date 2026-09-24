@@ -18,12 +18,18 @@ HAPROXY_SYNC="${SCRIPT_DIR}/sync_haproxy_routes.sh"
 TEST_MODE="${APP_HA_CLEANUP_TEST_MODE:-0}"
 MAX_SECONDS=120
 
+# Matches app-ha-guest-role-hook.sh, which writes the production-start
+# reservations and treats one younger than this as active.
+RESERVATION_TTL_SECONDS=900
+
 if [[ "$TEST_MODE" == 1 ]]; then
   LOCK_DIR="${APP_HA_LOCK_DIR:?APP_HA_LOCK_DIR is required in test mode}"
   LOCAL_NODE="${APP_HA_LOCAL_NODE:?APP_HA_LOCAL_NODE is required in test mode}"
+  RESERVATION_DIR="${APP_HA_RESERVATION_DIR:?APP_HA_RESERVATION_DIR is required in test mode}"
 else
   LOCK_DIR=/run/lock
   LOCAL_NODE="$(hostname -s)"
+  RESERVATION_DIR=/run/app-ha-production-starting
 fi
 
 log() {
@@ -859,6 +865,24 @@ run_with_lifecycle_lock() {
   return "$status"
 }
 
+# A production VM on this node is between its pre-start hook, which stopped
+# the local staging guests and queued their destruction, and its post-start
+# hook, which removes the reservation and triggers this worker. Destroying
+# those guests waits until production has started so that it adds nothing to
+# the production start. An expired reservation (the start never completed)
+# no longer defers anything.
+production_start_pending() {
+  local path created now
+  [[ -d "$RESERVATION_DIR" ]] || return 1
+  now="$(date +%s)"
+  for path in "$RESERVATION_DIR"/*.reservation; do
+    [[ -e "$path" ]] || continue
+    created="$(stat -c %Y "$path" 2>/dev/null)" || return 0
+    ((now - created < RESERVATION_TTL_SECONDS)) && return 0
+  done
+  return 1
+}
+
 mark_completed() {
   (($# > 0)) || return 0
   python3 - "$@" <<'PY' |
@@ -965,6 +989,11 @@ PY
       continue
     fi
     status=0
+    if [[ "$action" == destroy-vm || "$action" == destroy-volume ]] &&
+      production_start_pending; then
+      log "$cleanup_id: a production start is pending on $LOCAL_NODE; deferring staging destruction"
+      continue
+    fi
     case "$action" in
       destroy-vm)
         run_with_lifecycle_lock \

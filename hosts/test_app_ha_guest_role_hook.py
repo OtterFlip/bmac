@@ -21,6 +21,7 @@ HOSTS_DIR = Path(__file__).resolve().parent
 LIB_DIR = HOSTS_DIR.parent / "lib"
 HOOK = HOSTS_DIR / "app-ha-guest-role-hook.sh"
 REGISTRY = LIB_DIR / "cluster_registry.py"
+CLEANUP_WORKER = LIB_DIR / "process_deferred_cleanup.sh"
 
 
 class GuestRoleHookTest(unittest.TestCase):
@@ -91,6 +92,20 @@ os.execv({str(REGISTRY)!r}, [{str(REGISTRY)!r}, *sys.argv[1:]])
             encoding="utf-8",
         )
         registry_wrapper.chmod(0o755)
+        # The real deferred-cleanup worker runs against the same fakes so the
+        # tests can prove when queued staging destruction actually happens.
+        self.worker = self.install_lib / CLEANUP_WORKER.name
+        shutil.copy2(CLEANUP_WORKER, self.worker)
+        self.worker.chmod(0o755)
+        route_sync = self.install_lib / "sync_haproxy_routes.sh"
+        route_sync.write_text(
+            "#!/usr/bin/env bash\n"
+            "exec python3 -c 'import json,os; "
+            'open(os.environ["FAKE_ACTIONS"], "a").write('
+            'json.dumps(["haproxy-sync"]) + "\\n")\'\n',
+            encoding="utf-8",
+        )
+        route_sync.chmod(0o755)
 
         self.actions = self.root / "actions.jsonl"
         self.actions.write_text("", encoding="utf-8")
@@ -239,7 +254,7 @@ elif command == "fuser":
     raise SystemExit(1)
 elif command == "lsblk":
     raise SystemExit(0)
-elif command in {"logger", "systemctl"}:
+elif command in {"logger", "pvesr", "systemctl"}:
     record()
 else:
     raise SystemExit(f"unexpected fake command: {command} {args}")
@@ -254,6 +269,7 @@ else:
             "lsblk",
             "pvesh",
             "pvesm",
+            "pvesr",
             "qm",
             "systemctl",
             "zfs",
@@ -264,6 +280,7 @@ else:
         self.environment.update(
             {
                 "APP_HA_HOOK_TEST_MODE": "1",
+                "APP_HA_CLEANUP_TEST_MODE": "1",
                 "APP_HA_INSTALL_LIB": str(self.install_lib),
                 "APP_HA_LOCK_DIR": str(self.lock_dir),
                 "APP_HA_RESERVATION_DIR": str(self.reservation_dir),
@@ -388,6 +405,22 @@ else:
         )
         return completed
 
+    def run_worker(self) -> subprocess.CompletedProcess[str]:
+        completed = subprocess.run(
+            [str(self.worker), "--max-seconds", "30"],
+            env=self.environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+        )
+        return completed
+
     def action_rows(self) -> list[list[str]]:
         return [
             json.loads(line)
@@ -414,24 +447,28 @@ else:
             msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
         )
 
-    def add_registered_staging(self) -> None:
+    def add_registered_staging(self, index: int = 1) -> None:
+        vmid = 199 + index
+        name = f"stage{index}prod1"
+        snapshot_name = f"stg-base-{name}-260914T220000Z"
+        guid = str(123455 + index)
         self.registry(
             "allocate-staging",
             "--source",
             "prod1",
             "--vmid",
-            "200",
+            str(vmid),
             "--placement",
             "mox1",
             "--placement-limit",
             "5",
         )
-        self.registry("update", "stage1prod1", "--state", "snapshotting")
+        self.registry("update", name, "--state", "snapshotting")
         self.registry(
             "record-staging-snapshot-intent",
-            "stage1prod1",
+            name,
             "--snapshot-name",
-            "stg-base-stage1prod1-260914T220000Z",
+            snapshot_name,
             "--snapshot-owner-node",
             "mox2",
             "--source-volume-id",
@@ -441,75 +478,77 @@ else:
         )
         self.registry(
             "record-staging-snapshot",
-            "stage1prod1",
+            name,
             "--snapshot-name",
-            "stg-base-stage1prod1-260914T220000Z",
+            snapshot_name,
             "--snapshot-owner-node",
             "mox2",
             "--source-volume-id",
             "local-zfs:vm-100-disk-0",
             "--snapshot-guid",
-            "mox1=123456",
+            f"mox1={guid}",
             "--snapshot-guid",
-            "mox2=123456",
+            f"mox2={guid}",
             "--snapshot-volume-guid",
-            "local-zfs:vm-100-disk-0,mox1=123456",
+            f"local-zfs:vm-100-disk-0,mox1={guid}",
             "--snapshot-volume-guid",
-            "local-zfs:vm-100-disk-0,mox2=123456",
+            f"local-zfs:vm-100-disk-0,mox2={guid}",
         )
-        self.registry("update", "stage1prod1", "--state", "cloning")
+        self.registry("update", name, "--state", "cloning")
         self.registry(
             "update",
-            "stage1prod1",
+            name,
             "--state",
             "patching",
             "--owner-node",
             "mox1",
             "--volume-id",
-            "local-zfs:vm-200-disk-0",
+            f"local-zfs:vm-{vmid}-disk-0",
         )
         self.registry(
             "update",
-            "stage1prod1",
+            name,
             "--state",
             "stopped",
             "--routes-enabled",
         )
-        self.registry("update", "stage1prod1", "--state", "ready")
-        self.registry("update", "stage1prod1", "--state", "active")
+        self.registry("update", name, "--state", "ready")
+        self.registry("update", name, "--state", "active")
         state = self.read_fake_state()
-        state["vms"]["200"] = {
+        state["vms"][str(vmid)] = {
             "node": "mox1",
             "status": "running",
             "config": {
-                "name": "stage1prod1",
+                "name": name,
                 "tags": "custom-staging;custom-evictable;purpose-myapp",
                 "template": "0",
                 "onboot": "0",
                 "scsi0": (
-                    "local-zfs:vm-200-disk-0,discard=on,iothread=1,"
+                    f"local-zfs:vm-{vmid}-disk-0,discard=on,iothread=1,"
                     "replicate=0"
                 ),
                 "efidisk0": (
-                    "local-zfs:vm-200-disk-1,efitype=4m,"
+                    f"local-zfs:vm-{vmid}-disk-1,efitype=4m,"
                     "pre-enrolled-keys=1,size=4M"
                 ),
             },
         }
-        snapshot = "rpool/data/vm-100-disk-0@stg-base-stage1prod1-260914T220000Z"
-        clone = "rpool/data/vm-200-disk-0"
-        state["zfs"] = {
-            "rpool/data/vm-100-disk-0": {"type": "volume"},
-            snapshot: {
-                "type": "snapshot",
-                "guid": "123456",
-                "clones": clone,
-            },
-            clone: {
-                "type": "volume",
-                "origin": snapshot,
-            },
-        }
+        snapshot = f"rpool/data/vm-100-disk-0@{snapshot_name}"
+        clone = f"rpool/data/vm-{vmid}-disk-0"
+        state["zfs"].update(
+            {
+                "rpool/data/vm-100-disk-0": {"type": "volume"},
+                snapshot: {
+                    "type": "snapshot",
+                    "guid": guid,
+                    "clones": clone,
+                },
+                clone: {
+                    "type": "volume",
+                    "origin": snapshot,
+                },
+            }
+        )
         self.write_fake_state(state)
 
     def test_wrong_name_and_wrong_tags_are_never_destroyed(self) -> None:
@@ -626,7 +665,7 @@ else:
         self.run_hook(100, "pre-start")
         self.assertTrue((self.reservation_dir / "100.reservation").exists())
 
-    def test_destruction_order_reservation_and_offline_deferral(self) -> None:
+    def test_pre_start_stops_and_queues_destruction_for_after_start(self) -> None:
         self.add_registered_staging()
         state = self.read_fake_state()
         state["nodes"]["mox2"] = "offline"
@@ -644,29 +683,39 @@ else:
             and "update" in row
             and "--routes-disabled" in row
         )
-        config_index = first_index(
-            lambda row: row[:2] == ["qm", "destroy"]
-        )
-        zvol_index = first_index(
-            lambda row: row[:2] == ["zfs", "destroy"]
-        )
         defer_index = first_index(
             lambda row: row[0] == "registry" and "defer-cleanup" in row
         )
         self.assertLess(stop_index, route_index)
         self.assertLess(route_index, defer_index)
-        self.assertLess(defer_index, config_index)
-        self.assertLess(config_index, zvol_index)
+        self.assertFalse(
+            any(row[:2] in (["qm", "destroy"], ["zfs", "destroy"]) for row in rows),
+            "pre-start must not destroy staging; that waits for post-start",
+        )
 
+        # The staging guest is off but intact while production starts.
         state = self.read_fake_state()
-        self.assertNotIn("200", state["vms"])
-        self.assertNotIn("rpool/data/vm-200-disk-0", state["zfs"])
+        self.assertEqual(state["vms"]["200"]["status"], "stopped")
+        self.assertIn("rpool/data/vm-200-disk-0", state["zfs"])
         stage = self.registry("get", "stage1prod1")
         self.assertEqual(stage["state"], "cleanup_pending")
         self.assertFalse(stage["routes_enabled"])
-        self.assertIsNone(stage["owner_node"])
-        self.assertIsNone(stage["proxmox"]["volume_id"])
+        self.assertEqual(stage["owner_node"], "mox1")
+        self.assertEqual(stage["proxmox"]["volume_id"], "local-zfs:vm-200-disk-0")
         cleanup = self.registry("list", "--record-type", "cleanup")
+        local_payload = {
+            (row["action"], row["target"], row["state"])
+            for row in cleanup
+            if row["node"] == "mox1"
+            and row["action"] in {"destroy-vm", "destroy-volume"}
+        }
+        self.assertEqual(
+            local_payload,
+            {
+                ("destroy-vm", "vm:200", "pending"),
+                ("destroy-volume", "local-zfs:vm-200-disk-0", "pending"),
+            },
+        )
         pending_nodes = {
             row["node"]
             for row in cleanup
@@ -678,6 +727,13 @@ else:
         }
         self.assertEqual(route_nodes, {"mox1", "mox2"})
         self.assertTrue((self.reservation_dir / "100.reservation").exists())
+
+        # A timer-driven worker run before post-start leaves the guest alone.
+        completed = self.run_worker()
+        self.assertIn("a production start is pending on mox1", completed.stderr)
+        state = self.read_fake_state()
+        self.assertIn("200", state["vms"])
+        self.assertIn("rpool/data/vm-200-disk-0", state["zfs"])
 
         self.run_hook(100, "post-start")
         self.assertFalse((self.reservation_dir / "100.reservation").exists())
@@ -693,6 +749,55 @@ else:
                 for row in self.action_rows()
             )
         )
+
+        # The run that post-start triggers destroys the config, then the clone.
+        self.run_worker()
+        state = self.read_fake_state()
+        self.assertNotIn("200", state["vms"])
+        self.assertNotIn("rpool/data/vm-200-disk-0", state["zfs"])
+        rows = self.action_rows()
+        config_index = first_index(lambda row: row[:3] == ["qm", "destroy", "200"])
+        zvol_index = first_index(
+            lambda row: row[:2] == ["zfs", "destroy"]
+            and row[-1] == "rpool/data/vm-200-disk-0"
+        )
+        self.assertLess(config_index, zvol_index)
+
+    def test_every_staging_guest_is_off_before_any_is_queued(self) -> None:
+        self.add_registered_staging(1)
+        self.add_registered_staging(2)
+
+        self.run_hook(100, "pre-start")
+        rows = self.action_rows()
+        stops = [
+            index for index, row in enumerate(rows) if row[:2] == ["qm", "stop"]
+        ]
+        self.assertEqual(sorted(rows[index][2] for index in stops), ["200", "201"])
+        first_queue_step = next(
+            index
+            for index, row in enumerate(rows)
+            if row[0] == "registry"
+            and ("defer-cleanup" in row or "--routes-disabled" in row)
+        )
+        self.assertLess(max(stops), first_queue_step)
+        state = self.read_fake_state()
+        for vmid in ("200", "201"):
+            self.assertEqual(state["vms"][vmid]["status"], "stopped")
+        for name in ("stage1prod1", "stage2prod1"):
+            self.assertEqual(self.registry("get", name)["state"], "cleanup_pending")
+
+    def test_expired_reservation_does_not_defer_staging_destruction(self) -> None:
+        self.add_registered_staging()
+        self.run_hook(100, "pre-start")
+        reservation = self.reservation_dir / "100.reservation"
+        expired = reservation.stat().st_mtime - 901
+        os.utime(reservation, (expired, expired))
+
+        completed = self.run_worker()
+        self.assertNotIn("a production start is pending", completed.stderr)
+        state = self.read_fake_state()
+        self.assertNotIn("200", state["vms"])
+        self.assertNotIn("rpool/data/vm-200-disk-0", state["zfs"])
 
     def test_staging_refuses_a_production_reservation(self) -> None:
         self.run_hook(100, "pre-start")

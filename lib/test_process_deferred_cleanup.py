@@ -42,6 +42,7 @@ class DeferredCleanupTest(unittest.TestCase):
         self.bin_dir = self.root / "bin"
         self.install_lib = self.root / "install" / "lib"
         self.lock_dir = self.root / "locks"
+        self.reservation_dir = self.root / "reservations"
         self.work_dir = self.root / "work"
         self.state_dir = self.root / "registry"
         for path in (
@@ -49,6 +50,7 @@ class DeferredCleanupTest(unittest.TestCase):
             self.bin_dir,
             self.install_lib,
             self.lock_dir,
+            self.reservation_dir,
             self.work_dir,
         ):
             path.mkdir(parents=True)
@@ -321,6 +323,7 @@ else:
             {
                 "APP_HA_CLEANUP_TEST_MODE": "1",
                 "APP_HA_LOCK_DIR": str(self.lock_dir),
+                "APP_HA_RESERVATION_DIR": str(self.reservation_dir),
                 "APP_HA_WORK_DIR": str(self.work_dir),
                 "APP_HA_CONFIG_TEST_MODE": "1",
                 "APP_HA_ENV_DIR": str(self.env_dir),

@@ -345,10 +345,11 @@ or start after operator confirmation.
 
 The generic lifecycle hook is attached to both roles:
 
-- production pre-start serializes lifecycle work, force-stops the guest, and
-  destroys the QEMU config and local clone only for staging VMs whose name,
-  exact tags, registry UUID/VMID, owner, volume, snapshot origin/GUID, and
-  non-HA status all agree;
+- production pre-start serializes lifecycle work, force-stops every staging
+  VM whose name, exact tags, registry UUID/VMID, owner, volume, snapshot
+  origin/GUID, and non-HA status all agree, verifies that all of them are
+  off, and queues their destruction; the deferred-cleanup worker destroys the
+  QEMU config and local clone after production has started;
 - staging pre-start refuses admission while production is running or reserved
   to start on that node;
 - positively identified eviction queues unreachable route/snapshot cleanup
