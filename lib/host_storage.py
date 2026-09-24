@@ -31,6 +31,8 @@ from typing import Any, Callable, Sequence
 SCHEMA_VERSION = 1
 POOL = "rpool"
 BOOT_UUIDS_FILE = Path("/etc/kernel/proxmox-boot-uuids")
+CRYPTTAB_FILE = Path("/etc/crypttab")
+RPOOL_MAPPER_RE = re.compile(r"^crypt-rpool-(?:a|b|mirror[2-5]-[12])$")
 LSBLK_COLUMNS = (
     "NAME,KNAME,TYPE,SIZE,SERIAL,MODEL,WWN,TRAN,FSTYPE,UUID,MOUNTPOINTS"
 )
@@ -249,6 +251,26 @@ def parse_boot_uuids(text: str) -> set[str]:
     }
 
 
+def parse_crypttab(text: str) -> list[dict[str, Any]]:
+    """rpool entries of /etc/crypttab (no key material is ever stored there)."""
+
+    entries = []
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields or fields[0].startswith("#") or not RPOOL_MAPPER_RE.match(fields[0]):
+            continue
+        options = fields[3] if len(fields) > 3 else ""
+        entries.append(
+            {
+                "mapper": fields[0],
+                "shared_unlock": len(fields) > 2
+                and fields[2] == "app-ha-rpool"
+                and "keyscript=decrypt_keyctl" in options.split(","),
+            }
+        )
+    return entries
+
+
 def parse_volumes(volume_text: str, snapshot_text: str) -> list[dict[str, Any]]:
     """Summarize zvols and their snapshots from tab-separated ``zfs list -Hp``."""
 
@@ -308,6 +330,7 @@ def build_layout(
     realpath: Callable[[str], str],
     hostname: str,
     collected_at: int,
+    crypttab_text: str = "",
 ) -> dict[str, Any]:
     status = parse_zpool_status(status_text)
     sizes = parse_zpool_list(list_text)
@@ -416,6 +439,29 @@ def build_layout(
             }
         )
 
+    pool_devices = {
+        member["device"]
+        for vdev in vdevs
+        for member in vdev["members"]
+        if member["device"]
+    }
+    luks_mappings = []
+    for kname, device in sorted(devices.items()):
+        name = (device["name"] or "").rsplit("/", 1)[-1]
+        if device["type"] != "crypt" or not RPOOL_MAPPER_RE.match(name):
+            continue
+        disk = devices.get(device["disk"] or "") or {}
+        luks_mappings.append(
+            {
+                "mapper": name,
+                "backing": device["parent"],
+                "disk": disk.get("kname"),
+                "serial": disk.get("serial"),
+                "size": disk.get("size"),
+                "in_pool": kname in pool_devices,
+            }
+        )
+
     def prop_int(values: dict[str, str], key: str) -> int | None:
         return _optional_int(values.get(key, ""))
 
@@ -444,6 +490,8 @@ def build_layout(
         "auxiliary_vdevs": auxiliary,
         "esp_partitions": esp_partitions,
         "unassigned_disks": unassigned,
+        "luks_mappings": luks_mappings,
+        "crypttab": parse_crypttab(crypttab_text),
         "volumes": parse_volumes(volume_text, snapshot_text),
     }
 
@@ -468,6 +516,9 @@ def collect(pool: str = POOL) -> dict[str, Any]:
     boot_uuids = ""
     if BOOT_UUIDS_FILE.is_file():
         boot_uuids = BOOT_UUIDS_FILE.read_text(encoding="utf-8")
+    crypttab = ""
+    if CRYPTTAB_FILE.is_file():
+        crypttab = CRYPTTAB_FILE.read_text(encoding="utf-8")
     return build_layout(
         status_text=run_command(["zpool", "status", "-P", pool]),
         list_text=run_command(
@@ -502,6 +553,7 @@ def collect(pool: str = POOL) -> dict[str, Any]:
         realpath=os.path.realpath,
         hostname=os.uname().nodename.split(".", 1)[0],
         collected_at=int(time.time()),
+        crypttab_text=crypttab,
     )
 
 

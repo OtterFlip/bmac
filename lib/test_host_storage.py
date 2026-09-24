@@ -331,6 +331,51 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(layout["pool"]["dataset_available"], 4600000000000)
         self.assertTrue(layout["pool"]["removal_in_progress"])
 
+    def test_luks_mappings_and_crypttab_are_reported(self) -> None:
+        layout = luks_layout(
+            crypttab_text=(
+                "# comment\n"
+                "crypt-rpool-a\tUUID=1\tapp-ha-rpool\tluks,initramfs,nofail,keyscript=decrypt_keyctl\n"
+                "crypt-rpool-mirror4-1 UUID=2 none luks,initramfs,nofail\n"
+                "cryptswap UUID=3 none swap\n"
+            )
+        )
+        self.assertEqual(
+            layout["crypttab"],
+            [
+                {"mapper": "crypt-rpool-a", "shared_unlock": True},
+                {"mapper": "crypt-rpool-mirror4-1", "shared_unlock": False},
+            ],
+        )
+        mappings = {row["mapper"]: row for row in layout["luks_mappings"]}
+        self.assertEqual(
+            sorted(mappings),
+            [
+                "crypt-rpool-a",
+                "crypt-rpool-b",
+                "crypt-rpool-mirror2-1",
+                "crypt-rpool-mirror2-2",
+                "crypt-rpool-mirror3-1",
+                "crypt-rpool-mirror3-2",
+            ],
+        )
+        self.assertTrue(all(row["in_pool"] for row in mappings.values()))
+        self.assertEqual(mappings["crypt-rpool-mirror3-2"]["serial"], "S5EXTRA4")
+        self.assertEqual(mappings["crypt-rpool-a"]["backing"], "/dev/nvme0n1p3")
+
+        # A prepared pair that was never added shows as open but not in rpool.
+        status = LUKS_STATUS.replace(
+            "\t  mirror-2                             ONLINE       0     0     0\n"
+            "\t    /dev/mapper/crypt-rpool-mirror3-1  ONLINE       0     0     0\n"
+            "\t    /dev/mapper/crypt-rpool-mirror3-2  ONLINE       0     0     0\n",
+            "",
+        )
+        mappings = {
+            row["mapper"]: row for row in luks_layout(status_text=status)["luks_mappings"]
+        }
+        self.assertFalse(mappings["crypt-rpool-mirror3-1"]["in_pool"])
+        self.assertTrue(mappings["crypt-rpool-mirror2-1"]["in_pool"])
+
     def test_unassigned_disks_exclude_members_esps_and_zvols(self) -> None:
         layout = luks_layout()
         unassigned = {disk["disk"]: disk for disk in layout["unassigned_disks"]}

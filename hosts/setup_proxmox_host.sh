@@ -18,6 +18,8 @@ CLUSTER_REGISTRY_SOURCE="${SCRIPT_DIR}/../lib/cluster_registry.py"
 HAPROXY_RENDERER_SOURCE="${SCRIPT_DIR}/../lib/haproxy_routes.py"
 HAPROXY_SYNC_SOURCE="${SCRIPT_DIR}/../lib/sync_haproxy_routes.sh"
 DEFERRED_CLEANUP_SOURCE="${SCRIPT_DIR}/../lib/process_deferred_cleanup.sh"
+RPOOL_MIRROR_SOURCE="${SCRIPT_DIR}/../lib/rpool_mirror.sh"
+RPOOL_MIRROR_TOOL=/usr/local/sbin/app-ha-rpool-mirror
 PROD_ISO_BUILDER_SOURCE="${SCRIPT_DIR}/../guests/prod/build_ubuntu_autoinstall.py"
 PROD_ISO_PREPARER_SOURCE="${SCRIPT_DIR}/../guests/prod/prepare_prod_iso.sh"
 CANONICAL_GUEST_ROLE_HOOK_SOURCE="${SCRIPT_DIR}/app-ha-guest-role-hook.sh"
@@ -63,7 +65,7 @@ REQUESTED_BOOT_TEST_POLICY=""
 HARDWARE_INVENTORY_MODE=""
 HOST_SETUP_CONFIG_SHA256=""
 RPOOL_LAYOUT_SHA256=""
-MIRROR_PAIR_COUNT=0
+declare -a CONFIGURED_MIRROR_PAIRS=()
 declare -a CONFIGURED_NVME_SERIALS=()
 declare -a EXPECTED_RPOOL_MAPPERS=()
 
@@ -337,13 +339,15 @@ load_configuration() {
     fail "Remove the LUKS secret from configuration; it must only be entered at the target host console"
 
   CONFIGURED_NVME_SERIALS=()
+  CONFIGURED_MIRROR_PAIRS=()
   EXPECTED_RPOOL_MAPPERS=()
   local pair member serial_name serial capacity_name capacity
-  MIRROR_PAIR_COUNT=0
+  # Pairs 2-5 may have gaps: decommissioning a mirror comments out its
+  # entries, and pair N keeps its crypt-rpool-mirrorN-* LUKS names.
   for pair in 1 2 3 4 5; do
     serial_name="NVME_MIRROR_${pair}_SERIAL_1"
-    [[ -n "${!serial_name:-}" ]] || break
-    MIRROR_PAIR_COUNT="$pair"
+    [[ -n "${!serial_name:-}" ]] || continue
+    CONFIGURED_MIRROR_PAIRS+=("$pair")
     for member in 1 2; do
       serial_name="NVME_MIRROR_${pair}_SERIAL_${member}"
       serial="${!serial_name}"
@@ -358,7 +362,7 @@ load_configuration() {
       fi
     done
   done
-  ((MIRROR_PAIR_COUNT >= 1)) || fail "NVMe mirror 1 is mandatory"
+  [[ "${CONFIGURED_MIRROR_PAIRS[0]:-}" == 1 ]] || fail "NVMe mirror 1 is mandatory"
   RPOOL_LAYOUT_SHA256="$(
     printf '%s\n' "${CONFIGURED_NVME_SERIALS[@]}" |
       sha256sum | awk '{print $1}'
@@ -599,7 +603,7 @@ choose_encryption_policy() {
     require_var PROXMOX_LUKS_PASSWORD
     EXPECTED_RPOOL_MAPPERS=(crypt-rpool-a crypt-rpool-b)
     local pair member
-    for ((pair = 2; pair <= MIRROR_PAIR_COUNT; pair += 1)); do
+    for pair in "${CONFIGURED_MIRROR_PAIRS[@]:1}"; do
       for member in 1 2; do
         EXPECTED_RPOOL_MAPPERS+=("crypt-rpool-mirror${pair}-${member}")
       done
@@ -678,7 +682,7 @@ redfish_collection() {
 discover_hardware() {
   local recorded_hardware_complete=true pair
   has_state zfs-hdsize-gib || recorded_hardware_complete=false
-  for ((pair = 1; pair <= MIRROR_PAIR_COUNT; pair += 1)); do
+  for pair in "${CONFIGURED_MIRROR_PAIRS[@]}"; do
     has_state "mirror-${pair}-minimum-capacity-bytes" ||
       recorded_hardware_complete=false
   done
@@ -692,7 +696,7 @@ discover_hardware() {
   if [[ "$HARDWARE_INVENTORY_MODE" == manual ]]; then
     log "Validating manually inventoried disk capacities"
     local capacity_1_name capacity_2_name capacity_1 capacity_2
-    for ((pair = 1; pair <= MIRROR_PAIR_COUNT; pair += 1)); do
+    for pair in "${CONFIGURED_MIRROR_PAIRS[@]}"; do
       capacity_1_name="NVME_MIRROR_${pair}_CAPACITY_BYTES_1"
       capacity_2_name="NVME_MIRROR_${pair}_CAPACITY_BYTES_2"
       capacity_1="${!capacity_1_name}"
@@ -786,7 +790,7 @@ discover_hardware() {
 
   local serial_1_name serial_2_name serial_1 serial_2
   local capacity_1 capacity_2 larger_bytes smaller_bytes difference
-  for ((pair = 1; pair <= MIRROR_PAIR_COUNT; pair += 1)); do
+  for pair in "${CONFIGURED_MIRROR_PAIRS[@]}"; do
     serial_1_name="NVME_MIRROR_${pair}_SERIAL_1"
     serial_2_name="NVME_MIRROR_${pair}_SERIAL_2"
     serial_1="${!serial_1_name}"
@@ -1127,7 +1131,7 @@ installation_gate() {
     info "Manually inventoried capacity of each installer disk: ${NVME_MIRROR_1_CAPACITY_BYTES_1} bytes"
     info "The automated installer selects these disks by serial; it cannot independently verify the recorded byte capacities before erasing them."
   fi
-  if ((MIRROR_PAIR_COUNT > 1)); then
+  if ((${#CONFIGURED_MIRROR_PAIRS[@]} > 1)); then
     info "Extra configured mirror disks are serial-selected and left untouched by the installer."
   fi
   info "Installer public NIC MAC selector: ${PROXMOX_PUBLIC_MAC^^}"
@@ -2045,6 +2049,34 @@ REMOTE
   write_state encrypted-mirror-verified
 }
 
+# Install lib/rpool_mirror.sh on the target as the one copy of the extra-mirror
+# disk, LUKS, and zpool logic. hosts/add_new_disk_vdev.sh installs the same
+# file for mirrors added after setup.
+install_rpool_mirror_tool() {
+  local expected actual staged=/root/.app-ha-rpool-mirror.upload
+  expected="$(sha256sum "$RPOOL_MIRROR_SOURCE" | awk '{print $1}')"
+  actual="$(remote sha256sum "$RPOOL_MIRROR_TOOL" 2>/dev/null | awk '{print $1}')" ||
+    actual=""
+  [[ "$actual" == "$expected" ]] && return
+  copy_to_host "$RPOOL_MIRROR_SOURCE" "$staged"
+  remote install -o root -g root -m 0700 "$staged" "$RPOOL_MIRROR_TOOL"
+  remote rm -f "$staged"
+  actual="$(remote sha256sum "$RPOOL_MIRROR_TOOL" | awk '{print $1}')"
+  [[ "$actual" == "$expected" ]] ||
+    fail "Installed $RPOOL_MIRROR_TOOL does not match $RPOOL_MIRROR_SOURCE"
+}
+
+# Disk-size requirement for the rpool mirror tool: exact recorded bytes in
+# manual inventory mode, within 1% of the iDRAC-reported size otherwise.
+rpool_mirror_size_args() {
+  local expected_capacity=$1
+  if [[ "$HARDWARE_INVENTORY_MODE" == manual ]]; then
+    printf '%s\n' --expect-bytes "$expected_capacity" --match exact
+  else
+    printf '%s\n' --expect-bytes "$expected_capacity" --match within-1pct
+  fi
+}
+
 configure_extra_mirror() {
   local pair=$1
   local serial_1_name="NVME_MIRROR_${pair}_SERIAL_1"
@@ -2062,11 +2094,14 @@ configure_extra_mirror() {
   local remote_header_2="/root/luks-header-mirror${pair}-2.bin"
   local expected_capacity pair_config_hash remote_helper_hash pool
   local has_1=false has_2=false
+  local -a size_args=()
   expected_capacity="$(read_state "mirror-${pair}-minimum-capacity-bytes")"
+  mapfile -t size_args < <(rpool_mirror_size_args "$expected_capacity")
   pair_config_hash="$(
     printf '%s\n%s\n%s\n' "$serial_1" "$serial_2" "$expected_capacity" |
       sha256sum | awk '{print $1}'
   )"
+  install_rpool_mirror_tool
   pool="$(remote zpool status -P rpool)"
   awk -v member="/dev/mapper/$mapper_1" '$1 == member { found=1 } END { exit !found }' <<<"$pool" && has_1=true
   awk -v member="/dev/mapper/$mapper_2" '$1 == member { found=1 } END { exit !found }' <<<"$pool" && has_2=true
@@ -2074,39 +2109,11 @@ configure_extra_mirror() {
   if [[ "$has_1" == true || "$has_2" == true ]]; then
     [[ "$has_1" == true && "$has_2" == true ]] ||
       fail "rpool contains only one member of configured extra mirror $pair"
-    remote_script "$serial_1" "$serial_2" "$mapper_1" "$mapper_2" \
-      "$remote_header_1" "$remote_header_2" <<'REMOTE'
-set -Eeuo pipefail
-serials=("$1" "$2")
-mappers=("$3" "$4")
-headers=("$5" "$6")
-for index in 0 1; do
-  disk="$(app-ha-disk-by-serial "${serials[$index]}")"
-  mapper="${mappers[$index]}"
-  [[ -b "/dev/mapper/$mapper" ]]
-  backing="$(cryptsetup status "$mapper" | awk '$1 == "device:" { print $2; exit }')"
-  [[ "$(readlink -f "$backing")" == "$(readlink -f "$disk")" ]]
-  rm -f "${headers[$index]}"
-  cryptsetup luksHeaderBackup "$disk" --header-backup-file "${headers[$index]}"
-  chmod 0600 "${headers[$index]}"
-  uuid="$(cryptsetup luksUUID "$disk")"
-  awk -v name="$mapper" '$1 != name' /etc/crypttab > /etc/crypttab.app-ha-new
-  printf '%s UUID=%s none luks,initramfs,nofail\n' "$mapper" "$uuid" \
-    >>/etc/crypttab.app-ha-new
-  install -m 0600 /etc/crypttab.app-ha-new /etc/crypttab
-  rm -f /etc/crypttab.app-ha-new
-done
-pool="$(zpool status -P rpool)"
-awk -v member_1="/dev/mapper/$3" -v member_2="/dev/mapper/$4" '
-  $1 ~ /^mirror-/ { mirror=$1 }
-  $1 == member_1 { one=mirror }
-  $1 == member_2 { two=mirror }
-  END { exit !(one != "" && one == two) }
-' <<<"$pool"
-zpool status -x rpool | grep -F "pool 'rpool' is healthy"
-update-initramfs -u -k all
-proxmox-boot-tool refresh
-REMOTE
+    remote "$RPOOL_MIRROR_TOOL" luks-backup-headers --pair "$pair" \
+      "$serial_1" "$serial_2" ||
+      fail "Could not back up the LUKS headers of extra mirror $pair"
+    remote "$RPOOL_MIRROR_TOOL" luks-add --pair "$pair" "$serial_1" "$serial_2" ||
+      fail "Could not reconcile boot unlock for extra mirror $pair"
     if [[ ! -s "$header_1" ]] && remote test -s "$remote_header_1"; then
       copy_from_host "$remote_header_1" "$header_1"
       chmod 0600 "$header_1"
@@ -2137,40 +2144,10 @@ REMOTE
       write_state "$prepared_state"
     else
       local luks_probe
-      luks_probe="$(remote_script "$serial_1" "$serial_2" "$expected_capacity" \
-        "$HARDWARE_INVENTORY_MODE" <<'REMOTE'
-set -Eeuo pipefail
-serial_1="$1"; serial_2="$2"; expected_capacity="$3"; inventory_mode="$4"
-pool="$(zpool status -LP rpool)"
-for serial in "$serial_1" "$serial_2"; do
-  disk="$(app-ha-disk-by-serial "$serial")"
-  size="$(blockdev --getsize64 "$disk")"
-  if [[ "$inventory_mode" == manual ]]; then
-    [[ "$size" == "$expected_capacity" ]]
-  else
-    ((size * 100 >= expected_capacity * 99))
-  fi
-  while IFS= read -r device; do
-    [[ -n "$device" ]] || continue
-    canonical="$(readlink -f "$device")"
-    ! awk -v target="$canonical" '$1 == target { found=1 } END { exit !found }' <<<"$pool" || {
-      printf 'Configured extra disk %s is already referenced by rpool as %s\n' "$serial" "$device" >&2
-      exit 1
-    }
-  done < <(lsblk -nrpo NAME "$disk")
-  if lsblk -nrpo MOUNTPOINT "$disk" | awk 'NF { found=1 } END { exit !found }'; then
-    printf 'Configured extra disk %s has a mounted filesystem\n' "$serial" >&2
-    exit 1
-  fi
-  if cryptsetup isLuks "$disk"; then
-    printf 'luks\n'
-  else
-    printf 'fresh\n'
-  fi
-done
-REMOTE
-)"
-      if [[ "$luks_probe" == *luks* ]]; then
+      luks_probe="$(remote "$RPOOL_MIRROR_TOOL" check-new "${size_args[@]}" \
+        "$serial_1" "$serial_2")" ||
+        fail "The configured disks for extra mirror $pair are not safe to format"
+      if awk -F '\t' '$4 == "luks" { found=1 } END { exit !found }' <<<"$luks_probe"; then
         confirm_exact \
           "At least one serial-selected disk for extra mirror $pair already contains LUKS. Confirm that it belongs to this interrupted setup before adopting it; non-LUKS members will be erased." \
           "ADOPT OR FORMAT EXTRA MIRROR ${pair}"
@@ -2180,98 +2157,21 @@ REMOTE
           "FORMAT EXTRA MIRROR ${pair}"
       fi
 
-      remote_script "$serial_1" "$serial_2" "$mapper_1" "$mapper_2" \
-        "$pair" "$helper" "$remote_header_1" "$remote_header_2" \
-        "$expected_capacity" "$pair_config_hash" "$helper_config" \
-        "$NVME_MIRROR_1_SERIAL_1" "$LUKS_SECRET_FILE" \
-        "$HARDWARE_INVENTORY_MODE" <<'REMOTE'
+      # The console helper only wraps the shared tool, which proves the key
+      # file against every existing rpool LUKS member before formatting.
+      remote_script "$helper" "$helper_config" "$pair_config_hash" \
+        "$RPOOL_MIRROR_TOOL" "$pair" "$LUKS_SECRET_FILE" \
+        "$serial_1" "$serial_2" "${size_args[@]}" <<'REMOTE'
 set -Eeuo pipefail
-serial_1="$1"; serial_2="$2"; mapper_1="$3"; mapper_2="$4"
-pair="$5"; helper="$6"; header_1="$7"; header_2="$8"; expected_capacity="$9"
-pair_config_hash="${10}"; helper_config="${11}"; boot_serial="${12}"
-key_file="${13}"; inventory_mode="${14}"
-pool="$(zpool status -LP rpool)"
-for serial in "$serial_1" "$serial_2"; do
-  disk="$(app-ha-disk-by-serial "$serial")"
-  size="$(blockdev --getsize64 "$disk")"
-  if [[ "$inventory_mode" == manual ]]; then
-    [[ "$size" == "$expected_capacity" ]]
-  else
-    ((size * 100 >= expected_capacity * 99))
-  fi
-  while IFS= read -r device; do
-    [[ -n "$device" ]] || continue
-    canonical="$(readlink -f "$device")"
-    ! awk -v target="$canonical" '$1 == target { found=1 } END { exit !found }' <<<"$pool" || {
-      printf 'Refusing to reuse %s: rpool references %s\n' "$serial" "$device" >&2
-      exit 1
-    }
-  done < <(lsblk -nrpo NAME "$disk")
-  if lsblk -nrpo MOUNTPOINT "$disk" | awk 'NF { found=1 } END { exit !found }'; then
-    printf 'Refusing to reuse mounted disk %s\n' "$serial" >&2
-    exit 1
-  fi
-done
-
-printf -v serial_1_q '%q' "$serial_1"
-printf -v serial_2_q '%q' "$serial_2"
-printf -v mapper_1_q '%q' "$mapper_1"
-printf -v mapper_2_q '%q' "$mapper_2"
-printf -v header_1_q '%q' "$header_1"
-printf -v header_2_q '%q' "$header_2"
-printf -v boot_serial_q '%q' "$boot_serial"
-printf -v key_file_q '%q' "$key_file"
-cat >"$helper" <<EOF
-#!/usr/bin/env bash
-set -Eeuo pipefail
-set +x
-serials=($serial_1_q $serial_2_q)
-mappers=($mapper_1_q $mapper_2_q)
-headers=($header_1_q $header_2_q)
-boot_serial=$boot_serial_q
-key_file=$key_file_q
-[[ -s "\$key_file" && ! -L "\$key_file" ]]
-[[ "\$(stat -c '%U:%G:%a' "\$key_file")" == root:root:600 ]]
-
-printf 'Type GO to format extra mirror $pair.\n> '
-IFS= read -r confirmation
-[[ "\$confirmation" == GO ]]
-
-# Prove this is the existing rpool passphrase before formatting either fresh
-# disk. This is what makes decrypt_keyctl's one-prompt boot unlock reliable.
-boot_disk="\$(app-ha-disk-by-serial "\$boot_serial")"
-cryptsetup open --test-passphrase --key-file="\$key_file" "\${boot_disk}p3"
-
-# Also verify any already-formatted members adopted from an interrupted run.
-for index in 0 1; do
-  disk="\$(app-ha-disk-by-serial "\${serials[\$index]}")"
-  if cryptsetup isLuks "\$disk"; then
-    cryptsetup open --test-passphrase --key-file="\$key_file" "\$disk"
-  fi
-done
-
-for index in 0 1; do
-  disk="\$(app-ha-disk-by-serial "\${serials[\$index]}")"
-  mapper="\${mappers[\$index]}"
-  header="\${headers[\$index]}"
-  if ! cryptsetup isLuks "\$disk"; then
-    wipefs --all --force "\$disk"
-    sgdisk --zap-all "\$disk"
-    udevadm settle
-    cryptsetup luksFormat --batch-mode --type luks2 \
-      --key-file="\$key_file" "\$disk"
-  fi
-  if [[ ! -b "/dev/mapper/\$mapper" ]]; then
-    cryptsetup open --key-file="\$key_file" "\$disk" "\$mapper"
-  fi
-  backing="\$(cryptsetup status "\$mapper" | awk '\$1 == "device:" { print \$2; exit }')"
-  [[ "\$(readlink -f "\$backing")" == "\$(readlink -f "\$disk")" ]]
-  rm -f "\$header"
-  cryptsetup luksHeaderBackup "\$disk" --header-backup-file "\$header"
-  chmod 0600 "\$header"
-done
-echo "Extra mirror $pair LUKS members prepared successfully."
-EOF
+helper="$1"; helper_config="$2"; pair_config_hash="$3"; tool="$4"; pair="$5"
+key_file="$6"; serial_1="$7"; serial_2="$8"
+shift 8
+{
+  printf '#!/usr/bin/env bash\nset -Eeuo pipefail\nset +x\n'
+  printf 'exec %q luks-prepare --pair %q --key-file %q' "$tool" "$pair" "$key_file"
+  printf ' %q' "$@" "$serial_1" "$serial_2"
+  printf '\n'
+} >"$helper"
 chmod 0700 "$helper"
 printf '%s\n' "$pair_config_hash" >"$helper_config"
 chmod 0600 "$helper_config"
@@ -2295,84 +2195,18 @@ REMOTE
   wait_for_helper_success "$helper" \
     "both encrypted members of extra mirror ${pair} were prepared"
 
-  remote_script "$serial_1" "$serial_2" "$mapper_1" "$mapper_2" \
-    "$expected_capacity" "$remote_header_1" "$remote_header_2" <<'REMOTE'
-set -Eeuo pipefail
-serial_1="$1"; serial_2="$2"; mapper_1="$3"; mapper_2="$4"
-expected_capacity="$5"; header_1="$6"; header_2="$7"
-serials=("$serial_1" "$serial_2")
-mappers=("$mapper_1" "$mapper_2")
-headers=("$header_1" "$header_2")
-declare -a sizes=()
-for index in 0 1; do
-  serial="${serials[$index]}"
-  mapper="${mappers[$index]}"
-  header="${headers[$index]}"
-  disk="$(app-ha-disk-by-serial "$serial")"
-  [[ -b "/dev/mapper/$mapper" && -s "$header" ]]
-  backing="$(cryptsetup status "$mapper" | awk '$1 == "device:" { print $2; exit }')"
-  [[ "$(readlink -f "$backing")" == "$(readlink -f "$disk")" ]]
-  size="$(blockdev --getsize64 "/dev/mapper/$mapper")"
-  ((size * 100 >= expected_capacity * 98))
-  sizes+=("$size")
-done
-if ((sizes[0] >= sizes[1])); then
-  difference=$((sizes[0] - sizes[1])); larger=${sizes[0]}
-else
-  difference=$((sizes[1] - sizes[0])); larger=${sizes[1]}
-fi
-((difference * 100 <= larger))
-REMOTE
+  remote "$RPOOL_MIRROR_TOOL" luks-check-prepared --pair "$pair" \
+    --expect-bytes "$expected_capacity" "$serial_1" "$serial_2" ||
+    fail "Extra mirror $pair was not fully prepared; rerun the helper at the console"
   copy_from_host "$remote_header_1" "$header_1"
   copy_from_host "$remote_header_2" "$header_2"
   chmod 0600 "$header_1" "$header_2"
 
   confirm_exact \
-    "Add encrypted mappers $mapper_1 and $mapper_2 to rpool as one new top-level mirror vdev. Removing a top-level vdev later may not be possible." \
+    "Add encrypted mappers $mapper_1 and $mapper_2 to rpool as one new top-level mirror vdev. A later top-level vdev removal is possible (hosts/decommission_disks.sh) but evacuates its data first." \
     "ADD EXTRA MIRROR ${pair} TO RPOOL"
-  remote_script "$serial_1" "$serial_2" "$mapper_1" "$mapper_2" <<'REMOTE'
-set -Eeuo pipefail
-serial_1="$1"; serial_2="$2"; mapper_1="$3"; mapper_2="$4"
-serials=("$serial_1" "$serial_2")
-mappers=("$mapper_1" "$mapper_2")
-pool="$(zpool status -P rpool)"
-has_1=false; has_2=false
-awk -v member="/dev/mapper/$mapper_1" '$1 == member { found=1 } END { exit !found }' <<<"$pool" && has_1=true
-awk -v member="/dev/mapper/$mapper_2" '$1 == member { found=1 } END { exit !found }' <<<"$pool" && has_2=true
-[[ "$has_1" == "$has_2" ]]
-for index in 0 1; do
-  serial="${serials[$index]}"
-  mapper="${mappers[$index]}"
-  disk="$(app-ha-disk-by-serial "$serial")"
-  [[ -b "/dev/mapper/$mapper" ]]
-  backing="$(cryptsetup status "$mapper" | awk '$1 == "device:" { print $2; exit }')"
-  [[ "$(readlink -f "$backing")" == "$(readlink -f "$disk")" ]]
-  uuid="$(cryptsetup luksUUID "$disk")"
-  awk -v name="$mapper" '$1 != name' /etc/crypttab > /etc/crypttab.app-ha-new
-  printf '%s UUID=%s none luks,initramfs,nofail\n' \
-    "$mapper" "$uuid" >>/etc/crypttab.app-ha-new
-  install -m 0600 /etc/crypttab.app-ha-new /etc/crypttab
-  rm -f /etc/crypttab.app-ha-new
-done
-update-initramfs -u -k all
-
-if [[ "$has_1" == false ]]; then
-  ashift="$(zdb -C rpool | awk '$1 == "ashift:" { print $2; exit }')"
-  [[ "$ashift" =~ ^[0-9]+$ ]]
-  zpool add -o "ashift=$ashift" rpool mirror \
-    "/dev/mapper/$mapper_1" "/dev/mapper/$mapper_2"
-fi
-pool="$(zpool status -P rpool)"
-awk -v member="/dev/mapper/$mapper_1" '$1 == member { found=1 } END { exit !found }' <<<"$pool"
-awk -v member="/dev/mapper/$mapper_2" '$1 == member { found=1 } END { exit !found }' <<<"$pool"
-awk -v member_1="/dev/mapper/$mapper_1" -v member_2="/dev/mapper/$mapper_2" '
-  $1 ~ /^mirror-/ { mirror=$1 }
-  $1 == member_1 { one=mirror }
-  $1 == member_2 { two=mirror }
-  END { exit !(one != "" && one == two) }
-' <<<"$pool"
-zpool status -x rpool | grep -F "pool 'rpool' is healthy"
-REMOTE
+  remote "$RPOOL_MIRROR_TOOL" luks-add --pair "$pair" "$serial_1" "$serial_2" ||
+    fail "Could not add extra mirror $pair to rpool"
   write_state "$added_state"
   rm -f "$(state_path "$prepared_state")"
   remote rm -f "$helper" "$helper_config" "$remote_header_1" "$remote_header_2"
@@ -2384,7 +2218,9 @@ configure_raw_extra_mirror() {
   local serial_2_name="NVME_MIRROR_${pair}_SERIAL_2"
   local serial_1="${!serial_1_name}" serial_2="${!serial_2_name}"
   local expected_capacity state
+  local -a size_args=()
   expected_capacity="$(read_state "mirror-${pair}-minimum-capacity-bytes")"
+  mapfile -t size_args < <(rpool_mirror_size_args "$expected_capacity")
   state="raw-extra-mirror-${pair}-added"
 
   if remote_script "$serial_1" "$serial_2" <<'REMOTE' >/dev/null 2>&1
@@ -2406,73 +2242,23 @@ REMOTE
     fail "Recorded unencrypted extra mirror $pair is no longer present in rpool"
 
   confirm_exact \
-    "Erase both serial-selected disks for extra mirror $pair and add them as one unencrypted top-level rpool mirror vdev. These disks receive no ESP, and removing a top-level vdev later may not be possible." \
+    "Erase both serial-selected disks for extra mirror $pair and add them as one unencrypted top-level rpool mirror vdev. These disks receive no ESP. A later top-level vdev removal is possible (hosts/decommission_disks.sh) but evacuates its data first." \
     "ADD UNENCRYPTED EXTRA MIRROR ${pair}"
-  remote_script "$serial_1" "$serial_2" "$expected_capacity" \
-    "$HARDWARE_INVENTORY_MODE" <<'REMOTE'
-set -Eeuo pipefail
-serials=("$1" "$2")
-expected_capacity="$3"
-inventory_mode="$4"
-pool="$(zpool status -LP rpool)"
-declare -a disks=()
-for serial in "${serials[@]}"; do
-  disk="$(app-ha-disk-by-serial "$serial")"
-  size="$(blockdev --getsize64 "$disk")"
-  if [[ "$inventory_mode" == manual ]]; then
-    [[ "$size" == "$expected_capacity" ]]
-  else
-    ((size * 100 >= expected_capacity * 99))
-  fi
-  while IFS= read -r device; do
-    [[ -n "$device" ]] || continue
-    resolved="$(readlink -f "$device")"
-    ! awk -v target="$resolved" '$1 == target { found=1 } END { exit !found }' <<<"$pool" || {
-      printf 'Refusing to erase %s: rpool already references %s\n' "$serial" "$device" >&2
-      exit 1
-    }
-  done < <(lsblk -nrpo NAME "$disk")
-  ! lsblk -nrpo MOUNTPOINT "$disk" | awk 'NF { found=1 } END { exit !found }'
-  cryptsetup isLuks "$disk" &&
-    { printf 'Refusing to erase existing LUKS disk %s without a separate recovery decision\n' "$serial" >&2; exit 1; }
-  stable=""
-  for candidate in /dev/disk/by-id/*; do
-    [[ -L "$candidate" && "${candidate##*/}" == *"$serial"* &&
-       "${candidate##*/}" != *-part* &&
-       "$(readlink -f "$candidate")" == "$(readlink -f "$disk")" ]] || continue
-    if [[ -z "$stable" || "${#candidate}" -lt "${#stable}" ||
-          ( "${#candidate}" -eq "${#stable}" && "$candidate" < "$stable" ) ]]; then
-      stable="$candidate"
-    fi
-  done
-  [[ -n "$stable" ]] || {
-    printf 'No stable /dev/disk/by-id path contains serial %s for %s\n' "$serial" "$disk" >&2
-    exit 1
-  }
-  wipefs --all --force "$disk"
-  sgdisk --zap-all "$disk"
-  udevadm settle
-  disks+=("$stable")
-done
-ashift="$(zdb -C rpool | awk '$1 == "ashift:" { print $2; exit }')"
-[[ "$ashift" =~ ^[0-9]+$ ]]
-zpool add -o "ashift=$ashift" rpool mirror "${disks[0]}" "${disks[1]}"
-pool="$(zpool status -P rpool)"
-awk -v serial_1="${serials[0]}" -v serial_2="${serials[1]}" '
-  $1 ~ /^mirror-/ { mirror=$1 }
-  $1 ~ serial_1 { a=mirror }
-  $1 ~ serial_2 { b=mirror }
-  END { exit !(a != "" && a == b) }
-' <<<"$pool"
-zpool status -x rpool | grep -F "pool 'rpool' is healthy"
-REMOTE
+  install_rpool_mirror_tool
+  remote "$RPOOL_MIRROR_TOOL" clear-add "${size_args[@]}" "$serial_1" "$serial_2" ||
+    fail "Could not add unencrypted extra mirror $pair to rpool"
   write_state "$state"
 }
 
 configure_extra_mirrors() {
-  local pair pool
+  local pair pool configured configured_pair
   pool="$(remote zpool status -P rpool)"
-  for ((pair = MIRROR_PAIR_COUNT + 1; pair <= 5; pair += 1)); do
+  for pair in 2 3 4 5; do
+    configured=false
+    for configured_pair in "${CONFIGURED_MIRROR_PAIRS[@]}"; do
+      [[ "$configured_pair" != "$pair" ]] || configured=true
+    done
+    [[ "$configured" == false ]] || continue
     if awk -v one="/dev/mapper/crypt-rpool-mirror${pair}-1" \
       -v two="/dev/mapper/crypt-rpool-mirror${pair}-2" \
       '$1 == one || $1 == two { found=1 } END { exit !found }' <<<"$pool"; then
@@ -2490,7 +2276,7 @@ configure_extra_mirrors() {
       fail "crypttab still contains managed mirror $pair, but that pair was removed from configuration"
     fi
   done
-  for ((pair = 2; pair <= MIRROR_PAIR_COUNT; pair += 1)); do
+  for pair in "${CONFIGURED_MIRROR_PAIRS[@]:1}"; do
     if [[ "$ENCRYPTION_POLICY" == luks ]]; then
       configure_extra_mirror "$pair"
     else
@@ -4420,7 +4206,7 @@ sync_haproxy_routes() {
 final_verify() {
   local pair member header
   if [[ "$ENCRYPTION_POLICY" == luks ]]; then
-    for ((pair = 1; pair <= MIRROR_PAIR_COUNT; pair += 1)); do
+    for pair in "${CONFIGURED_MIRROR_PAIRS[@]}"; do
       for member in 1 2; do
         if ((pair == 1)); then
           if ((member == 1)); then

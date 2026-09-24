@@ -13,7 +13,10 @@
 #IDRAC_IP=10.20.30.2
 
 # Mirror 1 *_SERIAL_* values are mandatory; mirror 1 becomes the bootable rpool
-# mirror. Mirrors 2-5 are optional but must be complete and contiguous. Every
+# mirror. Mirrors 2-5 are optional and must be complete; gaps are allowed, so
+# hosts/add_new_disk_vdev.sh can fill the next free pair and
+# hosts/list_disks_ready_for_physically_removal.sh can comment out a removed
+# pair while later pairs keep their numbers. Every
 # configured pair follows the clear or LUKS storage policy selected by the host
 # setup run.
 # Corresponding *_CAPACITY_BYTES_* values are required only when running

@@ -570,7 +570,7 @@ _config_validate_selected_host() {
 _config_validate_mirror_serials() {
   local source_file="${1:?mox configuration file is required}"
   local pair a_name b_name capacity_a_name capacity_b_name
-  local prior_missing=0 serial capacity
+  local serial capacity
   local -A serials=()
   for pair in 1 2 3 4 5; do
     a_name="NVME_MIRROR_${pair}_SERIAL_1"
@@ -581,8 +581,6 @@ _config_validate_mirror_serials() {
       [[ -n "${!a_name:-}" && -n "${!b_name:-}" ]] ||
         config_die "NVMe mirror ${pair} must define both ${a_name} and ${b_name}" || return
       _config_require_from_file mox "$source_file" "$a_name" "$b_name" || return
-      ((prior_missing == 0)) ||
-        config_die "NVMe mirror pairs must be contiguous; mirror ${pair} follows an omitted pair" || return
       [[ "${!a_name}" != "${!b_name}" ]] ||
         config_die "NVMe mirror ${pair} contains the same serial twice" || return
       for serial in "${!a_name}" "${!b_name}"; do
@@ -603,9 +601,10 @@ _config_validate_mirror_serials() {
     else
       ((pair == 1)) &&
         config_die "NVMe mirror 1 is mandatory" && return
+      # Pairs 2-5 may have gaps: decommissioning a mirror comments out its
+      # entries, and pair N keeps its crypt-rpool-mirrorN-* LUKS names.
       [[ -z "${!capacity_a_name:-}${!capacity_b_name:-}" ]] ||
         config_die "NVMe mirror ${pair} capacities were provided without serials" || return
-      prior_missing=1
     fi
   done
 }

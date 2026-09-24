@@ -164,7 +164,7 @@ Flags:            Quorate Qdevice
             PROXMOX_IP={shlex.quote(config_value(MOX1_CONFIG, "PROXMOX_IP"))}
             NVME_MIRROR_1_SERIAL_1=disk-a
             NVME_MIRROR_1_SERIAL_2=disk-b
-            MIRROR_PAIR_COUNT=1
+            CONFIGURED_MIRROR_PAIRS=(1)
             HARDWARE_INVENTORY_MODE=idrac
             PROXMOX_PUBLIC_MAC=00:11:22:33:44:55
             PROXMOX_SECONDARY_MAC=00:11:22:33:44:66
@@ -197,7 +197,7 @@ Flags:            Quorate Qdevice
             NVME_MIRROR_1_SERIAL_2=disk-b
             NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
             NVME_MIRROR_1_CAPACITY_BYTES_2=1000204886016
-            MIRROR_PAIR_COUNT=1
+            CONFIGURED_MIRROR_PAIRS=(1)
             HARDWARE_INVENTORY_MODE=manual
             PROXMOX_PUBLIC_MAC=00:11:22:33:44:55
             PROXMOX_SECONDARY_MAC=00:11:22:33:44:66
@@ -215,7 +215,7 @@ Flags:            Quorate Qdevice
             trap 'rm -rf "$STATE_DIR"' EXIT
             HARDWARE_INVENTORY_MODE=manual
             HOST_SETUP_CONFIG_SHA256=config-hash
-            MIRROR_PAIR_COUNT=2
+            CONFIGURED_MIRROR_PAIRS=(1 2)
             NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
             NVME_MIRROR_1_CAPACITY_BYTES_2=1000204886016
             NVME_MIRROR_2_CAPACITY_BYTES_1=2000398934016
@@ -228,12 +228,30 @@ Flags:            Quorate Qdevice
             """
         )
 
+        # A decommissioned pair leaves a gap; later pairs keep their numbers.
+        self.run_bash(
+            """
+            STATE_DIR="$(mktemp -d)"
+            trap 'rm -rf "$STATE_DIR"' EXIT
+            HARDWARE_INVENTORY_MODE=manual
+            HOST_SETUP_CONFIG_SHA256=config-hash
+            CONFIGURED_MIRROR_PAIRS=(1 3)
+            NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
+            NVME_MIRROR_1_CAPACITY_BYTES_2=1000204886016
+            NVME_MIRROR_3_CAPACITY_BYTES_1=4000787030016
+            NVME_MIRROR_3_CAPACITY_BYTES_2=4000787030016
+            discover_hardware
+            [[ "$(read_state mirror-3-minimum-capacity-bytes)" == 4000787030016 ]]
+            ! has_state mirror-2-minimum-capacity-bytes
+            """
+        )
+
         completed = self.run_bash(
             """
             STATE_DIR="$(mktemp -d)"
             HARDWARE_INVENTORY_MODE=manual
             HOST_SETUP_CONFIG_SHA256=config-hash
-            MIRROR_PAIR_COUNT=1
+            CONFIGURED_MIRROR_PAIRS=(1)
             NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
             NVME_MIRROR_1_CAPACITY_BYTES_2=1000204886017
             discover_hardware
@@ -606,6 +624,22 @@ esac
         self.assertIn("count_a == 1 && count_b == 1 && a != \"\" && a == b", source)
         self.assertIn("verify_clear_mirrors", source)
         self.assertIn("Tailscale/SSH steps 6-10 are complete", source)
+
+    def test_extra_mirrors_use_the_one_shared_rpool_mirror_tool(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        tool = (SCRIPT.parent.parent / "lib" / "rpool_mirror.sh").read_text(encoding="utf-8")
+        # Nate asked for one copy of the add-a-mirror logic: setup and
+        # hosts/add_new_disk_vdev.sh both run lib/rpool_mirror.sh on the host.
+        self.assertNotIn("zpool add", source)
+        self.assertIn("zpool add", tool)
+        for call in (
+            '"$RPOOL_MIRROR_TOOL" check-new',
+            'luks-prepare --pair %q --key-file %q',
+            '"$RPOOL_MIRROR_TOOL" luks-check-prepared',
+            '"$RPOOL_MIRROR_TOOL" luks-add',
+            '"$RPOOL_MIRROR_TOOL" clear-add',
+        ):
+            self.assertIn(call, source)
 
     def test_verified_bootstrap_retires_proxmox_first_boot_payload(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")

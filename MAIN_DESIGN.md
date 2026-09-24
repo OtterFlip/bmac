@@ -48,7 +48,7 @@ defaults. In that example:
 - [Corosync, quorum, and QDevice](#corosync-quorum-and-qdevice)
 - [Host storage, LUKS, and mirrors](#host-storage-luks-and-mirrors)
 - [Configuration, secrets, and artifacts](#configuration-secrets-and-artifacts)
-- [The three main workflows](#the-three-main-workflows)
+- [The main workflows](#the-main-workflows)
 - [Helper inventory](#helper-inventory)
 - [Required operational sequence](#required-operational-sequence)
 - [Host workflow in detail](#host-workflow-in-detail)
@@ -178,6 +178,10 @@ Expected to work on macOS, not yet run there against a cluster:
 - `diagnostics/show_proxmox_host_state.sh`. It uses the same strict SSH
   helpers as `show_prod_vm_state.sh`, plus local `python3`, and is covered by
   fake-SSH unit tests only;
+- `hosts/add_new_disk_vdev.sh`, `hosts/decommission_disks.sh`, and
+  `hosts/list_disks_ready_for_physically_removal.sh`. Their local work is the
+  config load, `python3`, and SSH; covered by fake-SSH unit tests only, and
+  not yet run against real disks;
 - `hosts/update_cluster_runtime.sh`. Local commands are portable and its unit
   tests pass on macOS. It rewrites the runtime on every node, so treat the
   first macOS run as a test, not as routine;
@@ -621,7 +625,7 @@ host-specific unattended ISO with public networking, serial-selected mirror
 1, administrator keys, a temporary setup key, a fresh one-time Tailscale key,
 the public management-port guard, and first-boot Tailscale bootstrap.
 
-One through five contiguous NVMe mirror pairs are supported:
+One through five NVMe mirror pairs are supported:
 
 - Mirror 1 is mandatory and bootable. The Proxmox installer destroys its two
   serial-selected disks, creates the raw ZFS `rpool` mirror and ESPs, and
@@ -645,7 +649,9 @@ One through five contiguous NVMe mirror pairs are supported:
   mirror-1 member alone, restoring and resilvering after each simulation, then
   reboots the healthy final layout. LUKS testing begins only after both members
   are encrypted; it never duplicates the drills against the raw layout.
-- Optional mirror pairs 2 through 5 must be complete and contiguous. Each pair
+- Optional mirror pairs 2 through 5 must be complete. Gaps are allowed, so a
+  decommissioned pair's entries can be commented out while later pairs keep
+  their numbers and LUKS names. Each pair
   is capacity-matched and added as one new top-level `rpool` mirror vdev.
   In LUKS mode its whole disks use names `crypt-rpool-mirror<P>-<M>`; in clear
   mode they remain unencrypted. Extra mirrors have no ESP.
@@ -683,7 +689,7 @@ the selected storage policy or skip final non-boot validation.
 
 ## Configuration, secrets, and artifacts
 
-All three workflows use [`lib/config.sh`](lib/config.sh). It parses literal
+All workflows use [`lib/config.sh`](lib/config.sh). It parses literal
 `KEY=VALUE` data without `source` or `eval`, in this order:
 
 1. [`env/cluster.conf`](env/cluster.conf): shared non-secret policy;
@@ -704,7 +710,7 @@ a non-secret effective hash.
 host media path/hash, guest media HTTPS URL/hash/install mode, default
 compute/storage policy, DNS, public
 administrator keys, Tailscale host tag, and SSH behavior. Each `moxN.conf`
-owns an optional iDRAC address, exact contiguous NVMe serial pairs, optional
+owns an optional iDRAC address, exact NVMe serial pairs, optional
 manual-inventory byte capacities, public IP/gateway/prefix/MAC, private
 MAC/address, and repeated derived HAProxy/VRRP values that the loader verifies
 rather than trusts. `config.sh` derives each host's application-agnostic
@@ -774,9 +780,10 @@ from both passing the check-before-append operation. Back up host recovery
 material separately, encrypted, and with access controls. Git ignore is not a
 backup or security boundary.
 
-## The five main workflows
+## The main workflows
 
-There are exactly five operator workflows in this project:
+There are eight operator workflows in this project: five that build hosts and
+guests, and three (6-8) that grow or shrink a host's storage later:
 
 1. `hosts/setup_proxmox_host.sh` — destructively install or reconcile
    one `moxN`, create or join the cluster, and install storage, networking,
@@ -830,6 +837,33 @@ There are exactly five operator workflows in this project:
    guests/staging/destroy_staging_vm.sh --dry-run
    guests/staging/destroy_staging_vm.sh
    ```
+
+6. `hosts/add_new_disk_vdev.sh` — add two new identical-capacity disks to a
+   host's rpool as one new mirror vdev. On a LUKS host the operator types the
+   shared passphrase at the host console, where it is proven against every
+   existing member before the disks are formatted; the script then proves the
+   rebuilt initramfs unlocks them before `zpool add`, and records the pair in
+   `env/moxN.conf`.
+7. `hosts/decommission_disks.sh` — prepare a host's rpool to give up one
+   non-boot mirror vdev (related staging destroyed first; guest trims,
+   forced replication, and a scrub, each skipped if done in the last 24
+   hours) and start its `zpool remove` while keeping a minimum free space of
+   at least 50 GiB.
+8. `hosts/list_disks_ready_for_physically_removal.sh` — once a removal
+   completes, close the removed pair's LUKS mappings, update crypttab and the
+   initramfs, comment the pair out of `env/moxN.conf`, and list its disks by
+   serial as safe to pull.
+
+Workflows 6-8 are described in
+[`hosts/README.md`](hosts/README.md#adding-and-decommissioning-rpool-disks).
+They share `lib/rpool_mirror.sh` with host setup, so there is one copy of the
+logic that adds a mirror.
+
+```bash
+hosts/add_new_disk_vdev.sh --host moxN
+hosts/decommission_disks.sh --host moxN
+hosts/list_disks_ready_for_physically_removal.sh --host moxN
+```
 
 The production/staging creators and destroyers have read-only
 `--dry-run` modes that query live state without registry or Proxmox mutation.
@@ -971,8 +1005,16 @@ scripts/libraries named in their descriptions.
   Proxmox, QEMU, ZFS, and block-device inspection tools.
 - `lib/host_storage.py` collects a read-only JSON layout of one host's
   `rpool` (vdevs, member disk serials through LUKS, the boot/ESP vdev,
-  removal progress, disks outside the pool, zvols) and renders it for
-  `diagnostics/show_proxmox_host_state.sh`.
+  removal progress, disks outside the pool, open rpool LUKS mappings,
+  crypttab entries, zvols) and renders it for
+  `diagnostics/show_proxmox_host_state.sh` and the disk workflows.
+- `lib/rpool_mirror.sh` is the single copy of the host-side mirror logic
+  (disk checks, console LUKS preparation, crypttab/initramfs, `zpool add`, and
+  LUKS retirement) used by host setup and workflows 6 and 8.
+- `lib/storage_state.py` keeps trim, scrub, and vdev-removal records on the
+  host; `lib/mox_conf_mirrors.py` records and retires `NVME_MIRROR_N` pairs in
+  a workstation's `env/moxN.conf`; `lib/disk_workflows.sh` holds the
+  workstation plumbing shared by workflows 6-8.
 - `lib/test_shared_libs.py`, `lib/test_haproxy_routes.py`,
   `lib/test_process_deferred_cleanup.py`, and `lib/test_host_storage.py` test
   configuration, pmxcfs semantics, registry/IPAM, route rendering,
@@ -1100,7 +1142,8 @@ resumable:
 
 1. **Load and fingerprint inputs.** It strictly loads `cluster.conf`,
    `moxN.conf`, and `secrets.env`; derives fixed addressing; verifies
-   contiguous mirror pairs; computes disk-layout and secret-inclusive setup
+   mirror pairs (pair 1 mandatory, later gaps allowed); computes disk-layout
+   and secret-inclusive setup
    fingerprints; and requires explicit acceptance if stored setup inputs
    changed.
 2. **Discover hardware.** In iDRAC mode, Redfish inventories the target before
@@ -2472,6 +2515,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
   lib/test_haproxy_routes.py \
   lib/test_process_deferred_cleanup.py \
   lib/test_host_storage.py \
+  lib/test_rpool_mirror.py \
+  lib/test_mox_conf_mirrors.py \
+  hosts/test_disk_workflows.py \
   diagnostics/test_show_proxmox_host_state.py -v
 ```
 
@@ -2512,6 +2558,19 @@ Coverage by test helper:
   auxiliary sections, removal progress, LUKS and by-id member resolution to
   disk serials, boot/ESP vdev detection, disks outside `rpool`, zvol
   allocation and snapshots, configured-serial comparison, and render output.
+- `lib/test_rpool_mirror.py`: the shared mirror tool against fake disk, LUKS,
+  zpool, and initramfs commands: disk safety checks, the passphrase proven
+  before any disk is touched, reuse or refusal of existing LUKS, the host's
+  crypttab form, no `zpool add` unless the initramfs unlocks the new disks,
+  ashift uniformity, unencrypted adds, and LUKS retirement.
+- `lib/test_mox_conf_mirrors.py`: assigning and commenting out `NVME_MIRROR`
+  pairs with `lib/config.sh` accepting the resulting gaps, and the host
+  storage-state records.
+- `hosts/test_disk_workflows.py`: workflows 6-8 end to end against a fake SSH
+  host and guests: console hand-off, resume, capacity checks, the five-mirror
+  limit, related-staging refusal, trim and scrub reuse within 24 hours,
+  forced replication, minimum-free-space rules, removal records, and
+  retirement.
 - `diagnostics/test_show_proxmox_host_state.py`: the host report against a
   fake SSH that rejects any non-read-only command, attention exit status, the
   optional `moxN.conf` serial comparison, and usage errors.
@@ -2523,18 +2582,13 @@ health, sanitizer, or full-power-loss drills.
 
 ## Deliberate boundaries and future scripts
 
-Only the five workflows named above exist as supported operator entry points.
+Only the workflows named above exist as supported operator entry points.
 The following potential future commands/functions are explicitly out of scope
 and must not be inferred from registry primitives or old design prose:
 
 - **Host removal or cluster shrink.** Host setup can create/join contiguous
   nodes; no script removes a mox, rewrites placement/replication, shrinks VRRP
   peers, or reconciles QDevice around node removal.
-- **Adding storage to an existing host.** A future operator script will select
-  `moxN`, validate a newly installed equal-capacity NVMe pair, LUKS-encrypt it
-  with the host's shared rpool passphrase, and add it as another mirror vdev.
-  The current host installer supports up to five pairs present at initial
-  installation, but it is not the later expansion workflow.
 - **Online production-disk growth.** A future script will grow a selected
   production zvol, then extend the guest's final ext4 partition/filesystem
   online. It must enforce a pool-allocation ceiling of 90% and account for all

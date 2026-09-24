@@ -183,7 +183,9 @@ durable host artifact is the tracked
 `artifacts/used-tailscale-auth-key-sha256` denylist. Its ignored `.lock` file
 only serializes concurrent check-and-append operations.
 
-One through five contiguous NVMe mirror pairs may be configured:
+One through five NVMe mirror pairs may be configured. Pairs 2-5 may have
+gaps once a pair has been decommissioned; pair N always keeps the LUKS names
+`crypt-rpool-mirrorN-1` and `crypt-rpool-mirrorN-2`:
 
 - Mirror 1 is mandatory. The Proxmox installer destroys its two
   serial-selected disks, creates the bootable ZFS mirror, and reserves space
@@ -213,7 +215,9 @@ One through five contiguous NVMe mirror pairs may be configured:
   artifacts tree before completion. Protect and separately back up those
   files.
 
-Adding a top-level vdev expands the pool and may not be reversible. Losing
+Adding a top-level vdev expands the pool. Removing one later
+(`hosts/decommission_disks.sh`) evacuates its data onto the other vdevs and
+needs every vdev to share one ashift, which every script here keeps. Losing
 both members of any mirror vdev loses the striped pool. Disk serials, mapper
 identity, pool membership, and interrupted phase records are revalidated
 before destructive post-install work. iDRAC mode obtains live pre-install
@@ -312,6 +316,82 @@ companion `/run` lease remains fail-closed if the SSH holder disappears; the
 next run identifies its owner and requires an operator to verify that no
 installer remains before removing a stale lease. Run the same command again
 after correcting a failure.
+
+## Adding and decommissioning rpool disks
+
+Three workstation scripts manage a host's rpool mirrors after setup. They run
+the same host-side code setup uses: `lib/rpool_mirror.sh` (installed per run as
+`/usr/local/sbin/app-ha-rpool-mirror`) for every disk, LUKS, and zpool change,
+`lib/host_storage.py` for a read-only layout, and `lib/storage_state.py` for
+records kept on the host in `/var/lib/app-ha-storage/state.json`. rpool holds
+at most five mirrors, including mirror 1, the boot mirror that holds the ESPs.
+Mirror 1 is never removed.
+
+### Adding a mirror
+
+`hosts/add_new_disk_vdev.sh [--host moxN]`:
+
+1. lists the disks that are not part of rpool, with serials and byte
+   capacities, and asks for two with identical capacity;
+2. on a LUKS host, writes `/root/app-ha-add-mirror-N` and has you run it at the
+   host console. It asks for `GO` and the shared rpool passphrase (hidden),
+   proves that passphrase unlocks every existing rpool LUKS member, then
+   formats both disks as whole-disk LUKS2 with it and opens them as
+   `crypt-rpool-mirrorN-1` and `-2`. The passphrase is typed only at the
+   console; setup's temporary key file no longer exists by then;
+3. copies both LUKS header backups to `hosts/artifacts/moxN/luks-headers/`;
+4. adds crypttab entries in the host's single-prompt `decrypt_keyctl` form,
+   rebuilds the initramfs, unpacks it to prove it will unlock the new mappings
+   at boot, and only then runs `zpool add` with the pool's existing ashift;
+5. writes the pair's serials and byte capacities into `env/moxN.conf` as the
+   lowest free `NVME_MIRROR_2` to `_5` slot, checks that `lib/config.sh`
+   still loads the file, and prints the values.
+
+On an unencrypted host step 2 is skipped and the disks stay unencrypted. A
+rerun resumes a pair that was prepared but not yet added. After adding a LUKS
+mirror, test a reboot by hand: gracefully migrate every production guest off
+the host, then gracefully reboot it and enter the passphrase once at its
+console.
+
+### Decommissioning a mirror
+
+`hosts/decommission_disks.sh [--host moxN]` prepares rpool and starts one
+top-level vdev removal:
+
+1. stops if a removal is running or an earlier one has not been retired;
+2. lists every related staging VM and stops until they are gone: staging on
+   the host, and staging cloned from a production guest whose disk lives on
+   the host (running there or replicating there). Leftover `stg-base-`
+   snapshots and pending cleanup records for the host count too. Destroy them
+   with `guests/staging/destroy_staging_vm.sh stageNprodN`;
+3. lists the production guests that run on or replicate to the host, asks
+   whether unwanted files have been deleted inside them, and checks that
+   `ssh prodN` works for each;
+4. runs `fstrim -v /` in each guest over SSH, then forces those guests'
+   replication jobs (`pvesr schedule-now`) and waits, so the freed space also
+   reaches the host's copies and old replication snapshots rotate;
+5. scrubs rpool with `zpool scrub -w`, or waits for a scrub already running;
+6. shows `zfs get available rpool` in bytes, MiB, and GiB, asks for the
+   minimum free space to keep (at least 50 GiB), and offers only non-boot
+   vdevs whose capacity fits within the difference;
+7. records the chosen vdev's member serials on the host, then runs
+   `zpool remove`, which evacuates the vdev in the background.
+
+Every long step asks before it starts. Each guest's trim and each clean scrub
+is recorded on the host with a timestamp, and a rerun within 24 hours treats
+them as sufficient. Run the script once per vdev: ZFS evacuates only one
+top-level vdev at a time. Trimming frees pool space only for sparse
+production zvols; a full (refreserved) zvol keeps its space reserved.
+
+### Pulling the disks
+
+`hosts/list_disks_ready_for_physically_removal.sh [--host moxN]` shows the
+removal's progress. Once it has completed, the script closes the pair's LUKS
+mappings, removes them from crypttab, rebuilds and verifies the initramfs,
+comments out the pair in `env/moxN.conf`, and marks the record retired. It
+then lists every retired disk that is still installed, by serial, as safe to
+pull. A removal that was cancelled or failed is marked failed so
+`decommission_disks.sh` can retry.
 
 ## Production and staging lifecycle
 

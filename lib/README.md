@@ -123,6 +123,33 @@ the proxmox-boot-tool ESPs, device-removal progress, disks outside `rpool`,
 and per-zvol allocation and snapshot usage. `render` prints that layout on
 the workstation. `diagnostics/show_proxmox_host_state.sh` uses both.
 
+## `rpool_mirror.sh`
+
+The root-only host tool behind every rpool mirror change, installed per run
+as `/usr/local/sbin/app-ha-rpool-mirror` by `hosts/setup_proxmox_host.sh` and
+the disk workflows. Subcommands select disks by serial and re-prove identity
+before acting: `check-new`, `luks-prepare` (console; key file during setup,
+hidden prompt afterwards; proven against every existing LUKS member),
+`luks-check-prepared`, `luks-backup-headers`, `luks-add` (crypttab in the
+host's existing form, initramfs rebuilt and unpacked to prove boot unlock,
+then `zpool add` with the pool's one ashift), `clear-add`, and `retire-luks`.
+
+## `storage_state.py`
+
+Piped to a host as `python3 - COMMAND`. Keeps
+`/var/lib/app-ha-storage/state.json` (root-only, locked, atomically replaced):
+per-guest trim times, scrub results, and one record per vdev removal with its
+member serials, because ZFS forgets them once a removal completes.
+
+## `mox_conf_mirrors.py` and `disk_workflows.sh`
+
+`mox_conf_mirrors.py` shows, assigns, and comments out (`retire`)
+`NVME_MIRROR_N_*` entries in a workstation's `env/moxN.conf`, keeping every
+other line byte for byte. `disk_workflows.sh` is the workstation library
+sourced by the three disk workflows: host selection, strict SSH, per-run
+tool installation with a hash check, host-side Python, long-step prompts, and
+conf edits that are reverted if `config.sh` no longer loads the file.
+
 ## Tests
 
 ```bash

@@ -82,8 +82,10 @@ For a quick loop while editing, run one module natively:
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest lib/test_shared_libs.py
 ```
 
-A full native run of all 191 tests reports two failures (lifecycle-hook
-tests that need GNU `stat -c`) and 11 skips. Those are the gaps the VM closes.
+A full native run of all 241 tests reports two failures (lifecycle-hook
+tests that need GNU `stat -c`) and 27 skips (Proxmox-host-only suites such as
+the deferred-cleanup worker and `lib/rpool_mirror.sh`). Those are the gaps the
+VM closes.
 
 ## 2. The Lima VM: the complete suite
 
@@ -152,8 +154,8 @@ something else, set `BMAC_LIMA_INSTANCE` to another name.
   with mocked commands, so this does not affect them, but nothing here
   executes an amd64 binary.
 - **Native macOS is partial by design.** The lifecycle hook needs GNU
-  `stat`, and `test_process_deferred_cleanup.py` plus the production
-  ISO-preparer tests skip on non-Linux platforms. Treat the native run as a
+  `stat`, and `test_process_deferred_cleanup.py`, `test_rpool_mirror.py`,
+  and the production ISO-preparer tests skip on non-Linux platforms. Treat the native run as a
   smoke test and use the VM before pushing.
 - **The tests depend on workstation state.** They need `env/mox1.conf` and
   `~/.ssh/known_hosts` as described above. Both are test bugs: the tests
