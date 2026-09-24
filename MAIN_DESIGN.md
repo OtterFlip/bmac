@@ -216,8 +216,9 @@ macOS limits:
   write access to the SSH `known_hosts` trust file without changing those
   bits, and is not detected. `ls -le` shows ACL entries.
 - On macOS the unit suite skips the classes that exercise Proxmox-host-only
-  scripts (`prepare_prod_iso.sh`, `process_deferred_cleanup.sh`). Those run
-  only in a Linux test pass.
+  scripts (`prepare_prod_iso.sh`, `process_deferred_cleanup.sh`), and the
+  lifecycle-hook tests need `flock` and GNU `stat`. Those run only in a Linux
+  test pass; [`DEVELOPMENT.md`](DEVELOPMENT.md) sets one up in a Lima VM.
 
 ## Responsibility boundaries
 
@@ -2431,6 +2432,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
   lib/test_haproxy_routes.py \
   lib/test_process_deferred_cleanup.py -v
 ```
+
+On a Mac, `dev/run-tests-in-vm.sh` runs `bash -n` on every tracked script and
+every tracked `test_*.py` inside a Debian 13 Lima VM; see
+[`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 Coverage by test helper:
 

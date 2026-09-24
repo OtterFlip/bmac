@@ -284,6 +284,10 @@ BMAC also provides a production-derived staging model that Kubernetes does not p
 
 BMAC doesn't prevent you from using Kubernetes. If your application benefits from containers, horizontal scaling, service orchestration, or Kubernetes deployment tooling, you can run Kubernetes inside VMs hosted by BMAC. The two systems solve different layers of the problem.
 
+## Developing BMAC
+
+To work on BMAC itself from a Mac, including a Lima VM that runs the complete test suite and the known limits of that setup, see [`DEVELOPMENT.md`](DEVELOPMENT.md).
+
 ## History
 
 This project was worked on, tested and used privately, with tons of commits, before being migrated to this public repo.  Our hope is to help others while garnering support from the community for self-built cloud infrastructure.

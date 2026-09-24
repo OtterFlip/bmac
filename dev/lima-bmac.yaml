@@ -1,0 +1,59 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+# Lima VM for running the complete BMAC test suite on a Mac. See
+# DEVELOPMENT.md.
+#
+# Debian 13 is the same userland as Proxmox VE 9 and the fixed HAProxy LXC,
+# so the Proxmox-host-only suites (lifecycle hook, deferred cleanup, prod ISO
+# preparation, haproxy -c) run here as they would on a mox host.
+#
+# Do not create this instance by hand: dev/run-tests-in-vm.sh creates it on
+# first use and mounts only this checkout, writable, at the same absolute path
+# as on macOS (the config loader rejects symlinked path components). That
+# path differs per workstation, so it is injected with --set rather than
+# written here.
+#
+# Debian 13 mounts /tmp as tmpfs, which prepare_prod_iso.sh rejects for its
+# cache; the runner therefore sets TMPDIR=/var/tmp.
+#
+# Not enabled: Rosetta (vmOpts.vz.rosetta) for the amd64-only
+# proxmox-auto-install-assistant used by hosts/setup_proxmox_host.sh.
+
+minimumLimaVersion: 2.0.0
+base:
+- template:_images/debian-13
+
+# arch is left to Lima: aarch64 on Apple Silicon, x86_64 on an Intel Mac.
+vmType: vz
+cpus: 4
+memory: 8GiB
+disk: 30GiB
+
+mountType: virtiofs
+mounts: []
+
+containerd:
+  system: false
+  user: false
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+      bsdutils ca-certificates curl git haproxy iproute2 jq openssl \
+      psmisc python3 util-linux xorriso
+    # Only the haproxy binary is needed for `haproxy -c`; not the service.
+    systemctl disable --now haproxy
+- mode: user
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    # The prod/staging dry-run tests resolve strict SSH trust to
+    # ~/.ssh/known_hosts and require it to exist; contents are never used.
+    install -d -m 0700 ~/.ssh
+    [ -e ~/.ssh/known_hosts ] || install -m 0600 /dev/null ~/.ssh/known_hosts
