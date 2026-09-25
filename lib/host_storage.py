@@ -173,15 +173,26 @@ def parse_zpool_status(text: str) -> dict[str, Any]:
 
 
 def parse_zpool_list(text: str) -> dict[str, dict[str, Any]]:
-    """Parse ``zpool list -v -H -p -P -o name,size,allocated,free,health``."""
+    """Parse ``zpool list -v -H -p -P -o name,size,allocated,free,health``.
+
+    Only the pool row follows ``-o``. OpenZFS prints every vdev and member row
+    with a fixed set of columns: name, size, allocated, free, checkpoint,
+    expandsize, fragmentation, capacity, dedup, and health.
+    """
 
     rows: dict[str, dict[str, Any]] = {}
     for line in text.splitlines():
-        # Vdev and member rows may be indented; the name is still one field.
+        # Vdev and member rows start with a tab; the name is still one field.
         fields = [field.strip() for field in line.strip().split("\t")]
-        if len(fields) != 5 or not fields[0]:
+        if not fields[0]:
             continue
-        name, size, allocated, free, health = fields
+        if len(fields) == 5:
+            name, size, allocated, free, health = fields
+        elif len(fields) == 10:
+            name, size, allocated, free = fields[:4]
+            health = fields[9]
+        else:
+            continue
         rows[name] = {
             "size": _optional_int(size),
             "allocated": _optional_int(allocated),

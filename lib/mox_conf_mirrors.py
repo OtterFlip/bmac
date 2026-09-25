@@ -258,6 +258,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ConfError("assign needs exactly two --serial and two --capacity values")
             if min(args.capacity) <= 0:
                 raise ConfError("capacities must be positive byte counts")
+            if active_pairs(lines).get(args.pair) == {
+                "serial_1": args.serial[0], "serial_2": args.serial[1],
+                "capacity_1": str(args.capacity[0]), "capacity_2": str(args.capacity[1]),
+            }:
+                print(f"NVME_MIRROR_{args.pair} already records these disks in {args.conf}")
+                return 0
             write_lines(
                 args.conf,
                 assign(lines, args.pair, tuple(args.serial), tuple(args.capacity), args.note),

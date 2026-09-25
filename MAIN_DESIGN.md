@@ -1024,8 +1024,8 @@ scripts/libraries named in their descriptions.
   (disk checks, console LUKS preparation, crypttab/initramfs, `zpool add`,
   boot-disk partitioning and ESPs, member replacement, and LUKS retirement)
   used by host setup and workflows 6, 8, and 9.
-- `lib/storage_state.py` keeps trim, scrub, and vdev-removal records on the
-  host; `lib/mox_conf_mirrors.py` records, replaces, and retires
+- `lib/storage_state.py` keeps trim, scrub, vdev-removal, and pending
+  mirror-addition and member-replacement records on the host; `lib/mox_conf_mirrors.py` records, replaces, and retires
   `NVME_MIRROR_N` entries in a workstation's `env/moxN.conf`;
   `lib/disk_workflows.sh` holds the workstation plumbing shared by workflows
   6-9.

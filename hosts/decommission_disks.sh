@@ -289,9 +289,11 @@ PY
     for row in "${JOBS[@]}"; do
       IFS=$'\t' read -r job source target <<<"$row"
       status_path="/nodes/${source}/replication/${job}/status"
-      baseline="$(dw_on_node "$source" pvesh get "$status_path" --output-format json 2>/dev/null |
-        python3 -c 'import json,sys; v=json.load(sys.stdin).get("last_sync", 0); print(v if isinstance(v, int) else 0)' 2>/dev/null)" ||
-        baseline=0
+      # last_sync is the start time of the last good run, on the source's
+      # clock. Only a run that starts after the trims replicates them; one
+      # already running took its snapshot before them.
+      baseline="$(dw_on_node "$source" date +%s)" && [[ "$baseline" =~ ^[0-9]+$ ]] ||
+        dw_die "could not read the clock of $source to time replication job $job"
       printf '  %s (%s -> %s): ' "$job" "$source" "$target"
       requested=false
       deadline=$((SECONDS + REPLICATION_TIMEOUT_SECONDS))
@@ -308,7 +310,7 @@ import sys
 row = json.loads(sys.argv[1])
 ok = (
     isinstance(row.get("last_sync"), int)
-    and row["last_sync"] > int(sys.argv[2])
+    and row["last_sync"] >= int(sys.argv[2])
     and int(row.get("fail_count", 0)) == 0
     and not row.get("error")
     and not row.get("pid")
@@ -328,6 +330,8 @@ PY
 fi
 
 dw_section "Scrubbing rpool on $DW_HOST"
+# Trims and replication can take hours; judge the last scrub's age now.
+dw_state show >"$STATE" || dw_die "could not read the storage state on $DW_HOST"
 RECENT_SCRUB="$(python3 - "$STATE" "$RECENT_SECONDS" <<'PY'
 import json
 import sys
@@ -494,9 +498,24 @@ confirm_exact "Start removing $VDEV from rpool on $DW_HOST? ZFS copies its data 
 REMOVAL_ID="$(dw_state record-removal --request "$REQUEST")" ||
   dw_die "could not record the removal on $DW_HOST; nothing was removed"
 if ! REMOVE_OUTPUT="$(dw_on_host zpool remove rpool "$VDEV" 2>&1)"; then
-  dw_state set-removal "$REMOVAL_ID" --state failed \
-    --note "zpool remove failed: ${REMOVE_OUTPUT//$'\n'/ }" >/dev/null || true
-  dw_die "zpool remove rpool $VDEV failed: $REMOVE_OUTPUT"
+  # The error may be SSH's after the host already started the removal. Mark
+  # the record failed only when rpool shows the vdev with no removal running;
+  # otherwise keep it requested so the list script can finish the job.
+  STARTED=unknown
+  if dw_host_python "$DW_HOST_STORAGE" collect >"${DW_RUN_DIR}/after-remove.json" 2>/dev/null; then
+    STARTED="$(dw_json "${DW_RUN_DIR}/after-remove.json" "('no' if any(v['name'] == '$VDEV' and not v['removing'] for v in d['vdevs']) else 'yes')")" ||
+      STARTED=unknown
+  fi
+  if [[ "$STARTED" == no ]]; then
+    dw_state set-removal "$REMOVAL_ID" --state failed \
+      --note "zpool remove failed: ${REMOVE_OUTPUT//$'\n'/ }" >/dev/null || true
+    dw_die "zpool remove rpool $VDEV failed: $REMOVE_OUTPUT"
+  fi
+  printf 'WARNING: zpool remove reported an error (%s), but %s may be removing it anyway.\n' \
+    "${REMOVE_OUTPUT//$'\n'/ }" "$DW_HOST" >&2
+  printf 'The removal record stays requested. Run\n  hosts/list_disks_ready_for_physically_removal.sh --host %s\n' "$DW_HOST"
+  printf 'to see whether the removal is running; it marks the record failed if not.\n'
+  exit 1
 fi
 
 dw_collect_layout "$LAYOUT"

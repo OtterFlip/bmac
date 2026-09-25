@@ -73,9 +73,6 @@ state = json.load(open(sys.argv[2]))
 pool = layout["pool"]
 in_pool = {m["serial"] for v in layout["vdevs"] for m in v["members"] if m["serial"]}
 evacuating = re.search(r"Evacuation of (\S+) in progress", pool["remove"] or "")
-open_or_listed = {row["mapper"] for row in layout["luks_mappings"]} | {
-    row["mapper"] for row in layout["crypttab"]
-}
 for row in state["removals"]:
     if row["state"] != "requested":
         continue
@@ -87,7 +84,10 @@ for row in state["removals"]:
         status = "evacuating"
     elif set(serials) & in_pool:
         status = "still-in-pool"
-    elif set(mappers) & open_or_listed:
+    elif mappers:
+        # Always let the tool finish a LUKS retirement: a run interrupted after
+        # it closed the mappings and edited crypttab may have left an
+        # initramfs that still expects them. The tool only rebuilds when needed.
         status = "needs-retire"
     else:
         status = "complete"
@@ -149,16 +149,46 @@ done
 
 dw_state show >"$STATE" || dw_die "could not read the storage state on $DW_HOST"
 dw_collect_layout "$LAYOUT"
-dw_section "Disks on $DW_HOST that are safe to pull"
-python3 - "$LAYOUT" "$STATE" <<'PY'
-import datetime
+
+# The layout covers rpool only. Before calling a retired disk safe to pull,
+# prove on the host that no imported pool holds it and nothing mounts it,
+# with the same check that guards every disk erase.
+mapfile -t RETIRED_PRESENT < <(python3 - "$LAYOUT" "$STATE" <<'PY'
 import json
 import sys
 layout = json.load(open(sys.argv[1]))
 state = json.load(open(sys.argv[2]))
 in_pool = {m["serial"] for v in layout["vdevs"] for m in v["members"] if m["serial"]}
 present = {d["serial"]: d for d in layout["unassigned_disks"] if d["serial"]}
-ready, pulled, clear = [], [], False
+for row in state["removals"]:
+    if row["state"] == "retired":
+        for member in row["members"]:
+            disk = present.get(member["serial"])
+            if disk and member["serial"] not in in_pool and not disk["mounted"]:
+                print(f"{member['serial']}\t{disk['size']}")
+PY
+)
+IN_USE=()
+if ((${#RETIRED_PRESENT[@]} > 0)); then
+  dw_install_tool
+  for row in "${RETIRED_PRESENT[@]}"; do
+    IFS=$'\t' read -r serial size <<<"$row"
+    dw_tool check-new --expect-bytes "$size" --match exact "$serial" >/dev/null 2>&1 ||
+      IN_USE+=("$serial")
+  done
+fi
+
+dw_section "Disks on $DW_HOST that are safe to pull"
+python3 - "$LAYOUT" "$STATE" "${IN_USE[@]}" <<'PY'
+import datetime
+import json
+import sys
+layout = json.load(open(sys.argv[1]))
+state = json.load(open(sys.argv[2]))
+in_use = set(sys.argv[3:])
+in_pool = {m["serial"] for v in layout["vdevs"] for m in v["members"] if m["serial"]}
+present = {d["serial"]: d for d in layout["unassigned_disks"] if d["serial"]}
+ready, pulled, mounted, clear = [], [], [], False
 for row in state["removals"]:
     if row["state"] != "retired":
         continue
@@ -167,7 +197,9 @@ for row in state["removals"]:
         serial = member["serial"]
         if serial in in_pool:
             continue
-        if serial in present:
+        if serial in present and (present[serial]["mounted"] or serial in in_use):
+            mounted.append((serial, present[serial]["disk"], row["vdev"]))
+        elif serial in present:
             ready.append((serial, present[serial]["disk"], member["disk_size"],
                           member["model"] or "-", row["vdev"], when))
             clear = clear or not member["luks"]
@@ -183,6 +215,11 @@ if ready:
         print("before reuse or disposal if that matters to you.")
 else:
     print("  none")
+if mounted:
+    print("\nNOT safe to pull: these retired disks are in use again (a mounted")
+    print("filesystem, another ZFS pool, or a failed check on the host):")
+    for serial, device, vdev in mounted:
+        print(f"  {serial} ({device}, from {vdev})")
 if pulled:
     print("\nAlready pulled (retired serials no longer attached): "
           + ", ".join(f"{serial} ({vdev})" for serial, vdev, _ in pulled))

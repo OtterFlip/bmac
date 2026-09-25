@@ -161,10 +161,20 @@ section "Cluster membership, quorum, HA, and app-ha services" \
 run "Cluster quorum and membership" on_host pvecm status
 run "Corosync link status" on_host corosync-cfgtool -s
 run "HA manager status" on_host ha-manager status
-run "Core and app-ha unit states" on_host systemctl is-active \
-  pve-cluster.service corosync.service pve-ha-lrm.service pve-ha-crm.service \
-  keepalived.service app-ha-deferred-cleanup.timer \
-  app-ha-haproxy-route-sync.timer
+# systemctl is-active succeeds when any one listed unit is active, so check
+# each unit on its own.
+printf '\n[CHECK] Core and app-ha unit states\n'
+for unit in pve-cluster.service corosync.service pve-ha-lrm.service \
+  pve-ha-crm.service keepalived.service app-ha-deferred-cleanup.timer \
+  app-ha-haproxy-route-sync.timer; do
+  unit_state="$(on_host systemctl is-active "$unit" 2>/dev/null)" || true
+  if [[ "$unit_state" == active ]]; then
+    printf '  [PASS] %s is active.\n' "$unit"
+  else
+    printf '  [ATTENTION] %s is %s.\n' "$unit" "${unit_state:-unknown}"
+    ATTENTION=1
+  fi
+done
 if ! failed_units="$(on_host systemctl --failed --no-legend --plain --no-pager)"; then
   printf '\n[ATTENTION] Failed systemd units could not be listed.\n'
   ATTENTION=1

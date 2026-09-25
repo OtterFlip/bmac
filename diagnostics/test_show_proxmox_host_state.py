@@ -67,6 +67,9 @@ allowed = {tuple(row) for row in json.loads(os.environ["FAKE_ALLOWED"])}
 if words[:1] == ["systemctl"]:
     if "--failed" in words:
         sys.stdout.write(os.environ.get("FAKE_FAILED_UNITS", ""))
+    elif words[-1] in os.environ.get("FAKE_INACTIVE_UNITS", "").split():
+        print("inactive")
+        raise SystemExit(3)
     else:
         print("active")
 elif words[:2] == ["pvesh", "get"] and "--output-format" in words:
@@ -280,6 +283,16 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
         self.assertIn("prod1 (here)", output)
         self.assertIn("NVME_MIRROR_3_SERIAL_2  S5EXTRA4  mirror-2", output)
         self.assertIn("[OK] mox1 has no attention items.", output)
+        self.assertIn("[PASS] pve-ha-lrm.service is active.", output)
+
+    def test_a_stopped_required_service_needs_attention(self) -> None:
+        # Stopped cleanly, so it is not a failed unit either.
+        self.environment["FAKE_INACTIVE_UNITS"] = "pve-ha-lrm.service"
+        output = self.run_script("mox1", expected=1).stdout
+        self.assertIn("[ATTENTION] pve-ha-lrm.service is inactive.", output)
+        self.assertIn("[PASS] corosync.service is active.", output)
+        self.assertIn("[PASS] No failed systemd units.", output)
+        self.assertIn("[ATTENTION] mox1 has one or more attention items above.", output)
 
     def test_report_runs_only_read_only_remote_commands(self) -> None:
         self.run_script("mox1", expected=0)

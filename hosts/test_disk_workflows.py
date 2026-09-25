@@ -44,6 +44,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import time
 
 state_path = Path(os.environ["FAKE_STATE"])
 state = json.loads(state_path.read_text())
@@ -74,6 +75,18 @@ def act(*row):
 
 
 layout = state["layout"]
+
+
+def find_disk(serial):
+    for disk in layout["unassigned_disks"] + layout["esp_only_disks"]:
+        if disk["serial"] == serial:
+            return disk
+    for vdev in layout["vdevs"]:
+        for member in vdev["members"]:
+            if member["serial"] == serial:
+                return {"disk": member["disk"], "serial": serial,
+                        "model": member["model"], "size": member["disk_size"]}
+    raise SystemExit(f"no disk with serial {serial}")
 
 if "@" not in destination:  # a production guest reached as `ssh prodN`
     if destination in state.get("guest_ssh_fail", []):
@@ -128,6 +141,9 @@ elif words[0] == os.environ["APP_HA_REMOTE_RPOOL_MIRROR"]:
     if command == "check-new":
         for serial in serials:
             disk = next(d for d in layout["unassigned_disks"] if d["serial"] == serial)
+            if disk["mounted"] or serial in state.get("in_other_pool", []):
+                print(f"ERROR: disk {serial} is in use", file=sys.stderr)
+                raise SystemExit(1)
             print(f"{serial}\t{disk['disk']}\t{disk['size']}\tfresh")
     elif command == "luks-check-prepared":
         if not state.get("console_ran"):
@@ -165,30 +181,37 @@ elif words[0] == os.environ["APP_HA_REMOTE_RPOOL_MIRROR"]:
     elif command == "boot-partition":
         pass
     elif command == "boot-esp":
-        disk = next(d for d in layout["unassigned_disks"] + layout["esp_only_disks"]
-                    if d["serial"] == serials[0])
+        disk = find_disk(serials[0])
         layout["unassigned_disks"] = [d for d in layout["unassigned_disks"] if d is not disk
                                       and d["serial"] != serials[0]]
         if all(d["serial"] != serials[0] for d in layout["esp_only_disks"]):
             layout["esp_only_disks"].append(disk)
         save()
-    elif command == "luks-check-member":
-        if state.get("console_after_checks", 0) > 0:
+    elif command in ("luks-check-member", "luks-backup-headers"):
+        member = options["--member"]
+        name = f"luks-header-{member}.bin" if member in ("A", "B") else f"luks-header-mirror{member}.bin"
+        header = f"/fake/root/{name}"
+        if command == "luks-backup-headers":
+            # Succeeds only when the member's mapping is already open.
+            if not state.get("mapping_open"):
+                raise SystemExit(1)
+            state["remote_files"][header] = f"header {member}"
+        elif header in state["remote_files"]:
+            pass
+        elif state.get("console_after_checks", 0) > 0:
             state["console_after_checks"] -= 1
             save()
             print("ERROR: crypt-rpool mapping is not open", file=sys.stderr)
             raise SystemExit(1)
-        member = options["--member"]
-        name = f"luks-header-{member}.bin" if member in ("A", "B") else f"luks-header-mirror{member}.bin"
-        state["remote_files"][f"/fake/root/{name}"] = f"header {member}"
+        else:
+            state["remote_files"][header] = f"header {member}"
         save()
     elif command == "replace-member":
         if state.get("replace_fails"):
             print("ERROR: cannot replace", file=sys.stderr)
             raise SystemExit(1)
         survivor, new = options["--survivor"], serials[0]
-        disk = next(d for d in layout["unassigned_disks"] + layout["esp_only_disks"]
-                    if d["serial"] == new)
+        disk = find_disk(new)
         for vdev in layout["vdevs"]:
             if any(m["serial"] == survivor for m in vdev["members"]):
                 vdev["replacing"] = True
@@ -234,9 +257,12 @@ elif words[:2] == ["pvesh", "get"]:
         save()
     else:
         raise SystemExit(f"unexpected pvesh path {path}")
+elif words == ["date", "+%s"]:
+    print(int(time.time()) - state.get("clock_skew", 0))
 elif words[:2] == ["pvesr", "schedule-now"]:
     act("pvesr", words[2], node)
-    state["replication_status"].setdefault(words[2], {"last_sync": 100})["last_sync"] += 60
+    if not state.get("replication_stuck"):
+        state["replication_status"].setdefault(words[2], {})["last_sync"] = int(time.time())
     save()
 elif words == ["zpool", "scrub", "-w", "rpool"] or words == ["zpool", "wait", "-t", "scrub", "rpool"]:
     act("zpool", *words[1:])
@@ -247,12 +273,16 @@ elif words[:3] == ["zpool", "remove", "rpool"]:
     if state.get("remove_fails"):
         print("cannot remove mirror-1: out of space", file=sys.stderr)
         raise SystemExit(1)
+    fail_after_start = state.get("remove_starts_then_fails")
     layout["pool"]["removal_in_progress"] = True
     layout["pool"]["remove"] = f"Evacuation of {words[3]} in progress since Thu Sep 25 04:00:00 2026"
     for vdev in layout["vdevs"]:
         if vdev["name"] == words[3]:
             vdev["removing"] = True
     save()
+    if fail_after_start:
+        print("Connection to mox1 closed by remote host.", file=sys.stderr)
+        raise SystemExit(255)
 else:
     raise SystemExit(f"unexpected host command {words}")
 '''
@@ -433,6 +463,9 @@ class DiskWorkflowTest(unittest.TestCase):
     def actions(self, kind: str) -> list[list[str]]:
         return [row[1:] for row in self.fake()["actions"] if row[1] == kind]
 
+    def retirements(self) -> list[list[str]]:
+        return [row for row in self.actions("tool") if row[1] == "retire-luks"]
+
     # -- add_new_disk_vdev.sh ------------------------------------------------
 
     def test_add_luks_mirror_via_console_passphrase(self) -> None:
@@ -461,6 +494,32 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertIn("NVME_MIRROR_4_SERIAL_2=S7USED", output)
         self.assertIn("gracefully migrate every production guest off mox1", output)
         self.assertFalse(any("reboot" in " ".join(row) for row in self.fake()["actions"]))
+        self.assertEqual(self.host_storage_state()["additions"], {})
+
+    def test_add_records_a_pair_an_earlier_run_added(self) -> None:
+        # zpool add succeeded, then the session ended before moxN.conf changed.
+        layout = self.fake()["layout"]
+        members = []
+        for disk in layout["unassigned_disks"][:2]:
+            members.append({
+                "path": f"/dev/mapper/crypt-rpool-mirror4-{len(members) + 1}",
+                "state": "ONLINE", "device": disk["disk"], "luks": True,
+                "mapper": None, "backing": disk["disk"], "disk": disk["disk"],
+                "serial": disk["serial"], "model": disk["model"],
+                "disk_size": disk["size"], "member_size": None,
+            })
+        layout["vdevs"].append(dict(layout["vdevs"][2], name="mirror-3", members=members))
+        layout["unassigned_disks"] = layout["unassigned_disks"][2:]
+        self.update_fake(layout=layout)
+        self.seed_host_state(additions={"4": {
+            "serials": ["S6BLANK", "S7USED"],
+            "capacities": [4000787030016, 4000787030016], "recorded_at": 1,
+        }})
+        completed = self.run_script(ADD, "")
+        self.assertIn("Recording NVME_MIRROR_4, which an earlier run added to rpool", completed.stdout)
+        self.assertIn("NVME_MIRROR_4_SERIAL_2=S7USED\n", self.conf.read_text())
+        self.assertEqual(self.host_storage_state()["additions"], {})
+        self.assertEqual(self.actions("tool"), [])
 
     def test_add_stops_until_the_console_helper_succeeds(self) -> None:
         completed = self.run_script(ADD, "1\n2\nGO\nGO\nq\n", expected=1)
@@ -512,6 +571,20 @@ class DiskWorkflowTest(unittest.TestCase):
         )
         self.assertIn("NVME_MIRROR_4_SERIAL_2=S7USED\n", self.conf.read_text())
 
+    def test_add_ignores_mappings_of_a_removed_vdev_awaiting_retirement(self) -> None:
+        # mirror-1 finished its removal; its mappings stay open until the list
+        # script retires them, so they must not look like a prepared addition.
+        layout = self.completed_removal_layout()
+        for row in layout["luks_mappings"]:
+            if row["mapper"].startswith("crypt-rpool-mirror2"):
+                self.assertFalse(row["in_pool"])
+        self.update_fake(layout=layout, console_ran=True)
+        self.record_mirror_1_removal()
+        completed = self.run_script(ADD, "1\n2\nGO\nGO\ny\n")
+        self.assertNotIn("was prepared by an earlier run", completed.stdout)
+        self.assertIn(["tool", "luks-add", "--pair", "4", "S6BLANK", "S7USED"],
+                      self.actions("tool"))
+
     def test_add_refuses_a_sixth_mirror(self) -> None:
         layout = self.fake()["layout"]
         layout["vdevs"] += [dict(layout["vdevs"][2], name="mirror-3"),
@@ -537,7 +610,7 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertEqual(
             [row[1] for row in self.actions("tool")],
             ["check-new", "boot-partition", "boot-esp", "luks-check-member",
-             "luks-check-member", "replace-member"],
+             "luks-backup-headers", "luks-check-member", "replace-member"],
         )
         self.assertIn(
             ["tool", "check-new", "--expect-bytes", "2000398934016", "--match", "exact",
@@ -571,6 +644,7 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertIn("either disk can boot mox1 alone", output)
         self.assertIn("enter the\nshared passphrase once", output)
         self.assertFalse(any("reboot" in " ".join(row) for row in self.fake()["actions"]))
+        self.assertEqual(self.host_storage_state()["replacements"], {})
 
         # The mirror now shows the replacement resilvering; a rerun leaves it.
         rerun = self.run_script(REPLACE, "")
@@ -611,7 +685,104 @@ class DiskWorkflowTest(unittest.TestCase):
         )
         self.assertNotIn("replace-member", [row[1] for row in self.actions("tool")])
         self.assertNotIn("boot-partition", [row[1] for row in self.actions("tool")])
+        record = self.host_storage_state()["replacements"]["S2EXTRA1"]
+        self.assertEqual((record["serial"], record["vdev"]), ("S9NEWEXTRA", "mirror-1"))
         self.assertIn("NVME_MIRROR_2_SERIAL_2=S3EXTRA2\n", self.conf.read_text())
+
+    def test_replace_resumes_after_reusing_the_pulled_members_mapping(self) -> None:
+        # The console helper closed the pulled disk's leftover crypt-rpool-b,
+        # opened the new disk under that name, and the run stopped before
+        # zpool replace: rpool shows crypt-rpool-b OFFLINE on the new disk.
+        status = strip_remove(fixtures.LUKS_STATUS).replace(
+            "\t    /dev/mapper/crypt-rpool-b          ONLINE",
+            "\t    /dev/mapper/crypt-rpool-b          OFFLINE",
+        )
+        devices = json.loads(fixtures.LUKS_LSBLK)
+        devices["blockdevices"][1] = fixtures.boot_disk(
+            1, "S8NEWBOOT", "CCCC-3333", "crypt-rpool-b"
+        )
+        self.update_fake(layout=healthy_layout(
+            status_text=status, lsblk_text=json.dumps(devices),
+            boot_uuids_text="AAAA-1111\nCCCC-3333\n",
+        ))
+        # Without the host's record it is indistinguishable from a failed disk.
+        refused = self.run_script(REPLACE, "")
+        self.assertIn("(disk S8NEWBOOT) is OFFLINE but still installed", refused.stdout)
+        self.assertEqual(self.actions("tool"), [])
+
+        self.seed_host_state(replacements={
+            "S0BOOTA": {"serial": "S8NEWBOOT", "vdev": "mirror-0", "recorded_at": 1},
+        })
+        completed = self.run_script(REPLACE, "y\ny\ny\n")
+        self.assertIn("Disk S8NEWBOOT was prepared for mirror-0 by an earlier run", completed.stdout)
+        self.assertEqual(
+            [row[1] for row in self.actions("tool")],
+            ["boot-partition", "boot-esp", "luks-check-member", "replace-member"],
+        )
+        self.assertIn("NVME_MIRROR_1_SERIAL_2=S8NEWBOOT\n", self.conf.read_text())
+        self.assertEqual(self.host_storage_state()["replacements"], {})
+
+    def test_replace_resumes_a_recorded_disk_after_a_reboot(self) -> None:
+        # The console helper encrypted S9NEWEXTRA, then the host rebooted
+        # before replace-member: its mapping is closed and it holds LUKS.
+        layout = degraded_layout("crypt-rpool-mirror2-2", "S3EXTRA2", "S9NEWEXTRA")
+        disk = next(d for d in layout["unassigned_disks"] if d["serial"] == "S9NEWEXTRA")
+        disk["fstype"] = "crypto_LUKS"
+        self.update_fake(layout=layout, console_after_checks=1)
+        self.seed_host_state(replacements={
+            "S2EXTRA1": {"serial": "S9NEWEXTRA", "vdev": "mirror-1", "recorded_at": 1},
+        })
+        completed = self.run_script(REPLACE, "y\nGO\ny\n")
+        self.assertIn("Disk S9NEWEXTRA was prepared for mirror-1 by an earlier run", completed.stdout)
+        self.assertEqual(
+            [row[1] for row in self.actions("tool")],
+            ["luks-check-member", "luks-backup-headers", "luks-check-member",
+             "replace-member"],
+        )
+        self.assertEqual(len(self.actions("write-helper")), 1)
+        self.assertIn("NVME_MIRROR_2_SERIAL_2=S9NEWEXTRA\n", self.conf.read_text())
+
+    def test_replace_refreshes_a_missing_header_backup_instead_of_the_console(self) -> None:
+        # An earlier run opened the new member, then stopped before its header
+        # backup; preparing it again would refuse the open mapping.
+        self.update_fake(
+            layout=degraded_layout("crypt-rpool-mirror2-2", "S3EXTRA2", "S9NEWEXTRA"),
+            mapping_open=True, console_after_checks=5,
+        )
+        self.seed_host_state(replacements={
+            "S2EXTRA1": {"serial": "S9NEWEXTRA", "vdev": "mirror-1", "recorded_at": 1},
+        })
+        completed = self.run_script(REPLACE, "y\ny\n")
+        self.assertIn("its header backup was refreshed", completed.stdout)
+        self.assertEqual(
+            [row[1] for row in self.actions("tool")],
+            ["luks-check-member", "luks-backup-headers", "luks-check-member",
+             "replace-member"],
+        )
+        self.assertEqual(self.actions("write-helper"), [])
+
+    def test_replace_records_a_disk_that_already_joined(self) -> None:
+        # The run stopped after zpool replace, before env/moxN.conf changed.
+        layout = degraded_layout("crypt-rpool-b", "S1BOOTB", "S8NEWBOOT")
+        disk = next(d for d in layout["unassigned_disks"] if d["serial"] == "S8NEWBOOT")
+        layout["unassigned_disks"].remove(disk)
+        layout["vdevs"][0]["replacing"] = True
+        layout["vdevs"][0]["members"].append({
+            "path": "/dev/mapper/crypt-rpool-b", "state": "ONLINE", "device": "/dev/dm-8",
+            "luks": True, "mapper": "/dev/mapper/crypt-rpool-b", "backing": "/dev/nvme8n1p3",
+            "disk": "/dev/nvme8n1", "serial": "S8NEWBOOT", "model": "Dell Ent NVMe",
+            "disk_size": 2000398934016, "member_size": None,
+        })
+        self.update_fake(layout=layout)
+        self.seed_host_state(replacements={
+            "S0BOOTA": {"serial": "S8NEWBOOT", "vdev": "mirror-0", "recorded_at": 1},
+        })
+        completed = self.run_script(REPLACE, "")
+        self.assertIn("Disk S8NEWBOOT already joined mirror-0", completed.stdout)
+        self.assertIn("nothing to replace", completed.stdout)
+        self.assertEqual(self.actions("tool"), [])
+        self.assertIn("NVME_MIRROR_1_SERIAL_2=S8NEWBOOT\n", self.conf.read_text())
+        self.assertEqual(self.host_storage_state()["replacements"], {})
 
     def test_replace_clear_extra_member(self) -> None:
         self.update_fake(
@@ -714,6 +885,20 @@ class DiskWorkflowTest(unittest.TestCase):
             sorted(row[1] for row in self.actions("fstrim")), ["prod1", "prod2"]
         )
 
+    def test_decommission_waits_for_a_replication_run_started_after_the_trims(self) -> None:
+        # A scheduled run that started before the trims finishes (last_sync is
+        # its start time), but no run starts after them.
+        recent = int(time.time()) - 60
+        self.seed_host_state(scrubs=[{"completed_at": recent, "result": "scrub repaired 0B with 0 errors"}])
+        self.environment["APP_HA_REPLICATION_TIMEOUT_SECONDS"] = "1"
+        self.update_fake(
+            replication_stuck=True,
+            replication_status={"100-0": {"last_sync": int(time.time()) - 30}},
+        )
+        completed = self.run_script(DECOMMISSION, "Y\ny\ny\ny\n", expected=1)
+        self.assertIn("timed out waiting for replication job 100-0", completed.stderr)
+        self.assertNotIn("replicated", completed.stdout)
+
     def test_decommission_requires_related_staging_to_be_destroyed(self) -> None:
         fake = self.fake()
         fake["registry"]["resources"].append(
@@ -794,6 +979,19 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertIn("out of space", completed.stderr)
         self.assertEqual(self.host_storage_state()["removals"][-1]["state"], "failed")
 
+    def test_decommission_keeps_a_removal_the_host_started_despite_an_error(self) -> None:
+        # zpool remove ran on the host, but the SSH session failed afterwards.
+        recent = int(time.time()) - 60
+        self.seed_host_state(
+            trims={"prod1": {"completed_at": recent}, "prod2": {"completed_at": recent}},
+            scrubs=[{"completed_at": recent, "result": "scrub repaired 0B with 0 errors"}],
+        )
+        self.update_fake(remove_starts_then_fails=True)
+        completed = self.run_script(DECOMMISSION, "Y\ny\n100\n1\nGO\n", expected=1)
+        self.assertIn("may be removing it anyway", completed.stderr)
+        self.assertIn("list_disks_ready_for_physically_removal.sh --host mox1", completed.stdout)
+        self.assertEqual(self.host_storage_state()["removals"][-1]["state"], "requested")
+
     # -- list_disks_ready_for_physically_removal.sh --------------------------
 
     def record_mirror_1_removal(self) -> None:
@@ -834,7 +1032,7 @@ class DiskWorkflowTest(unittest.TestCase):
         self.update_fake(layout=self.completed_removal_layout())
         completed = self.run_script(LIST, "y\n")
         self.assertEqual(
-            self.actions("tool"),
+            self.retirements(),
             [["tool", "retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2"]],
         )
         conf = self.conf.read_text()
@@ -848,7 +1046,7 @@ class DiskWorkflowTest(unittest.TestCase):
 
         # A later run just lists them; once pulled they are reported as such.
         rerun = self.run_script(LIST, "")
-        self.assertEqual(len(self.actions("tool")), 1)
+        self.assertEqual(len(self.retirements()), 1)
         self.assertIn("S2EXTRA1", rerun.stdout)
         layout = self.fake()["layout"]
         layout["unassigned_disks"] = [
@@ -857,6 +1055,47 @@ class DiskWorkflowTest(unittest.TestCase):
         self.update_fake(layout=layout)
         pulled = self.run_script(LIST, "")
         self.assertIn("Already pulled", pulled.stdout)
+
+    def test_list_always_lets_the_tool_finish_a_luks_retirement(self) -> None:
+        # An interrupted retirement already closed the mappings and edited
+        # crypttab; only the tool can tell whether the initramfs was rebuilt.
+        self.record_mirror_1_removal()
+        layout = self.completed_removal_layout()
+        layout["luks_mappings"] = [
+            row for row in layout["luks_mappings"] if not row["mapper"].startswith("crypt-rpool-mirror2")
+        ]
+        layout["crypttab"] = [
+            row for row in layout["crypttab"] if not row["mapper"].startswith("crypt-rpool-mirror2")
+        ]
+        self.update_fake(layout=layout)
+        self.run_script(LIST, "y\n")
+        self.assertEqual(
+            self.retirements(),
+            [["tool", "retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2"]],
+        )
+        self.assertEqual(self.host_storage_state()["removals"][0]["state"], "retired")
+
+    def test_list_does_not_offer_a_retired_disk_that_is_mounted_again(self) -> None:
+        self.record_mirror_1_removal()
+        layout = self.completed_removal_layout()
+        for disk in layout["unassigned_disks"]:
+            if disk["serial"] == "S3EXTRA2":
+                disk["mounted"] = True
+        self.update_fake(layout=layout)
+        output = self.run_script(LIST, "y\n").stdout
+        ready = output.split("safe to pull ====", 1)[1].split("NOT safe to pull", 1)[0]
+        self.assertIn("S2EXTRA1", ready)
+        self.assertNotIn("S3EXTRA2", ready)
+        self.assertIn("S3EXTRA2 (/dev/nvme3n1, from mirror-1)", output.split("NOT safe to pull", 1)[1])
+
+    def test_list_does_not_offer_a_retired_disk_in_another_pool(self) -> None:
+        self.record_mirror_1_removal()
+        self.update_fake(layout=self.completed_removal_layout(), in_other_pool=["S2EXTRA1"])
+        output = self.run_script(LIST, "y\n").stdout
+        ready = output.split("safe to pull ====", 1)[1].split("NOT safe to pull", 1)[0]
+        self.assertIn("S3EXTRA2", ready)
+        self.assertNotIn("S2EXTRA1", ready)
+        self.assertIn("S2EXTRA1 (/dev/nvme2n1, from mirror-1)", output.split("NOT safe to pull", 1)[1])
 
     def test_list_mentions_wiping_only_for_unencrypted_disks(self) -> None:
         self.record_mirror_1_removal()
@@ -870,7 +1109,7 @@ class DiskWorkflowTest(unittest.TestCase):
         layout["crypttab"] = []
         self.update_fake(layout=layout)
         completed = self.run_script(LIST, "")
-        self.assertEqual(self.actions("tool"), [])
+        self.assertEqual(self.retirements(), [])
         self.assertIn("were not encrypted and still hold old rpool data", completed.stdout)
 
     def test_list_marks_a_canceled_removal_failed(self) -> None:

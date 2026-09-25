@@ -44,17 +44,19 @@ config:
 errors: No known data errors
 """
 
+# The pool row follows -o; OpenZFS prints vdev and member rows with its fixed
+# ten columns (name size alloc free ckpoint expandsz frag cap dedup health).
 LUKS_LIST = """\
 rpool\t5989000000000\t1200000000000\t4789000000000\tONLINE
-\tmirror-0\t1990000000000\t800000000000\t1190000000000\tONLINE
-\t\t/dev/mapper/crypt-rpool-a\t1995000000000\t-\t-\tONLINE
-\t\t/dev/mapper/crypt-rpool-b\t1995000000000\t-\t-\tONLINE
-\tmirror-1\t1999000000000\t300000000000\t1699000000000\tONLINE
-\t\t/dev/mapper/crypt-rpool-mirror2-1\t2000000000000\t-\t-\tONLINE
-\t\t/dev/mapper/crypt-rpool-mirror2-2\t2000000000000\t-\t-\tONLINE
-\tmirror-2\t2000000000000\t100000000000\t1900000000000\tONLINE
-\t\t/dev/mapper/crypt-rpool-mirror3-1\t2000000000000\t-\t-\tONLINE
-\t\t/dev/mapper/crypt-rpool-mirror3-2\t2000000000000\t-\t-\tONLINE
+\tmirror-0\t1990000000000\t800000000000\t1190000000000\t-\t-\t4\t40\t-\tONLINE
+\t/dev/mapper/crypt-rpool-a\t1995000000000\t-\t-\t-\t-\t-\t-\t-\tONLINE
+\t/dev/mapper/crypt-rpool-b\t1995000000000\t-\t-\t-\t-\t-\t-\t-\tONLINE
+\tmirror-1\t1999000000000\t300000000000\t1699000000000\t-\t-\t2\t15\t-\tONLINE
+\t/dev/mapper/crypt-rpool-mirror2-1\t2000000000000\t-\t-\t-\t-\t-\t-\t-\tONLINE
+\t/dev/mapper/crypt-rpool-mirror2-2\t2000000000000\t-\t-\t-\t-\t-\t-\t-\tONLINE
+\tmirror-2\t2000000000000\t100000000000\t1900000000000\t-\t-\t1\t5\t-\tONLINE
+\t/dev/mapper/crypt-rpool-mirror3-1\t2000000000000\t-\t-\t-\t-\t-\t-\t-\tONLINE
+\t/dev/mapper/crypt-rpool-mirror3-2\t2000000000000\t-\t-\t-\t-\t-\t-\t-\tONLINE
 """
 
 POOL_PROPERTIES = """\

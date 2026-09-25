@@ -883,6 +883,17 @@ production_start_pending() {
   return 1
 }
 
+# Run a staging destruction unless a production start is pending. It runs
+# under the lifecycle lock, so a production pre-start cannot write its
+# reservation between this check and the destruction.
+unless_production_start_pending() {
+  if production_start_pending; then
+    log "$2: a production start is pending on $LOCAL_NODE; deferring staging destruction"
+    return 75
+  fi
+  "$@"
+}
+
 mark_completed() {
   (($# > 0)) || return 0
   python3 - "$@" <<'PY' |
@@ -996,12 +1007,12 @@ PY
     fi
     case "$action" in
       destroy-vm)
-        run_with_lifecycle_lock \
+        run_with_lifecycle_lock unless_production_start_pending \
           destroy_vm_action "$cleanup_id" "$target" "$resource_file" ||
           status=$?
         ;;
       destroy-volume)
-        run_with_lifecycle_lock \
+        run_with_lifecycle_lock unless_production_start_pending \
           destroy_volume_action "$cleanup_id" "$target" "$resource_file" ||
           status=$?
         ;;

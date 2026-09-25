@@ -141,6 +141,17 @@ class MoxConfMirrorsTest(unittest.TestCase):
         loaded = self.load_with_config_sh()
         self.assertEqual(loaded.returncode, 0, loaded.stderr)
         self.assertIn("3=NEW1", loaded.stdout)
+        # Recording the same pair again changes nothing.
+        before = self.conf.read_text(encoding="utf-8")
+        code, output, _ = self.cli(
+            "assign", str(self.conf), "--pair", "3",
+            "--serial", "NEW1", "--serial", "NEW2",
+            "--capacity", "4000787030016", "--capacity", "4000787030016",
+            "--note", "again",
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("already records these disks", output)
+        self.assertEqual(self.conf.read_text(encoding="utf-8"), before)
 
     def test_assign_refuses_configured_pair_or_serial(self) -> None:
         base = ["--capacity", "1", "--capacity", "1", "--note", "n"]
@@ -330,6 +341,32 @@ class StorageStateTest(unittest.TestCase):
         self.assertEqual(removal["state"], "retired")
         self.assertEqual(removal["notes"][0]["note"], "closed LUKS")
         self.assertEqual(self.cli("record-removal", "--request", request)[0], 0)
+
+    def test_addition_records_are_kept_until_cleared(self) -> None:
+        self.assertEqual(
+            self.cli("record-addition", "--pair", "4", "--serial", "A1", "--serial", "A2",
+                     "--capacity", "10", "--capacity", "10")[0], 0
+        )
+        self.assertEqual(self.show()["additions"]["4"]["serials"], ["A1", "A2"])
+        self.assertEqual(
+            self.cli("record-addition", "--pair", "1", "--serial", "A1", "--serial", "A2",
+                     "--capacity", "10", "--capacity", "10")[0], 1
+        )
+        self.assertEqual(self.cli("clear-addition", "--pair", "4")[0], 0)
+        self.assertEqual(self.show()["additions"], {})
+
+    def test_replacement_records_are_kept_until_cleared(self) -> None:
+        self.assertEqual(
+            self.cli("record-replacement", "--survivor", "S0BOOTA",
+                     "--serial", "S8NEWBOOT", "--vdev", "mirror-0")[0], 0
+        )
+        self.assertEqual(self.show()["replacements"]["S0BOOTA"]["serial"], "S8NEWBOOT")
+        self.assertEqual(
+            self.cli("record-replacement", "--survivor", "S0BOOTA",
+                     "--serial", "S0BOOTA", "--vdev", "mirror-0")[0], 1
+        )
+        self.assertEqual(self.cli("clear-replacement", "--survivor", "S0BOOTA")[0], 0)
+        self.assertEqual(self.show()["replacements"], {})
 
     def test_malformed_removal_requests_are_rejected(self) -> None:
         for request in (

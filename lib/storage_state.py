@@ -12,7 +12,14 @@ keeps one root-only JSON document, by default
 - when each production guest's filesystem was last trimmed for this host;
 - when rpool was last scrubbed, and the result;
 - one record per top-level vdev removal, with its member disks' serials,
-  because ZFS forgets which disks a vdev used once its removal completes.
+  because ZFS forgets which disks a vdev used once its removal completes;
+- each new mirror pair from the moment its disks are chosen until
+  env/moxN.conf records it, so a run interrupted after zpool add can still
+  record the pair;
+- the disk chosen to replace a pulled mirror member, keyed by the surviving
+  disk's serial, until it joins the mirror. Once a LUKS replacement takes the
+  pulled member's mapping name, rpool shows the old member resolving to the
+  new disk, and only this record tells a rerun it is the replacement.
 
 Every change takes an exclusive lock and replaces the file atomically. Times
 are the host's epoch seconds; ``show`` includes the host's current time so
@@ -39,6 +46,7 @@ DEFAULT_STATE_FILE = Path(
     os.environ.get("APP_HA_STORAGE_STATE_FILE", "/var/lib/app-ha-storage/state.json")
 )
 GUEST_RE = re.compile(r"^prod[1-9][0-9]*$")
+SERIAL_RE = re.compile(r"^[A-Za-z0-9._:+-]+$")
 VDEV_RE = re.compile(r"^mirror-[0-9]+$")
 REMOVAL_STATES = ("requested", "failed", "retired")
 MAX_SCRUBS = 20
@@ -64,6 +72,9 @@ def validate(state: Any) -> dict[str, Any]:
         raise StateError("unsupported storage state schema")
     for key, kind in (("trims", dict), ("scrubs", list), ("removals", list)):
         if not isinstance(state.get(key), kind):
+            raise StateError(f"storage state {key} is malformed")
+    for key in ("replacements", "additions"):
+        if not isinstance(state.get(key, {}), dict):
             raise StateError(f"storage state {key} is malformed")
     return state
 
@@ -175,6 +186,42 @@ def set_removal(
         row["notes"].append({"at": now, "note": note})
 
 
+def record_replacement(
+    state: dict[str, Any], survivor: str, serial: str, vdev: str, now: int
+) -> None:
+    for value in (survivor, serial):
+        if not SERIAL_RE.fullmatch(value):
+            raise StateError(f"invalid disk serial: {value!r}")
+    if survivor == serial:
+        raise StateError("the replacement disk and the surviving disk must differ")
+    if not vdev or "\n" in vdev or len(vdev) > 200:
+        raise StateError("invalid vdev name")
+    state.setdefault("replacements", {})[survivor] = {
+        "serial": serial,
+        "vdev": vdev,
+        "recorded_at": now,
+    }
+
+
+def record_addition(
+    state: dict[str, Any], pair: int, serials: Sequence[str], capacities: Sequence[int], now: int
+) -> None:
+    if pair not in (2, 3, 4, 5):
+        raise StateError("pair must be 2 through 5")
+    if len(serials) != 2 or len(set(serials)) != 2:
+        raise StateError("an addition needs two different disk serials")
+    for serial in serials:
+        if not SERIAL_RE.fullmatch(serial):
+            raise StateError(f"invalid disk serial: {serial!r}")
+    if len(capacities) != 2 or min(capacities) <= 0:
+        raise StateError("an addition needs two positive byte capacities")
+    state.setdefault("additions", {})[str(pair)] = {
+        "serials": list(serials),
+        "capacities": list(capacities),
+        "recorded_at": now,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE_FILE)
@@ -192,6 +239,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     removal.add_argument("removal_id")
     removal.add_argument("--state", required=True, choices=REMOVAL_STATES)
     removal.add_argument("--note")
+    replacement = subparsers.add_parser(
+        "record-replacement", help="record the disk chosen to replace a pulled member"
+    )
+    replacement.add_argument("--survivor", required=True)
+    replacement.add_argument("--serial", required=True)
+    replacement.add_argument("--vdev", required=True)
+    cleared = subparsers.add_parser(
+        "clear-replacement", help="forget a replacement once its disk joined the mirror"
+    )
+    cleared.add_argument("--survivor", required=True)
+    addition = subparsers.add_parser(
+        "record-addition", help="record a new mirror pair until moxN.conf records it"
+    )
+    addition.add_argument("--pair", type=int, required=True)
+    addition.add_argument("--serial", action="append", required=True)
+    addition.add_argument("--capacity", action="append", type=int, required=True)
+    added = subparsers.add_parser(
+        "clear-addition", help="forget a new mirror pair once moxN.conf records it"
+    )
+    added.add_argument("--pair", type=int, required=True)
     args = parser.parse_args(argv)
     now = int(time.time())
     try:
@@ -210,6 +277,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             mutate(
                 args.state_file,
                 lambda state: set_removal(state, args.removal_id, args.state, args.note, now),
+            )
+        elif args.command == "record-replacement":
+            mutate(
+                args.state_file,
+                lambda state: record_replacement(
+                    state, args.survivor, args.serial, args.vdev, now
+                ),
+            )
+        elif args.command == "clear-replacement":
+            mutate(
+                args.state_file,
+                lambda state: state.setdefault("replacements", {}).pop(args.survivor, None),
+            )
+        elif args.command == "record-addition":
+            mutate(
+                args.state_file,
+                lambda state: record_addition(
+                    state, args.pair, args.serial, args.capacity, now
+                ),
+            )
+        elif args.command == "clear-addition":
+            mutate(
+                args.state_file,
+                lambda state: state.setdefault("additions", {}).pop(str(args.pair), None),
             )
         return 0
     except (StateError, json.JSONDecodeError, OSError) as exc:

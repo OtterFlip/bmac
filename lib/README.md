@@ -147,8 +147,10 @@ register, and sync the new ESP), and `replace-member` (`zpool replace` or
 
 Piped to a host as `python3 - COMMAND`. Keeps
 `/var/lib/app-ha-storage/state.json` (root-only, locked, atomically replaced):
-per-guest trim times, scrub results, and one record per vdev removal with its
-member serials, because ZFS forgets them once a removal completes.
+per-guest trim times, scrub results, one record per vdev removal with its
+member serials, because ZFS forgets them once a removal completes, each new
+mirror pair until `env/moxN.conf` records it, and the disk chosen for a pending
+mirror-member replacement, so a rerun can tell it from a failed disk.
 
 ## `mox_conf_mirrors.py` and `disk_workflows.sh`
 

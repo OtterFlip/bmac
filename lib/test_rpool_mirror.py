@@ -138,6 +138,14 @@ elif command == "zpool":
                 else:
                     print(f"\t    {member_path(member)} {member_state(member)} 0 0 0")
         print("\nerrors: No known data errors")
+        if len(args) == 2:
+            # Without a pool name, zpool status lists every imported pool.
+            for name, leaves in state.get("other_pools", {}).items():
+                print(f"\n  pool: {name}\n state: ONLINE\nconfig:\n")
+                print(f"\tNAME STATE READ WRITE CKSUM\n\t{name} ONLINE 0 0 0")
+                for leaf in leaves:
+                    print(f"\t  {leaf} ONLINE 0 0 0")
+                print("\nerrors: No known data errors")
     elif args[0] == "replace":
         record()
         old, new = args[2], args[3]
@@ -235,7 +243,11 @@ elif command == "cryptsetup":
         raise SystemExit(f"unexpected cryptsetup {args}")
 elif command == "sgdisk":
     if args[0] == "--print":
-        print(f"Disk {args[1]}: sectors\nNumber  Start (sector)    End (sector)  Size       Code  Name")
+        guid = state["disks"][args[1]].get("guid")
+        print(f"Disk {args[1]}: sectors")
+        if guid:
+            print(f"Disk identifier (GUID): {guid}")
+        print("Number  Start (sector)    End (sector)  Size       Code  Name")
         for number, start, end, code in state["disks"][args[1]].get("gpt", []):
             print(f"   {number}   {start}   {end}   1.0 GiB   {code}  ")
         raise SystemExit(0)
@@ -243,9 +255,13 @@ elif command == "sgdisk":
     if args[0] == "--zap-all":
         state["disks"][args[1]]["gpt"] = []
         state["disks"][args[1]]["partitions"] = []
+        state["disks"][args[1]].pop("guid", None)
+    elif args[0] == "--randomize-guids":
+        state["disks"][args[1]]["guid"] = f"RANDOM-{args[1]}-{len(state['actions'])}"
     elif len(args) == 2 and args[1].startswith("--replicate="):
         target = args[1].split("=", 1)[1]
         state["disks"][target]["gpt"] = [list(row) for row in state["disks"][args[0]]["gpt"]]
+        state["disks"][target]["guid"] = state["disks"][args[0]].get("guid")
         state["disks"][target]["partitions"] = [
             f"{target}p{row[0]}" for row in state["disks"][args[0]]["gpt"]
         ]
@@ -339,6 +355,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
                         "serial": "BOOTA",
                         "size": DISK_BYTES,
                         "gpt": BOOT_GPT,
+                        "guid": "GUID-BOOTA",
                         "partitions": [
                             "/dev/nvme0n1p1", "/dev/nvme0n1p2", "/dev/nvme0n1p3",
                         ],
@@ -472,7 +489,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_check_new_rejects_unsafe_disks(self) -> None:
         self.assertIn(
-            "already part of rpool",
+            "already part of an imported ZFS pool",
             self.run_tool("check-new", "--require-equal", "NEW1", "BOOTA", expected=1).stderr,
         )
         state = self.state()
@@ -501,6 +518,14 @@ class RpoolMirrorToolTest(unittest.TestCase):
             self.run_tool("check-new", "--require-equal", "NEW1", "MISSING", expected=1).stderr,
         )
         self.run_tool("check-new", "--require-equal", "NEW1", "NEW1", expected=1)
+        # A disk in any other imported pool is in use too.
+        state["disks"]["/dev/nvme3n1"]["mountpoints"] = []
+        state["other_pools"] = {"tank": ["/dev/nvme3n1"]}
+        self.write_state(state)
+        self.assertIn(
+            "disk NEW2 (/dev/nvme3n1) is already part of an imported ZFS pool",
+            self.run_tool("check-new", "--require-equal", "NEW1", "NEW2", expected=1).stderr,
+        )
         self.run_tool("check-new", "--require-equal", "NEW1", "bad;serial", expected=1)
 
     # -- luks-prepare -----------------------------------------------------
@@ -720,9 +745,27 @@ class RpoolMirrorToolTest(unittest.TestCase):
         self.assertFalse(
             any(line.startswith("crypt-rpool-mirror2") for line in state["initrd_crypttab"])
         )
+        # A rerun rebuilds again, since only that proves every ESP is current.
         rebuilds = len(self.actions("update-initramfs"))
         self.run_tool("retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2")
-        self.assertEqual(len(self.actions("update-initramfs")), rebuilds)
+        self.assertEqual(len(self.actions("update-initramfs")), rebuilds + 1)
+        self.assertEqual(self.actions("proxmox-boot-tool")[-1][1], "refresh")
+
+    def test_retire_finishes_an_interrupted_initramfs_rebuild(self) -> None:
+        self.prepare()
+        self.run_tool("luks-add", "--pair", "2", "NEW1", "NEW2")
+        stale_initrd = self.state()["initrd_crypttab"]
+        self.update_state(pool=self.state()["pool"][:1])
+        self.run_tool("retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2")
+        # The first run closed the mappings and edited crypttab, then was
+        # interrupted before the initramfs was rebuilt.
+        self.update_state(initrd_crypttab=stale_initrd)
+        rebuilds = len(self.actions("update-initramfs"))
+        self.run_tool("retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2")
+        self.assertEqual(len(self.actions("update-initramfs")), rebuilds + 1)
+        self.assertFalse(any(
+            line.startswith("crypt-rpool-mirror2") for line in self.state()["initrd_crypttab"]
+        ))
 
     def test_retire_refuses_boot_mirror_and_busy_mapper(self) -> None:
         self.assertIn(
@@ -776,7 +819,10 @@ class RpoolMirrorToolTest(unittest.TestCase):
         wipes = len(self.actions("wipefs"))
         rerun = self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1").stdout
         self.assertIn("already has the partition table", rerun)
-        self.assertEqual(len(self.actions("wipefs")), wipes)
+        # Only partition 3 is cleared again; the table is kept.
+        self.assertEqual(self.actions("wipefs")[wipes:],
+                         [["wipefs", "--all", "--force", "/dev/nvme2n1p3"]])
+        self.assertEqual(self.state()["disks"]["/dev/nvme2n1"]["gpt"], BOOT_GPT)
 
         output = self.run_tool("boot-esp", "--survivor", "BOOTA", "NEW1").stdout
         self.assertIn("hold the same boot files: uefi (versions: 6.14.8-2-pve)", output)
@@ -821,6 +867,25 @@ class RpoolMirrorToolTest(unittest.TestCase):
         rerun = self.run_tool("replace-member", "--survivor", "BOOTA", "--member", "B", "NEW1")
         self.assertIn("already part of mirror-0", rerun.stdout)
         self.assertEqual(len(self.actions("zpool")), 1)
+
+    def test_boot_partition_gives_an_interrupted_copy_its_own_guids(self) -> None:
+        self.pull_boot_b(rebooted=True)
+        self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1")
+        self.assertNotEqual(self.state()["disks"]["/dev/nvme2n1"]["guid"], "GUID-BOOTA")
+        # A run that stopped right after --replicate left the survivor's GUIDs.
+        state = self.state()
+        state["disks"]["/dev/nvme2n1"]["guid"] = "GUID-BOOTA"
+        state["actions"] = []
+        self.write_state(state)
+        output = self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1").stdout
+        self.assertIn("already has the partition table", output)
+        self.assertEqual(
+            self.actions("sgdisk"), [["sgdisk", "--randomize-guids", "/dev/nvme2n1"]]
+        )
+        self.assertNotEqual(self.state()["disks"]["/dev/nvme2n1"]["guid"], "GUID-BOOTA")
+        self.assertEqual(
+            self.actions("wipefs"), [["wipefs", "--all", "--force", "/dev/nvme2n1p3"]]
+        )
 
     def test_boot_member_replacement_closes_the_pulled_disks_mapping(self) -> None:
         self.pull_boot_b(rebooted=False)

@@ -82,8 +82,8 @@ For a quick loop while editing, run one module natively:
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest lib/test_shared_libs.py
 ```
 
-A full native run of all 263 tests reports two failures (lifecycle-hook
-tests that need GNU `stat -c`) and 38 skips (Proxmox-host-only suites such as
+A full native run of all 280 tests reports two failures (lifecycle-hook
+tests that need GNU `stat -c`) and 41 skips (Proxmox-host-only suites such as
 the deferred-cleanup worker and `lib/rpool_mirror.sh`). Those are the gaps the
 VM closes.
 

@@ -359,12 +359,13 @@ pool_rows() {
 }
 
 # Print "serial disk bytes luks|fresh" for each serial after proving that the
-# disk is not part of rpool, is not mounted, and has the expected capacity.
+# disk is not part of rpool or any other imported pool, is not mounted, and has
+# the expected capacity.
 check_new_disks() {
   local serial disk size state device resolved pool
   local -a sizes=() disks=()
   [[ -n "$MATCH" ]] || die "a disk size requirement is required"
-  pool="$(zpool status -LP "$POOL")" || die "could not read rpool status"
+  pool="$(zpool status -LP)" || die "could not read the status of the imported pools"
   for serial in "${SERIALS[@]}"; do
     disk="$(disk_by_serial "$serial")" || exit 1
     ((${#disks[@]} == 0)) || [[ "${disks[0]}" != "$disk" ]] ||
@@ -384,7 +385,7 @@ check_new_disks() {
       [[ -n "$device" ]] || continue
       resolved="$(canonical "$device")" || exit 1
       if awk -v target="$resolved" '$1 == target { found=1 } END { exit !found }' <<<"$pool"; then
-        die "disk $serial ($disk) is already part of rpool as $device"
+        die "disk $serial ($disk) is already part of an imported ZFS pool as $device"
       fi
     done < <(lsblk -nrpo NAME "$disk")
     if lsblk -nrpo MOUNTPOINT "$disk" | awk 'NF { found=1 } END { exit !found }'; then
@@ -835,7 +836,7 @@ command_clear_add() {
 }
 
 command_retire_luks() {
-  local mapper form pattern changed=0
+  local mapper form pattern
   local -a mappers=()
   (($# > 0)) || die "retire-luks requires at least one mapper"
   for mapper in "$@"; do
@@ -851,19 +852,15 @@ command_retire_luks() {
       cryptsetup close "$mapper" ||
         die "could not close $mapper; something still holds it open"
       printf 'Closed %s.\n' "$mapper"
-      changed=1
-    fi
-    if [[ -f "$CRYPTTAB" ]] &&
-      awk -v mapper="$mapper" '$1 == mapper { found=1 } END { exit !found }' "$CRYPTTAB"; then
-      changed=1
     fi
   done
   pattern="^($(IFS='|'; printf '%s' "${mappers[*]}"))\$"
   form="$(crypttab_form "$pattern")"
   replace_crypttab_entries "$pattern"
-  if ((changed)); then
-    rebuild_initramfs
-  fi
+  # Always rebuild every kernel's initramfs and resync the ESPs: a run
+  # interrupted after editing crypttab, or after rebuilding but before the
+  # ESPs were refreshed, leaves a boot image that still unlocks the mappings.
+  rebuild_initramfs
   verify_initramfs_mappers absent "$form" "${mappers[@]}"
   printf 'Retired %s: closed, removed from crypttab, and absent from the initramfs.\n' \
     "${mappers[*]}"
@@ -1001,6 +998,19 @@ partition_table() {
     awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { print $1, $2, $3, $6 }'
 }
 
+disk_guid() {
+  sgdisk --print "$1" 2>/dev/null |
+    awk -F': *' '/^Disk identifier \(GUID\)/ { print $2; exit }'
+}
+
+# True when the new disk still carries the survivor's GUIDs: sgdisk
+# --replicate copies them, and only --randomize-guids makes them unique.
+shares_survivor_guids() {
+  local guid
+  guid="$(disk_guid "$1")"
+  [[ -n "$guid" && "$guid" == "$(disk_guid "$2")" ]]
+}
+
 fs_uuid() {
   blkid -s UUID -o value "$1" 2>/dev/null || true
 }
@@ -1077,6 +1087,25 @@ command_boot_partition() {
   survivor_boot_esp "$survivor_disk" >/dev/null || exit 1
   table="$(partition_table "$survivor_disk")"
   if [[ "$(partition_table "$new_disk")" == "$table" ]]; then
+    if shares_survivor_guids "$new_disk" "$survivor_disk"; then
+      # An earlier run stopped between copying the table and giving the copy
+      # its own GUIDs; nothing uses the new partitions yet.
+      sgdisk --randomize-guids "$new_disk"
+      partx --update "$new_disk" || true
+      udevadm settle
+      ! shares_survivor_guids "$new_disk" "$survivor_disk" ||
+        die "disk $serial still has the GUIDs of $SURVIVOR"
+    fi
+    # The same layout can come from an earlier installation whose partition 3
+    # still carries another pool's labels. Unless partition 3 already holds
+    # this replacement's LUKS, clear it after the usual safety checks.
+    if ! cryptsetup isLuks "$(partition_path "$new_disk" 3)" >/dev/null 2>&1; then
+      EXPECT_BYTES="$(blockdev --getsize64 "$survivor_disk")" ||
+        die "could not read the size of $survivor_disk"
+      MATCH=exact
+      check_new_disks >/dev/null || exit 1
+      wipefs --all --force "$(partition_path "$new_disk" 3)"
+    fi
     printf 'Disk %s already has the partition table of %s.\n' "$serial" "$SURVIVOR"
     return
   fi
@@ -1100,6 +1129,8 @@ command_boot_partition() {
   udevadm settle
   [[ "$(partition_table "$new_disk")" == "$table" ]] ||
     die "disk $serial did not receive the partition table of $SURVIVOR"
+  ! shares_survivor_guids "$new_disk" "$survivor_disk" ||
+    die "disk $serial still has the GUIDs of $SURVIVOR"
   for number in 2 3; do
     block_device_exists "$(partition_path "$new_disk" "$number")" ||
       die "partition $number of disk $serial did not appear"

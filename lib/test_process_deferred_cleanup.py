@@ -742,6 +742,34 @@ else:
         )
         self.assertEqual(missing.returncode, 1)
 
+    def test_staging_destruction_rechecks_production_start_under_the_lock(self) -> None:
+        # A production pre-start can write its reservation after the worker's
+        # first check but before the worker takes the lifecycle lock. The
+        # destruction re-checks while holding the lock.
+        script = r"""
+source "$1"
+destroy() { echo "destroyed $1"; }
+# The reservation appears just as the worker takes the lock.
+flock() { touch "$RESERVATION_DIR/100.reservation"; command flock "$@"; }
+run_with_lifecycle_lock unless_production_start_pending destroy cleanup-1 ||
+  echo "status=$?"
+unset -f flock
+rm -f "$RESERVATION_DIR/100.reservation"
+run_with_lifecycle_lock unless_production_start_pending destroy cleanup-2
+"""
+        completed = subprocess.run(
+            ["bash", "-c", script, "bash", str(HELPER_SOURCE)],
+            env={**self.base_environment, "APP_HA_LOCAL_NODE": "mox1"},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.splitlines(), ["status=75", "destroyed cleanup-2"])
+        self.assertIn(
+            "cleanup-1: a production start is pending on mox1", completed.stderr
+        )
+
     def test_shell_syntax(self) -> None:
         completed = subprocess.run(
             ["bash", "-n", str(HELPER_SOURCE)],
