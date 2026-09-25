@@ -4,7 +4,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 """Fake-SSH tests for the disk workflows: add_new_disk_vdev.sh,
-decommission_disks.sh, and list_disks_ready_for_physically_removal.sh.
+add_replacement_disk.sh, decommission_disks.sh, and
+list_disks_ready_for_physically_removal.sh.
 
 One fake `ssh` plays the Proxmox host (the storage layout, registry,
 replication, zpool, and the installed rpool mirror tool) and the production
@@ -27,6 +28,7 @@ import unittest
 HOSTS_DIR = Path(__file__).resolve().parent
 LIB_DIR = HOSTS_DIR.parent / "lib"
 ADD = HOSTS_DIR / "add_new_disk_vdev.sh"
+REPLACE = HOSTS_DIR / "add_replacement_disk.sh"
 DECOMMISSION = HOSTS_DIR / "decommission_disks.sh"
 LIST = HOSTS_DIR / "list_disks_ready_for_physically_removal.sh"
 sys.path.insert(0, str(LIB_DIR))
@@ -114,7 +116,15 @@ elif words[:2] == ["bash", "-c"] and "ls -l" in words[2]:
 elif words[0] == os.environ["APP_HA_REMOTE_RPOOL_MIRROR"]:
     command, rest = words[1], words[2:]
     act("tool", command, *rest)
-    serials = [value for value in rest if not value.startswith("-") and not value.isdigit()]
+    serials, skip = [], False
+    for value in rest:
+        if skip:
+            skip = False
+        elif value in ("--pair", "--expect-bytes", "--match", "--member", "--survivor"):
+            skip = True
+        elif not value.startswith("-"):
+            serials.append(value)
+    options = dict(zip(rest, rest[1:]))
     if command == "check-new":
         for serial in serials:
             disk = next(d for d in layout["unassigned_disks"] if d["serial"] == serial)
@@ -151,6 +161,45 @@ elif words[0] == os.environ["APP_HA_REMOTE_RPOOL_MIRROR"]:
         layout["luks_mappings"] = [
             row for row in layout["luks_mappings"] if row["serial"] not in serials
         ]
+        save()
+    elif command == "boot-partition":
+        pass
+    elif command == "boot-esp":
+        disk = next(d for d in layout["unassigned_disks"] + layout["esp_only_disks"]
+                    if d["serial"] == serials[0])
+        layout["unassigned_disks"] = [d for d in layout["unassigned_disks"] if d is not disk
+                                      and d["serial"] != serials[0]]
+        if all(d["serial"] != serials[0] for d in layout["esp_only_disks"]):
+            layout["esp_only_disks"].append(disk)
+        save()
+    elif command == "luks-check-member":
+        if state.get("console_after_checks", 0) > 0:
+            state["console_after_checks"] -= 1
+            save()
+            print("ERROR: crypt-rpool mapping is not open", file=sys.stderr)
+            raise SystemExit(1)
+        member = options["--member"]
+        name = f"luks-header-{member}.bin" if member in ("A", "B") else f"luks-header-mirror{member}.bin"
+        state["remote_files"][f"/fake/root/{name}"] = f"header {member}"
+        save()
+    elif command == "replace-member":
+        if state.get("replace_fails"):
+            print("ERROR: cannot replace", file=sys.stderr)
+            raise SystemExit(1)
+        survivor, new = options["--survivor"], serials[0]
+        disk = next(d for d in layout["unassigned_disks"] + layout["esp_only_disks"]
+                    if d["serial"] == new)
+        for vdev in layout["vdevs"]:
+            if any(m["serial"] == survivor for m in vdev["members"]):
+                vdev["replacing"] = True
+                vdev["members"].append({
+                    "path": f"/dev/new-{new}", "state": "ONLINE", "device": disk["disk"],
+                    "luks": "--member" in options, "mapper": None, "backing": disk["disk"],
+                    "disk": disk["disk"], "serial": new, "model": disk["model"],
+                    "disk_size": disk["size"], "member_size": None,
+                })
+        layout["unassigned_disks"] = [d for d in layout["unassigned_disks"] if d["serial"] != new]
+        layout["esp_only_disks"] = [d for d in layout["esp_only_disks"] if d["serial"] != new]
         save()
     elif command == "retire-luks":
         layout["luks_mappings"] = [
@@ -229,6 +278,34 @@ SHARED_CRYPTTAB = "".join(
 NO_STAGING_SNAPSHOTS = "\n".join(
     line for line in fixtures.SNAPSHOTS.splitlines() if "stg-base-" not in line
 )
+
+
+def degraded_layout(
+    gone: str, pulled_serial: str, new_serial: str, new_size: int = 2000398934016
+) -> dict:
+    """The disk behind mapping GONE was pulled and NEW_SERIAL was installed."""
+    status = strip_remove(fixtures.LUKS_STATUS).replace(
+        f"\t    /dev/mapper/{gone}".ljust(40) + "ONLINE",
+        "\t    8093158935163316232".ljust(40) + "UNAVAIL",
+    )
+    assert "UNAVAIL" in status
+    devices = json.loads(fixtures.LUKS_LSBLK)
+    devices["blockdevices"] = [
+        disk for disk in devices["blockdevices"] if disk["serial"] != pulled_serial
+    ]
+    devices["blockdevices"].append(fixtures.disk("/dev/nvme8n1", new_serial, new_size))
+    return healthy_layout(status_text=status, lsblk_text=json.dumps(devices))
+
+
+def make_clear(layout: dict) -> dict:
+    for vdev in layout["vdevs"]:
+        vdev["luks"] = False
+        for member in vdev["members"]:
+            member["luks"] = False
+            member["mapper"] = None
+    layout["luks_mappings"] = []
+    layout["crypttab"] = []
+    return layout
 
 
 def healthy_layout(**overrides) -> dict:
@@ -442,6 +519,146 @@ class DiskWorkflowTest(unittest.TestCase):
         self.update_fake(layout=layout)
         completed = self.run_script(ADD, "", expected=1)
         self.assertIn("already has 5 mirror vdevs", completed.stderr)
+
+    # -- add_replacement_disk.sh ---------------------------------------------
+
+    def test_replace_pulled_luks_boot_member(self) -> None:
+        self.update_fake(
+            layout=degraded_layout("crypt-rpool-b", "S1BOOTB", "S8NEWBOOT"),
+            console_after_checks=1,
+        )
+        completed = self.run_script(REPLACE, "1\nGO\ny\nGO\ny\n")
+        output = completed.stdout
+        self.assertIn(
+            "mirror-0 (boot mirror): member 8093158935163316232 is gone; "
+            "surviving disk S0BOOTA has 2000398934016 bytes",
+            output,
+        )
+        self.assertEqual(
+            [row[1] for row in self.actions("tool")],
+            ["check-new", "boot-partition", "boot-esp", "luks-check-member",
+             "luks-check-member", "replace-member"],
+        )
+        self.assertIn(
+            ["tool", "check-new", "--expect-bytes", "2000398934016", "--match", "exact",
+             "S8NEWBOOT"],
+            self.actions("tool"),
+        )
+        self.assertIn(
+            ["tool", "boot-esp", "--survivor", "S0BOOTA", "S8NEWBOOT"], self.actions("tool")
+        )
+        self.assertIn(
+            ["tool", "replace-member", "--survivor", "S0BOOTA", "--member", "B", "S8NEWBOOT"],
+            self.actions("tool"),
+        )
+        self.assertEqual(
+            self.actions("write-helper"),
+            [["write-helper", "/fake/root/app-ha-replace-member-B", REMOTE_TOOL, "B",
+              "S8NEWBOOT", ""]],
+        )
+        self.assertIn("it never passes through this workstation or SSH", output)
+        header = self.artifacts / "mox1" / "luks-headers" / "rpool-B.bin"
+        self.assertEqual(header.read_text(), "header B")
+        self.assertEqual(header.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn("/fake/root/luks-header-B.bin", self.fake()["remote_files"])
+        conf = self.conf.read_text()
+        self.assertIn("NVME_MIRROR_1_SERIAL_2=S8NEWBOOT\n", conf)
+        self.assertIn(": NVME_MIRROR_1_SERIAL_2=S1BOOTB\n", conf)
+        self.assertIn("NVME_MIRROR_1_CAPACITY_BYTES_2=2000398934016\n", conf)
+        self.assertIn("NVME_MIRROR_1_SERIAL_1=S0BOOTA\n", conf)
+        self.assertIn("REPLACING A MEMBER (resilver)", output)
+        self.assertIn("this script does not wait for it", output)
+        self.assertIn("either disk can boot mox1 alone", output)
+        self.assertIn("enter the\nshared passphrase once", output)
+        self.assertFalse(any("reboot" in " ".join(row) for row in self.fake()["actions"]))
+
+        # The mirror now shows the replacement resilvering; a rerun leaves it.
+        rerun = self.run_script(REPLACE, "")
+        self.assertIn("mirror-0 is already resilvering a replacement member", rerun.stdout)
+        self.assertIn("nothing to replace", rerun.stdout)
+
+    def test_replace_resumes_a_prepared_boot_disk(self) -> None:
+        layout = degraded_layout("crypt-rpool-b", "S1BOOTB", "S8NEWBOOT")
+        disk = next(d for d in layout["unassigned_disks"] if d["serial"] == "S8NEWBOOT")
+        layout["unassigned_disks"].remove(disk)
+        layout["esp_only_disks"].append(disk)
+        layout["luks_mappings"].append(
+            {"mapper": "crypt-rpool-b", "backing": "/dev/nvme8n1p3", "disk": "/dev/nvme8n1",
+             "serial": "S8NEWBOOT", "size": 2000398934016, "in_pool": False}
+        )
+        self.update_fake(layout=layout)
+        completed = self.run_script(REPLACE, "y\ny\ny\n")
+        self.assertIn("was prepared for mirror-0 by an earlier run", completed.stdout)
+        self.assertIn("is already open on disk S8NEWBOOT", completed.stdout)
+        self.assertEqual(
+            [row[1] for row in self.actions("tool")],
+            ["boot-partition", "boot-esp", "luks-check-member", "replace-member"],
+        )
+        self.assertEqual(self.actions("write-helper"), [])
+        self.assertIn("NVME_MIRROR_1_SERIAL_2=S8NEWBOOT\n", self.conf.read_text())
+
+    def test_replace_stops_until_the_console_helper_succeeds(self) -> None:
+        self.update_fake(
+            layout=degraded_layout("crypt-rpool-mirror2-2", "S3EXTRA2", "S9NEWEXTRA"),
+            console_after_checks=5,
+        )
+        completed = self.run_script(REPLACE, "1\nGO\nGO\nq\n", expected=1)
+        self.assertIn("rerun /fake/root/app-ha-replace-member-2-2 at the console", completed.stdout)
+        self.assertEqual(
+            self.actions("write-helper"),
+            [["write-helper", "/fake/root/app-ha-replace-member-2-2", REMOTE_TOOL, "2-2",
+              "S9NEWEXTRA", "--expect-bytes 2000398934016 --match exact"]],
+        )
+        self.assertNotIn("replace-member", [row[1] for row in self.actions("tool")])
+        self.assertNotIn("boot-partition", [row[1] for row in self.actions("tool")])
+        self.assertIn("NVME_MIRROR_2_SERIAL_2=S3EXTRA2\n", self.conf.read_text())
+
+    def test_replace_clear_extra_member(self) -> None:
+        self.update_fake(
+            layout=make_clear(degraded_layout("crypt-rpool-mirror2-2", "S3EXTRA2", "S9NEWEXTRA"))
+        )
+        completed = self.run_script(REPLACE, "1\nGO\n")
+        self.assertEqual(
+            self.actions("tool"),
+            [["tool", "check-new", "--expect-bytes", "2000398934016", "--match", "exact",
+              "S9NEWEXTRA"],
+             ["tool", "replace-member", "--survivor", "S2EXTRA1", "S9NEWEXTRA"]],
+        )
+        self.assertEqual(self.actions("write-helper"), [])
+        conf = self.conf.read_text()
+        self.assertIn("NVME_MIRROR_2_SERIAL_2=S9NEWEXTRA\n", conf)
+        self.assertIn("NVME_MIRROR_2_SERIAL_1=S2EXTRA1\n", conf)
+        self.assertNotIn("either disk can boot", completed.stdout)
+        self.assertNotIn("passphrase", completed.stdout)
+
+    def test_replace_offers_only_identical_capacity(self) -> None:
+        self.update_fake(
+            layout=degraded_layout("crypt-rpool-b", "S1BOOTB", "S8NEWBOOT", 2000398934016 + 4096)
+        )
+        completed = self.run_script(REPLACE, "", expected=1)
+        self.assertIn("no unused, unmounted disk on mox1 has exactly 2000398934016 bytes",
+                      completed.stderr)
+        self.assertEqual(self.actions("tool"), [])
+
+    def test_replace_leaves_failed_disks_that_are_still_installed(self) -> None:
+        status = strip_remove(fixtures.LUKS_STATUS).replace(
+            "\t    /dev/mapper/crypt-rpool-mirror2-2  ONLINE",
+            "\t    /dev/mapper/crypt-rpool-mirror2-2  FAULTED",
+        )
+        self.update_fake(layout=healthy_layout(status_text=status))
+        completed = self.run_script(REPLACE, "")
+        self.assertIn(
+            "mirror-1 member /dev/mapper/crypt-rpool-mirror2-2 (disk S3EXTRA2) is FAULTED "
+            "but still installed",
+            completed.stdout,
+        )
+        self.assertIn("nothing to replace", completed.stdout)
+        self.assertEqual(self.actions("tool"), [])
+
+    def test_replace_waits_for_a_running_removal(self) -> None:
+        self.update_fake(layout=healthy_layout(status_text=fixtures.LUKS_STATUS))
+        completed = self.run_script(REPLACE, "", expected=1)
+        self.assertIn("a vdev removal is in progress on mox1", completed.stderr)
 
     # -- decommission_disks.sh ------------------------------------------------
 
@@ -667,7 +884,7 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertIn("No vdev removals are recorded on mox1", completed.stdout)
 
     def test_shell_syntax(self) -> None:
-        for script in (ADD, DECOMMISSION, LIST, LIB_DIR / "disk_workflows.sh"):
+        for script in (ADD, REPLACE, DECOMMISSION, LIST, LIB_DIR / "disk_workflows.sh"):
             completed = subprocess.run(
                 ["bash", "-n", str(script)], text=True, capture_output=True, check=False
             )

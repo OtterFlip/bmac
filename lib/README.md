@@ -119,8 +119,10 @@ remains pending; it never invents completion evidence.
 only read-only `zpool`, `zfs`, and `lsblk` queries and prints one JSON layout
 of `rpool`: capacity and ZFS available space, every top-level vdev with its
 members resolved through LUKS to physical disk serials, the vdev that holds
-the proxmox-boot-tool ESPs, device-removal progress, disks outside `rpool`,
-and per-zvol allocation and snapshot usage. `render` prints that layout on
+the proxmox-boot-tool ESPs, device-removal progress, disks outside `rpool`
+(and those holding a registered ESP, a boot-disk replacement not yet in the
+pool), vdevs resilvering a replacement, and per-zvol allocation and snapshot
+usage. `render` prints that layout on
 the workstation. `diagnostics/show_proxmox_host_state.sh` uses both.
 
 ## `rpool_mirror.sh`
@@ -133,6 +135,13 @@ hidden prompt afterwards; proven against every existing LUKS member),
 `luks-check-prepared`, `luks-backup-headers`, `luks-add` (crypttab in the
 host's existing form, initramfs rebuilt and unpacked to prove boot unlock,
 then `zpool add` with the pool's one ashift), `clear-add`, and `retire-luks`.
+One member at a time (A or B on a boot disk's partition 3, N-M on an extra
+mirror's whole disk): `luks-prepare-member`, `luks-check-member`,
+`luks-backup-headers --member`, and `luks-register`, which setup's boot-mirror
+LUKS conversion and `hosts/add_replacement_disk.sh` share; plus
+`boot-partition` (copy the survivor's partition table), `boot-esp` (format,
+register, and sync the new ESP), and `replace-member` (`zpool replace` or
+`zpool attach` without waiting for the resilver).
 
 ## `storage_state.py`
 
@@ -143,10 +152,10 @@ member serials, because ZFS forgets them once a removal completes.
 
 ## `mox_conf_mirrors.py` and `disk_workflows.sh`
 
-`mox_conf_mirrors.py` shows, assigns, and comments out (`retire`)
-`NVME_MIRROR_N_*` entries in a workstation's `env/moxN.conf`, keeping every
-other line byte for byte. `disk_workflows.sh` is the workstation library
-sourced by the three disk workflows: host selection, strict SSH, per-run
+`mox_conf_mirrors.py` shows, assigns, replaces one member of, and comments
+out (`retire`) `NVME_MIRROR_N_*` entries in a workstation's `env/moxN.conf`,
+keeping every other line byte for byte. `disk_workflows.sh` is the workstation
+library sourced by the four disk workflows: host selection, strict SSH, per-run
 tool installation with a hash check, host-side Python, long-step prompts, and
 conf edits that are reverted if `config.sh` no longer loads the file.
 

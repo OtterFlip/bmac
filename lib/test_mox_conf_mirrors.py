@@ -205,6 +205,58 @@ class MoxConfMirrorsTest(unittest.TestCase):
         self.assertIn("no configured NVMe mirror pair", error)
         self.assertEqual(self.conf.read_text(encoding="utf-8"), MOX_CONF)
 
+    def test_replace_records_one_member_and_keeps_the_old_one(self) -> None:
+        arguments = [
+            "replace", str(self.conf), "--pair", "1", "--member", "2",
+            "--survivor", "BOOTA", "--serial", "BOOTC", "--capacity", "2000398934016",
+            "--note", "Replaced by hosts/add_replacement_disk.sh on 2026-09-24",
+        ]
+        code, output, error = self.cli(*arguments)
+        self.assertEqual(code, 0, error)
+        self.assertIn("Recorded BOOTC as NVME_MIRROR_1_SERIAL_2", output)
+        text = self.conf.read_text(encoding="utf-8")
+        self.assertIn(
+            "# Replaced by hosts/add_replacement_disk.sh on 2026-09-24: "
+            "NVME_MIRROR_1_SERIAL_2=BOOTB\n"
+            "NVME_MIRROR_1_SERIAL_2=BOOTC\n",
+            text,
+        )
+        self.assertIn(
+            ": NVME_MIRROR_1_CAPACITY_BYTES_2=2000398934016\n"
+            "NVME_MIRROR_1_CAPACITY_BYTES_2=2000398934016\n",
+            text,
+        )
+        self.assertIn("NVME_MIRROR_1_SERIAL_1=BOOTA\n", text)
+        self.assertEqual(self.conf.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.load_with_config_sh().returncode, 0)
+
+        # A rerun changes nothing.
+        code, output, _ = self.cli(*arguments)
+        self.assertEqual(code, 0)
+        self.assertIn("already BOOTC", output)
+        self.assertEqual(self.conf.read_text(encoding="utf-8"), text)
+
+    def test_replace_requires_the_survivor_in_the_other_slot(self) -> None:
+        base = ["--capacity", "1", "--note", "n"]
+        code, _, error = self.cli(
+            "replace", str(self.conf), "--pair", "2", "--member", "2",
+            "--survivor", "OLD2", "--serial", "NEW9", *base,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("not the surviving disk OLD2", error)
+        code, _, error = self.cli(
+            "replace", str(self.conf), "--pair", "2", "--member", "2",
+            "--survivor", "OLD1", "--serial", "BOOTA", *base,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("already configured in NVME_MIRROR_1", error)
+        code, _, _ = self.cli(
+            "replace", str(self.conf), "--pair", "3", "--member", "1",
+            "--survivor", "X", "--serial", "NEW9", *base,
+        )
+        self.assertEqual(code, 3)
+        self.assertEqual(self.conf.read_text(encoding="utf-8"), MOX_CONF)
+
     def test_symlinked_conf_is_refused(self) -> None:
         link = self.env_dir / "mox2.conf"
         link.symlink_to(self.conf)

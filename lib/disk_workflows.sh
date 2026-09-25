@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Workstation helpers shared by hosts/add_new_disk_vdev.sh,
-# hosts/decommission_disks.sh, and
+# hosts/add_replacement_disk.sh, hosts/decommission_disks.sh, and
 # hosts/list_disks_ready_for_physically_removal.sh. Source after setting
 # DW_SCRIPT_NAME. Host work goes through lib/config.sh strict SSH; host-side
 # logic lives in lib/rpool_mirror.sh, lib/host_storage.py, and

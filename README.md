@@ -259,7 +259,7 @@ Since host setup must be done using a Debian workstation, there's a good chance 
 
 ### Growing or shrinking a host's storage
 
-To add two new disks to a host's ZFS pool later, run `hosts/add_new_disk_vdev.sh`. To give up a pair of disks, run `hosts/decommission_disks.sh`, then `hosts/list_disks_ready_for_physically_removal.sh` until it lists them as safe to pull. See [`hosts/README.md`](hosts/README.md#adding-and-decommissioning-rpool-disks) for the details, including the manual reboot test after adding encrypted disks.
+To add two new disks to a host's ZFS pool later, run `hosts/add_new_disk_vdev.sh`. After a failed disk is pulled and an identical one installed, run `hosts/add_replacement_disk.sh` to put it back into its mirror. To give up a pair of disks, run `hosts/decommission_disks.sh`, then `hosts/list_disks_ready_for_physically_removal.sh` until it lists them as safe to pull. See [`hosts/README.md`](hosts/README.md#adding-and-decommissioning-rpool-disks) for the details, including the manual reboot test after adding encrypted disks.
 
 ## A Basic CI/CD Workflow
 

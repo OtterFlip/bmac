@@ -8,8 +8,10 @@
 ``show`` prints the active NVME_MIRROR_N_* entries as JSON. ``assign`` writes
 the serial and byte-capacity entries of a newly added mirror pair. ``retire``
 comments out the entries of a mirror whose vdev removal completed, so the
-file still records the hardware that used to be there. Every other line is
-kept byte for byte, and the file is replaced atomically with its mode kept.
+file still records the hardware that used to be there. ``replace`` comments
+out one member's entries after its disk was replaced and writes the new
+disk's serial and capacity beneath them. Every other line is kept byte for
+byte, and the file is replaced atomically with its mode kept.
 The workflow scripts reload the file with lib/config.sh afterwards.
 """
 
@@ -149,6 +151,71 @@ def retire(lines: list[str], serials: Sequence[str], note: str) -> tuple[list[st
     return retired, pair
 
 
+def replace(
+    lines: list[str],
+    pair: int,
+    member: int,
+    survivor: str,
+    serial: str,
+    capacity: int,
+    note: str,
+) -> tuple[list[str], bool]:
+    """Record SERIAL as member MEMBER of PAIR in place of a pulled disk.
+
+    Returns the new lines and whether anything changed; a rerun after a
+    successful replace changes nothing.
+    """
+
+    if member not in (1, 2):
+        raise ConfError("--member must be 1 or 2")
+    if not SERIAL_RE.fullmatch(serial):
+        raise ConfError(f"unsafe disk serial: {serial}")
+    if capacity <= 0:
+        raise ConfError("the capacity must be a positive byte count")
+    pairs = active_pairs(lines)
+    values = pairs.get(pair)
+    if values is None:
+        raise LookupError(f"NVME_MIRROR_{pair} is not configured")
+    if values.get(f"serial_{member}") == serial:
+        return lines, False
+    other = 3 - member
+    if values.get(f"serial_{other}") != survivor:
+        raise ConfError(
+            f"NVME_MIRROR_{pair}_SERIAL_{other} is {values.get(f'serial_{other}') or 'unset'}, "
+            f"not the surviving disk {survivor}"
+        )
+    for other_pair, other_values in pairs.items():
+        if serial in (other_values.get("serial_1"), other_values.get("serial_2")):
+            raise ConfError(f"serial {serial} is already configured in NVME_MIRROR_{other_pair}")
+    wanted = {
+        f"NVME_MIRROR_{pair}_SERIAL_{member}": serial,
+        f"NVME_MIRROR_{pair}_CAPACITY_BYTES_{member}": str(capacity),
+    }
+    written: set[str] = set()
+    updated: list[str] = []
+    for line in lines:
+        match = ACTIVE_RE.match(line)
+        if match and match.group(1) in wanted:
+            if not line.endswith("\n"):
+                line += "\n"
+            updated.append(f"# {note}: {line.lstrip()}")
+            if match.group(1) not in written:
+                updated.append(f"{match.group(1)}={wanted[match.group(1)]}\n")
+                written.add(match.group(1))
+        else:
+            updated.append(line)
+    missing = [key for key in wanted if key not in written]
+    if missing:
+        # An entry the file lacks goes after the pair's last active line.
+        at = 1 + max(
+            index
+            for index, line in enumerate(updated)
+            if (match := ACTIVE_RE.match(line)) and int(match.group(2)) == pair
+        )
+        updated[at:at] = [f"{key}={wanted[key]}\n" for key in missing]
+    return updated, True
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -164,6 +231,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     retire_parser.add_argument("conf", type=Path)
     retire_parser.add_argument("--serial", action="append", required=True)
     retire_parser.add_argument("--note", required=True)
+    replace_parser = subparsers.add_parser("replace")
+    replace_parser.add_argument("conf", type=Path)
+    replace_parser.add_argument("--pair", type=int, required=True)
+    replace_parser.add_argument("--member", type=int, required=True)
+    replace_parser.add_argument("--survivor", required=True)
+    replace_parser.add_argument("--serial", required=True)
+    replace_parser.add_argument("--capacity", type=int, required=True)
+    replace_parser.add_argument("--note", required=True)
     args = parser.parse_args(argv)
     try:
         lines = read_lines(args.conf)
@@ -188,6 +263,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 assign(lines, args.pair, tuple(args.serial), tuple(args.capacity), args.note),
             )
             print(f"Recorded NVME_MIRROR_{args.pair} in {args.conf}")
+            return 0
+        if args.command == "replace":
+            updated, changed = replace(
+                lines, args.pair, args.member, args.survivor, args.serial,
+                args.capacity, args.note,
+            )
+            if changed:
+                write_lines(args.conf, updated)
+                print(f"Recorded {args.serial} as NVME_MIRROR_{args.pair}_SERIAL_{args.member} in {args.conf}")
+            else:
+                print(f"NVME_MIRROR_{args.pair}_SERIAL_{args.member} is already {args.serial} in {args.conf}")
             return 0
         updated, pair = retire(lines, args.serial, args.note)
         write_lines(args.conf, updated)

@@ -149,6 +149,9 @@ def parse_zpool_status(text: str) -> dict[str, Any]:
             "type": kind,
             "state": node["state"],
             "removing": bool(evacuating and evacuating.group(1) == node["name"]),
+            "replacing": any(
+                child["name"].startswith("replacing-") for child in node["children"]
+            ),
             "members": leaves(node),
         }
 
@@ -393,6 +396,7 @@ def build_layout(
                 "type": vdev["type"],
                 "state": vdev["state"],
                 "removing": vdev["removing"],
+                "replacing": vdev["replacing"],
                 "size": size_row.get("size"),
                 "allocated": size_row.get("allocated"),
                 "free": size_row.get("free"),
@@ -418,15 +422,18 @@ def build_layout(
         )
 
     unassigned = []
+    esp_only = []
     for kname, device in sorted(devices.items()):
         if device["type"] != "disk" or device["parent"] is not None:
             continue
         # zvols are block disks too; they belong to guests, not to the host.
         if re.fullmatch(r"/dev/zd[0-9]+", kname):
             continue
-        if kname in member_disks or kname in esp_disks:
+        if kname in member_disks:
             continue
-        unassigned.append(
+        # A registered ESP on a disk outside rpool is a boot-mirror
+        # replacement that has not joined the pool yet.
+        (esp_only if kname in esp_disks else unassigned).append(
             {
                 "disk": kname,
                 "serial": device["serial"],
@@ -490,6 +497,7 @@ def build_layout(
         "auxiliary_vdevs": auxiliary,
         "esp_partitions": esp_partitions,
         "unassigned_disks": unassigned,
+        "esp_only_disks": esp_only,
         "luks_mappings": luks_mappings,
         "crypttab": parse_crypttab(crypttab_text),
         "volumes": parse_volumes(volume_text, snapshot_text),
@@ -641,6 +649,12 @@ def attention_items(
                 )
     if not any(vdev["holds_esp"] for vdev in layout["vdevs"]):
         items.append("no rpool vdev could be matched to a proxmox-boot-tool ESP")
+    for disk in layout.get("esp_only_disks", []):
+        items.append(
+            f"disk {disk['disk']} ({disk['serial'] or 'no serial'}) holds a registered "
+            "ESP but is not an rpool member; finish its replacement with "
+            "hosts/add_replacement_disk.sh"
+        )
     if configured:
         live = {
             member["serial"]
@@ -714,6 +728,8 @@ def render(
             flags.append("boot/ESP (never removable)")
         if vdev["removing"]:
             flags.append("REMOVAL IN PROGRESS")
+        if vdev.get("replacing"):
+            flags.append("REPLACING A MEMBER (resilver)")
         rows.append(
             [
                 vdev["name"],

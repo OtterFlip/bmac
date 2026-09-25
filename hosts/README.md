@@ -319,7 +319,7 @@ after correcting a failure.
 
 ## Adding and decommissioning rpool disks
 
-Three workstation scripts manage a host's rpool mirrors after setup. They run
+Four workstation scripts manage a host's rpool mirrors after setup. They run
 the same host-side code setup uses: `lib/rpool_mirror.sh` (installed per run as
 `/usr/local/sbin/app-ha-rpool-mirror`) for every disk, LUKS, and zpool change,
 `lib/host_storage.py` for a read-only layout, and `lib/storage_state.py` for
@@ -352,6 +352,42 @@ rerun resumes a pair that was prepared but not yet added. After adding a LUKS
 mirror, test a reboot by hand: gracefully migrate every production guest off
 the host, then gracefully reboot it and enter the passphrase once at its
 console.
+
+### Replacing a pulled mirror member
+
+When a mirror member fails, pull its disk and install one of identical byte
+capacity, then run `hosts/add_replacement_disk.sh [--host moxN]`:
+
+1. lists the mirrors that are missing a member (or were detached down to one
+   disk) and the unused disks whose capacity equals the surviving member's,
+   and asks for one; it replaces one member per run;
+2. for mirror 1, copies the survivor's partition table to the new disk
+   (`sgdisk --replicate` from the survivor, new GUIDs), formats and registers
+   its ESP with `proxmox-boot-tool` using the survivor's boot loader (grub or
+   uefi), drops ESPs of pulled disks, and waits until the new ESP holds the
+   same kernels as the survivor's, so either disk can boot the host;
+3. on a LUKS host, writes `/root/app-ha-replace-member-M` (M is `A` or `B` for
+   mirror 1, `N-M` for extra mirrors) and has you run it at the host console.
+   It asks for `GO` and the shared passphrase, proves it against every rpool
+   member still present, closes a leftover mapping of the pulled disk, and
+   encrypts the new disk (partition 3 on mirror 1, the whole disk otherwise)
+   under the pulled member's mapping name. The header backup is copied to
+   `hosts/artifacts/moxN/luks-headers/`, keeping the old one as
+   `.replaced-<time>`;
+4. records the new member in crypttab and proves the rebuilt initramfs unlocks
+   it, rechecks that both boot ESPs are in sync, then runs `zpool replace`
+   (or `zpool attach` for a mirror detached to one disk) and returns without
+   waiting for the resilver;
+5. comments out the pulled disk's `NVME_MIRROR_N_SERIAL_M` and
+   `_CAPACITY_BYTES_M` lines in `env/moxN.conf` and writes the new disk's
+   beneath them.
+
+A failed disk that is still installed is not handled; pull it first. The
+script also waits for a running vdev removal, since ZFS does not change
+mirror members until that finishes. A rerun resumes a disk that was prepared
+but has not joined the mirror. Once the resilver finishes, test a reboot by
+hand: gracefully migrate every production guest off the host, then gracefully
+reboot it.
 
 ### Decommissioning a mirror
 

@@ -1791,33 +1791,19 @@ REMOTE
     write_state "$prepared_state"
   fi
 
+  # lib/rpool_mirror.sh holds the one copy of the member LUKS logic, shared
+  # with hosts/add_replacement_disk.sh.
+  install_rpool_mirror_tool
   if [[ "$mapper_in_pool" == false ]]; then
-    remote_script "$serial" "$mapper" "$member" "$helper" \
-      "$LUKS_SECRET_FILE" <<'REMOTE'
+    remote_script "$helper" "$RPOOL_MIRROR_TOOL" "$member" "$LUKS_SECRET_FILE" \
+      "$serial" <<'REMOTE'
 set -Eeuo pipefail
-serial="$1"; mapper="$2"; member="$3"; helper="$4"; key_file="$5"
-cat >"$helper" <<EOF
-#!/usr/bin/env bash
-set -Eeuo pipefail
-set +x
-disk="\$(app-ha-disk-by-serial "$serial")"
-key_file="$key_file"
-[[ -s "\$key_file" && ! -L "\$key_file" ]]
-[[ "\$(stat -c '%U:%G:%a' "\$key_file")" == root:root:600 ]]
-if ! cryptsetup isLuks "\${disk}p3"; then
-  printf 'Type GO to format LUKS member $member.\n> '
-  IFS= read -r confirmation
-  [[ "\$confirmation" == GO ]]
-  cryptsetup luksFormat --batch-mode --type luks2 \
-    --key-file="\$key_file" "\${disk}p3"
-fi
-if [[ ! -b "/dev/mapper/$mapper" ]]; then
-  cryptsetup open --key-file="\$key_file" "\${disk}p3" "$mapper"
-fi
-cryptsetup luksHeaderBackup "\${disk}p3" --header-backup-file "/root/luks-header-$member.bin"
-chmod 0600 "/root/luks-header-$member.bin"
-echo "LUKS member $member prepared successfully."
-EOF
+helper="$1"; tool="$2"; member="$3"; key_file="$4"; serial="$5"
+{
+  printf '#!/usr/bin/env bash\nset -Eeuo pipefail\nset +x\n'
+  printf 'exec %q luks-prepare-member --member %q --key-file %q %q\n' \
+    "$tool" "$member" "$key_file" "$serial"
+} >"$helper"
 chmod 0700 "$helper"
 REMOTE
 
@@ -1827,11 +1813,12 @@ REMOTE
       fail "Prepared member $member helper no longer matches configured serial $serial"
     printf '\nMANUAL LUKS ACTION REQUIRED\n'
     printf 'At the target host console, log in as root and run:\n  %s\n' "$helper"
-    printf 'If it already reported success during this setup attempt, do not run it again.\n'
+    printf 'It asks you to type GO. Rerunning it after it reported success is harmless.\n'
     printf 'The helper reads the root-only temporary LUKS key file; it will not prompt for the password.\n'
     wait_for_helper_success "$helper" \
       "LUKS member ${member} was formatted/opened and its header was backed up"
-    remote test -b "/dev/mapper/${mapper}" || fail "Expected mapper /dev/mapper/$mapper is not open"
+    remote "$RPOOL_MIRROR_TOOL" luks-check-member --member "$member" "$serial" ||
+      fail "LUKS member $member is not open on partition 3 of $serial with its header backed up"
 
     confirm_exact \
       "Attach /dev/mapper/${mapper} to rpool, resilver, configure initramfs manual unlock, refresh both ESPs, and export the LUKS header." \
@@ -1840,9 +1827,13 @@ REMOTE
     info "Recovered member $member after its encrypted mapper was already attached; reconciling boot files and backups."
   fi
 
-  remote_script "$serial" "$mapper" "$remote_header" <<'REMOTE'
+  # Record the mapping in crypttab and prove the rebuilt initramfs unlocks it
+  # before the pool depends on it.
+  remote "$RPOOL_MIRROR_TOOL" luks-register --member "$member" "$serial" ||
+    fail "Could not record LUKS member $member for boot unlock"
+  remote_script "$serial" "$mapper" <<'REMOTE'
 set -Eeuo pipefail
-serial="$1"; mapper="$2"; remote_header="$3"
+serial="$1"; mapper="$2"
 disk="$(app-ha-disk-by-serial "$serial")"
 [[ -b "/dev/mapper/$mapper" ]]
 backing="$(cryptsetup status "$mapper" | awk '$1 == "device:" { print $2; exit }')"
@@ -1858,17 +1849,9 @@ while zpool status rpool | grep -q 'resilver in progress'; do sleep 30; done
 zpool status -x rpool | grep -F "pool 'rpool' is healthy"
 pool="$(zpool status -P rpool)"
 awk -v member="/dev/mapper/$mapper" '$1 == member { found++ } END { exit !(found == 1) }' <<<"$pool"
-rm -f "$remote_header"
-cryptsetup luksHeaderBackup "${disk}p3" --header-backup-file "$remote_header"
-chmod 0600 "$remote_header"
-uuid="$(cryptsetup luksUUID "${disk}p3")"
-awk -v name="$mapper" '$1 != name' /etc/crypttab > /etc/crypttab.app-ha-new
-printf '%s UUID=%s none luks,initramfs,nofail\n' "$mapper" "$uuid" >>/etc/crypttab.app-ha-new
-install -m 0600 /etc/crypttab.app-ha-new /etc/crypttab
-rm -f /etc/crypttab.app-ha-new
-update-initramfs -u -k all
-proxmox-boot-tool refresh
 REMOTE
+  remote "$RPOOL_MIRROR_TOOL" luks-backup-headers --member "$member" "$serial" ||
+    fail "Could not back up the LUKS header of member $member"
   copy_from_host "$remote_header" "$local_header"
   chmod 0600 "$local_header"
   remote rm -f "$remote_header" "$helper" "$backup" "$phase_file"
@@ -2049,9 +2032,9 @@ REMOTE
   write_state encrypted-mirror-verified
 }
 
-# Install lib/rpool_mirror.sh on the target as the one copy of the extra-mirror
-# disk, LUKS, and zpool logic. hosts/add_new_disk_vdev.sh installs the same
-# file for mirrors added after setup.
+# Install lib/rpool_mirror.sh on the target as the one copy of the member LUKS
+# and extra-mirror disk, LUKS, and zpool logic. hosts/add_new_disk_vdev.sh and
+# hosts/add_replacement_disk.sh install the same file after setup.
 install_rpool_mirror_tool() {
   local expected actual staged=/root/.app-ha-rpool-mirror.upload
   expected="$(sha256sum "$RPOOL_MIRROR_SOURCE" | awk '{print $1}')"

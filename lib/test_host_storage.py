@@ -291,6 +291,8 @@ errors: No known data errors
             ],
         )
         self.assertEqual(mirror["members"][1]["state"], "FAULTED")
+        self.assertTrue(mirror["replacing"])
+        self.assertFalse(single["replacing"])
         self.assertEqual(single["type"], "disk")
         self.assertEqual(single["members"][0]["path"], "/dev/disk/by-id/nvme-D")
         self.assertEqual(
@@ -508,6 +510,26 @@ class RenderTest(unittest.TestCase):
             )
         text = host_storage.render(luks_layout(), configured, now=NOW)
         self.assertIn("NVME_MIRROR_2_SERIAL_2  S2GONE    NOT IN RPOOL", text)
+
+    def test_registered_esp_outside_rpool_is_a_pending_replacement(self) -> None:
+        devices = json.loads(LUKS_LSBLK)
+        devices["blockdevices"].append(
+            boot_disk(8, "S8NEWBOOT", "CCCC-3333", "crypt-rpool-unused")
+        )
+        layout = luks_layout(
+            lsblk_text=json.dumps(devices),
+            boot_uuids_text="AAAA-1111\nBBBB-2222\nCCCC-3333\n",
+        )
+        self.assertEqual(
+            [disk["serial"] for disk in layout["esp_only_disks"]], ["S8NEWBOOT"]
+        )
+        self.assertNotIn(
+            "S8NEWBOOT", [disk["serial"] for disk in layout["unassigned_disks"]]
+        )
+        self.assertTrue(any(
+            "S8NEWBOOT) holds a registered ESP but is not an rpool member" in item
+            for item in host_storage.attention_items(layout, ())
+        ))
 
     def test_unresolved_member_and_missing_esp_need_attention(self) -> None:
         layout = luks_layout(boot_uuids_text="", realpath=lambda path: path)

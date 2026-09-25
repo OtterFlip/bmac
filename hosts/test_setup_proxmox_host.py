@@ -641,6 +641,25 @@ esac
         ):
             self.assertIn(call, source)
 
+    def test_boot_member_luks_uses_the_shared_rpool_mirror_tool(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        # The same member LUKS code serves hosts/add_replacement_disk.sh.
+        luks = source[source.index("rebuild_luks_member() {") : source.index("encrypted_boot_test() {")]
+        self.assertNotIn("luksFormat", source)
+        self.assertNotIn("update-initramfs", luks)
+        self.assertNotIn("crypttab.app-ha-new", source)
+        for call in (
+            "install_rpool_mirror_tool",
+            "luks-prepare-member --member %q --key-file %q",
+            '"$RPOOL_MIRROR_TOOL" luks-check-member --member',
+            '"$RPOOL_MIRROR_TOOL" luks-register --member',
+            '"$RPOOL_MIRROR_TOOL" luks-backup-headers --member',
+        ):
+            self.assertIn(call, luks)
+        self.assertLess(
+            luks.index("luks-register --member"), luks.index("zpool attach rpool")
+        )
+
     def test_verified_bootstrap_retires_proxmox_first_boot_payload(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn(

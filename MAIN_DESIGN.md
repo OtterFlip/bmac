@@ -178,7 +178,8 @@ Expected to work on macOS, not yet run there against a cluster:
 - `diagnostics/show_proxmox_host_state.sh`. It uses the same strict SSH
   helpers as `show_prod_vm_state.sh`, plus local `python3`, and is covered by
   fake-SSH unit tests only;
-- `hosts/add_new_disk_vdev.sh`, `hosts/decommission_disks.sh`, and
+- `hosts/add_new_disk_vdev.sh`, `hosts/add_replacement_disk.sh`,
+  `hosts/decommission_disks.sh`, and
   `hosts/list_disks_ready_for_physically_removal.sh`. Their local work is the
   config load, `python3`, and SSH; covered by fake-SSH unit tests only, and
   not yet run against real disks;
@@ -641,10 +642,13 @@ One through five NVMe mirror pairs are supported:
 - LUKS conversion degrades mirror 1 one member at a time. The script records a GPT
   backup and partition start, detaches the ZFS member, expands partition 3
   into the reserved tail, clears only old ZFS signatures, and prepares LUKS2
-  through a helper run at the target host console.
+  through a helper run at the target host console. The helper, the crypttab
+  entry, and the initramfs check are `lib/rpool_mirror.sh` member commands,
+  the same ones `hosts/add_replacement_disk.sh` uses.
 - Converted members are `/dev/mapper/crypt-rpool-a` and
-  `/dev/mapper/crypt-rpool-b`. Each is reattached, resilvered, recorded once
-  in `/etc/crypttab`, and both ESPs are refreshed.
+  `/dev/mapper/crypt-rpool-b`. Each is recorded once in `/etc/crypttab`, the
+  rebuilt initramfs is proven to unlock it, and it is reattached and
+  resilvered with both ESPs refreshed.
 - Selected boot testing uses three reboots in either mode. It boots from each
   mirror-1 member alone, restoring and resilvering after each simulation, then
   reboots the healthy final layout. LUKS testing begins only after both members
@@ -782,8 +786,8 @@ backup or security boundary.
 
 ## The main workflows
 
-There are eight operator workflows in this project: five that build hosts and
-guests, and three (6-8) that grow or shrink a host's storage later:
+There are nine operator workflows in this project: five that build hosts and
+guests, and four (6-9) that grow, shrink, or repair a host's storage later:
 
 1. `hosts/setup_proxmox_host.sh` — destructively install or reconcile
    one `moxN`, create or join the cluster, and install storage, networking,
@@ -853,14 +857,22 @@ guests, and three (6-8) that grow or shrink a host's storage later:
    completes, close the removed pair's LUKS mappings, update crypttab and the
    initramfs, comment the pair out of `env/moxN.conf`, and list its disks by
    serial as safe to pull.
+9. `hosts/add_replacement_disk.sh` — after a failed mirror member's disk was
+   pulled and an identical-capacity disk installed, put the new disk into
+   that mirror (`zpool replace`, or `zpool attach` for a mirror detached to
+   one disk) and record it in `env/moxN.conf`. A boot-mirror replacement
+   first gets the survivor's partition table and its own registered,
+   in-sync ESP; a LUKS replacement gets the shared passphrase at the host
+   console. It starts the resilver without waiting for it.
 
-Workflows 6-8 are described in
+Workflows 6-9 are described in
 [`hosts/README.md`](hosts/README.md#adding-and-decommissioning-rpool-disks).
 They share `lib/rpool_mirror.sh` with host setup, so there is one copy of the
-logic that adds a mirror.
+logic that adds a mirror or encrypts a mirror member.
 
 ```bash
 hosts/add_new_disk_vdev.sh --host moxN
+hosts/add_replacement_disk.sh --host moxN
 hosts/decommission_disks.sh --host moxN
 hosts/list_disks_ready_for_physically_removal.sh --host moxN
 ```
@@ -1005,16 +1017,18 @@ scripts/libraries named in their descriptions.
   Proxmox, QEMU, ZFS, and block-device inspection tools.
 - `lib/host_storage.py` collects a read-only JSON layout of one host's
   `rpool` (vdevs, member disk serials through LUKS, the boot/ESP vdev,
-  removal progress, disks outside the pool, open rpool LUKS mappings,
-  crypttab entries, zvols) and renders it for
-  `diagnostics/show_proxmox_host_state.sh` and the disk workflows.
+  removal progress, disks outside the pool, registered ESPs on disks outside
+  the pool, open rpool LUKS mappings, crypttab entries, zvols) and renders it
+  for `diagnostics/show_proxmox_host_state.sh` and the disk workflows.
 - `lib/rpool_mirror.sh` is the single copy of the host-side mirror logic
-  (disk checks, console LUKS preparation, crypttab/initramfs, `zpool add`, and
-  LUKS retirement) used by host setup and workflows 6 and 8.
+  (disk checks, console LUKS preparation, crypttab/initramfs, `zpool add`,
+  boot-disk partitioning and ESPs, member replacement, and LUKS retirement)
+  used by host setup and workflows 6, 8, and 9.
 - `lib/storage_state.py` keeps trim, scrub, and vdev-removal records on the
-  host; `lib/mox_conf_mirrors.py` records and retires `NVME_MIRROR_N` pairs in
-  a workstation's `env/moxN.conf`; `lib/disk_workflows.sh` holds the
-  workstation plumbing shared by workflows 6-8.
+  host; `lib/mox_conf_mirrors.py` records, replaces, and retires
+  `NVME_MIRROR_N` entries in a workstation's `env/moxN.conf`;
+  `lib/disk_workflows.sh` holds the workstation plumbing shared by workflows
+  6-9.
 - `lib/test_shared_libs.py`, `lib/test_haproxy_routes.py`,
   `lib/test_process_deferred_cleanup.py`, and `lib/test_host_storage.py` test
   configuration, pmxcfs semantics, registry/IPAM, route rendering,
@@ -2556,21 +2570,27 @@ Coverage by test helper:
   GUID protection, first-host no-op, restart finalization, and syntax.
 - `lib/test_host_storage.py`: `zpool status` topology, resilver nesting and
   auxiliary sections, removal progress, LUKS and by-id member resolution to
-  disk serials, boot/ESP vdev detection, disks outside `rpool`, zvol
-  allocation and snapshots, configured-serial comparison, and render output.
+  disk serials, boot/ESP vdev detection, disks outside `rpool`, registered
+  ESPs outside `rpool`, zvol allocation and snapshots, configured-serial
+  comparison, and render output.
 - `lib/test_rpool_mirror.py`: the shared mirror tool against fake disk, LUKS,
   zpool, and initramfs commands: disk safety checks, the passphrase proven
   before any disk is touched, reuse or refusal of existing LUKS, the host's
   crypttab form, no `zpool add` unless the initramfs unlocks the new disks,
-  ashift uniformity, unencrypted adds, and LUKS retirement.
-- `lib/test_mox_conf_mirrors.py`: assigning and commenting out `NVME_MIRROR`
-  pairs with `lib/config.sh` accepting the resulting gaps, and the host
-  storage-state records.
-- `hosts/test_disk_workflows.py`: workflows 6-8 end to end against a fake SSH
+  ashift uniformity, unencrypted adds, LUKS retirement, setup's in-place boot
+  member conversion, and member replacement: the survivor's partition table
+  copied (never written), a grub or uefi ESP matching the survivor's, no
+  `zpool replace` until that ESP is in sync, closing a pulled disk's leftover
+  mapping, refusing a failed disk that is still installed, and `zpool attach`
+  for a mirror detached to one disk.
+- `lib/test_mox_conf_mirrors.py`: assigning, replacing one member of, and
+  commenting out `NVME_MIRROR` pairs with `lib/config.sh` accepting the
+  results, and the host storage-state records.
+- `hosts/test_disk_workflows.py`: workflows 6-9 end to end against a fake SSH
   host and guests: console hand-off, resume, capacity checks, the five-mirror
   limit, related-staging refusal, trim and scrub reuse within 24 hours,
-  forced replication, minimum-free-space rules, removal records, and
-  retirement.
+  forced replication, minimum-free-space rules, removal records, retirement,
+  and boot, extra, and unencrypted member replacement.
 - `diagnostics/test_show_proxmox_host_state.py`: the host report against a
   fake SSH that rejects any non-read-only command, attention exit status, the
   optional `moxN.conf` serial comparison, and usage errors.
