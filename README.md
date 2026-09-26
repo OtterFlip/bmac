@@ -20,7 +20,7 @@ You're not the only one who noticed that the public clouds aren't really necessa
 - Full At-Rest Disk Encryption.  Many webapps need to satisfy security requirements and so BMAC has the option to configure all cluster hosts with disk-level encryption using LUKS.  When this option is enabled, you must enter a password on the hosts during host boot.  All mirror members for all mirror sets (each mirror is called a vdev) share the same password, so only one password must be entered at boot time.
 - Software RAID1, Including OS Boot Volume.  Even if your servers don't have a hardware RAID controller, BMAC will configure them with ZFS RAID1, mirroring each set of identical-capacity disks. During host setup, BMAC also offers the option to fully-test failure scenarios for each mirror member of the boot disk RAID1 set in order to prove host bootability.  BMAC also ensures that each boot disk has a mirrored EFI System Partition (ESP), in addition to mirroring the ZFS partition.  For servers that support host-swap of NVMe disks, this enables each server to endure a single-member disk failure for each mirror set without any downtime or data loss.  Simply pull the failed disk, insert an identical-capacity replacment, and resilver the mirror set.
 - Dell iDRAC9 IPMI support.  BMAC has been tested on Dell Poweredge R640 'Dual Intel Xeon Gold 6138 40 core/80 thread' hosts at FiberState, and one of the host setup script options is to use iDRAC to simplify hardware discovery. This is not required, and a hardware discovery script is provided in cases where you're using some other type of host.
-- BMAC's architecture supports decommissioning hard disks you no longer need. Scripts for this have not yet been written, yet the possibility is there by doing the following:  Deleting files within the production VM's EXT4 filesystem, then run a TRIM operation within the production VM to send SCSI opcodes to its disk, which pass through to the host, notifying it of blocks which are no longer in use on the guest's zvol, this causes the ZFS pool on the host to mark those blocks free. When sufficient space is free then vdevs on the host can be removed from the host ZFS pool which causes ZFS to move any remaining allocated blocks on such a vdev away to other vdevs, then the disks for those removed vdevs can be physically removed from the host.  Such a situation may occur if you have, for instance, moved much of your data to CEPH, or elsewhere, and need to decommission drives you no longer need.  Future plans for BMAC include tooling to provision and manage an integrated CEPH cluster.
+- BMAC supports decommissioning disk capacity you no longer need. The disk workflows trim affected guests, force replication, scrub the pool, evacuate an eligible non-boot vdev, finalize its retirement, and identify the exact disks that are safe to remove physically. This can be useful after data has moved elsewhere and a host no longer needs all of its installed capacity.
 
 ## What You Need to Use BMAC
 
@@ -43,14 +43,14 @@ You're not the only one who noticed that the public clouds aren't really necessa
 - Tailscale
 - Ubuntu Server x64 (default OS for prod and staging guests)
 
-## Step-by-Step Guide
+## Step-by-Step Host Setup Guide
 
 Prepare for Proxmox Host Setup
 
 - If you're using iDRAC, make sure you can access it.  Additional tips on setting up iDRAC with FiberState are provided in a section below.
 - Read the top of `env/secrets_dot_env` and make a copy of it as the instructions direct, to `env/secrets.env` and choose your password values.  If you're using iDRAC then make sure all of your hosts use the same iDRAC password and set it in your `env/secrets.env` file.
 - Read the top of `env/mox1_dot_conf` and `env/mox2_dot_conf` and make a copy of each, to `env/mox1.conf` and `env/mox2.conf` which you should fill in with your actual host values.
-- Set appropriate values in `env/cluster.conf` and `env/mox1` and `env/mox2` relevant to your hardware and network. The default values are for hosts with 128GB RAM where each host has two identical 2TB NVMe disks and 40 cores capable of 80 threads (so 80 vCPUs), and where they share a private network connection on subnet 10.213.0.0/24, and where each host has a public IP with an intenet gateway.  You'll need to adjust all of the IP address and subnet values to be accurate for your own hosts' IP addresses and subnet.  If your hosts have a different hardware level (CPU, RAM, storage) then you'll need to adjust the provisioning values for storage, CPU and RAM to be suitable for your hardware and their expected workload, for the production and staging guests.  You must also determine the serial numbers of your host's NVMe drives to be used for the initial OS/boot disk mirror.  If you're using iDRAC you can display these serial numbers in the iDRAC web UI.  When you run the `hosts/setup_proxmox_host.sh` script to set up each of your hosts, if you choose to use iDRAC then it will determine the byte capacity values for you, however if you're not using iDRAC then you should use the `hosts/inventory_disks.sh` script (run this in a Live/Trial Linux CD/USB in non-install mode) to obtain the disk serial number and byte capacity values to be set in the `env/mox1.conf` and `env/mox2.conf` files.  Be sure to also set the PROXMOX_PUBLIC_MAC and PROXMOX_SECONDARY_MAC values in your moxN.conf files to match the MAC addresses on your hardware for their primary and seconary NICs.
+- Set appropriate values in `env/cluster.conf`, `env/mox1.conf`, and `env/mox2.conf` for your hardware and network. The example values are for hosts with 128GB RAM, two identical 2TB NVMe disks, and 40 cores/80 threads, with a shared private network on `10.213.0.0/24` and a separate public IP and Internet gateway per host. Adjust all network, storage, CPU, and RAM values for your environment and expected production/staging workload. Determine the serial numbers of the NVMe disks for the initial boot mirror. iDRAC can provide the byte capacity values (if you have already set the serial number values - which you can obtain visually in the iDRAC console or by running `hosts/inventory_disks` in a Live Linux CD env) and lets `hosts/setup_proxmox_host.sh` determine capacities; without iDRAC, boot the target into a reachable Live/Trial Linux environment and run `hosts/inventory_disks.sh --host moxN` from the administrator workstation to obtain exact serial and byte-capacity values for the host's `env/moxN.conf`. Also set `PROXMOX_PUBLIC_MAC` and `PROXMOX_SECONDARY_MAC` to the permanent MAC addresses of the host's primary and secondary NICs.
 - Download the Proxmox VE x64 installer ISO to your dev workstation (the machine from which you'll be running `hosts/setup_proxmox_host.sh`) and set its path and SHA256 hash value in `env/cluster.conf` for PROXMOX_ISO_FILE_FULL_PATH and PROXMOX_ISO_FILE_SHA256.
 - Add your (and another colleague's) SSH public key to the ADMIN_1_PUBLIC_SSH_KEY and ADMIN_2_PUBLIC_SSH_KEY values in `env/cluster.conf`
 - Follow the instructions in `qdevice/QDEVICE_MANUAL_SETUP.MD` to set up your qdevice and add it to your tailscale network. Before doing that you'll need to follow the Tailscale setup steps below to add the appropriate tailscale tags and access policies.
@@ -62,7 +62,7 @@ After our cluster is configured, you should be able to access the Proxmox admin 
 
 You can now use the `guests/prod/create_prod_vm.sh` script to create your first production VM to host your application, which will deploy a blank/vanilla Ubuntu x64 OS to that VM and setup SSH access, and nothing else.  You can always tear it back down if you're not satisfied with it using `guests/prod/destroy_prod_vm.sh`.  If you like, you can also deploy a test "hello world" static webapp to your new production VM using `app/deploy_hello_app_to_prod.sh`.
 
-After creating a production VM, you can test creation and teardown of a staging VM, based on that production VM, using the `guests/staging/create_staging.vm` and `guests/staging/destroy_staging_vm.sh` scripts.
+After creating a production VM, you can test creation and teardown of a staging VM, based on that production VM, using the `guests/staging/create_staging_vm.sh` and `guests/staging/destroy_staging_vm.sh` scripts.
 
 ### Instructions for Cloudflare Setup
 
@@ -260,6 +260,272 @@ Since host setup must be done using a Debian workstation, there's a good chance 
 ### Growing or shrinking a host's storage
 
 To add two new disks to a host's ZFS pool later, run `hosts/add_new_disk_vdev.sh`. After a failed disk is pulled and an identical one installed, run `hosts/add_replacement_disk.sh` to put it back into its mirror. To give up a pair of disks, run `hosts/decommission_disks.sh`, then `hosts/inventory_disks.sh` until it finalizes the retirement and lists the disks as safe to pull. See [`hosts/README.md`](hosts/README.md#adding-and-decommissioning-rpool-disks) for the details, including the manual reboot test after adding encrypted disks.
+
+## Common Tasks
+
+Run these commands from the repository root on an administrator workstation.
+Scripts that target a Proxmox host prompt for its `moxN` name and default to
+`mox1`; pass `--host moxN` to select it non-interactively. Read every plan and
+confirmation before allowing a destructive operation.
+
+### Checking Cluster, Host, Guest, and Disk State
+
+Use the read-only diagnostics before and after maintenance:
+
+```bash
+./diagnostics/show_cluster_state.sh
+./diagnostics/show_proxmox_host_state.sh --host mox1
+./diagnostics/show_prod_vm_state.sh prod1
+./hosts/inventory_disks.sh --host mox1
+```
+
+`show_cluster_state.sh` reports cluster membership, quorum, networking,
+services, storage, and registered guests. `show_proxmox_host_state.sh` gives a
+detailed report for one host, and `show_prod_vm_state.sh` checks one production
+VM across HA, replication, routing, storage, QGA, and SSH.
+
+`inventory_disks.sh` prints every physical disk with its serial number and
+exact byte capacity, every imported ZFS pool vdev and member, and disks that
+are not in use and are safe to remove physically. It normally makes no
+changes. If a removal started by `decommission_disks.sh` has finished, it
+identifies the affected disks and asks permission before finalizing their
+retirement. Declining still produces the complete inventory without making
+retirement changes.
+
+### Creating or Removing a Production VM
+
+Start with the read-only preflight, then run the creator and answer its
+placement, sizing, purpose, domain, and installer questions:
+
+```bash
+./guests/prod/create_prod_vm.sh --dry-run
+./guests/prod/create_prod_vm.sh
+```
+
+The workflow allocates the next `prodN`, installs its OS, verifies guest
+identity and SSH, creates replication to every selected placement host,
+configures HA, and publishes its routes. It can safely resume its own
+incomplete allocation after a failure.
+
+To permanently remove a production VM, inspect the exact destruction plan
+first:
+
+```bash
+./guests/prod/destroy_prod_vm.sh --dry-run prod1
+./guests/prod/destroy_prod_vm.sh prod1
+```
+
+This removes the VM, its HA and replication configuration, routes, owned
+volumes, and registry allocation. It is intentionally destructive.
+
+### Creating or Removing a Production-Derived Staging VM
+
+Preview and then create a staging VM from a selected production VM:
+
+```bash
+./guests/staging/create_staging_vm.sh --dry-run
+./guests/staging/create_staging_vm.sh
+```
+
+The script selects an eligible standby placement host and creates a stopped
+`stageNprodN` linked clone. Use `--sanitizer /absolute/path/to/script.sh` when
+application-specific data or configuration must be changed before guest
+networking starts. Review and start the guest when prompted.
+
+Destroy staging guests as soon as testing is complete so their snapshots do
+not continue pinning production pool space:
+
+```bash
+./guests/staging/destroy_staging_vm.sh --dry-run stage1prod1
+./guests/staging/destroy_staging_vm.sh stage1prod1
+```
+
+Omit `stage1prod1` to select a registered staging guest interactively.
+
+### Deploying the Example Application
+
+After creating a production VM and configuring the Cloudflare origin
+certificate described above, run:
+
+```bash
+./app/deploy_hello_app_to_prod.sh
+```
+
+The script prompts for a registered `prodN` and certificate/key paths, checks
+direct SSH, installs or updates NGINX, and configures the production and
+possible staging hostnames. It is an example deployment, not a general BMAC
+application deployer.
+
+### Updating BMAC Runtime Code on Existing Hosts
+
+When checked-in runtime helpers or hooks have changed, preview drift and then
+deploy the validated bundle atomically to every configured online node:
+
+```bash
+./hosts/update_cluster_runtime.sh --dry-run
+./hosts/update_cluster_runtime.sh
+```
+
+The second command requires `GO`; use `--yes` only in controlled automation.
+This updates BMAC runtime code, not Proxmox packages or host configuration.
+
+### Adding More Storage: Adding a Mirrored Vdev
+
+1. Physically install two disks with identical exact byte capacity.
+2. Confirm that both appear unused in:
+
+   ```bash
+   ./hosts/inventory_disks.sh --host mox1
+   ```
+
+3. Add them as one top-level mirror:
+
+   ```bash
+   ./hosts/add_new_disk_vdev.sh --host mox1
+   ```
+
+The script asks which disks to use and rechecks their identity immediately
+before erasing them. On an encrypted host, follow its instructions at the
+physical or iDRAC console to apply the existing shared rpool passphrase; the
+passphrase never crosses SSH. The script updates crypttab and initramfs before
+adding the mirror. BMAC supports at most five rpool mirrors including the boot
+mirror.
+
+After an encrypted addition, wait for the operation to complete, gracefully
+migrate production guests away, and perform the instructed manual reboot test.
+Then inspect the host again with `show_proxmox_host_state.sh`.
+
+### Replacing a Failed Mirror Member
+
+First inspect the failed vdev with `inventory_disks.sh` and `zpool status
+rpool` on the host. This workflow handles a member whose failed disk has
+already been physically removed; it deliberately refuses a failed disk that
+is still installed.
+
+1. Pull the failed disk and install a replacement with exactly the same byte
+   capacity as the surviving member.
+2. Run:
+
+   ```bash
+   ./hosts/add_replacement_disk.sh --host mox1
+   ```
+
+3. Select the degraded mirror and replacement disk, then follow any console
+   instructions for the shared LUKS passphrase.
+4. Monitor the background resilver with:
+
+   ```bash
+   ./diagnostics/show_proxmox_host_state.sh --host mox1
+   ```
+
+For a boot-mirror member, the script also copies the partition layout and
+creates and verifies a registered ESP. After resilvering finishes, gracefully
+migrate production guests away and perform the instructed manual reboot test.
+An interrupted replacement can be resumed by rerunning the same command.
+
+### Decommissioning Unnecessary Disk Capacity
+
+1. Delete unnecessary files inside every production VM that runs on or
+   replicates to the target host.
+2. Destroy related staging VMs with `destroy_staging_vm.sh`; their clones and
+   snapshots can pin blocks that must be freed.
+3. Start one non-boot vdev removal:
+
+   ```bash
+   ./hosts/decommission_disks.sh --host mox1
+   ```
+
+The script validates staging state, trims affected production filesystems,
+forces replication, scrubs rpool, asks how much free space must remain (at
+least 50 GiB), and offers only eligible non-boot vdevs. ZFS evacuation then
+runs in the background.
+
+Run the inventory repeatedly to check progress:
+
+```bash
+./hosts/inventory_disks.sh --host mox1
+```
+
+When evacuation is complete, the inventory identifies the exact disks and
+asks permission to close their LUKS mappings, update crypttab/initramfs, and
+mark them retired. Physically pull only disks shown under **Disks eligible for
+safe physical removal**. Run `decommission_disks.sh` once per vdev.
+
+## Less Common Tasks
+
+### Adding Another Host to the Cluster
+
+The new host must use the next contiguous name (`mox3` after `mox1` and
+`mox2`), must not exceed `MAX_MOX_HOSTS`, and must fit the host, replication,
+and HAProxy ranges already configured in `env/cluster.conf`.
+
+1. Copy `env/mox1_dot_conf` or `env/mox2_dot_conf` to the new
+   `env/moxN.conf` name and set the new host's disk, NIC, public/private
+   network, iDRAC, capacity, and HAProxy values. This file is used only for
+   initial setup and retries before setup completes.
+2. Ensure every existing cluster node is online and healthy:
+
+   ```bash
+   ./diagnostics/show_cluster_state.sh
+   ```
+
+3. From a Debian-based workstation, run setup using the same storage policy
+   as the existing hosts:
+
+   ```bash
+   ./hosts/setup_proxmox_host.sh --host mox3 --encrypt
+   # or, for a clear-storage cluster:
+   ./hosts/setup_proxmox_host.sh --host mox3 --no-encrypt
+   ```
+
+   Choose `--run-boot-tests` or `--skip-boot-tests` explicitly when desired.
+   The setup workflow temporarily reconciles QDevice quorum while joining the
+   node and requires all existing nodes to remain online.
+
+4. Verify the completed cluster and synchronize the current BMAC runtime:
+
+   ```bash
+   ./diagnostics/show_cluster_state.sh
+   ./hosts/update_cluster_runtime.sh --dry-run
+   ./hosts/update_cluster_runtime.sh
+   ```
+
+Adding the node does not automatically change any existing production VM's
+placement.
+
+### Migrating Workloads to Hosts with More Resources
+
+First add and validate the new host as described above. Before moving a
+production VM, its HA placement, replication targets, registry placement, and
+route policy must all agree and an initial replication to the new host must
+finish successfully.
+
+The repository currently has no high-level operator workflow that safely
+changes placement for an existing production VM. Do not change only the
+registry or only the Proxmox HA rule: that would leave the other control
+planes inconsistent. Until a placement-reconfiguration workflow is added,
+treat this as an advanced manual operation using the Proxmox UI/CLI and the
+registry tooling, and validate each stage with:
+
+```bash
+./diagnostics/show_cluster_state.sh
+./diagnostics/show_prod_vm_state.sh prod1
+```
+
+The safe operational order is:
+
+1. Add the new host to placement and replication without removing either
+   existing placement host.
+2. Wait for and verify a complete initial replication to the new host.
+3. Destroy or stop staging guests on the intended destination.
+4. Gracefully stop or HA-migrate the production VM to the new host, then
+   verify it is healthy before serving traffic.
+5. Remove the old host from placement only after HA, replication, registry,
+   and routing state agree, while retaining at least two valid production
+   placement hosts.
+6. Remove or decommission the old cluster host only after no production VM,
+   replica, staging VM, HA rule, route, or deferred cleanup depends on it and
+   cluster/QDevice quorum remains healthy.
 
 ## A Basic CI/CD Workflow
 
