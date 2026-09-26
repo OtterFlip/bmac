@@ -34,8 +34,7 @@ Adds two new disks to the chosen host's rpool as one new mirror vdev:
      rpool member, and formats both disks with it;
   3. records the disks in /etc/crypttab, rebuilds and verifies the initramfs,
      and adds them to rpool;
-  4. records their serials and capacities in env/moxN.conf as the next free
-     NVME_MIRROR_N pair, and prints them.
+  4. prints the new disks' serials and exact byte capacities.
 
 A rerun resumes a mirror whose disks were prepared but not yet added. rpool
 holds at most five mirrors, the boot mirror included.
@@ -65,7 +64,7 @@ dw_init
 dw_select_host "$HOST_ARG"
 dw_install_tool
 LAYOUT="${DW_RUN_DIR}/layout.json"
-dw_collect_layout "$LAYOUT"
+dw_inventory "$LAYOUT"
 
 dw_section "Current rpool on $DW_HOST"
 dw_render_layout "$LAYOUT"
@@ -76,47 +75,20 @@ ENCRYPTION="$(dw_json "$LAYOUT" '("luks" if d["vdevs"] and all(v["luks"] for v i
   dw_die "rpool on $DW_HOST mixes LUKS and unencrypted vdevs; resolve that first"
 VDEV_COUNT="$(dw_json "$LAYOUT" 'len(d["vdevs"])')"
 
-# Pair slots already used by env/moxN.conf, or by LUKS mappings and crypttab
-# entries on the host. A decommissioned pair's slot is free again only after
-# hosts/list_disks_ready_for_physically_removal.sh retired it.
-CONF_PAIRS="[]"
-CONF_PATH="$(dw_conf_path)"
-if [[ -f "$CONF_PATH" ]]; then
-  CONF_PAIRS="$(python3 "$DW_CONF_MIRRORS" show "$CONF_PATH" |
-    python3 -c 'import json,sys; print(json.dumps(sorted(int(k) for k in json.load(sys.stdin))))')" ||
-    dw_die "could not read NVMe mirror entries from $CONF_PATH"
-else
-  printf '\nNOTE: %s is not on this workstation; the new serials will be printed for you to record.\n' \
-    "$CONF_PATH"
-fi
-
-# Record a new pair in env/moxN.conf and print its lines. The host keeps its
-# record of the addition until that succeeds, so a rerun can retry it.
+# Print a completed addition and clear its temporary host-side resume record.
 record_new_pair() {
-  local pair="$1" serial_1="$2" serial_2="$3" capacity_1="$4" capacity_2="$5" status=0
-  dw_edit_conf assign --pair "$pair" \
-    --serial "$serial_1" --serial "$serial_2" \
-    --capacity "$capacity_1" --capacity "$capacity_2" \
-    --note "Added to rpool by hosts/add_new_disk_vdev.sh on $(date +%Y-%m-%d)" ||
-    status=$?
-  case "$status" in
-    0) printf 'Recorded NVME_MIRROR_%s in %s.\n' "$pair" "$CONF_PATH" ;;
-    3) printf '%s is not on this workstation; add the lines below to it.\n' "$CONF_PATH" ;;
-    *) printf 'WARNING: %s was not updated; add the lines below to it by hand, or rerun this script.\n' \
-      "$CONF_PATH" >&2 ;;
-  esac
+  local pair="$1" serial_1="$2" serial_2="$3" capacity_1="$4" capacity_2="$5"
   printf '\nNew mirror disks on %s:\n' "$DW_HOST"
-  printf '  NVME_MIRROR_%s_SERIAL_1=%s\n' "$pair" "$serial_1"
-  printf '  NVME_MIRROR_%s_SERIAL_2=%s\n' "$pair" "$serial_2"
-  printf '  NVME_MIRROR_%s_CAPACITY_BYTES_1=%s\n' "$pair" "$capacity_1"
-  printf '  NVME_MIRROR_%s_CAPACITY_BYTES_2=%s\n' "$pair" "$capacity_2"
-  if ((status == 0 || status == 3)); then
-    dw_state clear-addition --pair "$pair" ||
-      printf 'WARNING: could not clear the addition record on %s\n' "$DW_HOST" >&2
-  fi
+  printf '  mirror slot:    %s\n' "$pair"
+  printf '  serial 1:       %s\n' "$serial_1"
+  printf '  capacity bytes: %s\n' "$capacity_1"
+  printf '  serial 2:       %s\n' "$serial_2"
+  printf '  capacity bytes: %s\n' "$capacity_2"
+  dw_state clear-addition --pair "$pair" ||
+    printf 'WARNING: could not clear the addition record on %s\n' "$DW_HOST" >&2
 }
 
-# A pair an earlier run added to rpool but did not record in env/moxN.conf.
+# A pair an earlier run added to rpool but did not finish reporting.
 STATE="${DW_RUN_DIR}/state.json"
 dw_state show >"$STATE" || dw_die "could not read the storage records on $DW_HOST"
 mapfile -t ADDED < <(python3 - "$LAYOUT" "$STATE" <<'PY'
@@ -133,7 +105,7 @@ PY
 if ((${#ADDED[@]} > 0)); then
   for row in "${ADDED[@]}"; do
     IFS=$'\t' read -r added_pair added_1 added_2 added_capacity_1 added_capacity_2 <<<"$row"
-    dw_section "Recording NVME_MIRROR_$added_pair, which an earlier run added to rpool"
+    dw_section "Mirror slot $added_pair, which an earlier run added to rpool"
     record_new_pair "$added_pair" "$added_1" "$added_2" "$added_capacity_1" "$added_capacity_2"
   done
   printf '\nRun this script again to add another mirror.\n'
@@ -147,7 +119,7 @@ import json
 import re
 import sys
 layout = json.load(open(sys.argv[1]))
-# A removed vdev keeps its mappings open until the list script retires them;
+# A removed vdev keeps its mappings open until inventory_disks.sh retires them;
 # those disks are leaving, not being added.
 leaving = {
     member["serial"]
@@ -188,12 +160,12 @@ fi
 if [[ "$RESUMING" == false ]]; then
   ((VDEV_COUNT < MAX_MIRRORS)) ||
     dw_die "rpool on $DW_HOST already has $VDEV_COUNT mirror vdevs, the most BMAC supports; decommission one first"
-  PAIR="$(python3 - "$LAYOUT" "$CONF_PAIRS" <<'PY'
+  PAIR="$(python3 - "$LAYOUT" "$STATE" <<'PY'
 import json
 import re
 import sys
 layout = json.load(open(sys.argv[1]))
-used = set(json.loads(sys.argv[2]))
+used = {int(pair) for pair in json.load(open(sys.argv[2])).get("additions", {})}
 for row in layout["luks_mappings"] + layout["crypttab"]:
     match = re.fullmatch(r"crypt-rpool-mirror([2-5])-[12]", row["mapper"])
     if match:
@@ -203,7 +175,7 @@ print(free[0] if free else "")
 PY
 )"
   [[ -n "$PAIR" ]] ||
-    dw_die "NVME_MIRROR slots 2-5 are all in use in $CONF_PATH or on $DW_HOST"
+    dw_die "extra-mirror slots 2-5 are all in use on $DW_HOST"
 
   dw_section "Disks on $DW_HOST that are not part of rpool"
   mapfile -t CANDIDATES < <(python3 - "$LAYOUT" "$STATE" <<'PY'
@@ -215,7 +187,7 @@ leaving = {
     for member in row["members"]
 }
 for disk in json.load(open(sys.argv[1]))["unassigned_disks"]:
-    if disk["serial"] in leaving:
+    if disk["serial"] in leaving or disk.get("in_use_reasons"):
         continue
     contents = (
         "mounted" if disk["mounted"]
@@ -287,9 +259,9 @@ PY
   fi
 
   if [[ "$ENCRYPTION" == luks ]]; then
-    confirm_exact "ERASE disks $SERIAL_1 and $SERIAL_2 on $DW_HOST, encrypt both with the shared rpool LUKS passphrase (typed at the host console), and add them to rpool as a new mirror recorded as NVME_MIRROR_${PAIR}."
+    confirm_exact "ERASE disks $SERIAL_1 and $SERIAL_2 on $DW_HOST, encrypt both with the shared rpool LUKS passphrase (typed at the host console), and add them to rpool as a new mirror."
   else
-    confirm_exact "ERASE disks $SERIAL_1 and $SERIAL_2 on $DW_HOST and add them to its unencrypted rpool as a new mirror recorded as NVME_MIRROR_${PAIR}."
+    confirm_exact "ERASE disks $SERIAL_1 and $SERIAL_2 on $DW_HOST and add them to its unencrypted rpool as a new mirror."
   fi
 fi
 
@@ -371,7 +343,7 @@ else
     dw_die "adding the unencrypted mirror failed"
 fi
 
-dw_section "Recording the new mirror"
+dw_section "New mirror added"
 record_new_pair "$PAIR" "$SERIAL_1" "$SERIAL_2" "$CAPACITY_1" "$CAPACITY_2"
 if [[ -n "$HEADER_1" ]]; then
   printf 'LUKS header backups: %s and %s\n' "$HEADER_1" "$HEADER_2"

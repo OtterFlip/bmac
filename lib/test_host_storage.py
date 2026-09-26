@@ -14,6 +14,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -308,6 +309,29 @@ errors: No known data errors
 
 
 class LayoutTest(unittest.TestCase):
+    def test_collect_can_inventory_disks_before_rpool_exists(self) -> None:
+        lsblk = json.dumps(
+            {"blockdevices": [disk("/dev/nvme0n1", "FRESH", 1000204886016)]}
+        )
+
+        def command(argv):
+            if argv[0] == "lsblk":
+                return lsblk
+            raise host_storage.StorageError("rpool is not imported")
+
+        with (
+            mock.patch.object(host_storage, "run_command", side_effect=command),
+            mock.patch.object(host_storage, "BOOT_UUIDS_FILE", Path("/missing-boot-uuids")),
+            mock.patch.object(host_storage, "CRYPTTAB_FILE", Path("/missing-crypttab")),
+        ):
+            layout = host_storage.collect(allow_missing_pool=True)
+        self.assertEqual(layout["vdevs"], [])
+        self.assertEqual(layout["imported_pool_vdevs"], [])
+        self.assertEqual(
+            [row["serial"] for row in layout["physically_removable_disks"]],
+            ["FRESH"],
+        )
+
     def test_luks_members_resolve_to_serials_and_esp(self) -> None:
         layout = luks_layout()
         vdevs = {vdev["name"]: vdev for vdev in layout["vdevs"]}
@@ -334,6 +358,10 @@ class LayoutTest(unittest.TestCase):
         )
         self.assertEqual(layout["pool"]["dataset_available"], 4600000000000)
         self.assertTrue(layout["pool"]["removal_in_progress"])
+        self.assertEqual(
+            [(row["pool"], row["name"]) for row in layout["imported_pool_vdevs"]],
+            [("rpool", "mirror-0"), ("rpool", "mirror-1"), ("rpool", "mirror-2")],
+        )
 
     def test_luks_mappings_and_crypttab_are_reported(self) -> None:
         layout = luks_layout(
@@ -387,6 +415,14 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(unassigned["/dev/nvme6n1"]["partitions_or_holders"], 0)
         self.assertEqual(unassigned["/dev/nvme7n1"]["partitions_or_holders"], 1)
         self.assertFalse(unassigned["/dev/nvme7n1"]["mounted"])
+        self.assertEqual(len(layout["all_disks"]), 8)
+        self.assertEqual(
+            {disk["serial"] for disk in layout["physically_removable_disks"]},
+            {"S6BLANK", "S7USED"},
+        )
+        boot = next(disk for disk in layout["all_disks"] if disk["serial"] == "S0BOOTA")
+        self.assertIn("member of an imported ZFS pool", boot["in_use_reasons"])
+        self.assertIn("registered Proxmox boot ESP", boot["in_use_reasons"])
 
     def test_clear_pool_resolves_by_id_paths(self) -> None:
         status = """\

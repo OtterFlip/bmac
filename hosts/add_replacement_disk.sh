@@ -38,7 +38,7 @@ Replaces the pulled member of one rpool mirror on the chosen host:
      for the shared rpool LUKS passphrase, proves it unlocks every rpool member,
      and encrypts the new disk with it, then records the disk for boot unlock;
   4. starts resilvering the new disk into the mirror (without waiting for it)
-     and records its serial and capacity in env/moxN.conf.
+     and prints its serial and exact byte capacity.
 
 A disk that failed but is still installed is not handled; pull it first.
 A rerun resumes a replacement that stopped before the resilver started.
@@ -68,20 +68,13 @@ dw_init
 dw_select_host "$HOST_ARG"
 dw_install_tool
 LAYOUT="${DW_RUN_DIR}/layout.json"
-dw_collect_layout "$LAYOUT"
+dw_inventory "$LAYOUT"
 
 dw_section "Current rpool on $DW_HOST"
 dw_render_layout "$LAYOUT"
 
 [[ "$(dw_json "$LAYOUT" 'd["pool"]["removal_in_progress"]')" != true ]] ||
-  dw_die "a vdev removal is in progress on $DW_HOST, and ZFS does not change mirror members until it finishes. Check it with hosts/list_disks_ready_for_physically_removal.sh --host $DW_HOST; to restore redundancy sooner, cancel it on the host with: zpool remove -s rpool"
-
-CONF_PATH="$(dw_conf_path)"
-CONF_PAIRS="{}"
-if [[ -f "$CONF_PATH" ]]; then
-  CONF_PAIRS="$(python3 "$DW_CONF_MIRRORS" show "$CONF_PATH")" ||
-    dw_die "could not read NVMe mirror entries from $CONF_PATH"
-fi
+  dw_die "a vdev removal is in progress on $DW_HOST, and ZFS does not change mirror members until it finishes. Check it with hosts/inventory_disks.sh --host $DW_HOST; to restore redundancy sooner, cancel it on the host with: zpool remove -s rpool"
 
 # The host records the disk chosen for a replacement until it joins the
 # mirror (lib/storage_state.py).
@@ -94,18 +87,17 @@ dw_state show >"$STATE" || dw_die "could not read the storage records on $DW_HOS
 # member is the LUKS member (A, B, or N-M) or "-" on an unencrypted host;
 # resume names a disk an earlier run already prepared, or "-". Rows starting
 # with NOTE explain mirrors this script leaves alone.
-ANALYSIS="$(python3 - "$LAYOUT" "$CONF_PAIRS" "$STATE" <<'PY'
+ANALYSIS="$(python3 - "$LAYOUT" "$STATE" <<'PY'
 import json
 import re
 import sys
 
 layout = json.load(open(sys.argv[1]))
-conf = json.loads(sys.argv[2])
-pending = json.load(open(sys.argv[3])).get("replacements", {})
+pending = json.load(open(sys.argv[2])).get("replacements", {})
 
 
 def conf_slot(survivor, holds_esp):
-    """The new member's LUKS member name and NVME_MIRROR pair and member."""
+    """Return the LUKS mapper member and its host-side mirror slot."""
     if survivor["luks"]:
         mapper = (survivor["mapper"] or "").rsplit("/", 1)[-1]
         match = re.fullmatch(r"crypt-rpool-mirror([2-5])-([12])", mapper)
@@ -116,20 +108,13 @@ def conf_slot(survivor, holds_esp):
             pair, member = int(match.group(1)), 3 - int(match.group(2))
             return f"{pair}-{member}", pair, member
         return "?", None, None
-    pair = member = None
-    for number, values in conf.items():
-        for index in (1, 2):
-            if values.get(f"serial_{index}") == survivor["serial"]:
-                pair, member = int(number), 3 - index
-    if pair is None and holds_esp:
-        pair = 1
-    return None, pair, member
+    return None, None, None
 
 
 for vdev in layout["vdevs"]:
     members = vdev["members"]
     # A recorded replacement that already joined its mirror, from a run that
-    # stopped before it recorded the disk in env/moxN.conf.
+    # stopped before it cleared the temporary host-side record.
     joined = [
         (survivor, member)
         for survivor in members if survivor["state"] == "ONLINE" and survivor["serial"]
@@ -201,36 +186,15 @@ for vdev in layout["vdevs"]:
 PY
 )" || dw_die "could not analyze the rpool layout of $DW_HOST"
 
-# Record the replacement disk SERIAL in env/moxN.conf in place of the pulled
-# member and print its lines. The host's record of the replacement is cleared
-# once nothing is left to retry.
+# Print the replacement and clear its temporary host-side resume record.
 record_replacement_disk() {
-  local pair="$1" member="$2" survivor="$3" serial="$4" size="$5" status=4
-  if [[ ! -f "$CONF_PATH" ]]; then
-    status=3
-  elif [[ -n "$pair" && -n "$member" ]]; then
-    status=0
-    dw_edit_conf replace --pair "$pair" --member "$member" --survivor "$survivor" \
-      --serial "$serial" --capacity "$size" \
-      --note "Replaced by hosts/add_replacement_disk.sh on $(date +%Y-%m-%d)" ||
-      status=$?
-  fi
-  case "$status" in
-    0) printf 'Recorded disk %s in %s.\n' "$serial" "$CONF_PATH" ;;
-    3) printf '%s is not on this workstation or lacks NVME_MIRROR_%s; record the lines below in it.\n' \
-      "$CONF_PATH" "${pair:-N}" ;;
-    4) printf 'The NVME_MIRROR entry of surviving disk %s was not found in %s; record the new disk in place of the pulled one by hand.\n' \
-      "$survivor" "$CONF_PATH" ;;
-    *) printf 'WARNING: %s was not updated; record the lines below in it by hand, or rerun this script.\n' \
-      "$CONF_PATH" >&2 ;;
-  esac
+  local pair="$1" member="$2" survivor="$3" serial="$4" size="$5"
   printf '\nReplacement disk on %s:\n' "$DW_HOST"
-  printf '  NVME_MIRROR_%s_SERIAL_%s=%s\n' "${pair:-N}" "${member:-M}" "$serial"
-  printf '  NVME_MIRROR_%s_CAPACITY_BYTES_%s=%s\n' "${pair:-N}" "${member:-M}" "$size"
-  if [[ "$status" == 0 || "$status" == 3 || "$status" == 4 ]]; then
-    dw_state clear-replacement --survivor "$survivor" ||
-      printf 'WARNING: could not clear the replacement record on %s\n' "$DW_HOST" >&2
-  fi
+  [[ -z "$pair" ]] || printf '  mirror slot:    %s member %s\n' "$pair" "${member:-?}"
+  printf '  serial:         %s\n' "$serial"
+  printf '  capacity bytes: %s\n' "$size"
+  dw_state clear-replacement --survivor "$survivor" ||
+    printf 'WARNING: could not clear the replacement record on %s\n' "$DW_HOST" >&2
 }
 
 dw_section "rpool mirrors on $DW_HOST that are missing a member"
@@ -308,7 +272,8 @@ layout = json.load(open(sys.argv[1]))
 size = int(sys.argv[2])
 open_luks = {row["serial"] for row in layout["luks_mappings"] if row["serial"]}
 for disk in layout["unassigned_disks"]:
-    if disk["size"] != size or not disk["serial"] or disk["mounted"]:
+    if (disk["size"] != size or not disk["serial"]
+            or disk.get("in_use_reasons")):
         continue
     if disk["serial"] in open_luks:
         continue
@@ -459,7 +424,7 @@ else
     dw_die "adding disk $NEW_SERIAL to $VDEV failed; rerun this script to resume"
 fi
 
-dw_section "Recording the replacement disk"
+dw_section "Replacement disk added"
 record_replacement_disk "$PAIR" "$CONF_MEMBER" "$SURVIVOR" "$NEW_SERIAL" "$NEW_SIZE"
 if [[ -n "$LOCAL_HEADER" ]]; then
   printf 'LUKS header backup: %s\n' "$LOCAL_HEADER"

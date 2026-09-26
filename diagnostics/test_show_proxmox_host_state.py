@@ -271,9 +271,9 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
             for line in self.calls.read_text(encoding="utf-8").splitlines()
         ]
 
-    def test_healthy_host_report_covers_guests_storage_and_serials(self) -> None:
+    def test_healthy_host_report_covers_guests_and_live_storage(self) -> None:
         output = self.run_script("mox1", expected=0).stdout
-        self.assertIn("Compared rpool with 6 serial(s) from env/mox1.conf.", output)
+        self.assertIn("DISK INVENTORY FOR mox1", output)
         self.assertIn("mox1 currently holds the guest egress VIP 10.213.0.10/24", output)
         self.assertIn("[PASS] No failed systemd units.", output)
         self.assertRegex(output, r"100\s+prod1\s+qemu\s+running\s+production\s+active\s+started")
@@ -281,7 +281,7 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
         self.assertRegex(output, r"101-0\s+prod2 \(101\)\s+mox2")
         self.assertIn("boot/ESP (never removable)", output)
         self.assertIn("prod1 (here)", output)
-        self.assertIn("NVME_MIRROR_3_SERIAL_2  S5EXTRA4  mirror-2", output)
+        self.assertRegex(output, r"mirror-2\s+ONLINE\s+ONLINE\s+/dev/nvme5n1\s+S5EXTRA4")
         self.assertIn("[OK] mox1 has no attention items.", output)
         self.assertIn("[PASS] pve-ha-lrm.service is active.", output)
 
@@ -318,24 +318,35 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
         output = self.run_script("mox1", expected=1).stdout
         self.assertIn("[ATTENTION] Failed systemd units:", output)
         self.assertIn("a top-level vdev removal is in progress", output)
-        self.assertIn(
-            "NVME_MIRROR_2_SERIAL_2=S2GONE is configured but is not an rpool member",
-            output,
-        )
+        self.assertNotIn("S2GONE", output)
         self.assertIn("[ATTENTION] mox1 has one or more attention items above.", output)
 
-    def test_missing_host_conf_skips_serial_comparison(self) -> None:
+    def test_missing_host_conf_does_not_affect_report(self) -> None:
         (self.env_dir / "mox1.conf").unlink()
         output = self.run_script("mox1", expected=0).stdout
-        self.assertIn("env/mox1.conf is not present on this workstation", output)
-        self.assertNotIn("Serials recorded in the host's .conf file", output)
+        self.assertIn("DISK INVENTORY FOR mox1", output)
+        self.assertNotIn("env/mox1.conf", output)
 
     def test_usage_errors(self) -> None:
+        self.calls.unlink(missing_ok=True)
         self.run_script(expected=2)
         self.run_script("pve1", expected=2)
         self.run_script("mox1", "mox2", expected=2)
         self.assertIn("Usage:", self.run_script("--help", expected=0).stdout)
         self.assertFalse(self.calls.exists())
+
+    def test_host_prompt_defaults_to_mox1(self) -> None:
+        completed = subprocess.run(
+            [str(SCRIPT)],
+            input="\n",
+            env=self.environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Host:        mox1", completed.stdout)
 
 
 if __name__ == "__main__":

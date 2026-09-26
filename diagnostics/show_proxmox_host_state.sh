@@ -24,7 +24,7 @@ RESERVATION_DIR="/run/app-ha-production-starting"
 
 usage() {
   cat <<'EOF'
-Usage: diagnostics/show_proxmox_host_state.sh moxN
+Usage: diagnostics/show_proxmox_host_state.sh [--host moxN]
 
 Show one Proxmox host's current configuration, the guests it runs and the
 replicas it stores, and its rpool storage layout: every vdev resolved to
@@ -32,21 +32,39 @@ physical disk serials, the boot/ESP vdev, device-removal progress, disks
 that are not part of rpool, and per-zvol allocation and snapshot usage.
 
 Nothing on the host, its guests, or the registry is changed. Commands create
-normal SSH and command-access log entries. When env/moxN.conf is present on
-this workstation, its NVMe serials are compared with the live pool.
+normal SSH and command-access log entries.
 
 Exit status: 0 when no attention items were found, 1 when some were, and 2
 for usage or configuration errors.
 EOF
 }
 
-if (($# != 1)) || [[ "$1" == -h || "$1" == --help ]]; then
-  usage
-  (($# == 1)) && [[ "$1" == -h || "$1" == --help ]] && exit 0
-  exit 2
+HOST=""
+while (($#)); do
+  case "$1" in
+    --host)
+      (($# >= 2)) || { printf 'ERROR: --host requires moxN\n' >&2; exit 2; }
+      HOST="$2"
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      [[ -z "$HOST" && "$1" != -* ]] || { usage >&2; exit 2; }
+      HOST="$1"
+      shift
+      ;;
+  esac
+done
+if [[ -z "$HOST" ]]; then
+  IFS= read -r -p "Target Proxmox host [mox1]: " HOST || {
+    printf 'ERROR: input ended\n' >&2
+    exit 2
+  }
+  HOST="${HOST:-mox1}"
 fi
-
-HOST="$1"
 [[ "$HOST" =~ ^mox([1-9]|10)$ ]] || {
   printf 'ERROR: host must be named mox1 through mox10\n' >&2
   exit 2
@@ -117,36 +135,21 @@ save_json() {
     python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$path" 2>/dev/null
 }
 
-# Serials recorded in this workstation's env/moxN.conf, as PAIR:MEMBER:SERIAL.
-configured_serials=()
-serial_note="env/${HOST}.conf is not present on this workstation; serials were not compared."
-if [[ -f "${PROXMOX_ENV_DIR}/${HOST}.conf" ]]; then
-  if serial_text="$(
-    bash -c '
-set -Eeuo pipefail
-source "$1"
-load_proxmox_config --host "$2" --no-secrets >/dev/null
-for pair in 1 2 3 4 5; do
-  for member in 1 2; do
-    name="NVME_MIRROR_${pair}_SERIAL_${member}"
-    [[ -z "${!name:-}" ]] || printf "%s:%s:%s\n" "$pair" "$member" "${!name}"
-  done
-done
-' bash "$CONFIG_LIB" "$HOST"
-  )"; then
-    mapfile -t configured_serials <<<"$serial_text"
-    [[ -n "${configured_serials[0]:-}" ]] || configured_serials=()
-    serial_note="Compared rpool with ${#configured_serials[@]} serial(s) from env/${HOST}.conf."
-  else
-    serial_note="env/${HOST}.conf could not be loaded; serials were not compared."
-  fi
-fi
-
 section "Proxmox host diagnostic target" \
-  "identify the host and the workstation configuration used for this read-only report."
+  "identify the host used for this read-only report."
 printf 'Host:        %s (%s.%s)\n' "$HOST" "$HOST" "$PROXMOX_INTERNAL_DOMAIN"
 printf 'Started:     %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)"
-printf 'Serials:     %s\n' "$serial_note"
+
+storage_json="${RUN_DIR}/storage.json"
+section "Full disk inventory" \
+  "establish live disk, vdev, and safe-removal state before the other diagnostics."
+if mox_ssh "$HOST" python3 - collect <"$STORAGE_LIB" >"$storage_json" 2>"${storage_json}.err"; then
+  python3 "$STORAGE_LIB" render-inventory "$storage_json"
+else
+  printf '[ATTENTION] The disk inventory could not be collected:\n'
+  cat "${storage_json}.err"
+  ATTENTION=1
+fi
 
 section "Identity, versions, and compute resources" \
   "show what is installed and how much CPU and RAM the host has for its guests."
@@ -378,14 +381,10 @@ run "Production-start reservations (present only while production is starting)" 
 
 section "Storage: rpool layout, disks, and zvols" \
   "show every vdev resolved to physical disk serials, the boot vdev, removal progress, unused disks, and per-zvol allocation."
-storage_json="${RUN_DIR}/storage.json"
-if mox_ssh "$HOST" python3 - collect <"$STORAGE_LIB" >"$storage_json" 2>"${storage_json}.err"; then
+if [[ -s "$storage_json" ]]; then
   render_args=(render "$storage_json" --exit-status)
   [[ -s "${RUN_DIR}/cluster-vms.json" ]] &&
     render_args+=(--guests "${RUN_DIR}/cluster-vms.json")
-  for configured in "${configured_serials[@]}"; do
-    render_args+=(--configured-serial "$configured")
-  done
   python3 "$STORAGE_LIB" "${render_args[@]}"
   (($? == 0)) || ATTENTION=1
 else

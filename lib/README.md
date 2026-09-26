@@ -149,17 +149,16 @@ Piped to a host as `python3 - COMMAND`. Keeps
 `/var/lib/app-ha-storage/state.json` (root-only, locked, atomically replaced):
 per-guest trim times, scrub results, one record per vdev removal with its
 member serials, because ZFS forgets them once a removal completes, each new
-mirror pair until `env/moxN.conf` records it, and the disk chosen for a pending
+mirror pair until its operation completes, and the disk chosen for a pending
 mirror-member replacement, so a rerun can tell it from a failed disk.
 
-## `mox_conf_mirrors.py` and `disk_workflows.sh`
+## `disk_workflows.sh`
 
-`mox_conf_mirrors.py` shows, assigns, replaces one member of, and comments
-out (`retire`) `NVME_MIRROR_N_*` entries in a workstation's `env/moxN.conf`,
-keeping every other line byte for byte. `disk_workflows.sh` is the workstation
-library sourced by the four disk workflows: host selection, strict SSH, per-run
-tool installation with a hash check, host-side Python, long-step prompts, and
-conf edits that are reverted if `config.sh` no longer loads the file.
+`disk_workflows.sh` is the workstation library sourced by the four disk
+workflows: target-host prompting, strict SSH, shared live disk inventory,
+per-run tool installation with a hash check, host-side Python, and long-step
+prompts. Post-setup workflows use the host as their storage source of truth
+and do not read or update `env/moxN.conf`.
 
 ## Tests
 

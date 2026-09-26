@@ -122,7 +122,7 @@ prompt_yes() {
 choose_hardware_inventory_mode() {
   printf '\nDISK INVENTORY METHOD\n'
   printf 'iDRAC mode queries Redfish to verify configured disk serials, capacities, and health.\n'
-  printf 'Manual mode uses serials and exact byte capacities gathered beforehand with hosts/inventory_disks.sh from a Live Linux environment.\n'
+  printf 'Manual mode uses serials and exact byte capacities gathered beforehand by running hosts/inventory_disks.sh against the host while it is in a reachable Live Linux environment.\n'
   if prompt_yes "Use iDRAC/Redfish for disk inventory on this run?"; then
     HARDWARE_INVENTORY_MODE=idrac
   else
@@ -358,7 +358,7 @@ load_configuration() {
         capacity_name="NVME_MIRROR_${pair}_CAPACITY_BYTES_${member}"
         capacity="${!capacity_name:-}"
         [[ "$capacity" =~ ^[1-9][0-9]*$ ]] ||
-          fail "$capacity_name must be an exact positive byte count in manual inventory mode; gather it with hosts/inventory_disks.sh"
+          fail "$capacity_name must be an exact positive byte count in manual inventory mode; gather it by running hosts/inventory_disks.sh against the Live Linux host"
       fi
     done
   done

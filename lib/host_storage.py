@@ -10,7 +10,9 @@ to ``python3 - collect``). It runs only read-only zpool, zfs, and lsblk
 queries and prints one JSON document: pool capacity, every top-level vdev with
 its member devices resolved through LUKS to physical disk serials, which vdev
 holds the ESPs, device-removal progress, disks that are not part of rpool, and
-per-zvol allocation and snapshot usage.
+per-zvol allocation and snapshot usage. The disk inventory also records every
+physical disk, every imported ZFS pool vdev, and active-use reasons that make
+a disk unsafe to remove physically.
 
 ``render`` runs on the workstation and prints that JSON for an operator.
 """
@@ -345,6 +347,7 @@ def build_layout(
     hostname: str,
     collected_at: int,
     crypttab_text: str = "",
+    all_pools_status_text: str | None = None,
 ) -> dict[str, Any]:
     status = parse_zpool_status(status_text)
     sizes = parse_zpool_list(list_text)
@@ -352,6 +355,9 @@ def build_layout(
     dataset_properties = parse_properties(dataset_properties_text)
     devices = parse_lsblk(lsblk_text)
     boot_uuids = parse_boot_uuids(boot_uuids_text)
+    all_pools_status_text = (
+        status_text if all_pools_status_text is None else all_pools_status_text
+    )
 
     esp_partitions = sorted(
         kname
@@ -426,6 +432,35 @@ def build_layout(
         for name, rows in status["auxiliary"].items()
     }
 
+    pool_status_blocks = re.split(
+        r"(?=^\s*pool:\s+)", all_pools_status_text, flags=re.MULTILINE
+    )
+    imported_pool_vdevs = []
+    for block in pool_status_blocks:
+        if not re.search(r"^\s*pool:\s+", block, flags=re.MULTILINE):
+            continue
+        imported = parse_zpool_status(block)
+        for vdev in imported["vdevs"]:
+            imported_pool_vdevs.append(
+                {
+                    "pool": imported["pool"],
+                    "name": vdev["name"],
+                    "type": vdev["type"],
+                    "state": vdev["state"],
+                    "members": [resolve_member(member) for member in vdev["members"]],
+                }
+            )
+
+    imported_pool_disks: set[str] = set()
+    for line in all_pools_status_text.splitlines():
+        fields = line.split()
+        if not fields or not fields[0].startswith("/dev/"):
+            continue
+        resolved = realpath(fields[0])
+        device = devices.get(resolved)
+        if device and device["disk"]:
+            imported_pool_disks.add(device["disk"])
+
     def subtree_mounted(kname: str) -> bool:
         device = devices[kname]
         return bool(device["mountpoints"]) or any(
@@ -434,12 +469,61 @@ def build_layout(
 
     unassigned = []
     esp_only = []
+    all_disks = []
+    crypttab_uuids = {
+        fields[1].removeprefix("UUID=")
+        for line in crypttab_text.splitlines()
+        if len(fields := line.split()) >= 2
+        and not fields[0].startswith("#")
+        and fields[1].startswith("UUID=")
+    }
+
+    def subtree(kname: str) -> list[dict[str, Any]]:
+        device = devices[kname]
+        return [device] + [
+            descendant
+            for child in device["children"] if child in devices
+            for descendant in subtree(child)
+        ]
+
     for kname, device in sorted(devices.items()):
         if device["type"] != "disk" or device["parent"] is not None:
             continue
         # zvols are block disks too; they belong to guests, not to the host.
         if re.fullmatch(r"/dev/zd[0-9]+", kname):
             continue
+        descendants = subtree(kname)
+        reasons = []
+        if kname in imported_pool_disks:
+            reasons.append("member of an imported ZFS pool")
+        if subtree_mounted(kname):
+            reasons.append("mounted filesystem or active swap")
+        holders = sorted(
+            {
+                child["type"]
+                for child in descendants[1:]
+                if child["type"] not in (None, "part")
+            }
+        )
+        if holders:
+            reasons.append("active " + "/".join(holders) + " holder")
+        if kname in esp_disks:
+            reasons.append("registered Proxmox boot ESP")
+        if any(child["uuid"] in crypttab_uuids for child in descendants):
+            reasons.append("configured in /etc/crypttab")
+        all_disks.append(
+            {
+                "disk": kname,
+                "serial": device["serial"],
+                "model": device["model"],
+                "size": device["size"],
+                "tran": device["tran"],
+                "fstype": device["fstype"],
+                "partitions_or_holders": len(device["children"]),
+                "mounted": subtree_mounted(kname),
+                "in_use_reasons": reasons,
+            }
+        )
         if kname in member_disks:
             continue
         # A registered ESP on a disk outside rpool is a boot-mirror
@@ -454,6 +538,7 @@ def build_layout(
                 "fstype": device["fstype"],
                 "partitions_or_holders": len(device["children"]),
                 "mounted": subtree_mounted(kname),
+                "in_use_reasons": reasons,
             }
         )
 
@@ -506,7 +591,12 @@ def build_layout(
         },
         "vdevs": vdevs,
         "auxiliary_vdevs": auxiliary,
+        "imported_pool_vdevs": imported_pool_vdevs,
         "esp_partitions": esp_partitions,
+        "all_disks": all_disks,
+        "physically_removable_disks": [
+            disk for disk in all_disks if not disk["in_use_reasons"]
+        ],
         "unassigned_disks": unassigned,
         "esp_only_disks": esp_only,
         "luks_mappings": luks_mappings,
@@ -531,15 +621,45 @@ def run_command(argv: Sequence[str]) -> str:
     return completed.stdout
 
 
-def collect(pool: str = POOL) -> dict[str, Any]:
+def collect(pool: str = POOL, allow_missing_pool: bool = False) -> dict[str, Any]:
     boot_uuids = ""
     if BOOT_UUIDS_FILE.is_file():
         boot_uuids = BOOT_UUIDS_FILE.read_text(encoding="utf-8")
     crypttab = ""
     if CRYPTTAB_FILE.is_file():
         crypttab = CRYPTTAB_FILE.read_text(encoding="utf-8")
+    lsblk_text = run_command(["lsblk", "-J", "-b", "-p", "-o", LSBLK_COLUMNS])
+    try:
+        status_text = run_command(["zpool", "status", "-P", pool])
+    except StorageError:
+        if not allow_missing_pool:
+            raise
+        status_text = (
+            f"pool: {pool}\nstate: UNAVAILABLE\nconfig:\n\n"
+            f"\tNAME        STATE\n\t{pool}       UNAVAIL\n\n"
+            "errors: no pool is imported\n"
+        )
+        return build_layout(
+            status_text=status_text,
+            list_text="",
+            pool_properties_text="",
+            dataset_properties_text="",
+            lsblk_text=lsblk_text,
+            boot_uuids_text=boot_uuids,
+            volume_text="",
+            snapshot_text="",
+            realpath=os.path.realpath,
+            hostname=os.uname().nodename.split(".", 1)[0],
+            collected_at=int(time.time()),
+            crypttab_text=crypttab,
+            all_pools_status_text="",
+        )
+    try:
+        all_pools_status = run_command(["zpool", "status", "-LP"])
+    except StorageError:
+        all_pools_status = status_text
     return build_layout(
-        status_text=run_command(["zpool", "status", "-P", pool]),
+        status_text=status_text,
         list_text=run_command(
             [
                 "zpool", "list", "-v", "-H", "-p", "-P",
@@ -555,7 +675,7 @@ def collect(pool: str = POOL) -> dict[str, Any]:
         dataset_properties_text=run_command(
             ["zfs", "get", "-H", "-p", "-o", "property,value", "available,used", pool]
         ),
-        lsblk_text=run_command(["lsblk", "-J", "-b", "-p", "-o", LSBLK_COLUMNS]),
+        lsblk_text=lsblk_text,
         boot_uuids_text=boot_uuids,
         volume_text=run_command(
             [
@@ -573,6 +693,7 @@ def collect(pool: str = POOL) -> dict[str, Any]:
         hostname=os.uname().nodename.split(".", 1)[0],
         collected_at=int(time.time()),
         crypttab_text=crypttab,
+        all_pools_status_text=all_pools_status,
     )
 
 
@@ -888,6 +1009,81 @@ def render(
     return "\n".join(out) + "\n"
 
 
+def render_disk_inventory(layout: dict[str, Any]) -> str:
+    """Render the complete physical-disk and rpool-vdev inventory."""
+
+    out = [f"DISK INVENTORY FOR {layout['host']}", "", "All physical disks:"]
+    out.append(
+        table(
+            ["DISK", "SERIAL", "CAPACITY_BYTES", "MODEL", "TRANSPORT", "USE"],
+            [
+                [
+                    disk["disk"],
+                    disk["serial"] or "?",
+                    disk["size"] if disk["size"] is not None else "?",
+                    disk["model"] or "-",
+                    disk["tran"] or "-",
+                    "; ".join(disk["in_use_reasons"]) or "not in use",
+                ]
+                for disk in layout["all_disks"]
+            ],
+        )
+        if layout["all_disks"]
+        else "  none"
+    )
+
+    out.extend(["", "Imported ZFS pool vdevs and member disks:"])
+    rows = []
+    for vdev in layout["imported_pool_vdevs"]:
+        for member in vdev["members"]:
+            rows.append(
+                [
+                    vdev["pool"],
+                    vdev["name"],
+                    vdev["state"],
+                    member["state"],
+                    member["disk"] or "?",
+                    member["serial"] or "?",
+                    member["disk_size"] if member["disk_size"] is not None else "?",
+                ]
+            )
+    out.append(
+        table(
+            [
+                "POOL", "VDEV", "VDEV_STATUS", "MEMBER_STATUS",
+                "DISK", "SERIAL", "CAPACITY_BYTES",
+            ],
+            rows,
+        )
+        if rows
+        else "  none"
+    )
+
+    out.extend(["", "Disks eligible for safe physical removal:"])
+    removable = layout["physically_removable_disks"]
+    out.append(
+        table(
+            ["DISK", "SERIAL", "CAPACITY_BYTES", "MODEL"],
+            [
+                [
+                    disk["disk"],
+                    disk["serial"] or "?",
+                    disk["size"] if disk["size"] is not None else "?",
+                    disk["model"] or "-",
+                ]
+                for disk in removable
+            ],
+        )
+        if removable
+        else "  none"
+    )
+    out.append(
+        "Only disks with no imported-pool membership, mounts, active swap/holders, "
+        "registered boot ESP, or crypttab entry are listed as removable."
+    )
+    return "\n".join(out) + "\n"
+
+
 def parse_configured(values: Sequence[str]) -> list[tuple[int, int, str]]:
     configured = []
     for value in values:
@@ -905,6 +1101,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "collect", help="print the rpool layout of this host as JSON"
     )
     collect_parser.add_argument("--pool", default=POOL)
+    collect_parser.add_argument(
+        "--allow-missing-pool",
+        action="store_true",
+        help="inventory physical disks even when rpool is not imported",
+    )
     render_parser = subparsers.add_parser(
         "render", help="print a collected layout for an operator"
     )
@@ -925,10 +1126,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="exit 1 when there are storage attention items",
     )
+    inventory_parser = subparsers.add_parser(
+        "render-inventory", help="print all disks, rpool vdevs, and removable disks"
+    )
+    inventory_parser.add_argument("layout", help="collected JSON file, or - for stdin")
     args = parser.parse_args(argv)
     try:
         if args.command == "collect":
-            json.dump(collect(args.pool), sys.stdout, indent=2, sort_keys=True)
+            json.dump(
+                collect(args.pool, allow_missing_pool=args.allow_missing_pool),
+                sys.stdout,
+                indent=2,
+                sort_keys=True,
+            )
             sys.stdout.write("\n")
             return 0
         text = (
@@ -939,6 +1149,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         layout = json.loads(text)
         if layout.get("schema_version") != SCHEMA_VERSION:
             raise StorageError("unsupported storage layout schema")
+        if args.command == "render-inventory":
+            sys.stdout.write(render_disk_inventory(layout))
+            return 0
         configured = parse_configured(args.configured_serial)
         guests: list[dict[str, Any]] = []
         if args.guests:

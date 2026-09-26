@@ -179,8 +179,7 @@ Expected to work on macOS, not yet run there against a cluster:
   helpers as `show_prod_vm_state.sh`, plus local `python3`, and is covered by
   fake-SSH unit tests only;
 - `hosts/add_new_disk_vdev.sh`, `hosts/add_replacement_disk.sh`,
-  `hosts/decommission_disks.sh`, and
-  `hosts/list_disks_ready_for_physically_removal.sh`. Their local work is the
+  `hosts/decommission_disks.sh`, and `hosts/inventory_disks.sh`. Their local work is the
   config load, `python3`, and SSH; covered by fake-SSH unit tests only, and
   not yet run against real disks;
 - `hosts/update_cluster_runtime.sh`. Local commands are portable and its unit
@@ -693,12 +692,16 @@ the selected storage policy or skip final non-boot validation.
 
 ## Configuration, secrets, and artifacts
 
-All workflows use [`lib/config.sh`](lib/config.sh). It parses literal
-`KEY=VALUE` data without `source` or `eval`, in this order:
+Workflows use [`lib/config.sh`](lib/config.sh). It parses literal `KEY=VALUE`
+data without `source` or `eval`, in this order when each layer is requested:
 
 1. [`env/cluster.conf`](env/cluster.conf): shared non-secret policy;
 2. `env/moxN.conf`: selected host hardware and public/private identity;
 3. local `env/secrets.env`: allowed secrets only, when required.
+
+`env/moxN.conf` is setup input only: initial host setup and retries before
+setup completes. Post-setup disk and diagnostic workflows load cluster policy
+only and use the target host's live state as authoritative.
 
 The loader rejects unknown, misplaced, inherited-as-substitute, or duplicate
 keys; CRLF; shell syntax; symlinks in any path component; unsafe ownership;
@@ -846,21 +849,20 @@ guests, and four (6-9) that grow, shrink, or repair a host's storage later:
    host's rpool as one new mirror vdev. On a LUKS host the operator types the
    shared passphrase at the host console, where it is proven against every
    existing member before the disks are formatted; the script then proves the
-   rebuilt initramfs unlocks them before `zpool add`, and records the pair in
-   `env/moxN.conf`.
+   rebuilt initramfs unlocks them before `zpool add`.
 7. `hosts/decommission_disks.sh` — prepare a host's rpool to give up one
    non-boot mirror vdev (related staging destroyed first; guest trims,
    forced replication, and a scrub, each skipped if done in the last 24
    hours) and start its `zpool remove` while keeping a minimum free space of
    at least 50 GiB.
-8. `hosts/list_disks_ready_for_physically_removal.sh` — once a removal
-   completes, close the removed pair's LUKS mappings, update crypttab and the
-   initramfs, comment the pair out of `env/moxN.conf`, and list its disks by
-   serial as safe to pull.
+8. `hosts/inventory_disks.sh` — inventory all disks and rpool vdev members
+   from live host state; once a removal completes, close the removed pair's
+   LUKS mappings, update crypttab and the initramfs, then list only disks not
+   in use as safe to pull.
 9. `hosts/add_replacement_disk.sh` — after a failed mirror member's disk was
    pulled and an identical-capacity disk installed, put the new disk into
    that mirror (`zpool replace`, or `zpool attach` for a mirror detached to
-   one disk) and record it in `env/moxN.conf`. A boot-mirror replacement
+   one disk). A boot-mirror replacement
    first gets the survivor's partition table and its own registered,
    in-sync ESP; a LUKS replacement gets the shared passphrase at the host
    console. It starts the resilver without waiting for it.
@@ -874,7 +876,7 @@ logic that adds a mirror or encrypts a mirror member.
 hosts/add_new_disk_vdev.sh --host moxN
 hosts/add_replacement_disk.sh --host moxN
 hosts/decommission_disks.sh --host moxN
-hosts/list_disks_ready_for_physically_removal.sh --host moxN
+hosts/inventory_disks.sh --host moxN
 ```
 
 The production/staging creators and destroyers have read-only
@@ -921,16 +923,15 @@ scripts/libraries named in their descriptions.
     >prod1_state.txt
   ```
 
-- `diagnostics/show_proxmox_host_state.sh moxN` is a read-only report for one
+- `diagnostics/show_proxmox_host_state.sh [--host moxN]` is a read-only report for one
   host: versions, CPU and RAM, quorum, HA and app-ha services, failed units,
   network and egress VIP ownership, the guests it runs with their registry
   roles, the production replicas it stores, pending deferred cleanup, and its
   `rpool` layout. `lib/host_storage.py` resolves every vdev through LUKS to
   physical disk serials, marks the boot/ESP vdev, and shows device-removal
   progress, disks outside `rpool`, ZFS available space in bytes, MiB, and
-  GiB, and each zvol's allocation, snapshots, and last replication. When
-  `env/moxN.conf` is present it compares the configured `NVME_MIRROR_*`
-  serials with the pool. It exits 1 when anything needs attention:
+  GiB, and each zvol's allocation, snapshots, and last replication. It exits
+  1 when anything needs attention:
 
   ```bash
   diagnostics/show_proxmox_host_state.sh mox1 \
@@ -1025,8 +1026,7 @@ scripts/libraries named in their descriptions.
   boot-disk partitioning and ESPs, member replacement, and LUKS retirement)
   used by host setup and workflows 6, 8, and 9.
 - `lib/storage_state.py` keeps trim, scrub, vdev-removal, and pending
-  mirror-addition and member-replacement records on the host; `lib/mox_conf_mirrors.py` records, replaces, and retires
-  `NVME_MIRROR_N` entries in a workstation's `env/moxN.conf`;
+  mirror-addition and member-replacement records on the host;
   `lib/disk_workflows.sh` holds the workstation plumbing shared by workflows
   6-9.
 - `lib/test_shared_libs.py`, `lib/test_haproxy_routes.py`,
@@ -2530,7 +2530,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
   lib/test_process_deferred_cleanup.py \
   lib/test_host_storage.py \
   lib/test_rpool_mirror.py \
-  lib/test_mox_conf_mirrors.py \
+  lib/test_storage_state.py \
   hosts/test_disk_workflows.py \
   diagnostics/test_show_proxmox_host_state.py -v
 ```
@@ -2571,8 +2571,8 @@ Coverage by test helper:
 - `lib/test_host_storage.py`: `zpool status` topology, resilver nesting and
   auxiliary sections, removal progress, LUKS and by-id member resolution to
   disk serials, boot/ESP vdev detection, disks outside `rpool`, registered
-  ESPs outside `rpool`, zvol allocation and snapshots, configured-serial
-  comparison, and render output.
+  ESPs outside `rpool`, all-disk use classification, safe physical-removal
+  classification, zvol allocation and snapshots, and render output.
 - `lib/test_rpool_mirror.py`: the shared mirror tool against fake disk, LUKS,
   zpool, and initramfs commands: disk safety checks, the passphrase proven
   before any disk is touched, reuse or refusal of existing LUKS, the host's
@@ -2583,17 +2583,16 @@ Coverage by test helper:
   `zpool replace` until that ESP is in sync, closing a pulled disk's leftover
   mapping, refusing a failed disk that is still installed, and `zpool attach`
   for a mirror detached to one disk.
-- `lib/test_mox_conf_mirrors.py`: assigning, replacing one member of, and
-  commenting out `NVME_MIRROR` pairs with `lib/config.sh` accepting the
-  results, and the host storage-state records.
+- `lib/test_storage_state.py`: locked host-side trim, scrub, vdev-removal,
+  mirror-addition, and member-replacement resume records.
 - `hosts/test_disk_workflows.py`: workflows 6-9 end to end against a fake SSH
   host and guests: console hand-off, resume, capacity checks, the five-mirror
   limit, related-staging refusal, trim and scrub reuse within 24 hours,
   forced replication, minimum-free-space rules, removal records, retirement,
   and boot, extra, and unencrypted member replacement.
 - `diagnostics/test_show_proxmox_host_state.py`: the host report against a
-  fake SSH that rejects any non-read-only command, attention exit status, the
-  optional `moxN.conf` serial comparison, and usage errors.
+  fake SSH that rejects any non-read-only command, live disk inventory,
+  attention exit status, and usage errors.
 
 These tests mock destructive Proxmox, ZFS, iDRAC, QDevice, and network
 behavior. They do not replace real media, 10-Gbps Layer-2, LUKS boot,

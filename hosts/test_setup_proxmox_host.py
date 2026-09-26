@@ -260,63 +260,13 @@ Flags:            Quorate Qdevice
         )
         self.assertIn("identical byte capacities", completed.stderr)
 
-    def test_inventory_helper_reports_exact_bytes_and_serials_read_only(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            fake_bin = Path(directory)
-            fake_lsblk = fake_bin / "lsblk"
-            fake_lsblk.write_text(
-                """#!/usr/bin/env bash
-case "$*" in
-  *"PATH,TYPE"*)
-    printf '/dev/nvme0n1 disk\\n/dev/nvme1n1 disk\\n'
-    ;;
-  *"-o SIZE"*)
-    printf '1000204886016\\n'
-    ;;
-  *"-o SERIAL"*)
-    [[ "${*: -1}" == /dev/nvme0n1 ]] && printf 'SERIAL-A\\n' || printf 'SERIAL-B\\n'
-    ;;
-  *"-o MODEL"*)
-    printf 'Example NVMe\\n'
-    ;;
-  *"-o VENDOR"*)
-    printf 'Example\\n'
-    ;;
-  *"-o TRAN"*)
-    printf 'nvme\\n'
-    ;;
-  *"-o ROTA"*)
-    printf '0\\n'
-    ;;
-  *)
-    exit 2
-    ;;
-esac
-""",
-                encoding="utf-8",
-            )
-            fake_lsblk.chmod(0o755)
-            environment = os.environ.copy()
-            environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
-            completed = subprocess.run(
-                [str(INVENTORY_SCRIPT)],
-                env=environment,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(completed.stdout.count("Class:          NVMe SSD"), 2)
-        self.assertIn("NVME_MIRROR_N_SERIAL_M=SERIAL-A", completed.stdout)
-        self.assertIn("NVME_MIRROR_N_SERIAL_M=SERIAL-B", completed.stdout)
-        self.assertEqual(
-            completed.stdout.count(
-                "NVME_MIRROR_N_CAPACITY_BYTES_M=1000204886016"
-            ),
-            2,
-        )
-        for destructive_command in ("wipefs", "mkfs", "sgdisk", "parted"):
-            self.assertNotIn(destructive_command, INVENTORY_SCRIPT.read_text())
+    def test_inventory_helper_uses_live_host_state(self) -> None:
+        text = INVENTORY_SCRIPT.read_text()
+        self.assertIn('source "${SCRIPT_DIR}/../lib/disk_workflows.sh"', text)
+        self.assertIn('dw_select_host "$HOST_ARG"', text)
+        self.assertIn('dw_inventory "$LAYOUT"', text)
+        self.assertNotIn("NVME_MIRROR_", text)
+        self.assertNotIn("moxN.conf", text)
 
     def test_reboot_wait_requires_changed_kernel_boot_id(self) -> None:
         self.run_bash(

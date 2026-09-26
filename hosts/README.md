@@ -237,17 +237,17 @@ only after the operator has actually run that helper successfully.
 ## Host setup flow
 
 For manual inventory, boot the target host from a Linux Live CD/USB in its
-try/live mode, not its installer. Copy or otherwise make
-`hosts/inventory_disks.sh` available there and run:
+try/live mode, not its installer, enable strict root SSH under its intended
+`moxN` name, and run from the administrator workstation:
 
 ```bash
-chmod +x inventory_disks.sh
-./inventory_disks.sh
+hosts/inventory_disks.sh --host moxN
 ```
 
-The helper is read-only. For each desired mirror, choose two entries reported
-as `NVMe SSD` with the same exact `Capacity bytes` value and distinct,
-non-empty serials. Copy the printed serial and byte-count values into the
+Before setup there are no host-side removal records to finalize, so the helper
+is read-only. For each desired mirror, choose two NVMe entries with the same
+exact `CAPACITY_BYTES` value and distinct, non-empty serials. Copy those
+serial and byte-count values into the
 corresponding `NVME_MIRROR_<P>_SERIAL_<M>` and
 `NVME_MIRROR_<P>_CAPACITY_BYTES_<M>` keys in `env/moxN.conf`. Leave disks that
 must not enter `rpool` unconfigured. Capacity keys are optional in iDRAC mode.
@@ -327,6 +327,11 @@ records kept on the host in `/var/lib/app-ha-storage/state.json`. rpool holds
 at most five mirrors, including mirror 1, the boot mirror that holds the ESPs.
 Mirror 1 is never removed.
 
+Each script prompts for a target host, defaults to `mox1`, accepts any
+configured `moxN` through `--host`, and starts by printing the same live disk
+inventory collected over SSH. After setup completes, the host is the source
+of truth; these scripts do not read or update `env/moxN.conf`.
+
 ### Adding a mirror
 
 `hosts/add_new_disk_vdev.sh [--host moxN]`:
@@ -343,9 +348,7 @@ Mirror 1 is never removed.
 4. adds crypttab entries in the host's single-prompt `decrypt_keyctl` form,
    rebuilds the initramfs, unpacks it to prove it will unlock the new mappings
    at boot, and only then runs `zpool add` with the pool's existing ashift;
-5. writes the pair's serials and byte capacities into `env/moxN.conf` as the
-   lowest free `NVME_MIRROR_2` to `_5` slot, checks that `lib/config.sh`
-   still loads the file, and prints the values.
+5. prints the pair's serials and exact byte capacities from the live host.
 
 On an unencrypted host step 2 is skipped and the disks stay unencrypted. A
 rerun resumes a pair that was prepared but not yet added. After adding a LUKS
@@ -378,9 +381,7 @@ capacity, then run `hosts/add_replacement_disk.sh [--host moxN]`:
    it, rechecks that both boot ESPs are in sync, then runs `zpool replace`
    (or `zpool attach` for a mirror detached to one disk) and returns without
    waiting for the resilver;
-5. comments out the pulled disk's `NVME_MIRROR_N_SERIAL_M` and
-   `_CAPACITY_BYTES_M` lines in `env/moxN.conf` and writes the new disk's
-   beneath them.
+5. prints the new disk's serial and exact byte capacity from the live host.
 
 A failed disk that is still installed is not handled; pull it first. The
 script also waits for a running vdev removal, since ZFS does not change
@@ -419,15 +420,19 @@ them as sufficient. Run the script once per vdev: ZFS evacuates only one
 top-level vdev at a time. Trimming frees pool space only for sparse
 production zvols; a full (refreserved) zvol keeps its space reserved.
 
-### Pulling the disks
+### Inventorying and pulling disks
 
-`hosts/list_disks_ready_for_physically_removal.sh [--host moxN]` shows the
-removal's progress. Once it has completed, the script closes the pair's LUKS
-mappings, removes them from crypttab, rebuilds and verifies the initramfs,
-comments out the pair in `env/moxN.conf`, and marks the record retired. It
-then lists every retired disk that is still installed, by serial, as safe to
-pull. A removal that was cancelled or failed is marked failed so
-`decommission_disks.sh` can retry.
+After `decommission_disks.sh`, you must run
+`hosts/inventory_disks.sh [--host moxN]`. It shows removal progress. Once
+evacuation completes, it asks before closing the pair's LUKS mappings,
+removing them from crypttab, rebuilding and verifying the initramfs, and
+marking the host-side record retired. Its final inventory lists every
+physical disk, every imported ZFS pool vdev and member with status, and only disks with
+no pool membership, mount, active swap or holder, registered ESP, or crypttab
+entry as eligible for safe physical removal. A cancelled or failed removal is
+marked failed so `decommission_disks.sh` can retry. If permission to finalize
+is declined, it makes no retirement changes and still prints the complete
+current inventory.
 
 ## Production and staging lifecycle
 

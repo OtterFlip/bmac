@@ -8,8 +8,8 @@
 # the host, forces their replication so the freed space reaches the host's
 # copies, scrubs rpool, and offers only vdevs whose removal keeps at least the
 # operator's minimum free space. ZFS removes one top-level vdev at a time, so
-# each run starts at most one removal; hosts/list_disks_ready_for_physically_removal.sh
-# reports when its disks can be pulled.
+# each run starts at most one removal; hosts/inventory_disks.sh finalizes a
+# completed removal and reports when its disks can be pulled.
 
 set -Eeuo pipefail
 set +x
@@ -72,7 +72,7 @@ require_vars STAGING_VM_TAG CLUSTER_STATE_DIR ||
 dw_select_host "$HOST_ARG"
 LAYOUT="${DW_RUN_DIR}/layout.json"
 STATE="${DW_RUN_DIR}/state.json"
-dw_collect_layout "$LAYOUT"
+dw_inventory "$LAYOUT"
 dw_state show >"$STATE" || dw_die "could not read the storage state on $DW_HOST"
 
 units() {
@@ -88,13 +88,13 @@ dw_render_layout "$LAYOUT"
 if [[ "$(dw_json "$LAYOUT" 'str(d["pool"]["removal_in_progress"])')" == True ]]; then
   printf '\nA vdev removal is already in progress on %s:\n%s\n' \
     "$DW_HOST" "$(dw_json "$LAYOUT" 'd["pool"]["remove"]')"
-  printf 'ZFS removes one top-level vdev at a time. Follow it with\n  hosts/list_disks_ready_for_physically_removal.sh --host %s\nand run this script again after it completes.\n' "$DW_HOST"
+  printf 'ZFS removes one top-level vdev at a time. Follow it with\n  hosts/inventory_disks.sh --host %s\nand run this script again after it completes.\n' "$DW_HOST"
   exit 1
 fi
 PENDING="$(dw_json "$STATE" '" ".join(r["vdev"] for r in d["removals"] if r["state"] == "requested")')"
 if [[ -n "$PENDING" ]]; then
   printf '\nThe removal of %s is recorded on %s but has not been retired yet.\n' "$PENDING" "$DW_HOST"
-  printf 'Run hosts/list_disks_ready_for_physically_removal.sh --host %s first.\n' "$DW_HOST"
+  printf 'Run hosts/inventory_disks.sh --host %s first; it finalizes completed retirement and identifies disks that are safe to remove physically.\n' "$DW_HOST"
   exit 1
 fi
 
@@ -446,13 +446,10 @@ while true; do
 done
 VDEV="${ELIGIBLE[choice - 1]}"
 
-CONF_PATH="$(dw_conf_path)"
-REQUEST="$(python3 - "$LAYOUT" "$VDEV" "$CONF_PATH" "$DW_CONF_MIRRORS" <<'PY'
+REQUEST="$(python3 - "$LAYOUT" "$VDEV" <<'PY'
 import json
-from pathlib import Path
-import subprocess
 import sys
-layout, vdev_name, conf, conf_tool = sys.argv[1:]
+layout, vdev_name = sys.argv[1:]
 vdev = next(v for v in json.load(open(layout))["vdevs"] if v["name"] == vdev_name)
 members = [
     {
@@ -468,18 +465,7 @@ members = [
 ]
 if any(not m["serial"] for m in members):
     raise SystemExit("a member of this vdev has no disk serial; it cannot be tracked for removal")
-pair = None
-shown = None
-if Path(conf).is_file():
-    shown = subprocess.run(
-        [sys.executable, conf_tool, "show", conf], capture_output=True, text=True
-    )
-if shown is not None and shown.returncode == 0:
-    serials = {m["serial"] for m in members}
-    for number, values in json.loads(shown.stdout).items():
-        if {values.get("serial_1"), values.get("serial_2")} & serials and int(number) != 1:
-            pair = int(number)
-print(json.dumps({"vdev": vdev_name, "members": members, "conf_pair": pair}))
+print(json.dumps({"vdev": vdev_name, "members": members}))
 PY
 )" || dw_die "could not describe $VDEV for the removal record"
 
@@ -493,7 +479,7 @@ for member in json.loads(sys.argv[1])["members"]:
         disk_size=member["disk_size"], model=member["model"] or "-",
     ))
 PY
-confirm_exact "Start removing $VDEV from rpool on $DW_HOST? ZFS copies its data onto the other vdevs in the background; its disks can be pulled only after hosts/list_disks_ready_for_physically_removal.sh says so."
+confirm_exact "Start removing $VDEV from rpool on $DW_HOST? ZFS copies its data onto the other vdevs in the background. You must then run hosts/inventory_disks.sh; it finalizes completed retirement and identifies disks that are safe to remove physically."
 
 REMOVAL_ID="$(dw_state record-removal --request "$REQUEST")" ||
   dw_die "could not record the removal on $DW_HOST; nothing was removed"
@@ -513,7 +499,7 @@ if ! REMOVE_OUTPUT="$(dw_on_host zpool remove rpool "$VDEV" 2>&1)"; then
   fi
   printf 'WARNING: zpool remove reported an error (%s), but %s may be removing it anyway.\n' \
     "${REMOVE_OUTPUT//$'\n'/ }" "$DW_HOST" >&2
-  printf 'The removal record stays requested. Run\n  hosts/list_disks_ready_for_physically_removal.sh --host %s\n' "$DW_HOST"
+  printf 'The removal record stays requested. Run\n  hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
   printf 'to see whether the removal is running; it marks the record failed if not.\n'
   exit 1
 fi
@@ -522,6 +508,6 @@ dw_collect_layout "$LAYOUT"
 dw_section "Removal started"
 printf '%s\n' "$(dw_json "$LAYOUT" 'd["pool"]["remove"] or "The removal already finished."')"
 printf '\n%s has been marked for removal from rpool on %s. ZFS is copying its data\n' "$VDEV" "$DW_HOST"
-printf 'onto the other vdevs. Run\n  hosts/list_disks_ready_for_physically_removal.sh --host %s\n' "$DW_HOST"
-printf 'later to see when its disks are safe to pull. To remove another vdev, run this\n'
+printf 'onto the other vdevs. You must run\n  hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
+printf 'to finalize retirement after evacuation and determine which disks are safe to pull. To remove another vdev, run this\n'
 printf 'script again after this removal completes.\n'

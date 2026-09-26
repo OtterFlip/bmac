@@ -13,9 +13,8 @@ keeps one root-only JSON document, by default
 - when rpool was last scrubbed, and the result;
 - one record per top-level vdev removal, with its member disks' serials,
   because ZFS forgets which disks a vdev used once its removal completes;
-- each new mirror pair from the moment its disks are chosen until
-  env/moxN.conf records it, so a run interrupted after zpool add can still
-  record the pair;
+- each new mirror pair from the moment its disks are chosen until the
+  operation completes, so an interrupted run can resume safely;
 - the disk chosen to replace a pulled mirror member, keyed by the surviving
   disk's serial, until it joins the mirror. Once a LUKS replacement takes the
   pulled member's mapping name, rpool shows the old member resolving to the
@@ -134,8 +133,11 @@ MEMBER_KEYS = {"path", "mapper", "luks", "disk", "serial", "model", "disk_size"}
 
 
 def record_removal(state: dict[str, Any], request: Any, now: int) -> str:
-    if not isinstance(request, dict) or set(request) != {"vdev", "members", "conf_pair"}:
-        raise StateError("removal request needs exactly vdev, members, and conf_pair")
+    if not isinstance(request, dict) or set(request) not in (
+        {"vdev", "members"},
+        {"vdev", "members", "conf_pair"},  # accepted for pre-change callers
+    ):
+        raise StateError("removal request needs exactly vdev and members")
     vdev = request["vdev"]
     if not isinstance(vdev, str) or not VDEV_RE.fullmatch(vdev):
         raise StateError(f"invalid vdev name: {vdev!r}")
@@ -147,9 +149,6 @@ def record_removal(state: dict[str, Any], request: Any, now: int) -> str:
             raise StateError("each removal member needs exactly " + ", ".join(sorted(MEMBER_KEYS)))
         if not member["serial"]:
             raise StateError("every removed member must have a disk serial")
-    pair = request["conf_pair"]
-    if pair is not None and pair not in (2, 3, 4, 5):
-        raise StateError("conf_pair must be 2 through 5 or null")
     if any(row["state"] == "requested" for row in state["removals"]):
         raise StateError("another vdev removal is still recorded as in progress")
     removal_id = f"removal-{now}-{vdev}"
@@ -158,7 +157,6 @@ def record_removal(state: dict[str, Any], request: Any, now: int) -> str:
             "id": removal_id,
             "vdev": vdev,
             "members": members,
-            "conf_pair": pair,
             "state": "requested",
             "requested_at": now,
             "updated_at": now,
@@ -250,13 +248,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     cleared.add_argument("--survivor", required=True)
     addition = subparsers.add_parser(
-        "record-addition", help="record a new mirror pair until moxN.conf records it"
+        "record-addition", help="record a new mirror pair until its operation completes"
     )
     addition.add_argument("--pair", type=int, required=True)
     addition.add_argument("--serial", action="append", required=True)
     addition.add_argument("--capacity", action="append", type=int, required=True)
     added = subparsers.add_parser(
-        "clear-addition", help="forget a new mirror pair once moxN.conf records it"
+        "clear-addition", help="forget a new mirror pair once its operation completes"
     )
     added.add_argument("--pair", type=int, required=True)
     args = parser.parse_args(argv)
