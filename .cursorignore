@@ -1,5 +1,6 @@
 *.env
 *.key
+*.cer
 secrets.env
 cluster_state.txt
 __pycache__/
