@@ -43,6 +43,7 @@ SOURCE_VMID=""
 SOURCE_PURPOSE=""
 SOURCE_PRIMARY_DOMAIN=""
 SOURCE_REGISTRY_OWNER=""
+SOURCE_REVISION=""
 SOURCE_OWNER=""
 SOURCE_VOLUME=""
 SOURCE_STATE=""
@@ -107,8 +108,8 @@ usage() {
 Usage: create_staging_vm.sh [options]
 
 Run from an administrator workstation. The script lists production registry
-resources, prompts for a source prodN, automatically selects the lowest
-currently-online HA/replication-eligible standby, and creates one stopped
+resources, prompts for a source prodN, selects a standby of its live HA owner
+(prompting when more than one is eligible), and creates one stopped
 stageNprodN staging VM.
 
 Options:
@@ -610,13 +611,14 @@ values = (
     row["spec"]["disk_gib"],
     row["spec"]["replication_interval"],
     ",".join(placement),
+    row["revision"],
 )
 for value in values:
     sys.stdout.buffer.write(str(value).encode() + b"\0")
 PY
   local -a fields=()
   mapfile -d '' -t fields <"$fields_path"
-  ((${#fields[@]} == 10)) ||
+  ((${#fields[@]} == 11)) ||
     die "Could not parse selected production resource"
   SOURCE_NAME="${fields[0]}"
   SOURCE_VMID="${fields[1]}"
@@ -628,6 +630,7 @@ PY
   SOURCE_DISK_GIB="${fields[7]}"
   SOURCE_REPLICATION_MINUTES="${fields[8]}"
   IFS=',' read -r -a SOURCE_PLACEMENT <<<"${fields[9]}"
+  SOURCE_REVISION="${fields[10]}"
 }
 
 validate_live_source_and_ha() {
@@ -735,8 +738,21 @@ PY
   )" || die "Live source/HA validation failed"
   [[ "$SOURCE_OWNER" =~ ^mox([1-9]|10)$ ]] ||
     die "Live source owner is invalid"
-  [[ "$SOURCE_REGISTRY_OWNER" == "$SOURCE_OWNER" ]] ||
-    die "Registry owner $SOURCE_REGISTRY_OWNER differs from live owner $SOURCE_OWNER"
+  if [[ "$SOURCE_REGISTRY_OWNER" != "$SOURCE_OWNER" ]]; then
+    info "Registry owner ${SOURCE_REGISTRY_OWNER:-unknown} is stale; it will be updated to live owner $SOURCE_OWNER before allocation"
+  fi
+}
+
+reconcile_source_registry_owner() {
+  [[ "$SOURCE_REGISTRY_OWNER" != "$SOURCE_OWNER" ]] || return 0
+  CURRENT_PHASE="updating stale production registry owner"
+  require_source_unchanged
+  registry_cmd update "$SOURCE_NAME" \
+    --expected-revision "$SOURCE_REVISION" \
+    --owner-node "$SOURCE_OWNER" >/dev/null ||
+    die "Could not update registry owner of $SOURCE_NAME to $SOURCE_OWNER"
+  info "Registry owner of $SOURCE_NAME updated from ${SOURCE_REGISTRY_OWNER:-unknown} to $SOURCE_OWNER"
+  SOURCE_REGISTRY_OWNER="$SOURCE_OWNER"
 }
 
 load_replication_jobs_and_choose_standby() {
@@ -808,7 +824,8 @@ PY
     REPLICATION_TARGETS+=("$target")
   done
 
-  STAGING_NODE="$(
+  local candidates_text
+  candidates_text="$(
     python3 - \
       "$SOURCE_OWNER" \
       "$(IFS=,; printf '%s' "${SOURCE_PLACEMENT[*]}")" \
@@ -828,10 +845,24 @@ candidates = sorted(
 )
 if not candidates:
     raise SystemExit("no currently-online HA/replication-eligible standby exists")
-print(candidates[0])
+print(*candidates, sep="\n")
 PY
   )" || die "Could not select an eligible standby"
+  local -a candidates=()
+  mapfile -t candidates <<<"$candidates_text"
   info "Active production owner: $SOURCE_OWNER"
+  if ((${#candidates[@]} == 1)); then
+    STAGING_NODE="${candidates[0]}"
+  else
+    info "Eligible staging standbys: ${candidates[*]}"
+    prompt_with_default STAGING_NODE "Staging standby" "${candidates[0]}"
+    local candidate valid=false
+    for candidate in "${candidates[@]}"; do
+      [[ "$STAGING_NODE" == "$candidate" ]] && valid=true
+    done
+    [[ "$valid" == true ]] ||
+      die "Staging standby must be one of: ${candidates[*]}"
+  fi
   info "Selected staging standby: $STAGING_NODE"
   validate_staging_host_capacity
 }
@@ -2620,6 +2651,7 @@ main() {
     dry_run_summary
     return 0
   fi
+  reconcile_source_registry_owner
   reserve_staging
   preflight_reserved_identity
   create_source_snapshot
