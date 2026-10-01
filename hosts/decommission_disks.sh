@@ -205,6 +205,7 @@ else
   done
 
   while true; do
+    dw_discard_typeahead
     IFS= read -r -p $'\nHave you deleted all unwanted files inside each of these guests? [Y/n] ' answer ||
       dw_die "input ended"
     case "${answer,,}" in
@@ -323,6 +324,7 @@ PY
         fi
         ((SECONDS < deadline)) ||
           dw_die "timed out waiting for replication job $job; check it with pvesr status on $source"
+        printf '.'
         sleep "$REPLICATION_POLL_SECONDS"
       done
     done

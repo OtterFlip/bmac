@@ -133,11 +133,21 @@ dw_select_host() {
   printf '\nTarget host: %s\n' "$DW_HOST"
 }
 
+# Drop keystrokes typed while a long step ran (an Enter pressed to check for
+# progress) so they cannot answer the next prompt.
+dw_discard_typeahead() {
+  [[ -t 0 ]] || return 0
+  local _
+  while IFS= read -r -s -t 0.1 -n 4096 _; do :; done
+  return 0
+}
+
 # Ask before a command that can take a long time; nothing runs on "no".
 dw_ready() {
   local what="$1" duration="$2"
   printf '\nNEXT: %s\n' "$what"
   printf 'This can take %s and blocks until it finishes.\n' "$duration"
+  dw_discard_typeahead
   prompt_yes "Ready to start it now?"
 }
 
