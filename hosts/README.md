@@ -344,7 +344,10 @@ of truth; these scripts do not read or update `env/moxN.conf`.
    formats both disks as whole-disk LUKS2 with it and opens them as
    `crypt-rpool-mirrorN-1` and `-2`. The passphrase is typed only at the
    console; setup's temporary key file no longer exists by then;
-3. copies both LUKS header backups to `hosts/artifacts/moxN/luks-headers/`;
+3. copies both LUKS header backups to `hosts/artifacts/moxN/luks-headers/`
+   as `rpool-mirrorN-1.bin` and `-2.bin`, keeping any earlier backup under
+   the same name (from a previous run or a pair N that was since
+   decommissioned) as `.replaced-<time>`;
 4. adds crypttab entries in the host's single-prompt `decrypt_keyctl` form,
    rebuilds the initramfs, unpacks it to prove it will unlock the new mappings
    at boot, and only then runs `zpool add` with the pool's existing ashift;
