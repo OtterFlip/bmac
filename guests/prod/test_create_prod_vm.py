@@ -779,6 +779,21 @@ printf '%s\\n' "$ROOT_VOLUME"
                 valid.stdout.strip(), "local-zfs:vm-100-disk-1"
             )
 
+            original_config = config.read_text(encoding="utf-8")
+            config.write_text(
+                original_config.replace("size=128G", "size=131584M"),
+                encoding="utf-8",
+            )
+            stale_size = self.run_sourced(body, expected=1)
+            self.assertIn("does not match", stale_size.stderr)
+            self.run_sourced(
+                body.replace(
+                    "VM_DISK_GIB=128\n",
+                    "VM_DISK_GIB=128\nVM_DISK_BYTES=137975824384\n",
+                )
+            )
+            config.write_text(original_config, encoding="utf-8")
+
             config.write_text(
                 config.read_text(encoding="utf-8").replace(
                     "bridge=vmbr-private,firewall=1",

@@ -66,6 +66,11 @@ sudo lib/cluster_registry.py update --help
 sudo lib/cluster_registry.py list-routes
 ```
 
+`update PRODN --disk-bytes N` records the exact root disk size after
+`guests/prod/extend_prod_vm_disk.sh` grows a production zvol. It accepts only
+whole-MiB values larger than the current size, and stores them in the optional
+`spec.disk_bytes`. `spec.disk_gib` keeps the creation-time size.
+
 All mutations use an atomic `mkdir` lock. A stale lock is never removed merely
 because it is old: an operator must inspect it and opt in with
 `--break-stale-lock`. Allocation IDs make retried creation requests

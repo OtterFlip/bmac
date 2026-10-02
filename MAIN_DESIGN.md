@@ -171,6 +171,8 @@ destroy/create/deploy/stage cycle on the test domain):
 
 Expected to work on macOS, not yet run there against a cluster:
 
+- `guests/prod/extend_prod_vm_disk.sh`. Its local work is the config load,
+  `ssh -G`, `python3`, and strict SSH, the same as the production creator;
 - `guests/staging/create_staging_vm.sh --sanitizer PATH`. The sanitizer size
   check was the macOS-specific part; it is covered by unit tests only;
 - `diagnostics/show_cluster_state.sh`. Its only local work is the config load
@@ -823,7 +825,19 @@ guests, and four (6-9) that grow, shrink, or repair a host's storage later:
    guests/prod/destroy_prod_vm.sh prodN
    ```
 
-4. `guests/staging/create_staging_vm.sh` — create one
+4. `guests/prod/extend_prod_vm_disk.sh` — after placement pools gain
+   capacity, grow one running production VM's root zvol and then its final
+   ext4 partition and filesystem online. Growth is capped so every placement
+   pool keeps 10% of its total size available; it replicates the new size to
+   every placement node and records the exact size in the registry. Start
+   with the read-only rehearsal:
+
+   ```bash
+   guests/prod/extend_prod_vm_disk.sh --dry-run
+   guests/prod/extend_prod_vm_disk.sh
+   ```
+
+5. `guests/staging/create_staging_vm.sh` — create one
    disposable, non-HA `stageNprodN` linked clone from a registered active
    production VM. Read
    [`guests/staging/README.md`](guests/staging/README.md). Start with:
@@ -834,7 +848,7 @@ guests, and four (6-9) that grow, shrink, or repair a host's storage later:
      --sanitizer /absolute/path/to/staging-sanitizer.sh
    ```
 
-5. `guests/staging/destroy_staging_vm.sh` — interactively select and
+6. `guests/staging/destroy_staging_vm.sh` — interactively select and
    permanently remove one staging VM after exact identity, clone-origin, and
    snapshot-GUID validation. It removes only that guest's route, VM-owned
    disks, linked clone, one exact source-owned snapshot and its replicated
@@ -845,21 +859,21 @@ guests, and four (6-9) that grow, shrink, or repair a host's storage later:
    guests/staging/destroy_staging_vm.sh
    ```
 
-6. `hosts/add_new_disk_vdev.sh` — add two new identical-capacity disks to a
+7. `hosts/add_new_disk_vdev.sh` — add two new identical-capacity disks to a
    host's rpool as one new mirror vdev. On a LUKS host the operator types the
    shared passphrase at the host console, where it is proven against every
    existing member before the disks are formatted; the script then proves the
    rebuilt initramfs unlocks them before `zpool add`.
-7. `hosts/decommission_disks.sh` — prepare a host's rpool to give up one
+8. `hosts/decommission_disks.sh` — prepare a host's rpool to give up one
    non-boot mirror vdev (related staging destroyed first; guest trims,
    forced replication, and a scrub, each skipped if done in the last 24
    hours) and start its `zpool remove` while keeping a minimum free space of
    at least 50 GiB.
-8. `hosts/inventory_disks.sh` — inventory all disks and rpool vdev members
+9. `hosts/inventory_disks.sh` — inventory all disks and rpool vdev members
    from live host state; once a removal completes, close the removed pair's
    LUKS mappings, update crypttab and the initramfs, then list only disks not
    in use as safe to pull.
-9. `hosts/add_replacement_disk.sh` — after a failed mirror member's disk was
+10. `hosts/add_replacement_disk.sh` — after a failed mirror member's disk was
    pulled and an identical-capacity disk installed, put the new disk into
    that mirror (`zpool replace`, or `zpool attach` for a mirror detached to
    one disk). A boot-mirror replacement
@@ -867,7 +881,7 @@ guests, and four (6-9) that grow, shrink, or repair a host's storage later:
    in-sync ESP; a LUKS replacement gets the shared passphrase at the host
    console. It starts the resilver without waiting for it.
 
-Workflows 6-9 are described in
+Workflows 7-10 are described in
 [`hosts/README.md`](hosts/README.md#adding-and-decommissioning-rpool-disks).
 They share `lib/rpool_mirror.sh` with host setup, so there is one copy of the
 logic that adds a mirror or encrypts a mirror member.
@@ -973,6 +987,13 @@ scripts/libraries named in their descriptions.
   `PROD_GUEST_OS_INSTALL_MODE=ubuntu-autoinstall`.
 - `guests/prod/test_create_prod_vm.py` tests installer rendering, allocation,
   resume, SSH, HA, and destructive guards for production creation.
+- `guests/prod/extend_prod_vm_disk.sh` runs from the workstation. It uses
+  strict mox SSH for Proxmox/ZFS work and the operator's `ssh prodN` alias
+  for the guest, where it needs Python 3, `findmnt`, `sfdisk`, `tune2fs`,
+  `growpart` (`cloud-guest-utils`), and `resize2fs`.
+- `guests/prod/test_extend_prod_vm_disk.py` tests the integer growth-limit
+  math, increase parsing and MiB rounding, guest-disk validation, and
+  mutation ordering.
 - `guests/staging/patch_staging_clone.sh` is the root-only host wrapper for
   offline clone validation, mounting, and teardown. It is invoked by the
   staging creator and depends on ZFS block-device, filesystem, and Proxmox
@@ -1024,7 +1045,7 @@ scripts/libraries named in their descriptions.
 - `lib/rpool_mirror.sh` is the single copy of the host-side mirror logic
   (disk checks, console LUKS preparation, crypttab/initramfs, `zpool add`,
   boot-disk partitioning and ESPs, member replacement, and LUKS retirement)
-  used by host setup and workflows 6, 8, and 9.
+  used by host setup and workflows 7, 9, and 10.
 - `lib/storage_state.py` keeps trim, scrub, vdev-removal, and pending
   mirror-addition and member-replacement records on the host;
   `lib/disk_workflows.sh` holds the workstation plumbing shared by workflows
@@ -1826,7 +1847,12 @@ created_at, updated_at, revision
 
 Nested data records the purpose/source, primary/alias/staging domains,
 cores/RAM/disk/allocation/replication interval, HA nodes, replication targets,
-volume, and snapshot dependency. A staging snapshot additionally records
+volume, and snapshot dependency. `spec.disk_gib` is the creation-time root
+disk size. After `extend_prod_vm_disk.sh` grows a production disk, the
+optional `spec.disk_bytes` holds the exact current size: a whole number of
+MiB, always larger than `disk_gib`, and changed only through
+`update --disk-bytes`, which allows growth only. Staging records keep the
+source's `disk_gib`. A staging snapshot additionally records
 source resource, root and all snapshotted volumes, original owner, root and
 per-volume GUID maps, verification flag, sole dependent, and refcount 1.
 
@@ -2524,6 +2550,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
   hosts/test_setup_proxmox_host.py \
   hosts/test_app_ha_guest_role_hook.py \
   guests/prod/test_create_prod_vm.py \
+  guests/prod/test_extend_prod_vm_disk.py \
   guests/staging/test_staging_vm.py \
   lib/test_shared_libs.py \
   lib/test_haproxy_routes.py \
@@ -2553,6 +2580,10 @@ Coverage by test helper:
   startup retry semantics, ISO hash/release/boot metadata/atomicity, contiguous
   nodes, QDevice gate, resume sentinels, exact VM/Secure Boot contract,
   argv-safe SSH, non-mutating dry-run, and absence of destructive rollback.
+- `guests/prod/test_extend_prod_vm_disk.py`: per-host 10% pool reserve with
+  smallest-headroom selection, sparse guest-free and overhead math, reserved
+  refreservation ratio, whole-MiB rounding, unit parsing and limits, guest
+  root-disk validation, and mutation ordering.
 - `guests/staging/test_staging_vm.py`: argv-safe node execution, identity and
   sanitizer rewrites, symlink escape rejection, mapping/unmount safety,
   stopped-VM disk-reference rejection, snapshot/refcount ordering, rollback,
@@ -2585,7 +2616,7 @@ Coverage by test helper:
   for a mirror detached to one disk.
 - `lib/test_storage_state.py`: locked host-side trim, scrub, vdev-removal,
   mirror-addition, and member-replacement resume records.
-- `hosts/test_disk_workflows.py`: workflows 6-9 end to end against a fake SSH
+- `hosts/test_disk_workflows.py`: workflows 7-10 end to end against a fake SSH
   host and guests: console hand-off, resume, capacity checks, the five-mirror
   limit, related-staging refusal, trim and scrub reuse within 24 hours,
   forced replication, minimum-free-space rules, removal records, retirement,
@@ -2608,10 +2639,6 @@ and must not be inferred from registry primitives or old design prose:
 - **Host removal or cluster shrink.** Host setup can create/join contiguous
   nodes; no script removes a mox, rewrites placement/replication, shrinks VRRP
   peers, or reconciles QDevice around node removal.
-- **Online production-disk growth.** A future script will grow a selected
-  production zvol, then extend the guest's final ext4 partition/filesystem
-  online. It must enforce a pool-allocation ceiling of 90% and account for all
-  HA replicas and full refreservations before changing anything.
 - **Cluster status report.** A future read-only `GetClusterStatus` workflow
   will summarize hosts, tags, quorum/QDevice, VRRP owner, HA guests,
   staging guests, IPs, placement, replication health, and pending cleanup.

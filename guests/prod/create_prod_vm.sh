@@ -756,12 +756,13 @@ values = [
     ",".join(row["proxmox"]["replication_targets"]),
     ",".join(row["proxmox"]["ha_nodes"]),
     "1" if row["routes_enabled"] else "0",
+    row["spec"].get("disk_bytes", row["spec"]["disk_gib"] * 2**30),
 ]
 for value in values:
     sys.stdout.buffer.write(str(value).encode("utf-8") + b"\0")
 PY
   )
-  ((${#fields[@]} == 22)) || die "Could not parse registry resource"
+  ((${#fields[@]} == 23)) || die "Could not parse registry resource"
 
   RESOURCE_NAME="${fields[0]}"
   VMID="${fields[1]}"
@@ -791,6 +792,13 @@ PY
   REGISTRY_REPLICATION_CSV="${fields[19]}"
   REGISTRY_HA_CSV="${fields[20]}"
   ROUTES_ENABLED="${fields[21]}"
+  VM_DISK_BYTES="${fields[22]}"
+}
+
+# extend_prod_vm_disk.sh records an exact grown size; otherwise the root disk
+# is still its creation-time whole-GiB size.
+registered_disk_bytes() {
+  printf '%s\n' "${VM_DISK_BYTES:-$((VM_DISK_GIB * 1024 * 1024 * 1024))}"
 }
 
 refresh_resource() {
@@ -1010,6 +1018,9 @@ reserve_or_resume_resource() {
     info "Purpose: $PURPOSE_SLUG; primary domain: $PRIMARY_DOMAIN"
     info "State: $RESOURCE_STATE; placement: ${PLACEMENT_NODES[*]}"
     info "Registered CPU/RAM/disk: ${VM_CORES} cores / ${VM_MEMORY_GIB} GiB / ${VM_DISK_GIB} GiB ($DISK_ALLOCATION)"
+    if [[ "$(registered_disk_bytes)" != "$((VM_DISK_GIB * 1024 * 1024 * 1024))" ]]; then
+      info "Root disk was grown online to $(registered_disk_bytes) bytes"
+    fi
     info "This durable allocation and its registered sizing will be reused."
     prompt_yes "Resume this allocation?" ||
       die "Existing purpose was not selected for resume"
@@ -1562,7 +1573,7 @@ verify_vm_config() {
       "$RESOURCE_NAME" "$VM_CORES" "$VM_MEMORY_MB" "$PROD_VM_CPU_TYPE" \
       "$PROD_VM_STORAGE" "$PROD_VM_BRIDGE" "$VM_MAC" "$HOOK_REF" \
       "$PRODUCTION_VM_TAG" "$PURPOSE_TAG" "$ISO_STORAGE_ID" "$ISO_FILENAME" \
-      "$ROOT_VOLUME" "$VM_DISK_GIB" "$INSTALL_PHASE" \
+      "$ROOT_VOLUME" "$(registered_disk_bytes)" "$INSTALL_PHASE" \
       "$FINAL_NETWORK_ENABLED" >"$parsed_config" <<'PY'
 import re
 import sys
@@ -1582,7 +1593,7 @@ import sys
     iso_storage,
     iso_filename,
     registered_root_volume,
-    disk_gib,
+    disk_bytes,
     install_phase,
     final_network_enabled,
 ) = sys.argv[1:]
@@ -1703,7 +1714,7 @@ for option in ("discard", "iothread", "replicate", "ssd"):
 size = disk_options.get("size", "")
 match = re.fullmatch(r"([0-9]+)([KMGTP])", size, re.IGNORECASE)
 units = {"K": 2**10, "M": 2**20, "G": 2**30, "T": 2**40, "P": 2**50}
-if not match or int(match.group(1)) * units[match.group(2).upper()] != int(disk_gib) * 2**30:
+if not match or int(match.group(1)) * units[match.group(2).upper()] != int(disk_bytes):
     fail("root disk size differs from registry")
 allowed_cdroms = {
     f"{iso_storage}:iso/{iso_filename}",
@@ -1760,14 +1771,14 @@ apply_disk_allocation() {
 set -Eeuo pipefail
 volume="$1"
 allocation="$2"
-expected_gib="$3"
+expected_bytes="$3"
 path="$(pvesm path "$volume")"
 case "$path" in
   /dev/zvol/*) dataset="${path#/dev/zvol/}" ;;
   *) printf "Unexpected non-ZFS volume path: %s\n" "$path" >&2; exit 1 ;;
 esac
 volsize="$(zfs get -Hp -o value volsize "$dataset")"
-[[ "$volsize" =~ ^[0-9]+$ && "$volsize" -eq $((expected_gib * 1024 * 1024 * 1024)) ]]
+[[ "$volsize" =~ ^[0-9]+$ && "$volsize" -eq "$expected_bytes" ]]
 if [[ "$allocation" == reserved ]]; then
   zfs set refreservation=auto "$dataset"
   refreservation="$(zfs get -Hp -o value refreservation "$dataset")"
@@ -1778,7 +1789,7 @@ else
   zfs set refreservation=none "$dataset"
   [[ "$(zfs get -Hp -o value refreservation "$dataset")" == 0 ]]
 fi
-' -- "$ROOT_VOLUME" "$DISK_ALLOCATION" "$VM_DISK_GIB"
+' -- "$ROOT_VOLUME" "$DISK_ALLOCATION" "$(registered_disk_bytes)"
 }
 
 validate_disk_allocation() {
@@ -1788,21 +1799,21 @@ validate_disk_allocation() {
 set -Eeuo pipefail
 volume="$1"
 allocation="$2"
-expected_gib="$3"
+expected_bytes="$3"
 path="$(pvesm path "$volume")"
 case "$path" in
   /dev/zvol/*) dataset="${path#/dev/zvol/}" ;;
   *) printf "Unexpected non-ZFS volume path: %s\n" "$path" >&2; exit 1 ;;
 esac
 volsize="$(zfs get -Hp -o value volsize "$dataset")"
-[[ "$volsize" =~ ^[0-9]+$ && "$volsize" -eq $((expected_gib * 1024 * 1024 * 1024)) ]]
+[[ "$volsize" =~ ^[0-9]+$ && "$volsize" -eq "$expected_bytes" ]]
 refreservation="$(zfs get -Hp -o value refreservation "$dataset")"
 if [[ "$allocation" == reserved ]]; then
   [[ "$refreservation" =~ ^[0-9]+$ && "$refreservation" -ge "$volsize" ]]
 else
   [[ "$refreservation" == 0 ]]
 fi
-' -- "$ROOT_VOLUME" "$DISK_ALLOCATION" "$VM_DISK_GIB"
+' -- "$ROOT_VOLUME" "$DISK_ALLOCATION" "$(registered_disk_bytes)"
 }
 
 validate_or_complete_existing_disk_allocation() {
@@ -3160,6 +3171,9 @@ print_completion() {
   info "Preferred startup node: $INITIAL_NODE"
   info "Root volume: $ROOT_VOLUME ($DISK_ALLOCATION)"
   info "CPU/RAM/disk: ${VM_CORES} cores / ${VM_MEMORY_GIB} GiB / ${VM_DISK_GIB} GiB"
+  if [[ "$(registered_disk_bytes)" != "$((VM_DISK_GIB * 1024 * 1024 * 1024))" ]]; then
+    info "Root disk was grown online to $(registered_disk_bytes) bytes"
+  fi
   info "Replication interval: */$REPLICATION_MINUTES"
   info "Guest OS install mode: $PROD_GUEST_OS_INSTALL_MODE"
   info "Final VM networking: $FINAL_NETWORK_ENABLED"

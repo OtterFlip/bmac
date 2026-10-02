@@ -1363,18 +1363,27 @@ def validate_policy(policy: Any) -> None:
     reject_secret_material(policy, "registry policy")
 
 
+SPEC_KEYS = {
+    "cores",
+    "memory_mb",
+    "disk_gib",
+    "disk_allocation",
+    "replication_interval",
+}
+# Present only after an online production-disk growth; disk_gib then remains
+# the creation-time size and disk_bytes is the exact current root disk size.
+SPEC_OPTIONAL_KEYS = {"disk_bytes"}
+MIB = 1024 * 1024
+GIB = 1024 * MIB
+MAX_DISK_BYTES = 1024 * 1024 * GIB
+
+
 def validate_spec(spec: Any) -> None:
     if not isinstance(spec, dict):
         raise RegistryError("resource spec must be an object")
     require_exact_keys(
         spec,
-        {
-            "cores",
-            "memory_mb",
-            "disk_gib",
-            "disk_allocation",
-            "replication_interval",
-        },
+        SPEC_KEYS | (set(spec) & SPEC_OPTIONAL_KEYS),
         "resource spec",
     )
     for field in ("cores", "memory_mb", "disk_gib"):
@@ -1384,6 +1393,22 @@ def validate_spec(spec: Any) -> None:
         raise RegistryError("disk allocation must be sparse or reserved")
     if not re.fullmatch(r"[1-9][0-9]*", str(spec["replication_interval"])):
         raise RegistryError("replication interval must be a positive minute count")
+    if "disk_bytes" in spec:
+        disk_bytes = spec["disk_bytes"]
+        if (
+            type(disk_bytes) is not int
+            or disk_bytes % MIB != 0
+            or disk_bytes <= spec["disk_gib"] * GIB
+            or disk_bytes > MAX_DISK_BYTES
+        ):
+            raise RegistryError(
+                "resource spec disk_bytes must be a whole-MiB byte count "
+                "larger than disk_gib"
+            )
+
+
+def effective_disk_bytes(spec: dict[str, Any]) -> int:
+    return int(spec.get("disk_bytes", spec["disk_gib"] * GIB))
 
 
 def validate_resource(resource: Any, policy: dict[str, Any]) -> None:
@@ -2519,6 +2544,19 @@ def command_update(registry: Registry, args: argparse.Namespace) -> Any:
                 snapshot["owner_node"] = args.snapshot_owner_node
             snapshot["guids"].update(_parse_snapshot_guids(args.snapshot_guid))
             updated["proxmox"]["snapshot"] = snapshot
+            changed = True
+        if args.disk_bytes is not None:
+            if current["kind"] != "production":
+                raise RegistryError("only production root disk sizes may be updated")
+            current_bytes = effective_disk_bytes(current["spec"])
+            if args.disk_bytes % MIB != 0:
+                raise RegistryError("--disk-bytes must be a whole number of MiB")
+            if args.disk_bytes <= current_bytes:
+                raise RegistryError(
+                    f"--disk-bytes may only grow the registered root disk "
+                    f"(currently {current_bytes} bytes)"
+                )
+            updated["spec"]["disk_bytes"] = args.disk_bytes
             changed = True
 
         if not changed:
@@ -4196,6 +4234,11 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--clear-snapshot", action="store_true")
     update.add_argument("--snapshot-owner-node")
     update.add_argument("--snapshot-guid", action="append", metavar="MOXN=GUID")
+    update.add_argument(
+        "--disk-bytes",
+        type=int,
+        help="grow the exact registered production root disk size (whole MiB)",
+    )
     update.set_defaults(handler=command_update)
 
     orchestration_get = subparsers.add_parser(

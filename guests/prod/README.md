@@ -228,6 +228,99 @@ proves absence on every placement node, clears durable metadata, and archives
 the released registry record. The hash-addressed source ISO cache below
 `/var/lib/app-ha-proxmox/iso-cache` is deliberately retained.
 
+## Online root-disk growth
+
+`extend_prod_vm_disk.sh` runs after a production VM already exists, typically
+after new mirror vdevs have added capacity to the `rpool` of its placement
+hosts. It passes some or all of that capacity to the VM while the VM keeps
+running:
+
+```bash
+guests/prod/extend_prod_vm_disk.sh --dry-run
+guests/prod/extend_prod_vm_disk.sh
+```
+
+Prerequisites:
+
+- Every cluster node is online and runs a `cluster_registry.py` that supports
+  `update --disk-bytes`. After pulling this change, deploy it with
+  `hosts/update_cluster_runtime.sh`. Older registries reject a record that
+  carries the exact grown size, so the script checks every node first.
+- Non-interactive root SSH to the guest works from the workstation, normally
+  through the `ssh prodN` alias that `create_prod_vm.sh` offers to configure.
+  The script asks for the alias (default `prodN`) and checks that it resolves
+  to the registry's private IP and logs in as root.
+- The guest has Python 3, `findmnt`, `sfdisk`, `tune2fs`, `growpart`
+  (Ubuntu package `cloud-guest-utils`), and `resize2fs`. The guest's root
+  ext4 must be the last partition on its SCSI disk, which is the layout that
+  Ubuntu autoinstall's `direct` storage produces.
+
+The script lists registered production VMs and defaults to the lowest-numbered
+active one. Before calculating anything it:
+
+- requires a quorate cluster, every placement node online, one running VM,
+  a started HA resource with its strict node-affinity rule, and healthy
+  replication to every placement node other than the owner;
+- takes the owner from live cluster state, not the registry. If a failover
+  left the registry owner stale, it updates the registry owner, as
+  `create_staging_vm.sh` does;
+- checks that the VM config, every placement copy of the zvol, and the guest
+  disk all have the registered exact size, and that no Proxmox lock is held.
+
+### Growth limit
+
+All arithmetic uses whole bytes. For each placement host:
+
+```text
+headroom = (ZFS available on the pool) - ceil(10% of zpool size)
+```
+
+The smallest headroom across placement hosts is used, rounded down to a whole
+MiB (1,048,576 bytes). ZFS `available` already subtracts other zvols'
+refreservations and the pool's slop space.
+
+- **Reserved (full) zvol:** the limit is `headroom × volsize ÷ refreservation`,
+  because `refreservation=auto` also reserves zvol metadata, so growing
+  volsize by X consumes slightly more than X on every replica.
+- **Sparse zvol:** the guest's existing free ext4 blocks, including
+  root-reserved blocks, can already be written into the zvol without any
+  resize. The limit is therefore `0` when that free space is at least the
+  headroom. Otherwise it is `(headroom − guest free) × (1 − 0.015)`, which
+  allows about 1.5% for sparse metadata.
+
+The limit is rounded down to a whole MiB and shown in bytes, MiB, and GiB.
+You then choose to enter the increase in bytes, MiB, or GiB. MiB and GiB
+accept decimals. The amount is rounded up to a whole MiB and rejected, with
+a new prompt, if it exceeds the limit. Enter `q` to quit without changes.
+`--dry-run` stops after showing the limit.
+
+### Growth sequence
+
+After the exact increase is shown and you type `GO`, the script:
+
+1. acquires the production orchestration lease, so `create_prod_vm.sh` and
+   `destroy_prod_vm.sh` cannot run against the VM concurrently. Then it
+   rechecks the live owner, registry revision, guest disk, and capacity limit;
+2. runs `qm resize <vmid> scsi0 <size>M` on the live owner. This updates the
+   VM config, grows the zvol, and notifies the running QEMU. For reserved
+   zvols it reapplies `refreservation=auto`;
+3. records the exact size with `cluster_registry.py update --disk-bytes`;
+4. triggers `pvesr schedule-now` for every replication job until every target
+   zvol has the new size. It then verifies volsize and allocation policy on
+   every placement node;
+5. rescans the guest SCSI disk, grows the final partition to the end of the
+   disk with `growpart`, and grows the mounted ext4 with `resize2fs`. Disk,
+   partition, and filesystem sizes are shown before and after.
+
+Growth cannot be undone. If a run fails after the resize, rerun the script. It
+detects unallocated space after the root partition, or ext4 smaller than its
+partition, and offers to finish the guest growth first. If the registry update
+itself failed, the failure message prints the exact `update --disk-bytes`
+command to run on a mox host.
+
+The script does not take a lease against `create_staging_vm.sh`. Avoid
+running both at once for the same production VM.
+
 ## Failure and resume behavior
 
 Temporary local request material lives under `guests/prod/artifacts` with
@@ -271,4 +364,9 @@ bash -n guests/prod/create_prod_vm.sh
 
 PYTHONDONTWRITEBYTECODE=1 python3 \
   guests/prod/test_create_prod_vm.py -v
+
+bash -n guests/prod/extend_prod_vm_disk.sh
+
+PYTHONDONTWRITEBYTECODE=1 python3 \
+  guests/prod/test_extend_prod_vm_disk.py -v
 ```

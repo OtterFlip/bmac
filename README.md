@@ -318,6 +318,26 @@ first:
 This removes the VM, its HA and replication configuration, routes, owned
 volumes, and registry allocation. It is intentionally destructive.
 
+### Growing a Production VM's Disk
+
+After adding capacity to the ZFS pools of a production VM's placement hosts
+(for example with `hosts/add_new_disk_vdev.sh`), pass some of it to the VM
+without stopping it:
+
+```bash
+./guests/prod/extend_prod_vm_disk.sh --dry-run
+./guests/prod/extend_prod_vm_disk.sh
+```
+
+Pick the VM (default: the first active `prodN`), make sure `ssh prodN` works,
+and the script shows the largest increase that still keeps 10% of every
+placement pool's total size available. You enter the increase in bytes, MiB,
+or GiB. It then grows the zvol on the live HA owner, replicates the new size
+to every placement host, and grows the guest's root partition and ext4
+filesystem online. Deploy the updated registry with
+`hosts/update_cluster_runtime.sh` before first use. See
+[`guests/prod/README.md`](guests/prod/README.md#online-root-disk-growth).
+
 ### Creating or Removing a Production-Derived Staging VM
 
 Preview and then create a staging VM from a selected production VM:

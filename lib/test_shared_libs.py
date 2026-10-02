@@ -423,6 +423,65 @@ class RegistryCliTest(unittest.TestCase):
             finally:
                 self.state = original_state
 
+    def test_production_disk_bytes_only_grow_in_whole_mib(self) -> None:
+        original = self.allocate_prod()["resource"]
+        self.assertNotIn("disk_bytes", original["spec"])
+        base = original["spec"]["disk_gib"] * 2**30
+        for value in (base, base - 2**20, base + 1):
+            self.run_registry(
+                "update", "prod1", "--disk-bytes", str(value), expected=1
+            )
+
+        grown, _ = self.run_registry(
+            "update", "prod1", "--disk-bytes", str(base + 3 * 2**20)
+        )
+        assert isinstance(grown, dict)
+        self.assertEqual(grown["spec"]["disk_bytes"], base + 3 * 2**20)
+        self.assertEqual(grown["spec"]["disk_gib"], original["spec"]["disk_gib"])
+        self.assertEqual(grown["revision"], original["revision"] + 1)
+        self.run_registry(
+            "update", "prod1", "--disk-bytes", str(base + 3 * 2**20), expected=1
+        )
+        regrown, _ = self.run_registry(
+            "update", "prod1", "--disk-bytes", str(base + 2**30)
+        )
+        assert isinstance(regrown, dict)
+        self.assertEqual(regrown["spec"]["disk_bytes"], base + 2**30)
+        listed, _ = self.run_registry("list")
+        assert isinstance(listed, list)
+        self.assertEqual(listed[0]["spec"]["disk_bytes"], base + 2**30)
+
+        self.run_registry(
+            "allocate-staging",
+            "--source",
+            "prod1",
+            "--vmid",
+            "200",
+            "--placement",
+            "mox2",
+            "--placement-limit",
+            "5",
+        )
+        self.run_registry(
+            "update",
+            "stage1prod1",
+            "--disk-bytes",
+            str(base + 2**31),
+            expected=1,
+        )
+
+        spec = copy.deepcopy(original["spec"])
+        cluster_registry.validate_spec(spec)
+        for invalid in (base, base + 1, True, str(base + 2**20)):
+            spec["disk_bytes"] = invalid
+            with self.assertRaises(cluster_registry.RegistryError):
+                cluster_registry.validate_spec(spec)
+        spec["disk_bytes"] = base + 2**20
+        cluster_registry.validate_spec(spec)
+        spec["unexpected"] = 1
+        with self.assertRaises(cluster_registry.RegistryError):
+            cluster_registry.validate_spec(spec)
+
     def test_stage_number_is_lowest_free_within_required_host_limit(self) -> None:
         production, _ = self.run_registry(
             "allocate-prod",
