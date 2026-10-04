@@ -797,11 +797,13 @@ After `PURGE moxN`, it:
    `pvesr delete --force`, records the live owner, and then records the
    narrower placement;
 3. abandons the dead host's own deferred cleanup records;
-4. deletes the node. With two members it runs
-   `pvecm qdevice remove || true; pvecm expected 1` on the survivor, so a
-   single host remains quorate. Otherwise it removes the QDevice and runs
-   `pvecm delnode`;
-5. re-adds the QDevice for an even remaining count, frees the slot,
+4. runs `pvecm delnode` while the existing votes, including any QDevice
+   vote, still hold quorum. Proxmox refuses `pvecm qdevice remove` while any
+   member is offline, so the QDevice is left in place until the dead node is
+   gone. If the survivors are not quorate right after the delete, the same
+   remote command runs `pvecm expected` with the remaining member count;
+5. reconciles the QDevice for the remaining count (removes it for an odd
+   count, keeps or adds it for an even count), frees the slot,
    resynchronizes routes, archives the artifacts, and offers to update
    `PROXMOX_CONTROL_NODE`.
 

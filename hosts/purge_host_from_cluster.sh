@@ -726,30 +726,20 @@ narrow_productions() {
   done
 }
 
-# Remove the QDevice and delete the dead member. A two-node cluster keeps
-# quorum only through the QDevice vote, so the survivor removes it and lowers
-# expected votes in one command, well inside the HA watchdog window.
+# Delete the dead member while the existing votes, including any QDevice vote,
+# still hold quorum. Proxmox refuses 'pvecm qdevice remove' while any member
+# is offline, so the QDevice is reconciled afterward in finish_cluster_cleanup,
+# when every remaining member is online. If the survivors are not quorate right
+# after the delete, expected votes drop to the remaining member count.
 delete_dead_member() {
   [[ "$TARGET_IS_MEMBER" == true ]] || return 0
   CURRENT_PHASE="deleting $TARGET_HOST from the cluster"
   CLUSTER_CHANGED=true
-  if hm_qdevice_configured; then
-    if ((${#MEMBERS[@]} == 2)); then
-      log "Removing the QDevice and setting expected votes to 1 on $HM_COORDINATOR"
-      hm_exec "$HM_COORDINATOR" bash -c \
-        'pvecm qdevice remove || true; pvecm expected 1' ||
-        die "Could not remove the QDevice and lower expected votes on $HM_COORDINATOR"
-      hm_qdevice_configured &&
-        die "corosync.conf still configures the QDevice; remove it manually with 'pvecm qdevice remove' on $HM_COORDINATOR"
-    else
-      hm_remove_qdevice
-    fi
-  fi
+  hm_delete_cluster_node "$TARGET_HOST" "$((${#MEMBERS[@]} - 1))"
   local status
   status="$(hm_cluster_status)" || die "Could not read cluster status"
   hm_status_is_quorate "$status" ||
-    die "The cluster is not quorate after QDevice removal"
-  hm_delete_cluster_node "$TARGET_HOST"
+    die "The cluster is not quorate after deleting $TARGET_HOST; run 'pvecm expected $((${#MEMBERS[@]} - 1))' on $HM_COORDINATOR and rerun"
 }
 
 finish_cluster_cleanup() {

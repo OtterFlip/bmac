@@ -485,6 +485,37 @@ hm_qdevice_configured() {
     /etc/pve/corosync.conf
 }
 
+# Corosync can keep a removed QDevice registered (the Qdevice flag with 0
+# votes) until it restarts. Vote checks and a later host join would treat that
+# as a configured QDevice, so restart corosync, one member at a time, on each
+# member that still reports it.
+hm_clear_stale_qdevice() {
+  local node state states status deadline
+  ! hm_qdevice_configured || return 0
+  states="$(hm_member_states)" || die "Could not list cluster members"
+  while read -r node state; do
+    [[ -n "$node" ]] || continue
+    [[ "$state" == online ]] || die "$node is not online"
+    status="$(hm_exec "$node" pvecm status)" ||
+      die "Could not read cluster status from $node"
+    hm_has_qdevice "$status" || continue
+    log "Restarting corosync on $node to clear the removed QDevice registration"
+    hm_exec "$node" systemctl restart corosync.service ||
+      die "Could not restart corosync on $node"
+    deadline=$((SECONDS + 120))
+    while true; do
+      if status="$(hm_exec "$node" pvecm status 2>/dev/null)" &&
+        hm_status_is_quorate "$status" && ! hm_has_qdevice "$status"; then
+        break
+      fi
+      ((SECONDS < deadline)) ||
+        die "$node is not quorate without a QDevice registration 120 seconds after restarting corosync"
+      sleep 3
+    done
+    info "$node no longer reports a QDevice registration"
+  done <<<"$states"
+}
+
 # Bring the QDevice to the layout required for NODE_COUNT online members.
 hm_reconcile_qdevice() {
   local node_count="$1" status
@@ -493,6 +524,7 @@ hm_reconcile_qdevice() {
     if hm_qdevice_configured; then
       hm_remove_qdevice
     fi
+    hm_clear_stale_qdevice
     hm_assert_qdevice_layout "$node_count"
     info "The ${node_count}-node cluster has an odd vote count; the QDevice is correctly absent"
     return 0
@@ -600,11 +632,35 @@ hm_wait_until_offline() {
 }
 
 # Delete NODE from corosync and pmxcfs. NODE must already be powered off.
+# hm_delete_cluster_node NODE [EXPECTED_VOTES]
+# With EXPECTED_VOTES, the coordinator lowers expected votes to that value when
+# the cluster is not quorate shortly after the delete. The check runs in the
+# same remote command so an inquorate survivor recovers well inside the HA
+# watchdog window.
 hm_delete_cluster_node() {
-  local node="$1" deadline listed
+  local node="$1" fallback_votes="${2:-}" deadline listed
   log "Deleting $node from the Proxmox cluster"
-  hm_exec "$HM_COORDINATOR" pvecm delnode "$node" ||
-    die "pvecm delnode $node failed on $HM_COORDINATOR"
+  if [[ -n "$fallback_votes" ]]; then
+    [[ "$fallback_votes" =~ ^[1-9][0-9]*$ ]] ||
+      die "Invalid fallback expected votes: $fallback_votes"
+    # shellcheck disable=SC2016 # The script is evaluated on the coordinator.
+    hm_exec "$HM_COORDINATOR" bash -c '
+set -Eeuo pipefail
+pvecm delnode "$1"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if pvecm status | grep -Eq "^Quorate:[[:space:]]+Yes[[:space:]]*$"; then
+    exit 0
+  fi
+  sleep 1
+done
+printf "Cluster is not quorate after deleting %s; setting expected votes to %s\n" "$1" "$2" >&2
+pvecm expected "$2"
+' bash "$node" "$fallback_votes" ||
+      die "pvecm delnode $node failed on $HM_COORDINATOR"
+  else
+    hm_exec "$HM_COORDINATOR" pvecm delnode "$node" ||
+      die "pvecm delnode $node failed on $HM_COORDINATOR"
+  fi
   deadline=$((SECONDS + 120))
   while ((SECONDS < deadline)); do
     listed="$(hm_member_states 2>/dev/null | awk -v node="$node" '$1 == node')" ||

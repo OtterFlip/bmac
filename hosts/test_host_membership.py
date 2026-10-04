@@ -283,7 +283,17 @@ class HostMembershipTest(unittest.TestCase):
         ):
             self.assertIn(phrase, source)
         self.assertIn('"PURGE ${TARGET_HOST}"', source)
-        self.assertIn("pvecm qdevice remove || true; pvecm expected 1", source)
+
+    def test_purge_deletes_the_dead_member_before_removing_the_qdevice(self) -> None:
+        source = PURGE_SCRIPT.read_text(encoding="utf-8")
+        member = source[source.index("delete_dead_member() {") :]
+        member = member[: member.index("\n}\n")]
+        self.assertNotIn("qdevice", member.lower())
+        self.assertIn('hm_delete_cluster_node "$TARGET_HOST" "$((${#MEMBERS[@]} - 1))"', member)
+        main = source[source.index("main() {") :]
+        self.assertLess(main.index("delete_dead_member"), main.index("finish_cluster_cleanup"))
+        cleanup = source[source.index("finish_cluster_cleanup() {") :]
+        self.assertIn('hm_reconcile_qdevice "${#MEMBERS[@]}"', cleanup[: cleanup.index("\n}\n")])
 
     def test_remove_keeps_the_documented_order(self) -> None:
         source = REMOVE_SCRIPT.read_text(encoding="utf-8")

@@ -2869,8 +2869,57 @@ cluster_control_tty() {
   fi
 }
 
-cluster_has_qdevice() {
-  grep -Eqi 'Qdevice|QDevice' <<<"$1"
+# corosync.conf, not pvecm status, decides whether a QDevice is configured:
+# corosync can keep a removed QDevice registered until it restarts.
+qdevice_configured() {
+  cluster_control grep -Eq '^[[:space:]]*device[[:space:]]*[{]' /etc/pve/corosync.conf
+}
+
+qdevice_flag_present() {
+  grep -Eq '^Flags:.*(^|[[:space:]])Qdevice([[:space:]]|$)' <<<"$1"
+}
+
+# Run a command on cluster member NODE through the cluster control node.
+cluster_node_control() {
+  local node=$1
+  shift
+  if [[ "$node" == "$(cluster_control_node)" ]]; then
+    cluster_control "$@"
+    return
+  fi
+  cluster_control ssh -o BatchMode=yes -o ConnectTimeout=8 \
+    -o StrictHostKeyChecking=yes \
+    -o CheckHostIP=no \
+    -o "HostKeyAlias=${node}" \
+    -o "UserKnownHostsFile=/etc/pve/nodes/${node}/ssh_known_hosts" \
+    -o GlobalKnownHostsFile=none \
+    "root@${node}.${PROXMOX_INTERNAL_DOMAIN}" "$@"
+}
+
+# Restart corosync, one member at a time, on each member that still reports a
+# QDevice registration after the QDevice was removed from corosync.conf.
+clear_stale_qdevice_registration() {
+  local members node status deadline
+  ! qdevice_configured || return 0
+  members="$(cluster_member_nodes)" ||
+    fail "Could not list cluster members through $(cluster_control_node)"
+  for node in $members; do
+    status="$(cluster_node_control "$node" pvecm status)" ||
+      fail "Could not read cluster status from $node"
+    qdevice_flag_present "$status" || continue
+    info "Restarting corosync on $node to clear the removed QDevice registration"
+    cluster_node_control "$node" systemctl restart corosync.service ||
+      fail "Could not restart corosync on $node"
+    deadline=$((SECONDS + 120))
+    until status="$(cluster_node_control "$node" pvecm status 2>/dev/null)" &&
+      grep -Eq '^Quorate:[[:space:]]+Yes[[:space:]]*$' <<<"$status" &&
+      ! qdevice_flag_present "$status"; do
+      ((SECONDS < deadline)) ||
+        fail "$node is not quorate without a QDevice registration 120 seconds after restarting corosync"
+      sleep 3
+    done
+    info "$node no longer reports a QDevice registration"
+  done
 }
 
 qdevice_status_is_healthy() {
@@ -2985,9 +3034,9 @@ wait_for_all_cluster_nodes_online() {
 
 remove_qdevice_before_membership_change() {
   local status
-  status="$(cluster_control pvecm status)"
-  cluster_has_qdevice "$status" || {
+  qdevice_configured || {
     QDEVICE_REMOVED_FOR_JOIN=0
+    clear_stale_qdevice_registration
     return
   }
   confirm_exact \
@@ -2995,9 +3044,10 @@ remove_qdevice_before_membership_change() {
     "REMOVE QDEVICE TO ADD ${HOST_ID}"
   cluster_control pvecm qdevice remove
   QDEVICE_REMOVED_FOR_JOIN=1
-  status="$(cluster_control pvecm status)"
-  cluster_has_qdevice "$status" &&
+  qdevice_configured &&
     fail "QDevice is still configured after pvecm qdevice remove"
+  clear_stale_qdevice_registration
+  status="$(cluster_control pvecm status)"
   grep -Eq '^Quorate:[[:space:]]+Yes' <<<"$status" ||
     fail "Cluster lost quorum after QDevice removal; do not continue the join"
 }
@@ -3321,15 +3371,16 @@ reconcile_qdevice() {
   status="$(cluster_control pvecm status)"
 
   if ((node_count % 2 == 1)); then
-    if cluster_has_qdevice "$status"; then
+    if qdevice_configured; then
       confirm_exact \
         "The $node_count-node cluster has an unnecessary configured QDevice. Every node is online; remove the external vote to restore the required odd-node quorum layout." \
         "REMOVE QDEVICE FROM ${node_count} NODE CLUSTER"
       cluster_control pvecm qdevice remove
-      status="$(cluster_control pvecm status)"
     fi
-    cluster_has_qdevice "$status" &&
+    qdevice_configured &&
       fail "QDevice must be absent for an odd $node_count-node cluster"
+    clear_stale_qdevice_registration
+    status="$(cluster_control pvecm status)"
     qdevice_absent_status_is_healthy "$status" "$node_count" ||
       fail "Odd-node cluster vote totals or quorum flags are inconsistent after QDevice reconciliation"
     info "Cluster has $node_count online voting nodes; QDevice is correctly absent."
@@ -3337,7 +3388,7 @@ reconcile_qdevice() {
     return
   fi
 
-  if cluster_has_qdevice "$status"; then
+  if qdevice_configured; then
     assert_healthy_qdevice "$status" "$node_count"
     remove_qdevice_setup_key
     info "Cluster has $node_count online voting nodes; QDevice is configured, alive, and voting."
@@ -3345,6 +3396,7 @@ reconcile_qdevice() {
     return
   fi
 
+  clear_stale_qdevice_registration
   log "Preparing the external QDevice and adding its vote"
   setup_qdevice_vote "$node_count"
   write_state qdevice-configured "present-for-${node_count}-node-cluster"

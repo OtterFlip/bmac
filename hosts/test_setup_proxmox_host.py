@@ -470,6 +470,17 @@ Flags:            Quorate Qdevice
             control.index("reconcile_qdevice"),
         )
         self.assertIn("reconcile_cluster_control_plane", main)
+        self.assertNotIn("cluster_has_qdevice", source)
+        for function in (
+            "remove_qdevice_before_membership_change() {",
+            "reconcile_qdevice() {",
+        ):
+            body = source[source.index(function) :]
+            body = body[: body.index("\n}\n")]
+            self.assertLess(
+                body.index("pvecm qdevice remove"),
+                body.rindex("clear_stale_qdevice_registration"),
+            )
         self.assertIn('flock -w 1800 "$cluster_lock_fd"', source)
         self.assertIn("cluster-control-plane.lock", source)
         self.assertIn("/run/lock/app-ha-cluster-control-plane", source)
