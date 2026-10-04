@@ -372,7 +372,7 @@ load_configuration() {
     PROXMOX_IP PROXMOX_GATEWAY PROXMOX_PREFIX PROXMOX_FQDN
     PROXMOX_DNS_SERVER PROXMOX_ADMIN_EMAIL PROXMOX_ROOT_PASSWORD
     PROXMOX_TIMEZONE PROXMOX_COUNTRY PROXMOX_KEYBOARD
-    PROXMOX_ISO_FILE_FULL_PATH PROXMOX_ISO_FILE_SHA256 PROXMOX_PUBLIC_MAC
+    PROXMOX_ISO_FILE_PATH PROXMOX_ISO_FILE_SHA256 PROXMOX_PUBLIC_MAC
     TAILSCALE_HOSTNAME TAILSCALE_TAG
     ADMIN_1_PUBLIC_SSH_KEY ADMIN_2_PUBLIC_SSH_KEY
     PROXMOX_SECONDARY_MAC PROXMOX_SECONDARY_IP MOX_REPLICATION_IP
@@ -394,6 +394,13 @@ load_configuration() {
   )
   local name
   for name in "${required[@]}"; do require_var "$name"; done
+  # Relative paths are anchored at the repo root, not the caller's cwd.
+  # shellcheck disable=SC2088 # Matching a literal, unexpanded tilde.
+  if [[ "$PROXMOX_ISO_FILE_PATH" == "~/"* ]]; then
+    PROXMOX_ISO_FILE_PATH="${HOME:?HOME is required to expand PROXMOX_ISO_FILE_PATH}/${PROXMOX_ISO_FILE_PATH#"~/"}"
+  elif [[ "$PROXMOX_ISO_FILE_PATH" != /* ]]; then
+    PROXMOX_ISO_FILE_PATH="${REPO_ROOT}/${PROXMOX_ISO_FILE_PATH}"
+  fi
   if [[ "$HARDWARE_INVENTORY_MODE" == idrac ]]; then
     for name in IDRAC_IP IDRAC_USER IDRAC_PASSWORD; do require_var "$name"; done
   fi
@@ -572,8 +579,7 @@ preflight() {
     fail "LUKS header artifacts are not ignored by Git"
 
   if source_iso_is_required; then
-    local iso="$PROXMOX_ISO_FILE_FULL_PATH"
-    [[ "$iso" == /* ]] || fail "PROXMOX_ISO_FILE_FULL_PATH must be absolute"
+    local iso="$PROXMOX_ISO_FILE_PATH"
     [[ -f "$iso" ]] || fail "Missing source ISO: $iso"
     local actual_hash
     actual_hash="$(sha256sum -- "$iso" | awk '{print $1}')"
@@ -1011,7 +1017,7 @@ build_iso() {
   assistant="$(assistant_binary)"
   answer="${GENERATED_DIR}/answer.toml"
   first_boot="${GENERATED_DIR}/first-boot.sh"
-  iso_name="$(basename -- "${PROXMOX_ISO_FILE_FULL_PATH%.iso}")"
+  iso_name="$(basename -- "${PROXMOX_ISO_FILE_PATH%.iso}")"
   output="${HOST_ARTIFACTS}/${iso_name}-${HOST_ID}-auto.iso"
   hdsize="$(read_state zfs-hdsize-gib)"
   setup_key_b64="$(base64 -w0 <"$SSH_KEY.pub")"
@@ -1244,7 +1250,7 @@ PY
 
   "$assistant" validate-answer "$answer"
   rm -f "$output"
-  "$assistant" prepare-iso "$PROXMOX_ISO_FILE_FULL_PATH" \
+  "$assistant" prepare-iso "$PROXMOX_ISO_FILE_PATH" \
     --fetch-from iso --answer-file "$answer" --on-first-boot "$first_boot" --output "$output"
   chmod 0600 "$output"
   sha256sum -- "$output" | tee "${LOG_DIR}/prepared-iso.sha256"
