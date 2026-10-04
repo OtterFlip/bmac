@@ -74,15 +74,15 @@ After creating a production VM, you can test creation and teardown of a staging 
     Proxied: Turned On
 
 
-2. Create a Load Balancing monitor for mox1 and mox2. If you're still on the domains page then click "Back to Domains" to see the whole left-side menu and then under "Delivery & performance" | "Load Balancing" use the "Monitors" tab and create one monitor each for mox1 and mox2 (2 monitors total) with these settings (note that if you haven't yet enabled Load Balancing on your account, which costs ~$5/month, you'll need to enable it):
+2. Create two Load Balancing monitors, one for the prod pool and one for the staging pool.  Each of these two pools will typically just have the single endpoint - the IP of the proxmox host you assign as the owner of your prod VM, and the IP of the proxmox host that's acting as the standby for your prod VM, respectively. Traffic will be sent to the pool associated with this monitor in your load-balancer.  Within the Proxmox cluster, that traffic will then be directed to the prod VM which must be setup to respond to HTTP /healthz GET requests with 200 (and "ok" response body) for requests to your mydomain.com domain. The sample app deploy script, `deploy_hello_app_to_prod.sh`, will set up NGINX on a prod VM to respond to /healthz GET requests in this fashion. If you're still on the domains page then click "Back to Domains" to see the whole left-side menu and then under "Delivery & performance" | "Load Balancing" use the "Monitors" tab and create one monitor each for mox1 and mox2 (2 monitors total) with these settings (note that if you haven't yet enabled Load Balancing on your account, which costs ~$5/month, you'll need to enable it):
 
     ```
-    Name: mox1-mydomain-http-healthz
+    Name: prod-via-prod-host-http-healthz
     Type: HTTP
     Path: /healthz
     Port: 80
 
-    Name: mox2-mydomain-http-healthz
+    Name: prod-via-stage-host-http-healthz
     Type: HTTP
     Path: /healthz
     Port: 80
@@ -91,8 +91,8 @@ After creating a production VM, you can test creation and teardown of a staging 
 3. Now under "Load Balancing" on the "Pools" tab create one pool each for mox1 and mox2 (2 pools total) with these settings:
 
     ```
-    Pool Name: mox1
-    Pool Description: Proxmox host mox1
+    Pool Name: prod
+    Pool Description: Proxmox prod pool
     Endpoint Steering: Random
     Endpoint Name: mox1
     Endpoint Address: enter the public IP address of your mox1 host here
@@ -100,13 +100,13 @@ After creating a production VM, you can test creation and teardown of a staging 
     Weight: 1
     Enabled: checked
     Health Threshold: 1
-    Monitor (select the mox1-mydomain-http-healthz monitor you already made)
+    Monitor (select the prod-via-prod-host-http-healthz monitor you already made)
     Health Check Regions: All Data Centers
     Health Check Notification: checked, either
     Notification Email: enter your email address here
 
-    Pool Name: mox2
-    Pool Description: Proxmox host mox2
+    Pool Name: stage
+    Pool Description: Proxmox stage pool
     Endpoint Steering: Random
     Endpoint Name: mox2
     Endpoint Address: enter the public IP address of your mox2 host here
@@ -114,21 +114,21 @@ After creating a production VM, you can test creation and teardown of a staging 
     Weight: 1
     Enabled: checked
     Health Threshold: 1
-    Monitor (select the mox2-mydomain-http-healthz monitor you already made)
+    Monitor (select the prod-via-stage-host-http-healthz monitor you already made)
     Health Check Regions: All Data Centers
     Health Check Notification: checked, either
     Notification Email: enter your email address here
     ```
 
-4. Now back on the "Load Balancing" page on the "Load Balancers" tab you need to create two load balancers, one for the traffic to the prod guest on the primary host, and the other for traffic to possible staging guests on the standby host, for a total of 2 load balancers, with these settings:
+4. Now back on the "Load Balancing" page on the "Load Balancers" tab you need to create two load balancers, one for the traffic to the prod VM on the primary/prod host, and the other for traffic to possible staging guests on the standby/stage host, for a total of 2 load balancers, with these settings.  PAY VERY CLOSE ATTENTION to the Hostename field and note that for the staging hostname you must use the *.mydomain.com format:
 
     ```
     Hostname: mydomain.com
     proxy (orange checkbox): CHECKED
-    load balancer description: mydomain.com load balancer
+    load balancer description: mydomain.com for prod
     Session Affinity: UNCHECKED
     Adaptive Routing: UNCHECKED
-    Pools: Add mox1 and then mox2 in that order (this order is critical)
+    Pools: Add prod pool and then stage pool in that order (this order is CRITICAL)
     Fallback Pool: mox2
     Attached Monitors should be set automatically since you already set them for the pools
     Traffic Steering: Off - this is what you want as this will do active/passive failover for you
@@ -136,10 +136,10 @@ After creating a production VM, you can test creation and teardown of a staging 
 
     Hostname: *.mydomain.com
     proxy (orange checkbox): CHECKED
-    load balancer description: *.mydomain.com load balancer
+    load balancer description: *.mydomain.com for staging
     Session Affinity: UNCHECKED
     Adaptive Routing: UNCHECKED
-    Pools: Add mox2 and then mox1 in that order (this order is critical)
+    Pools: Add stage pool and then prod pool in that order (this order is CRITICAL)
     Fallback Pool: mox1
     Attached Monitors should be set automatically since you already set them for the pools
     Traffic Steering: Off - this is what you want as this will do active/passive failover for you
