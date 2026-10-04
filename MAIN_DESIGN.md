@@ -31,7 +31,14 @@ defaults. In that example:
 - guest egress uses floating `10.213.0.10`, not `.1` or `.3`;
 - `.3` has no forwarding, DNAT, VIP, proxy, or gateway role;
 - production and staging guests do not run Tailscale;
-- supported host names are contiguous `mox1` through at most `mox10`;
+- supported host names are slots `mox1` through at most `mox10`, recorded in
+  the cluster registry; slots may have gaps and freed slots are reused
+  lowest first;
+- hosts can be removed (`hosts/remove_host_from_cluster.sh`) or purged after
+  a permanent failure (`hosts/purge_host_from_cluster.sh`), and production
+  placement and ownership can be changed
+  (`guests/prod/change_prod_vm_placement.sh`,
+  `guests/prod/change_prod_vm_owner.sh`);
 - staging Host/SNI routing and generic production creation are implemented;
 - the former legacy design documents have been consolidated into this README
   and removed.
@@ -68,8 +75,8 @@ defaults. In that example:
 
 The host layer builds an application-HA Proxmox cluster named `BMAC`.
 The current repository has host definitions for `mox1` and `mox2`; the
-implementation and allocation policy support adding contiguous hosts through
-`mox10`.
+implementation and allocation policy support adding hosts in any free slot
+through `mox10`, and removing them again.
 
 The managed workload roles are:
 
@@ -104,7 +111,7 @@ Do not rely on this architecture until all of these are true:
    stable identities.
 3. Every mox has a unique public IPv4 and public default route on `vmbr0`.
    `vmbr-private` has only the connected `/24`; it has no default gateway.
-4. At least two contiguous, online, quorate mox nodes exist before creating a
+4. At least two online, quorate mox nodes exist before creating a
    production resource. All existing nodes are online for membership changes.
 5. The external QDevice is operational and independent enough to arbitrate an
    even-node cluster. It is not hosted on the application cluster and is not a
@@ -188,12 +195,24 @@ Expected to work on macOS, not yet run there against a cluster:
   tests pass on macOS. It rewrites the runtime on every node, so treat the
   first macOS run as a test, not as routine;
 - `qdevice/purge_qdevice.sh`. Plain Bash plus SSH locally, read but not run.
+- `diagnostics/show_qdevice_state.sh`. Config load, `python3`, and strict SSH;
+  covered by unit tests only.
+- `diagnostics/show_cluster_health.sh`. Config load, `python3`, and strict SSH;
+  covered by fake-SSH unit tests only.
 
 Linux workstation only:
 
 - `hosts/setup_proxmox_host.sh`. It needs `flock` and `ip` locally, and the
   install-ISO phase executes the amd64 Linux `proxmox-auto-install-assistant`,
   so it also cannot run on arm64 Linux.
+- `hosts/remove_host_from_cluster.sh`, `hosts/purge_host_from_cluster.sh`,
+  and `qdevice/add_qdevice.sh`. They take the same workstation `flock` as
+  host setup.
+
+Expected to work on macOS, not yet run anywhere against a cluster:
+`guests/prod/change_prod_vm_placement.sh` and
+`guests/prod/change_prod_vm_owner.sh`. Their local work is the config load,
+`python3`, `mktemp`, and strict SSH, the same as the production creator.
 
 Never run on a workstation, so the workstation OS does not matter. These
 execute on a Proxmox host, inside a guest, or from a live Linux boot, and are
@@ -202,7 +221,7 @@ free to use GNU-only tools:
 - `guests/prod/prepare_prod_iso.sh`, `guests/prod/build_ubuntu_autoinstall.py`;
 - `guests/staging/patch_staging_clone.sh`,
   `guests/staging/patch_staging_guest_tree.py`;
-- `hosts/app-ha-guest-role-hook.sh`, `hosts/inventory_disks.sh`;
+- `hosts/app-ha-guest-role-hook.sh`, `hosts/cluster_setup_prereq.sh`;
 - `lib/cluster_registry.py`, `lib/haproxy_routes.py`,
   `lib/sync_haproxy_routes.sh`, `lib/process_deferred_cleanup.sh`.
 
@@ -336,8 +355,9 @@ mox2
   storage input: one mandatory NVMe mirror pair
 ```
 
-Only `mox1.conf` and `mox2.conf` currently exist. Adding `moxN` requires the
-next contiguous file and node; an omitted index cannot be skipped. The VRRP
+Only `mox1.conf` and `mox2.conf` currently exist. Adding `moxN` requires its
+`env/moxN.conf`; setup recommends the lowest slot the registry records as
+free, and every address derives from the slot number, so gaps are safe. The VRRP
 configuration on every installed candidate nevertheless lists all other
 addresses through configured `MAX_MOX_HOSTS=10`.
 
@@ -635,14 +655,17 @@ One through five NVMe mirror pairs are supported:
   conversion.
 - Each run selects iDRAC/Redfish or manual disk inventory. Redfish mode
   remotely verifies serial, capacity, and health. Manual mode uses the
-  read-only `hosts/inventory_disks.sh` helper from a Linux Live environment
+  standalone, read-only `hosts/cluster_setup_prereq.sh`, copied to and run in a
+  Linux Live environment booted on the machine,
   and requires an exact `NVME_MIRROR_<P>_CAPACITY_BYTES_<M>` value for every
-  configured serial; members of each pair must have identical byte capacity.
+  configured serial; the members of each pair may differ by at most 1%, in
+  either order, and the pair uses the smaller capacity.
 - Before boot-test selection, the operator chooses whether all configured
   rpool members remain unencrypted or use LUKS2. Both choices are resumable.
 - LUKS conversion degrades mirror 1 one member at a time. The script records a GPT
-  backup and partition start, detaches the ZFS member, expands partition 3
-  into the reserved tail, clears only old ZFS signatures, and prepares LUKS2
+  backup and partition start, detaches the ZFS member, expands partition 3 to
+  end 1 GiB short of the smaller boot disk's whole-GiB size (the same byte on
+  both disks, whichever is smaller), clears only old ZFS signatures, and prepares LUKS2
   through a helper run at the target host console. The helper, the crypttab
   entry, and the initramfs check are `lib/rpool_mirror.sh` member commands,
   the same ones `hosts/add_replacement_disk.sh` uses.
@@ -657,9 +680,18 @@ One through five NVMe mirror pairs are supported:
 - Optional mirror pairs 2 through 5 must be complete. Gaps are allowed, so a
   decommissioned pair's entries can be commented out while later pairs keep
   their numbers and LUKS names. Each pair
-  is capacity-matched and added as one new top-level `rpool` mirror vdev.
-  In LUKS mode its whole disks use names `crypt-rpool-mirror<P>-<M>`; in clear
-  mode they remain unencrypted. Extra mirrors have no ESP.
+  is capacity-matched within 1% and added as one new top-level `rpool` mirror
+  vdev. Each disk gets one GPT partition (partition 1) that ends 1 GiB short of
+  the smaller disk's whole-GiB size. In LUKS mode those partitions use names
+  `crypt-rpool-mirror<P>-<M>`; in clear mode they remain unencrypted. Extra
+  mirrors have no ESP.
+- Because no member reaches the end of its disk, a replacement disk only has to
+  hold the survivor's partition table (same logical sector size, at least the
+  last partition's end plus 1 MiB), so a slightly smaller disk of the same
+  nominal capacity works. Finalizing a decommission releases the disks:
+  only LUKS key slots, ZFS labels, signatures, and the partition table are
+  erased, never the data area, and their off-host LUKS header backups are
+  deleted.
 - Every member must accept the same configured `PROXMOX_LUKS_PASSWORD`.
   `decrypt_keyctl` caches it only in the initramfs kernel keyring so one
   target-console prompt can unlock every mapper.
@@ -791,8 +823,10 @@ backup or security boundary.
 
 ## The main workflows
 
-There are nine operator workflows in this project: five that build hosts and
-guests, and four (6-9) that grow, shrink, or repair a host's storage later:
+There are fifteen operator workflows in this project: six (1-6) that build
+hosts and create, grow, or remove guests, four (7-10) that grow, shrink, or
+repair a host's storage, four (11-14) that move production between hosts and
+change cluster membership, and one (15) that replaces a failed QDevice:
 
 1. `hosts/setup_proxmox_host.sh` — destructively install or reconcile
    one `moxN`, create or join the cluster, and install storage, networking,
@@ -893,6 +927,42 @@ hosts/decommission_disks.sh --host moxN
 hosts/inventory_disks.sh --host moxN
 ```
 
+11. `guests/prod/change_prod_vm_placement.sh` — add hosts to or remove hosts
+   from one production VM's placement. Adding checks the host's
+   `MAX_PROD_VM_COUNT_ON_THIS_HOST` and a 10% pool reserve after the replica.
+   It records the registry placement, replicates, and widens the HA rule only
+   after a successful initial replication. Removing narrows the HA rule
+   first, then the registry, then deletes the replication job and replica. It
+   never removes the live owner and keeps at least two placement hosts. It
+   detects and finishes an interrupted change.
+12. `guests/prod/change_prod_vm_owner.sh` — move one production VM to another
+   placement host with `ha-manager relocate` after checking that HA,
+   replication, and the registry agree. It then verifies the reversed
+   replication and records the new owner.
+13. `hosts/remove_host_from_cluster.sh` — retire a healthy host that holds
+   nothing: remove the QDevice, power the host off, `pvecm delnode`, strip its
+   SSH trust, restore odd vote parity, free its registry slot, and choose a
+   new control node if needed. Requires `REMOVE moxN`.
+14. `hosts/purge_host_from_cluster.sh` — delete a dead host that has been
+   physically disconnected permanently. It destroys dependent staging,
+   narrows affected production placement, abandons the host's cleanup,
+   deletes the node (including the two-to-one-node case), and frees the
+   slot. Requires `PURGE moxN`. The purged machine must never communicate
+   with the cluster again.
+
+15. `qdevice/add_qdevice.sh` — add a QDevice to an even-member cluster that
+   has none, typically after `qdevice/purge_qdevice.sh` unregistered a failed
+   one. `diagnostics/show_qdevice_state.sh` reports whether a QDevice is
+   needed, functional, or inaccessible. The full replacement procedure is in
+   [`qdevice/QDEVICE_MANUAL_SETUP.md`](qdevice/QDEVICE_MANUAL_SETUP.md#replacing-a-failed-qdevice).
+
+Workflows 11-14 are described in
+[`guests/prod/README.md`](guests/prod/README.md#changing-placement) and
+[`hosts/README.md`](hosts/README.md#removing-and-purging-hosts). The
+documented order for moving to bigger hosts is: set up the new hosts, add
+them to placement, change the owner, remove the old hosts from placement,
+then remove the old hosts.
+
 The production/staging creators and destroyers have read-only
 `--dry-run` modes that query live state without registry or Proxmox mutation.
 Host setup has no dry run because bare-metal media, iDRAC gates, disk
@@ -900,7 +970,7 @@ conversion, and cluster membership cannot be faithfully rehearsed that way.
 Use its explicit boot-test policy and read every destructive confirmation.
 Creation gates use the case-sensitive token `GO`; branching installer recovery
 may additionally offer `WIPE`, while production destruction requires
-`DESTROY prodN`.
+`DESTROY prodN`, host removal `REMOVE moxN`, and host purge `PURGE moxN`.
 
 ## Helper inventory
 
@@ -911,6 +981,21 @@ All `test_*.py` files use Python's standard `unittest` framework plus mocked
 Bash/Proxmox commands and temporary roots; they depend on the adjacent
 scripts/libraries named in their descriptions.
 
+- `diagnostics/show_cluster_health.sh` is a quick, read-only workstation
+  check of hardware and networking that ignores guests. For each member it
+  reports Proxmox online state, workstation SSH access, quorum, and the
+  corosync, pve-cluster, and QDevice-client services. A member the
+  workstation cannot reach is inspected through the first reachable member
+  over cluster SSH. `corosync-cfgtool -n` on each member gives the state of
+  link0 (private VLAN) and link1 (Tailscale) to every other member. For the
+  QDevice it checks the need for one, registration, reachability, qnetd
+  state, and per-member votes. It shows every ZFS pool's vdev tree with
+  read/write/checksum counts, each member resolved through LUKS to its disk
+  serial, and every drive's `smartctl -H` result. From `zfs list -p` it takes
+  rpool's used and available bytes, treats their sum as usable space, and
+  flags a host as needing more storage (`hosts/add_new_disk_vdev.sh`) when
+  less than 10% is available. It ends with a problem list and exits 1 when
+  anything needs attention.
 - `diagnostics/show_cluster_state.sh` is an interactive, read-only
   workstation diagnostic for the QDevice and reachable `mox1` through
   `mox10`. It reports identity, clocks, Tailscale, firewall/listener state,
@@ -952,13 +1037,33 @@ scripts/libraries named in their descriptions.
     >mox1_state.txt
   ```
 
+- `diagnostics/show_qdevice_state.sh` is a read-only workstation report on
+  the QDevice. It says whether the member count needs one and whether one is
+  registered, shows each member's vote view, and shows the QDevice host's
+  qnetd state and connected clusters. It ends with a verdict: OK, needs a
+  QDevice (`qdevice/add_qdevice.sh`), registered but inaccessible
+  (`qdevice/purge_qdevice.sh`, then `qdevice/add_qdevice.sh`), or reachable
+  but unhealthy (the problems found). It exits 1 when anything needs
+  attention.
+- `qdevice/add_qdevice.sh` adds a QDevice to an all-online, quorate cluster
+  with an even member count and no registered QDevice. It verifies
+  `ssh qdevice`, refuses a Proxmox VE host, and holds the cluster
+  control-plane lock. It installs `corosync-qnetd`, pins the QDevice's SSH
+  host key on every member, runs `pvecm qdevice setup` through the control
+  node, and verifies every member's vote layout, as host setup does.
 - `qdevice/purge_qdevice.sh` is an intentionally destructive maintenance tool
-  for teardown or clean-room retesting. It first removes the QDevice through
-  the supported Proxmox cluster command and refuses to purge the external host
-  if cluster-side detachment cannot be proven. It then removes the temporary
+  for teardown, clean-room retesting, or replacing a failed QDevice. It first
+  removes the QDevice through the supported Proxmox cluster command and
+  refuses to purge the external host if cluster-side detachment cannot be
+  proven. It then removes the temporary
   Proxmox SSH key, QNetd TLS/NSS identity, Corosync/QDevice packages, services,
   account, and package-specific state from the dedicated QDevice. It does not
-  run `apt autoremove` or erase general journals. Read
+  run `apt autoremove` or erase general journals. When the QDevice host
+  cannot be reached, or is not the registered machine, it never touches it.
+  It offers to unregister the QDevice instead, only after the operator
+  confirms the old machine was removed from Tailscale. It then runs
+  `pvecm qdevice remove` and removes the QDevice client, certificates, and
+  host-key trust from every Proxmox node. Read
   [`qdevice/QDEVICE_MANUAL_SETUP.md`](qdevice/QDEVICE_MANUAL_SETUP.md) and its
   exact `GO` destructive confirmation before running:
 
@@ -994,6 +1099,20 @@ scripts/libraries named in their descriptions.
 - `guests/prod/test_extend_prod_vm_disk.py` tests the integer growth-limit
   math, increase parsing and MiB rounding, guest-disk validation, and
   mutation ordering.
+- `guests/prod/change_prod_vm_placement.sh` and
+  `guests/prod/change_prod_vm_owner.sh` run from the workstation over strict
+  mox SSH and share `lib/prod_ha.sh`. That library handles production
+  selection, live HA/replication state, the per-resource lease, registry
+  updates, and replication waits.
+- `guests/prod/test_change_prod_vm_placement.py` tests host eligibility,
+  add/remove ordering, partial-change repair, and the owner script's
+  agreement checks.
+- `hosts/remove_host_from_cluster.sh` and `hosts/purge_host_from_cluster.sh`
+  run from the workstation and share `lib/host_membership.sh` (QDevice
+  access and parity, control-plane lock, node deletion, SSH-trust removal)
+  and `lib/cluster_control.sh` (control-node resolution and the
+  `cluster.conf` update). `hosts/test_host_membership.py` tests their
+  blockers, the purge plan, candidates, and QDevice vote checks.
 - `guests/staging/patch_staging_clone.sh` is the root-only host wrapper for
   offline clone validation, mounting, and teardown. It is invoked by the
   staging creator and depends on ZFS block-device, filesystem, and Proxmox
@@ -1098,13 +1217,14 @@ lib/config.sh \
   --check --host mox1 --require-secrets
 ```
 
-Review `cluster.conf`, then each `moxN.conf`. The first host must be `mox1`;
-the next must be `mox2`, and so on. Do not pre-create a non-contiguous cluster.
+Review `cluster.conf`, then each `moxN.conf`. The first host must be the
+control node (`PROXMOX_CONTROL_NODE`, normally `mox1`), which creates the
+cluster. Setup recommends the lowest free slot for each later host.
 
-### 3. Install hosts in contiguous order
+### 3. Install hosts one at a time
 
-Run the host workflow first for `mox1`, then for `mox2`, and later one node at
-a time:
+Run the host workflow first for the control node, then for each later host,
+one at a time:
 
 ```bash
 hosts/setup_proxmox_host.sh --host mox1 --run-boot-tests
@@ -1117,7 +1237,7 @@ temporary root-only key file and require only `GO`. Preserve every exported
 header. If a phase fails, correct the condition and rerun the identical
 command; do not skip the phase marker or manually improvise the next step.
 
-After each join, verify contiguous membership, exact QDevice parity, private
+After each join, verify membership, exact QDevice parity, private
 migration/replication, VRRP peers, local HAProxy, shared tools, timers, and
 registry health before proceeding.
 
@@ -1183,8 +1303,8 @@ resumable:
    changed.
 2. **Discover hardware.** In iDRAC mode, Redfish inventories the target before
    mutation. In manual mode, the workflow validates configured exact byte
-   capacities previously gathered by `hosts/inventory_disks.sh` from a Linux
-   Live environment. Both paths validate serial-selected pairs and enough
+   capacities previously gathered by running `hosts/cluster_setup_prereq.sh` in a
+   Linux Live environment. Both paths validate serial-selected pairs and enough
    reserved tail space for mirror-1 LUKS conversion.
 3. **Build host media.** It verifies the source hash; obtains the reviewed
    `proxmox-auto-install-assistant`; creates an unattended answer and
@@ -1198,15 +1318,16 @@ resumable:
 5. **Bootstrap and configure storage.** The workstation reaches only the
    attested Tailscale address with its setup key, verifies host and disk
    identity, installs prerequisites, applies the selected clear or LUKS policy,
-   and adds configured whole-disk mirror vdevs. LUKS mode converts mirror 1,
+   and adds configured partitioned mirror vdevs. LUKS mode converts mirror 1,
    verifies the shared passphrase, installs `decrypt_keyctl`, refreshes boot
    metadata, and exports headers. Selected boot drills test each member and
    the restored final state.
 6. **Build the private plane.** It resolves public/private physical NICs by
    MAC, requires 10-Gbps carrier, creates `vmbr-private`, and stops for a
    provider-console/peer `PRIVATE VLAN VERIFIED` gate.
-7. **Create or join the cluster.** `mox1` runs `pvecm create`; every later
-   contiguous node joins through `mox1`. Link 0 is private, link 1 is
+7. **Create or join the cluster.** The control node runs `pvecm create` when
+   no cluster exists; every later host reserves its registry slot and joins
+   through the control node. Link 0 is private, link 1 is
    Tailscale. The workflow reconciles secure migration/replication and
    QDevice parity only while all configured nodes are online.
 8. **Install routing and orchestration.** It installs guest SNAT/VRRP,
@@ -1278,7 +1399,7 @@ Cloudflare configuration. Those belong to later workflows.
 --replication-timeout-seconds N   default 14400
 ```
 
-It requires a quorate expected cluster, at least two online contiguous nodes,
+It requires a quorate expected cluster, at least two online nodes,
 Proxmox VE 9.2+, amd64, `local-zfs`, disk-backed `local` ISO storage,
 executable local lifecycle snippets, strict SSH trust, a reviewed
 guest OS HTTPS source URL/hash, and the installed
@@ -2267,7 +2388,16 @@ readiness until every mox reports the exact healthy vote layout.
 
 For an odd cluster, remove an unnecessary QDevice only with all nodes online.
 For an even cluster, restore `corosync-qnetd`, Tailscale TCP 5403, literal IP
-identity, and voting state.
+identity, and voting state. `diagnostics/show_qdevice_state.sh` reports which
+case applies. When the QDevice machine is lost, replace it:
+
+1. `qdevice/purge_qdevice.sh` unregisters it without contacting it, after
+   you confirm it was removed from Tailscale;
+2. prepare a new machine with `qdevice/QDEVICE_MANUAL_SETUP.md`;
+3. `qdevice/add_qdevice.sh` adds it.
+
+Until the replacement is added, losing any one member of an even cluster
+loses quorum.
 
 ### Quorum loss
 
@@ -2426,7 +2556,7 @@ ssh root@mox1 cat /etc/pve/datacenter.cfg
 
 Check:
 
-1. membership is exactly contiguous `mox1..moxN` and all are online;
+1. membership matches the registry's member slots and all are online;
 2. every node reports quorate;
 3. odd membership has no QDevice and exact node votes;
 4. even membership has one alive/voting QDevice and `N+1` expected/total
@@ -2559,7 +2689,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
   lib/test_rpool_mirror.py \
   lib/test_storage_state.py \
   hosts/test_disk_workflows.py \
-  diagnostics/test_show_proxmox_host_state.py -v
+  diagnostics/test_show_proxmox_host_state.py \
+  diagnostics/test_show_cluster_health.py -v
 ```
 
 On a Mac, `dev/run-tests-in-vm.sh` runs `bash -n` on every tracked script and
@@ -2577,8 +2708,8 @@ Coverage by test helper:
   the real cleanup worker deferring destruction until post-start, and remote
   deferral.
 - `guests/prod/test_create_prod_vm.py`: autoinstall network/root/QGA/SSH,
-  startup retry semantics, ISO hash/release/boot metadata/atomicity, contiguous
-  nodes, QDevice gate, resume sentinels, exact VM/Secure Boot contract,
+  startup retry semantics, ISO hash/release/boot metadata/atomicity, live
+  nodes with slot gaps, QDevice gate, resume sentinels, exact VM/Secure Boot contract,
   argv-safe SSH, non-mutating dry-run, and absence of destructive rollback.
 - `guests/prod/test_extend_prod_vm_disk.py`: per-host 10% pool reserve with
   smallest-headroom selection, sparse guest-free and overhead math, reserved
@@ -2624,6 +2755,14 @@ Coverage by test helper:
 - `diagnostics/test_show_proxmox_host_state.py`: the host report against a
   fake SSH that rejects any non-read-only command, live disk inventory,
   attention exit status, and usage errors.
+- `diagnostics/test_show_cluster_health.py`: the cluster health check with
+  its real host collector run against fake `pvecm`, `corosync-cfgtool`,
+  `zpool`, `zfs`, `lsblk`, `smartctl`, and `systemctl`: a healthy cluster, a
+  faulted member and failed drive named by serial, low and unreadable rpool
+  free space with the 10% boundary, a single down corosync link, a
+  down host reported once, inspection through a member when the workstation
+  cannot reach a host, QDevice failures, read-only commands, and usage
+  errors.
 
 These tests mock destructive Proxmox, ZFS, iDRAC, QDevice, and network
 behavior. They do not replace real media, 10-Gbps Layer-2, LUKS boot,
@@ -2636,9 +2775,10 @@ Only the workflows named above exist as supported operator entry points.
 The following potential future commands/functions are explicitly out of scope
 and must not be inferred from registry primitives or old design prose:
 
-- **Host removal or cluster shrink.** Host setup can create/join contiguous
-  nodes; no script removes a mox, rewrites placement/replication, shrinks VRRP
-  peers, or reconciles QDevice around node removal.
+- **Automatic rebalancing.** Host removal, host purge, and production
+  placement/owner changes are operator-driven scripts. Nothing moves
+  production automatically to balance capacity, and a purge never re-adds
+  placement hosts on its own.
 - **Cluster status report.** A future read-only `GetClusterStatus` workflow
   will summarize hosts, tags, quorum/QDevice, VRRP owner, HA guests,
   staging guests, IPs, placement, replication health, and pending cleanup.
@@ -2668,7 +2808,7 @@ and must not be inferred from registry primitives or old design prose:
   QDevice/HAProxy a placement controller.
 - **Guest Tailscale or `.3` forwarding.** Neither is a planned extension of
   this architecture. Guest access remains ProxyJump; egress remains `.10`.
-- **Non-contiguous or more-than-ten hosts.** `mox1..mox10` and the fixed
+- **More than ten hosts.** `mox1..mox10` and the fixed
   address/VMID/priority ranges are hard policy limits.
 
 Any future implementation must add a reviewed workflow, failure model,

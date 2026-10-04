@@ -1678,6 +1678,110 @@ print(json.dumps(value))
         self.assertTrue(report["ok"])
         self.assertEqual(report["checked_sections"], ["nodes", "vms", "volumes"])
 
+    def test_host_slots_sync_reserve_and_reuse_lowest_free_slot(self) -> None:
+        slots, _ = self.run_registry("host-list")
+        self.assertEqual(slots, [])
+        synced, _ = self.run_registry("host-sync", "--member", "mox2,mox1")
+        self.assertEqual(synced["created"], ["mox1", "mox2"])
+        self.assertEqual(
+            [(slot["node"], slot["state"]) for slot in synced["slots"]],
+            [("mox1", "member"), ("mox2", "member")],
+        )
+        again, _ = self.run_registry("host-sync", "--member", "mox1,mox2")
+        self.assertEqual((again["created"], again["promoted"]), ([], []))
+
+        nxt, _ = self.run_registry("host-next")
+        self.assertEqual(nxt["node"], "mox3")
+        nxt, _ = self.run_registry("host-next", "--exclude", "mox3")
+        self.assertEqual(nxt["node"], "mox4")
+
+        reserved, _ = self.run_registry("host-reserve", "mox3")
+        self.assertTrue(reserved["created"])
+        self.assertEqual(reserved["slot"]["state"], "joining")
+        repeated, _ = self.run_registry("host-reserve", "mox3")
+        self.assertFalse(repeated["created"])
+        _, member_error = self.run_registry("host-reserve", "mox1", expected=1)
+        self.assertIn("already a cluster member", member_error.stderr)
+        allowed, _ = self.run_registry("host-reserve", "mox1", "--allow-member")
+        self.assertFalse(allowed["created"])
+
+        promoted, _ = self.run_registry("host-sync", "--member", "mox1,mox2,mox3")
+        self.assertEqual(promoted["promoted"], ["mox3"])
+        stale, _ = self.run_registry("host-sync", "--member", "mox2,mox3")
+        self.assertEqual(stale["stale"], ["mox1"])
+
+        released, _ = self.run_registry("host-release", "mox1")
+        self.assertTrue(released["released"])
+        absent, _ = self.run_registry("host-release", "mox1")
+        self.assertFalse(absent["released"])
+        nxt, _ = self.run_registry("host-next")
+        self.assertEqual(nxt["node"], "mox1")
+        history, _ = self.run_registry("list", "--record-type", "history")
+        self.assertEqual(history[-1]["record_type"], "host-release")
+        self.assertEqual(history[-1]["slot"]["node"], "mox1")
+
+    def test_host_release_refuses_referenced_or_control_slots(self) -> None:
+        self.allocate_prod()
+        self.run_registry("host-sync", "--member", "mox1,mox2,mox3")
+        references, _ = self.run_registry("host-references", "mox2")
+        self.assertEqual(references["references"], ["prod1"])
+        self.assertIsNone(references["control_node"])
+        unreferenced, _ = self.run_registry("host-references", "mox3")
+        self.assertEqual(unreferenced["references"], [])
+        _, referenced = self.run_registry("host-release", "mox2", expected=1)
+        self.assertIn("prod1", referenced.stderr)
+        _, wrong_state = self.run_registry(
+            "host-release", "mox3", "--expected-state", "joining", expected=1
+        )
+        self.assertIn("not joining", wrong_state.stderr)
+
+        control, _ = self.run_registry("control-get")
+        self.assertIsNone(control)
+        _, not_member = self.run_registry("control-set", "mox4", expected=1)
+        self.assertIn("not a recorded cluster member", not_member.stderr)
+        result, _ = self.run_registry("control-set", "mox3", "--expected-node", "none")
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["control"]["control_node"], "mox3")
+        unchanged, _ = self.run_registry("control-set", "mox3")
+        self.assertFalse(unchanged["changed"])
+        _, conflict = self.run_registry(
+            "control-set", "mox1", "--expected-node", "mox2", expected=1
+        )
+        self.assertIn("control node changed", conflict.stderr)
+
+        _, control_error = self.run_registry("host-release", "mox3", expected=1)
+        self.assertIn("control node", control_error.stderr)
+        moved, _ = self.run_registry("control-set", "mox1", "--expected-node", "mox3")
+        self.assertEqual(moved["control"]["revision"], 2)
+        released, _ = self.run_registry(
+            "host-release", "mox3", "--expected-state", "member"
+        )
+        self.assertTrue(released["released"])
+
+    def test_host_sync_reads_live_membership_through_pvesh(self) -> None:
+        fake_pvesh = Path(self.temporary.name) / "pvesh"
+        fake_pvesh.write_text(
+            """#!/usr/bin/env python3
+import json
+import sys
+
+if sys.argv[1:3] != ["get", "/nodes"]:
+    raise SystemExit(2)
+print(json.dumps([
+    {"node": "mox3", "status": "online"},
+    {"node": "mox1", "status": "offline"},
+]))
+""",
+            encoding="utf-8",
+        )
+        fake_pvesh.chmod(0o755)
+        synced, _ = self.run_registry(
+            "host-sync", "--live", "--pvesh", str(fake_pvesh)
+        )
+        self.assertEqual(synced["members"], ["mox1", "mox3"])
+        nxt, _ = self.run_registry("host-next")
+        self.assertEqual(nxt["node"], "mox2")
+
 
 class ConfigLoaderTest(unittest.TestCase):
     def setUp(self) -> None:

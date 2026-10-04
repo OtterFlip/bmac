@@ -25,7 +25,7 @@ You're not the only one who noticed that the public clouds aren't really necessa
 ## What You Need to Use BMAC
 
 - 2 servers with UEFI BIOS, each with their own public IP and Internet gateway connection on a primary NIC, and a private network connection between these two servers on a secondary NIC on each (can be a VLAN).  We prefer [FiberState's 'Dedicated Server' option](https://www.fiberstate.com/dedicated-servers) (we have no affiliation, we're just a satisfied customer as FiberState is competitively-priced, particularly if you pay for a year in advance).  These will be your main cluster hosts, hosting the guest VMs which in turn host your webapp(s).  You can add more than 2 servers if you like, but start with 2.
-- Each server must have at least two identical-capacity physical NVMe hard disks for the ESP and OS partitions
+- Each server must have at least two physical NVMe hard disks of the same nominal capacity (their exact byte capacities may differ by up to 1%) for the ESP and OS partitions
 - 1 ultra-cheap VPS host with a public IP address, such as a $5/month Shared CPU Nanode 1GB VPS at Linode.  This node's sole purpose will be to play the role of a QDevice, to vote in your cluster quorum to break tie votes.
 - A developer workstation running a debian-based Linux distro (we made and tested this with x64 Ubuntu) to run BMAC's scripts.  This is required for the host setup scripts, but the prod/staging scritps work on macOS too.
 - A Tailscale account (the free account will work fine)
@@ -50,7 +50,7 @@ Prepare for Proxmox Host Setup
 - If you're using iDRAC, make sure you can access it.  Additional tips on setting up iDRAC with FiberState are provided in a section below.
 - Read the top of `env/secrets_dot_env` and make a copy of it as the instructions direct, to `env/secrets.env` and choose your password values.  If you're using iDRAC then make sure all of your hosts use the same iDRAC password and set it in your `env/secrets.env` file.
 - Read the top of `env/mox1_dot_conf` and `env/mox2_dot_conf` and make a copy of each, to `env/mox1.conf` and `env/mox2.conf` which you should fill in with your actual host values.
-- Set appropriate values in `env/cluster.conf`, `env/mox1.conf`, and `env/mox2.conf` for your hardware and network. The example values are for hosts with 128GB RAM, two identical 2TB NVMe disks, and 40 cores/80 threads, with a shared private network on `10.213.0.0/24` and a separate public IP and Internet gateway per host. Adjust all network, storage, CPU, and RAM values for your environment and expected production/staging workload. Determine the serial numbers of the NVMe disks for the initial boot mirror. iDRAC can provide the byte capacity values (if you have already set the serial number values - which you can obtain visually in the iDRAC console or by running `hosts/inventory_disks` in a Live Linux CD env) and lets `hosts/setup_proxmox_host.sh` determine capacities; without iDRAC, boot the target into a reachable Live/Trial Linux environment and run `hosts/inventory_disks.sh --host moxN` from the administrator workstation to obtain exact serial and byte-capacity values for the host's `env/moxN.conf`. Also set `PROXMOX_PUBLIC_MAC` and `PROXMOX_SECONDARY_MAC` to the permanent MAC addresses of the host's primary and secondary NICs.
+- Set appropriate values in `env/cluster.conf`, `env/mox1.conf`, and `env/mox2.conf` for your hardware and network. The example values are for hosts with 128GB RAM, two 2TB NVMe disks, and 40 cores/80 threads, with a shared private network on `10.213.0.0/24` and a separate public IP and Internet gateway per host. Adjust all network, storage, CPU, and RAM values for your environment and expected production/staging workload. Each `env/moxN.conf` also needs the serial numbers of the NVMe drives for each rpool mirror (mirror 1 is mandatory and becomes the boot mirror), the exact byte capacity of each of those drives, and the MAC addresses of the host's public NIC (`PROXMOX_PUBLIC_MAC`) and private NIC (`PROXMOX_SECONDARY_MAC`). To collect them, boot a Linux Live environment (USB or CD, in its try/live mode) on each machine you intend to set up as a Proxmox host, copy the standalone `hosts/cluster_setup_prereq.sh` into it, and run it there with `bash cluster_setup_prereq.sh`. It changes nothing and lists every NVMe drive's serial number and byte capacity and every NIC's MAC address. If you use iDRAC for setup, you must still set the drive serial numbers and MAC addresses but not the byte capacities, which setup reads through Redfish; the iDRAC admin web UI shows the serial numbers and MAC addresses, so you do not need to run the prereq script from a Live environment. See [`hosts/README.md`](hosts/README.md#host-setup-flow) for details. In the iDRAC admin web UI the MAC addresses to look for are under the Port tab(s) and are the field labeled "Virtual MAC Addresses".
 - Download the Proxmox VE x64 installer ISO to your dev workstation (the machine from which you'll be running `hosts/setup_proxmox_host.sh`) and set its path and SHA256 hash value in `env/cluster.conf` for PROXMOX_ISO_FILE_FULL_PATH and PROXMOX_ISO_FILE_SHA256.
 - Add your (and another colleague's) SSH public key to the ADMIN_1_PUBLIC_SSH_KEY and ADMIN_2_PUBLIC_SSH_KEY values in `env/cluster.conf`
 - Follow the instructions in `qdevice/QDEVICE_MANUAL_SETUP.MD` to set up your qdevice and add it to your tailscale network. Before doing that you'll need to follow the Tailscale setup steps below to add the appropriate tailscale tags and access policies.
@@ -211,7 +211,8 @@ Next, navigate to "Access controls" | "Policies" and under "General access rules
 	"ip":  ["tcp:5403"],
 }
 
-// Initial QDevice Setup by Proxmox Setup (temporary)
+// Initial QDevice Setup by Proxmox Setup
+// This rule is required by setup_proxmox_host.sh when it adds an even number of hosts, and by add_qdevice.sh
 {
 	"src": ["tag:proxmox-host"],
 	"dst": ["tag:proxmox-qdevice"],
@@ -259,7 +260,7 @@ Since host setup must be done using a Debian workstation, there's a good chance 
 
 ### Growing or shrinking a host's storage
 
-To add two new disks to a host's ZFS pool later, run `hosts/add_new_disk_vdev.sh`. After a failed disk is pulled and an identical one installed, run `hosts/add_replacement_disk.sh` to put it back into its mirror. To give up a pair of disks, run `hosts/decommission_disks.sh`, then `hosts/inventory_disks.sh` until it finalizes the retirement and lists the disks as safe to pull. See [`hosts/README.md`](hosts/README.md#adding-and-decommissioning-rpool-disks) for the details, including the manual reboot test after adding encrypted disks.
+To add two new disks to a host's ZFS pool later, run `hosts/add_new_disk_vdev.sh`. After a failed disk is pulled and one of the same nominal capacity installed, run `hosts/add_replacement_disk.sh` to put it back into its mirror. To give up a pair of disks, run `hosts/decommission_disks.sh`, then `hosts/inventory_disks.sh` until it finalizes the retirement and lists the disks as safe to pull. See [`hosts/README.md`](hosts/README.md#adding-and-decommissioning-rpool-disks) for the details, including the manual reboot test after adding encrypted disks.
 
 ## Common Tasks
 
@@ -273,16 +274,30 @@ confirmation before allowing a destructive operation.
 Use the read-only diagnostics before and after maintenance:
 
 ```bash
+./diagnostics/show_cluster_health.sh
 ./diagnostics/show_cluster_state.sh
 ./diagnostics/show_proxmox_host_state.sh --host mox1
 ./diagnostics/show_prod_vm_state.sh prod1
+./diagnostics/show_qdevice_state.sh
 ./hosts/inventory_disks.sh --host mox1
 ```
+
+Start with `show_cluster_health.sh` for a quick check of the cluster's
+hardware and networking. It ignores guests. It reports whether every host and
+the QDevice is up and reachable, whether each host's corosync links (private
+VLAN and Tailscale) reach every other host, and whether every ZFS pool, vdev
+member, and drive is healthy. Each failed pool member is named with its
+physical disk serial. It also flags any host whose `rpool` has less than 10%
+of its usable space free as needing more storage. It ends with a list of problems and exits 1 if there
+are any.
 
 `show_cluster_state.sh` reports cluster membership, quorum, networking,
 services, storage, and registered guests. `show_proxmox_host_state.sh` gives a
 detailed report for one host, and `show_prod_vm_state.sh` checks one production
 VM across HA, replication, routing, storage, QGA, and SSH.
+`show_qdevice_state.sh` says whether the cluster needs a QDevice and whether
+its QDevice is alive and voting on every host. If not, it says what to do
+(see [Replacing a Failed QDevice](#replacing-a-failed-qdevice)).
 
 `inventory_disks.sh` prints every physical disk with its serial number and
 exact byte capacity, every imported ZFS pool vdev and member, and disks that
@@ -391,7 +406,8 @@ This updates BMAC runtime code, not Proxmox packages or host configuration.
 
 ### Adding More Storage: Adding a Mirrored Vdev
 
-1. Physically install two disks with identical exact byte capacity.
+1. Physically install two disks of the same nominal capacity; their exact
+   byte capacities may differ by up to 1%.
 2. Confirm that both appear unused in:
 
    ```bash
@@ -417,8 +433,9 @@ Then inspect the host again with `show_proxmox_host_state.sh`.
 
 ### Replacing a Failed Mirror Member
 
-First inspect the failed vdev with `inventory_disks.sh` and `zpool status
-rpool` on the host. This workflow handles a member whose failed disk has
+`show_cluster_health.sh` reports which host and drive serial failed. First
+inspect the failed vdev with `inventory_disks.sh` and `zpool status rpool` on
+the host. This workflow handles a member whose failed disk has
 already been physically removed; it deliberately refuses a failed disk that
 is still installed.
 
@@ -467,22 +484,33 @@ Run the inventory repeatedly to check progress:
 ```
 
 When evacuation is complete, the inventory identifies the exact disks and
-asks permission to close their LUKS mappings, update crypttab/initramfs, and
-mark them retired. Physically pull only disks shown under **Disks eligible for
-safe physical removal**. Run `decommission_disks.sh` once per vdev.
+asks permission to close their LUKS mappings, update crypttab/initramfs,
+release the disks (erase only their LUKS key slots, ZFS labels, signatures,
+and partition table; no data wipe), and mark them retired. Physically pull
+only disks shown under **Disks eligible for safe physical removal**.
+Run `decommission_disks.sh` once per vdev.
 
 ## Less Common Tasks
 
 ### Adding Another Host to the Cluster
 
-The new host must use the next contiguous name (`mox3` after `mox1` and
-`mox2`), must not exceed `MAX_MOX_HOSTS`, and must fit the host, replication,
-and HAProxy ranges already configured in `env/cluster.conf`.
+Host names are slots `mox1` through `moxMAX_MOX_HOSTS`. The cluster registry
+records which slots are in use, and setup recommends the lowest free slot, so
+a slot freed by removing or purging a host is reused first. Slots need not be
+contiguous: a cluster of `mox1` and `mox3` is valid. Each host must fit the
+host, replication, and HAProxy ranges already configured in
+`env/cluster.conf`.
+
+New hosts join through the control node (`PROXMOX_CONTROL_NODE` in
+`env/cluster.conf`, normally `mox1`). Before a cluster exists, the control
+node is the host that creates it; once it exists, the registry records the
+authoritative control node and setup stops if `env/cluster.conf` disagrees.
 
 1. Copy `env/mox1_dot_conf` or `env/mox2_dot_conf` to the new
-   `env/moxN.conf` name and set the new host's disk, NIC, public/private
-   network, iDRAC, capacity, and HAProxy values. This file is used only for
-   initial setup and retries before setup completes.
+   `env/moxN.conf` name (use the slot setup will recommend) and set the new
+   host's disk, NIC, public/private network, iDRAC, capacity, and HAProxy
+   values. This file is used only for initial setup and retries before setup
+   completes.
 2. Ensure every existing cluster node is online and healthy:
 
    ```bash
@@ -515,37 +543,183 @@ placement.
 
 ### Migrating Workloads to Hosts with More Resources
 
-First add and validate the new host as described above. Before moving a
-production VM, its HA placement, replication targets, registry placement, and
-route policy must all agree and an initial replication to the new host must
-finish successfully.
+To move production onto bigger hosts and retire the old ones, for example
+from `mox1`/`mox2` to `mox3`/`mox4`:
 
-The repository currently has no high-level operator workflow that safely
-changes placement for an existing production VM. Do not change only the
-registry or only the Proxmox HA rule: that would leave the other control
-planes inconsistent. Until a placement-reconfiguration workflow is added,
-treat this as an advanced manual operation using the Proxmox UI/CLI and the
-registry tooling, and validate each stage with:
+1. Add the new hosts as described above.
+2. Add them to each production VM's placement:
+
+   ```bash
+   ./guests/prod/change_prod_vm_placement.sh
+   ```
+
+   Pick the VM (default: the lowest `prodN`), answer `a`, and list the new
+   hosts. A host is offered only if it is online, holds fewer production VMs
+   than its `MAX_PROD_VM_COUNT_ON_THIS_HOST` (from `env/moxN.conf`), and keeps
+   10% of its pool size available after receiving the replica. The script
+   records the wider placement in the registry, replicates the VM's disks to
+   each new host, waits for a successful initial replication, and only then
+   lets Proxmox HA use the host.
+3. Move the VM onto a new host:
+
+   ```bash
+   ./guests/prod/change_prod_vm_owner.sh
+   ```
+
+   It reads the live HA owner (refreshing a stale registry owner), checks that
+   HA, replication, and the registry agree, offers the other placement hosts,
+   replicates the latest changes, and runs the equivalent of
+   `ha-manager relocate vm:100 mox3`. It then waits for the VM to start there,
+   checks that replication now runs from the new owner, and records the new
+   owner in the registry. Staging VMs on the new owner are stopped and
+   destroyed when the production VM starts there, and the script warns first.
+4. Remove the old hosts from the placement by running
+   `change_prod_vm_placement.sh` again and answering `r`. It never removes the
+   live owner and keeps at least two placement hosts. HA stops using a host
+   first, then the registry placement narrows, then the replication job and
+   its replica are deleted.
+5. Retire each old host with `hosts/remove_host_from_cluster.sh` (see below).
+
+Both production scripts refuse a VM that has staging VMs derived from it;
+destroy those staging VMs first. If either script stops partway, rerun it: the
+placement script detects an unfinished change and offers to finish it, and the
+owner script records the live owner before offering a new one. Check each
+stage with:
 
 ```bash
 ./diagnostics/show_cluster_state.sh
 ./diagnostics/show_prod_vm_state.sh prod1
 ```
 
-The safe operational order is:
+### Removing a Host from the Cluster
 
-1. Add the new host to placement and replication without removing either
-   existing placement host.
-2. Wait for and verify a complete initial replication to the new host.
-3. Destroy or stop staging guests on the intended destination.
-4. Gracefully stop or HA-migrate the production VM to the new host, then
-   verify it is healthy before serving traffic.
-5. Remove the old host from placement only after HA, replication, registry,
-   and routing state agree, while retaining at least two valid production
-   placement hosts.
-6. Remove or decommission the old cluster host only after no production VM,
-   replica, staging VM, HA rule, route, or deferred cleanup depends on it and
-   cluster/QDevice quorum remains healthy.
+Run this for a healthy host that is no longer needed:
+
+```bash
+./hosts/remove_host_from_cluster.sh
+```
+
+It first asks whether `ssh qdevice` works from this workstation, and checks
+it. The host is offered only if no registry record references it (no
+production placement, no staging VM, no pending cleanup), it holds no guest
+other than its own HAProxy container, and no HA rule or replication job names
+it. The cluster must be quorate, keep at least two hosts afterwards, and have
+every other host online.
+
+The script asks you to type `REMOVE moxN`. It then removes the QDevice, powers
+the host off, deletes it from the cluster, removes its SSH trust, and adds the
+QDevice back only when the remaining host count is even, so the vote count
+stays odd. Finally it frees the slot in the registry, refreshes HAProxy
+routes, and archives `hosts/artifacts/moxN`. Take the host out of every
+Cloudflare load balancer first; the script asks you to confirm this. If you
+remove the control node, it asks which remaining host becomes the new control
+node, records it, and offers to update `PROXMOX_CONTROL_NODE` in
+`env/cluster.conf`. Every other workstation must set the same value.
+
+Never boot the removed host on the cluster network with its old disks. Wipe
+or reinstall it first; the script lists the remaining cleanup (Tailscale
+device, `known_hosts`, `env/moxN.conf`, Cloudflare).
+
+### Purging a Dead Host from the Cluster
+
+Use this only for a host that has failed and has been physically disconnected
+from the cluster permanently:
+
+```bash
+./hosts/purge_host_from_cluster.sh
+```
+
+The script shows this warning first, and you must accept it:
+
+> The purpose of this script is to enable the removal of a cluster host that
+> is no longer functioning and has been physically disconnected from the
+> cluster, permanently. The purged machine must never be allowed to
+> communicate with the cluster via the network in any way after it has been
+> purged from the cluster.
+
+It offers offline members, leftover `/etc/pve/nodes` directories, and
+registry slots that never finished joining. The cluster must be quorate with
+every other host online, and Proxmox HA must already have restarted any
+production VM that ran on the dead host elsewhere. The script refuses a
+production VM placed only on the dead host, and any guest it cannot account
+for.
+
+After you type `PURGE moxN`, it destroys staging VMs on the dead host or
+derived from production VMs that used it, narrows each affected production VM's HA rule, replication, and
+registry placement to the surviving hosts, abandons the dead host's
+deferred cleanup, deletes the node from the cluster, keeps the vote count odd
+with the QDevice, frees the slot, and archives the host's artifacts. Purging
+may leave a single host; the production VMs then have one placement host
+until you add hosts back with `change_prod_vm_placement.sh`. Like removal, it
+selects a new control node when the purged host held that role.
+
+### Replacing a Failed QDevice
+
+A cluster with an even number of hosts needs the external QDevice's vote to
+survive losing a host. Check it with:
+
+```bash
+./diagnostics/show_qdevice_state.sh
+```
+
+If the report says the registered QDevice is inaccessible and has failed:
+
+1. Unregister it:
+
+   ```bash
+   ./qdevice/purge_qdevice.sh
+   ```
+
+   The script cannot purge a machine it cannot reach, so it offers to
+   unregister the QDevice from the cluster without contacting it. You must
+   first remove the old machine from the Tailscale admin console, so it can
+   never communicate with the cluster again, and type `REMOVED FROM TAILSCALE`.
+   The script then runs `pvecm qdevice remove` and removes the QDevice client,
+   its certificates, and its pinned SSH host key from every Proxmox host.
+   Every host must be online.
+2. Run `ssh-keygen -R qdevice` on your workstation.
+3. Prepare a new machine with sections 1-15 of
+   [`qdevice/QDEVICE_MANUAL_SETUP.md`](qdevice/QDEVICE_MANUAL_SETUP.md), and
+   check that `ssh qdevice` works.
+4. Add it:
+
+   ```bash
+   ./qdevice/add_qdevice.sh
+   ```
+
+   It confirms the cluster needs a QDevice, asks for the QDevice hostname,
+   and checks SSH access. It then installs `corosync-qnetd`, trusts the new
+   host key on every Proxmox host, and runs `pvecm qdevice setup`, as host
+   setup does. Finally it checks that every host sees the QDevice voting.
+
+Until step 4 finishes, losing any host of an even cluster loses quorum, so
+replace the QDevice promptly. `hosts/remove_host_from_cluster.sh` and
+`hosts/purge_host_from_cluster.sh` also need a working `ssh qdevice`. When the
+QDevice is reachable, `purge_qdevice.sh` purges it fully and leaves a plain
+Ubuntu machine.
+
+### Wiping a Test Cluster and Starting Over
+
+If you've already set up a test cluster with BMAC and want to wipe it and set
+it all up again from scratch, this is the easiest sequence:
+
+1. Run `./qdevice/purge_qdevice.sh` to reset the existing QDevice back to a
+   plain, non-Proxmox machine. `mox1` must still be reachable over SSH when
+   you do this.
+2. In the Tailscale admin web UI, under "Machines", remove your current
+   Proxmox hosts (typically `mox1` and `mox2`). Leave the QDevice there so
+   you can reuse it for the new cluster. `hosts/setup_proxmox_host.sh`
+   configures it when it sets up the second Proxmox host, so the cluster has
+   3 quorum votes.
+3. Also in the Tailscale admin web UI, generate a new auth key for each
+   Proxmox host of the new cluster. Each key must be non-reusable,
+   non-ephemeral, and tagged `tag:proxmox-host` (see
+   [Instructions for Tailscale Setup](#instructions-for-tailscale-setup)).
+4. Run `./hosts/setup_proxmox_host.sh` for each Proxmox host. You can run it
+   for `mox1` and `mox2` concurrently. It will likely find the setup artifacts
+   left from the earlier test cluster; since you're setting up a new
+   cluster, tell it to delete them and start from the beginning.  These
+   script executions will ask for the Tailscale auth keys you generated above.
 
 ## A Basic CI/CD Workflow
 

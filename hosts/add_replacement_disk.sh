@@ -5,11 +5,13 @@
 
 # Put a newly installed disk into a host's rpool mirror in place of a member
 # whose disk was pulled. It finds the mirrors that are missing a member (or
-# were detached down to one disk), offers the unused disks whose byte capacity
-# is identical to the surviving member's, and after confirmation starts
-# resilvering the chosen disk into that mirror. A boot-mirror replacement
-# first receives the survivor's partition table and its own registered ESP, so
-# either disk can boot the host. On an encrypted host the new member gets the
+# were detached down to one disk), offers the unused disks large enough to hold
+# the surviving member's partitions (a slightly smaller disk often is, since
+# members end 1 GiB short of the smaller original disk's whole-GiB size), and
+# after confirmation starts resilvering the chosen disk into that mirror. The
+# new disk first receives the survivor's partition table; a boot-mirror
+# replacement also gets its own registered ESP, so either disk can boot the
+# host. On an encrypted host the new member gets the
 # shared rpool LUKS passphrase, which the operator types at the host console.
 # The disk, LUKS, ESP, and zpool logic is lib/rpool_mirror.sh, the same code
 # hosts/setup_proxmox_host.sh uses.
@@ -29,10 +31,11 @@ Usage: hosts/add_replacement_disk.sh [--host moxN]
 
 Replaces the pulled member of one rpool mirror on the chosen host:
 
-  1. lists the mirrors that are missing a member, and the unused disks whose
-     byte capacity is identical to the surviving member's;
-  2. for the boot mirror, copies the survivor's partition table to the new
-     disk, then creates and registers its ESP and waits until it holds the
+  1. lists the mirrors that are missing a member, and the unused disks large
+     enough to hold the surviving member's partitions (slightly smaller or
+     larger disks qualify);
+  2. copies the survivor's partition table to the new disk; for the boot
+     mirror, also creates and registers its ESP and waits until it holds the
      same boot files as the survivor's;
   3. on an encrypted host, has you run a helper at the host console that asks
      for the shared rpool LUKS passphrase, proves it unlocks every rpool member,
@@ -166,17 +169,16 @@ for vdev in layout["vdevs"]:
         # The recorded disk, back outside the pool; its LUKS mapping may be
         # closed (after a reboot), so only the record identifies it.
         for disk in layout["unassigned_disks"] + layout.get("esp_only_disks", []):
-            if disk["serial"] == record["serial"] and disk["size"] == survivor["disk_size"]:
+            if disk["serial"] == record["serial"]:
                 resume = disk["serial"]
     if resume == "-" and spec:
         wanted = "crypt-rpool-" + ({"A": "a", "B": "b"}.get(spec) or f"mirror{spec}")
         for row in layout["luks_mappings"]:
-            if row["mapper"] == wanted and not row["in_pool"] and row["serial"] \
-                    and row["size"] == survivor["disk_size"]:
+            if row["mapper"] == wanted and not row["in_pool"] and row["serial"]:
                 resume = row["serial"]
     if resume == "-" and vdev["holds_esp"]:
         for disk in layout.get("esp_only_disks", []):
-            if disk["serial"] and disk["size"] == survivor["disk_size"]:
+            if disk["serial"]:
                 resume = disk["serial"]
     print("\t".join(str(value) for value in (
         kind, vdev["name"], "boot" if vdev["holds_esp"] else "extra",
@@ -258,21 +260,31 @@ ENCRYPTED=false
 
 if [[ "$RESUME" != - ]]; then
   NEW_SERIAL="$RESUME"
-  NEW_SIZE="$SURVIVOR_SIZE"
+  NEW_SIZE="$(python3 - "$LAYOUT" "$NEW_SERIAL" <<'PY'
+import json
+import sys
+layout = json.load(open(sys.argv[1]))
+rows = layout["unassigned_disks"] + layout.get("esp_only_disks", []) + layout["luks_mappings"]
+print(next((row["size"] for row in rows if row["serial"] == sys.argv[2] and row.get("size")), "?"))
+PY
+)"
   printf '\nDisk %s was prepared for %s by an earlier run but has not joined it yet.\n' \
     "$NEW_SERIAL" "$VDEV"
   prompt_yes "Resume adding disk $NEW_SERIAL to $VDEV now?" ||
     dw_die "the prepared disk was left untouched; rerun to resume it"
 else
-  dw_section "Unused disks on $DW_HOST with exactly $SURVIVOR_SIZE bytes"
-  mapfile -t CANDIDATES < <(python3 - "$LAYOUT" "$SURVIVOR_SIZE" <<'PY'
+  REQUIRED_BYTES="$(dw_tool replacement-bytes --survivor "$SURVIVOR")" &&
+    [[ "$REQUIRED_BYTES" =~ ^[1-9][0-9]*$ ]] ||
+    dw_die "could not read the partition layout of surviving disk $SURVIVOR"
+  dw_section "Unused disks on $DW_HOST with at least $REQUIRED_BYTES bytes"
+  mapfile -t CANDIDATES < <(python3 - "$LAYOUT" "$REQUIRED_BYTES" <<'PY'
 import json
 import sys
 layout = json.load(open(sys.argv[1]))
-size = int(sys.argv[2])
+required = int(sys.argv[2])
 open_luks = {row["serial"] for row in layout["luks_mappings"] if row["serial"]}
 for disk in layout["unassigned_disks"]:
-    if (disk["size"] != size or not disk["serial"]
+    if ((disk["size"] or 0) < required or not disk["serial"]
             or disk.get("in_use_reasons")):
         continue
     if disk["serial"] in open_luks:
@@ -288,7 +300,7 @@ for disk in layout["unassigned_disks"]:
 PY
   )
   if ((${#CANDIDATES[@]} == 0)); then
-    dw_die "no unused, unmounted disk on $DW_HOST has exactly $SURVIVOR_SIZE bytes, the capacity of surviving disk $SURVIVOR; install an identical disk first"
+    dw_die "no unused, unmounted disk on $DW_HOST has the $REQUIRED_BYTES bytes needed to hold the partitions of surviving disk $SURVIVOR; install a large enough disk first"
   fi
   for index in "${!CANDIDATES[@]}"; do
     IFS=$'\t' read -r disk serial size model contents <<<"${CANDIDATES[index]}"
@@ -307,7 +319,7 @@ PY
   IFS=$'\t' read -r _ NEW_SERIAL NEW_SIZE _ _ <<<"${CANDIDATES[CHOICE - 1]}"
 
   dw_section "Checking disk $NEW_SERIAL on $DW_HOST"
-  CHECKED="$(dw_tool check-new --expect-bytes "$SURVIVOR_SIZE" --match exact "$NEW_SERIAL")" ||
+  CHECKED="$(dw_tool check-new --survivor "$SURVIVOR" "$NEW_SERIAL")" ||
     dw_die "disk $NEW_SERIAL is not safe to use"
   printf '%s\n' "$CHECKED"
   if awk -F '\t' '$4 == "luks" { found=1 } END { exit !found }' <<<"$CHECKED"; then
@@ -318,6 +330,8 @@ PY
   [[ "$KIND" == replace ]] || action="add it to $VDEV on $DW_HOST, which was detached down to disk $SURVIVOR"
   if [[ "$ROLE" == boot ]]; then
     action="${action}, giving it the boot partitions and ESP of disk $SURVIVOR"
+  else
+    action="${action}, giving it the partition table of disk $SURVIVOR"
   fi
   if [[ "$ENCRYPTED" == true ]]; then
     action="${action}, encrypted with the shared rpool LUKS passphrase (typed at the host console)"
@@ -328,10 +342,10 @@ fi
 dw_state record-replacement --survivor "$SURVIVOR" --serial "$NEW_SERIAL" --vdev "$VDEV" ||
   dw_die "could not record the replacement disk on $DW_HOST; nothing was changed"
 
+dw_section "Giving disk $NEW_SERIAL the partition table of $SURVIVOR"
+dw_tool copy-partitions --survivor "$SURVIVOR" "$NEW_SERIAL" ||
+  dw_die "partitioning disk $NEW_SERIAL failed; rerun this script to resume"
 if [[ "$ROLE" == boot ]]; then
-  dw_section "Giving disk $NEW_SERIAL the boot-mirror partitions of $SURVIVOR"
-  dw_tool boot-partition --survivor "$SURVIVOR" "$NEW_SERIAL" ||
-    dw_die "partitioning disk $NEW_SERIAL failed; rerun this script to resume"
   dw_ready "create the ESP on disk $NEW_SERIAL, register it with proxmox-boot-tool, copy the boot loader, kernels, and initramfs images onto it, and wait until it matches the ESP of $SURVIVOR" \
     "a minute or two" ||
     dw_die "stopped before creating the ESP; rerun this script to resume"
@@ -345,11 +359,9 @@ if [[ "$ENCRYPTED" == true ]]; then
   if [[ "$MEMBER" == A || "$MEMBER" == B ]]; then
     REMOTE_HEADER="${DW_REMOTE_ROOT}/luks-header-${MEMBER}.bin"
     HEADER_NAME="rpool-${MEMBER}.bin"
-    SIZE_ARGS=""
   else
     REMOTE_HEADER="${DW_REMOTE_ROOT}/luks-header-mirror${MEMBER}.bin"
     HEADER_NAME="rpool-mirror${MEMBER}.bin"
-    SIZE_ARGS="--expect-bytes ${SURVIVOR_SIZE} --match exact"
   fi
   if dw_tool luks-check-member --member "$MEMBER" "$NEW_SERIAL" >/dev/null 2>&1; then
     printf '\nLUKS member %s is already open on disk %s with its header backed up.\n' \
@@ -364,14 +376,14 @@ if [[ "$ENCRYPTED" == true ]]; then
     dw_on_host bash -c '
 set -Eeuo pipefail
 umask 077
-helper="$1"; tool="$2"; member="$3"; serial="$4"; size_args="$5"
+helper="$1"; tool="$2"; member="$3"; serial="$4"
 {
   printf "#!/usr/bin/env bash\nset -Eeuo pipefail\nset +x\n"
-  printf "exec %q luks-prepare-member --member %q --prompt %s %q\n" \
-    "$tool" "$member" "$size_args" "$serial"
+  printf "exec %q luks-prepare-member --member %q --prompt %q\n" \
+    "$tool" "$member" "$serial"
 } >"$helper"
 chmod 0700 "$helper"
-' bash "$HELPER" "$DW_REMOTE_TOOL" "$MEMBER" "$NEW_SERIAL" "$SIZE_ARGS" ||
+' bash "$HELPER" "$DW_REMOTE_TOOL" "$MEMBER" "$NEW_SERIAL" ||
       dw_die "could not write the console helper on $DW_HOST"
 
     printf '\nMANUAL LUKS ACTION REQUIRED\n'

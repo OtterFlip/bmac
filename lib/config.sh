@@ -43,7 +43,7 @@ declare -ag _PROXMOX_CONFIG_PUBLIC_KEYS=()
 declare -ag _PROXMOX_CONFIG_SECRET_KEYS=()
 declare -Ag _PROXMOX_CONFIG_ALLOWED_SCOPE=()
 declare -ag _PROXMOX_CONFIG_CLUSTER_KEYS=(
-  PROXMOX_CLUSTER_NAME PROXMOX_QDEVICE_HOST
+  PROXMOX_CLUSTER_NAME PROXMOX_QDEVICE_HOST PROXMOX_CONTROL_NODE
   PROXMOX_INTERNAL_DOMAIN
   MAX_MOX_HOSTS PROXMOX_MAX_HOSTS
   PRIVATE_SUBNET_CIDR PROXMOX_PRIVATE_SUBNET
@@ -636,6 +636,11 @@ _config_validate_cluster() {
     config_die "PROXMOX_INTERNAL_DOMAIN must be a lowercase private domain ending in .internal" || return
   [[ "$MAX_MOX_HOSTS" =~ ^([1-9]|10)$ ]] ||
     config_die "MAX_MOX_HOSTS must be between 1 and 10" || return
+  if [[ -n "${PROXMOX_CONTROL_NODE:-}" ]]; then
+    [[ "$PROXMOX_CONTROL_NODE" =~ ^mox([1-9]|10)$ ]] &&
+      ((${PROXMOX_CONTROL_NODE#mox} <= MAX_MOX_HOSTS)) ||
+      config_die "PROXMOX_CONTROL_NODE must name mox1 through mox${MAX_MOX_HOSTS}" || return
+  fi
   [[ "$PRIVATE_SUBNET_CIDR" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.0/24$ ]] ||
     config_die "PRIVATE_SUBNET_CIDR must be an IPv4 /24 ending in .0" || return
   prefix="${BASH_REMATCH[1]}"
@@ -825,6 +830,8 @@ _config_compute_hash() {
   for key in "${_PROXMOX_CONFIG_PUBLIC_KEYS[@]}"; do
     [[ -z "${secret_keys[$key]+x}" ]] ||
       config_die "Internal error: secret key ${key} entered the public hash set" || return
+    # The control node moves with cluster membership; it is not host setup input.
+    [[ "$key" != PROXMOX_CONTROL_NODE ]] || continue
     keys+=("$key")
   done
   mapfile -t keys < <(printf '%s\n' "${keys[@]}" | LC_ALL=C sort -u)

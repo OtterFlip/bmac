@@ -141,39 +141,31 @@ def boot_disk(index, serial, esp_uuid, mapper):
     )
 
 
+def extra_disk(index, serial, mapper):
+    base = f"/dev/nvme{index}n1"
+    return disk(
+        base,
+        serial,
+        2000398934016,
+        children=[
+            part(
+                f"{base}p1",
+                fstype="crypto_LUKS",
+                children=[crypt(mapper, f"/dev/dm-{index}")],
+            ),
+        ],
+    )
+
+
 LUKS_LSBLK = json.dumps(
     {
         "blockdevices": [
             boot_disk(0, "S0BOOTA", "AAAA-1111", "crypt-rpool-a"),
             boot_disk(1, "S1BOOTB", "BBBB-2222", "crypt-rpool-b"),
-            disk(
-                "/dev/nvme2n1",
-                "S2EXTRA1",
-                2000398934016,
-                fstype="crypto_LUKS",
-                children=[crypt("crypt-rpool-mirror2-1", "/dev/dm-2")],
-            ),
-            disk(
-                "/dev/nvme3n1",
-                "S3EXTRA2",
-                2000398934016,
-                fstype="crypto_LUKS",
-                children=[crypt("crypt-rpool-mirror2-2", "/dev/dm-3")],
-            ),
-            disk(
-                "/dev/nvme4n1",
-                "S4EXTRA3",
-                2000398934016,
-                fstype="crypto_LUKS",
-                children=[crypt("crypt-rpool-mirror3-1", "/dev/dm-4")],
-            ),
-            disk(
-                "/dev/nvme5n1",
-                "S5EXTRA4",
-                2000398934016,
-                fstype="crypto_LUKS",
-                children=[crypt("crypt-rpool-mirror3-2", "/dev/dm-5")],
-            ),
+            extra_disk(2, "S2EXTRA1", "crypt-rpool-mirror2-1"),
+            extra_disk(3, "S3EXTRA2", "crypt-rpool-mirror2-2"),
+            extra_disk(4, "S4EXTRA3", "crypt-rpool-mirror3-1"),
+            extra_disk(5, "S5EXTRA4", "crypt-rpool-mirror3-2"),
             disk("/dev/nvme6n1", "S6BLANK", 4000787030016),
             disk(
                 "/dev/nvme7n1",

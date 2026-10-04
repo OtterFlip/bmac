@@ -10,9 +10,13 @@ layer. It replaces the removed `proxmox_traffic_map.md` and
 `proxmox_haproxy_ha_design.md`, whose two-host, `.2`/`.3`, and
 guest-Tailscale assumptions became obsolete.
 
-The implementation supports a contiguous cluster named `mox1` through
-`mox10`, bounded by `MAX_MOX_HOSTS`. `mox1` creates the cluster; each later
-`moxN` joins through `mox1` only after every existing node is online. A
+The implementation supports a cluster whose hosts occupy slots `mox1` through
+`mox10`, bounded by `MAX_MOX_HOSTS`. Slots may have gaps; the cluster registry
+records each slot, and setup recommends the lowest free one. The control node
+(`PROXMOX_CONTROL_NODE`, normally `mox1`, recorded authoritatively in the
+registry) creates the cluster. Each later host joins through it only after
+every existing node is online. `remove_host_from_cluster.sh` retires a healthy
+host and `purge_host_from_cluster.sh` deletes a dead one; both free the slot. A
 production VM is one movable `prodN`, active on one HA placement node at a
 time. A `stageNprodN` staging VM is disposable, non-HA, and fixed to one eligible
 standby node. Membership/parity logic covers one through ten nodes; the
@@ -49,9 +53,11 @@ For host index `N`, the derived contract is:
 - proxy default gateway: that host's derived mox address;
 - VRRP priority: `200-N`, from 199 on `mox1` to 190 on `mox10`.
 
-Host names, cluster membership, private addresses, HAProxy addresses/VMIDs,
-and VRRP peers must stay contiguous. Never repurpose an unused address inside
-one of these ranges.
+Every address, HAProxy VMID, and VRRP priority derives from the slot number,
+so a gap in membership leaves its addresses unused rather than shifting the
+others. `/etc/hosts` and VRRP peer lists cover every configured slot. Never
+repurpose an unused address inside one of these ranges; a reused slot gets
+back exactly its own addresses.
 
 Host setup derives `moxN.pve.internal` from the configurable
 `PROXMOX_INTERNAL_DOMAIN` and writes every configured `mox1` through
@@ -194,14 +200,19 @@ gaps once a pair has been decommissioned; pair N always keeps the LUKS names
   Live Linux inventory. iDRAC mode verifies configured serials, capacity, and
   health remotely. Manual mode requires exact
   `NVME_MIRROR_<P>_CAPACITY_BYTES_<M>` values for every configured serial and
-  requires both members of each pair to have identical byte capacities.
+  allows the members of each pair to differ by at most 1%, in either order.
 - The operator chooses LUKS2 or unencrypted storage before choosing whether
   to run boot tests. The choice is durable and cannot be changed on resume.
 - In LUKS mode, the script degrades and rebuilds mirror 1 one member at a time
   behind `crypt-rpool-a` and `crypt-rpool-b`, preserving both ESPs. Optional
-  mirror pairs 2 through 5 become whole-disk LUKS2 mirror vdevs.
+  mirror pairs 2 through 5 become LUKS2 mirror vdevs on partition 1 of each
+  disk.
 - In unencrypted mode, mirror 1 remains as installed and optional mirror pairs
-  are added as unencrypted whole-disk mirror vdevs.
+  are added as unencrypted mirror vdevs on partition 1 of each disk.
+- Every member partition (partition 3 of the boot disks, partition 1 of extra
+  disks) ends 1 GiB short of the smaller disk's whole-GiB size, so slightly
+  different disks pair up in either order and a slightly smaller replacement
+  still fits.
 - In LUKS mode all members use `PROXMOX_LUKS_PASSWORD` from the protected local
   `secrets.env`.
   `decrypt_keyctl` caches it only in the initramfs kernel keyring so one
@@ -236,21 +247,41 @@ only after the operator has actually run that helper successfully.
 
 ## Host setup flow
 
-For manual inventory, boot the target host from a Linux Live CD/USB in its
-try/live mode, not its installer, enable strict root SSH under its intended
-`moxN` name, and run from the administrator workstation:
+Every `env/moxN.conf` needs the serial numbers of the NVMe drives that will
+form each rpool mirror and the MAC addresses of the host's public and private
+NICs. Without iDRAC it also needs each drive's exact byte capacity. Gather
+these values before running setup, once for each machine you intend to set up
+as a Proxmox host.
+
+**Without iDRAC:** boot the machine into a Linux Live environment (for
+example an Ubuntu or Debian Live USB/CD in its try/live mode, not its
+installer). Copy `hosts/cluster_setup_prereq.sh` into that environment, for
+example from a second USB stick; it is a single standalone file that needs
+nothing else from this repository. Run it there:
 
 ```bash
-hosts/inventory_disks.sh --host moxN
+bash cluster_setup_prereq.sh
 ```
 
-Before setup there are no host-side removal records to finalize, so the helper
-is read-only. For each desired mirror, choose two NVMe entries with the same
-exact `CAPACITY_BYTES` value and distinct, non-empty serials. Copy those
-serial and byte-count values into the
-corresponding `NVME_MIRROR_<P>_SERIAL_<M>` and
-`NVME_MIRROR_<P>_CAPACITY_BYTES_<M>` keys in `env/moxN.conf`. Leave disks that
-must not enter `rpool` unconfigured. Capacity keys are optional in iDRAC mode.
+It is read-only. It lists every NVMe drive's serial number and exact byte
+capacity (`CAPACITY_BYTES`) and every physical Ethernet NIC's MAC address and
+link state. Repeat on each machine.
+
+**With iDRAC:** you still must set the drive serial numbers and the MAC
+addresses, but not the byte capacities, which setup reads through Redfish. The
+iDRAC web UI shows both the drive serial numbers and the NIC MAC addresses, so
+you do not need to boot a Live environment or run the prereq script.
+
+Fill in `env/moxN.conf`:
+
+- For each desired mirror, choose two NVMe drives with distinct, non-empty
+  serials whose capacities differ by at most 1%, and set
+  `NVME_MIRROR_<P>_SERIAL_<M>`. Without iDRAC, also copy each drive's exact
+  `CAPACITY_BYTES` value into `NVME_MIRROR_<P>_CAPACITY_BYTES_<M>`. Leave
+  drives that must not enter `rpool` unconfigured.
+- Set `PROXMOX_PUBLIC_MAC` to the MAC address of the NIC cabled to the public
+  network and `PROXMOX_SECONDARY_MAC` to the NIC cabled to the private cluster
+  network.
 
 Run host setup from an administrator workstation:
 
@@ -274,7 +305,7 @@ The resumable flow:
    public/private MACs, hashes, and a secret-inclusive setup fingerprint.
 2. In iDRAC mode, queries Redfish without mutation. In manual mode, validates
    serials and exact capacities previously gathered with
-   `hosts/inventory_disks.sh` from a Live Linux environment. It then verifies
+   `hosts/cluster_setup_prereq.sh` in a Live Linux environment. It then verifies
    the source ISO and builds host-specific media containing a fresh one-time,
    non-ephemeral `tag:proxmox-host` Tailscale key.
 3. Stops for explicit install-media mapping and destructive install
@@ -289,8 +320,10 @@ The resumable flow:
    provider-console/private-Layer-2 verification gate. It then installs the
    complete private mox hostname map before any cluster action.
 6. Provisions and verifies `corosync-qnetd` over Tailscale even on the first
-   host run. It creates the cluster on `mox1` or joins the next contiguous node
-   through `mox1` using its private internal FQDN and a certificate fingerprint
+   host run. The control node creates the cluster only when it is not yet a
+   member and no other member is reachable; every other host reserves its slot
+   in the registry and joins through the control node, using its private
+   internal FQDN and a certificate fingerprint
    obtained over trusted workstation SSH. It refreshes Proxmox 9's native
    per-node SSH pins and verifies every private mox-to-mox path, configures
    Corosync links plus secure migration/replication, then reconciles QDevice
@@ -310,7 +343,8 @@ All existing configured nodes must be online for membership changes. Never
 skip a manual gate merely because local state says an earlier phase completed;
 the script also reconciles live hardware, disk, cluster, and remote phase
 state. Membership, native SSH-pin, and QDevice reconciliation is protected by
-both a checkout-local lock and an SSH-held `flock` on mox1, so installers from
+both a checkout-local lock and an SSH-held `flock` on the control node, so
+installers, host removal, and host purge from
 separate workstations cannot mutate the control plane concurrently. A
 companion `/run` lease remains fail-closed if the SSH holder disappears; the
 next run identifies its owner and requires an operator to verify that no
@@ -337,11 +371,11 @@ of truth; these scripts do not read or update `env/moxN.conf`.
 `hosts/add_new_disk_vdev.sh [--host moxN]`:
 
 1. lists the disks that are not part of rpool, with serials and byte
-   capacities, and asks for two with identical capacity;
+   capacities, and asks for two whose capacities differ by at most 1%;
 2. on a LUKS host, writes `/root/app-ha-add-mirror-N` and has you run it at the
    host console. It asks for `GO` and the shared rpool passphrase (hidden),
    proves that passphrase unlocks every existing rpool LUKS member, then
-   formats both disks as whole-disk LUKS2 with it and opens them as
+   gives each disk one partition, formats both as LUKS2 with it, and opens them as
    `crypt-rpool-mirrorN-1` and `-2`. The passphrase is typed only at the
    console; setup's temporary key file no longer exists by then;
 3. copies both LUKS header backups to `hosts/artifacts/moxN/luks-headers/`
@@ -361,14 +395,16 @@ console.
 
 ### Replacing a pulled mirror member
 
-When a mirror member fails, pull its disk and install one of identical byte
-capacity, then run `hosts/add_replacement_disk.sh [--host moxN]`:
+When a mirror member fails, pull its disk and install one of the same
+nominal capacity, then run `hosts/add_replacement_disk.sh [--host moxN]`:
 
 1. lists the mirrors that are missing a member (or were detached down to one
-   disk) and the unused disks whose capacity equals the surviving member's,
-   and asks for one; it replaces one member per run;
-2. for mirror 1, copies the survivor's partition table to the new disk
-   (`sgdisk --replicate` from the survivor, new GUIDs), formats and registers
+   disk) and the unused disks large enough to hold the surviving member's
+   partitions (a slightly smaller or a larger disk qualifies), and asks for
+   one; it replaces one member per run;
+2. copies the survivor's partition table to the new disk (`sgdisk --replicate`
+   from the survivor, new GUIDs, backup GPT moved to the disk's end); for
+   mirror 1 it also formats and registers
    its ESP with `proxmox-boot-tool` using the survivor's boot loader (grub or
    uefi), drops ESPs of pulled disks, and waits until the new ESP holds the
    same kernels as the survivor's, so either disk can boot the host;
@@ -376,7 +412,8 @@ capacity, then run `hosts/add_replacement_disk.sh [--host moxN]`:
    mirror 1, `N-M` for extra mirrors) and has you run it at the host console.
    It asks for `GO` and the shared passphrase, proves it against every rpool
    member still present, closes a leftover mapping of the pulled disk, and
-   encrypts the new disk (partition 3 on mirror 1, the whole disk otherwise)
+   encrypts the new disk's member partition (partition 3 on mirror 1,
+   partition 1 otherwise)
    under the pulled member's mapping name. The header backup is copied to
    `hosts/artifacts/moxN/luks-headers/`, keeping the old one as
    `.replaced-<time>`;
@@ -392,6 +429,25 @@ mirror members until that finishes. A rerun resumes a disk that was prepared
 but has not joined the mirror. Once the resilver finishes, test a reboot by
 hand: gracefully migrate every production guest off the host, then gracefully
 reboot it.
+
+#### Testing the replacement without a disk swap
+
+`hosts/simulate_disk_failure_and_replacement.sh [--host moxN]` is a test aid
+that **destroys the data on one disk**. It explains what it does and asks
+before doing anything. Then it lists the healthy two-way mirrors and asks for
+one mirror and one of its members. It takes that member `OFFLINE` and, on a
+LUKS host, closes its mapping. This step is reversible. After a second `GO`,
+it erases the disk: LUKS key slots, ZFS labels, signatures, and the partition
+table, then `blkdiscard`. The disk then shows as blank, unused, and safe to
+pull. This step is irreversible. If you decline the erase, the script offers
+to bring the member back. On a LUKS host that has to happen at the host
+console, because it needs the passphrase. A record in `/root` lets a rerun
+erase the disk or back out a simulation that stopped between the two steps.
+It works with and without LUKS, and on the boot mirror. Then run
+`hosts/add_replacement_disk.sh` and choose the erased disk. Do not reboot
+until it finishes: on a LUKS host, crypttab and the initramfs still list the
+erased member's UUID until that script replaces them. The mirror has no
+redundancy from the offline step until the resilver finishes.
 
 ### Decommissioning a mirror
 
@@ -428,8 +484,14 @@ production zvols; a full (refreserved) zvol keeps its space reserved.
 After `decommission_disks.sh`, you must run
 `hosts/inventory_disks.sh [--host moxN]`. It shows removal progress. Once
 evacuation completes, it asks before closing the pair's LUKS mappings,
-removing them from crypttab, rebuilding and verifying the initramfs, and
-marking the host-side record retired. Its final inventory lists every
+removing them from crypttab, rebuilding and verifying the initramfs,
+releasing the disks, deleting their off-host LUKS header backups, and marking
+the host-side record retired. Releasing erases only metadata (LUKS key slots,
+ZFS labels, filesystem signatures, and the partition table) so the disks show
+as blank with nothing to mount or import; it takes seconds and does not
+overwrite the data area. A full data wipe is outside BMAC's scope. A disk
+that is in use again is left untouched and the record stays open until a
+later run releases it. Its final inventory lists every
 physical disk, every imported ZFS pool vdev and member with status, and only disks with
 no pool membership, mount, active swap or holder, registered ESP, or crypttab
 entry as eligible for safe physical removal. A cancelled or failed removal is
@@ -652,6 +714,9 @@ keys, and LUKS headers stay outside pmxcfs.
   fallback does not replace those data paths.
 - QDevice failure: packet flow is unchanged, but even-node quorum safety is
   degraded. Do not perform membership changes until parity is healthy.
+  `diagnostics/show_qdevice_state.sh` reports the state. A lost QDevice is
+  replaced with `qdevice/purge_qdevice.sh` (which can unregister an
+  unreachable one) and then `qdevice/add_qdevice.sh`.
 - Replication lag/failure: HA can recover only the last successful replicated
   state. A fully reserved production zvol also consumes reservation capacity
   on every target.
@@ -661,14 +726,84 @@ keys, and LUKS headers stay outside pmxcfs.
 - LUKS: boot requires iDRAC passphrase entry. Lost passphrase/header recovery,
   mistaken serial selection, or both members of one vdev failing can make the
   host unavailable.
-- Membership: nodes must remain contiguous and online; QDevice must be removed
-  before a join and restored only when resulting parity is even.
+- Membership: every other member must be online for a join, removal, or
+  purge; QDevice must be removed before the change and restored only when
+  the resulting node count is even. A removal stops if the departing host
+  still holds anything; a purge refuses when HA has not yet recovered a
+  production VM from the dead host.
+- Purged host: a purged machine still holds the cluster's Corosync key and
+  configuration. It must never communicate with the cluster again; wipe its
+  disks before any reuse.
 - Route transaction: a node changing liveness during target selection aborts
   synchronization. A failed rollback is an operator incident.
 
-Do not introduce Ceph, another storage/recovery plane, non-contiguous hosts,
-another guest subnet, or automatic snapshot deletion without revisiting this
-design and its failure drills.
+Do not introduce Ceph, another storage/recovery plane, more than ten host
+slots, another guest subnet, or automatic snapshot deletion without
+revisiting this design and its failure drills.
+
+## Removing and purging hosts
+
+Both scripts run from the administrator workstation. They first ask whether
+`ssh qdevice` works there, and check it, because they may need to remove and
+re-add the QDevice. They resolve the control node from the registry and
+`PROXMOX_CONTROL_NODE`, and hold the same control-plane lock as host setup
+while they change membership.
+
+`remove_host_from_cluster.sh` retires a healthy host:
+
+1. It shows every member with what still blocks its removal: registry
+   references (production placement, staging, pending cleanup), guests other
+   than its `haproxyN` LXC, HA rules, or replication jobs. Move production
+   with `guests/prod/change_prod_vm_placement.sh` first.
+2. The cluster must be quorate with at least three members, every one online
+   except a target being resumed after an interrupted run.
+3. You confirm that the host is out of every Cloudflare load balancer. If it
+   is the control node, you pick its successor, which is recorded in the
+   registry before the change. Then you type `REMOVE moxN`.
+4. Under the lock it removes the QDevice and disables Corosync on the target.
+   It powers the target off and waits for it to leave the cluster, runs
+   `pvecm delnode`, and removes the node directory and the target's
+   cluster-wide SSH trust. It re-adds the QDevice only for an even remaining
+   count.
+5. It records membership, frees the slot, resynchronizes HAProxy routes,
+   archives `hosts/artifacts/moxN` as `moxN.retired-<timestamp>`, offers to
+   update `PROXMOX_CONTROL_NODE`, and lists the manual cleanup: Tailscale
+   device, `known_hosts`, `env/moxN.conf`, and Cloudflare.
+
+`purge_host_from_cluster.sh` deletes a host that has failed and has been
+physically disconnected permanently. It begins with the warning that a
+purged machine must never be allowed to communicate with the cluster again.
+It offers offline members, leftover `/etc/pve/nodes/moxN` directories, and
+slots that are stale or never finished joining. The target must not answer
+SSH, every other member must be online, and the cluster must be quorate.
+
+The script builds a plan from the registry and live Proxmox state, and
+refuses when:
+
+- a production VM is placed only on the dead host;
+- a production VM is still listed on the dead host (HA has not recovered it);
+- a production VM is not running on a surviving placement host, or does not
+  have exactly one HA rule;
+- a resource is in an unsupported state;
+- the dead host holds a guest the registry does not know.
+
+After `PURGE moxN`, it:
+
+1. destroys each staging VM that is on the dead host, or derived from a
+   production VM that used it: it disables routes, queues the cleanup, and
+   waits for the workers to finish;
+2. narrows each affected production VM's HA rule to the surviving hosts,
+   removes its replication jobs to the dead host with
+   `pvesr delete --force`, records the live owner, and then records the
+   narrower placement;
+3. abandons the dead host's own deferred cleanup records;
+4. deletes the node. With two members it runs
+   `pvecm qdevice remove || true; pvecm expected 1` on the survivor, so a
+   single host remains quorate. Otherwise it removes the QDevice and runs
+   `pvecm delnode`;
+5. re-adds the QDevice for an even remaining count, frees the slot,
+   resynchronizes routes, archives the artifacts, and offers to update
+   `PROXMOX_CONTROL_NODE`.
 
 ## Operator checks and runbooks
 
@@ -687,6 +822,22 @@ pvesh get /nodes --output-format json
 /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py ingress-status
 /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py reconcile --live
 ```
+
+For a quick read-only hardware and network check from the administrator
+workstation, run:
+
+```bash
+diagnostics/show_cluster_health.sh
+```
+
+It reports each member's Proxmox state, workstation SSH access, quorum, and
+corosync and pve-cluster services; every member's view of its corosync links
+to every other member; the QDevice's registration, reachability, qnetd
+state, and votes; every ZFS pool and vdev member with error counts and disk
+serials; each member's rpool free space, flagging a host that needs more
+storage when less than 10% of rpool's usable space is free; and each drive's
+SMART health. It does not inspect guests and exits 1 when anything needs
+attention.
 
 For a broader read-only snapshot from the administrator workstation, run:
 
@@ -713,7 +864,7 @@ diagnostics/show_proxmox_host_state.sh mox1 \
 
 Routine verification must establish:
 
-1. every configured cluster node is online and contiguous;
+1. every cluster member recorded in the registry's host slots is online;
 2. QDevice is absent for odd membership or alive/voting with exact totals for
    even membership;
 3. exactly one mox owns `.10`, and every candidate lists all other VRRP peers;
@@ -742,6 +893,8 @@ Repository checks:
 bash -n \
   hosts/setup_proxmox_host.sh \
   hosts/app-ha-guest-role-hook.sh \
+  hosts/remove_host_from_cluster.sh \
+  hosts/purge_host_from_cluster.sh \
   guests/prod/create_prod_vm.sh \
   guests/staging/create_staging_vm.sh \
   guests/staging/patch_staging_clone.sh \
@@ -752,6 +905,7 @@ bash -n \
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
   hosts/test_setup_proxmox_host.py \
   hosts/test_app_ha_guest_role_hook.py \
+  hosts/test_host_membership.py \
   guests/prod/test_create_prod_vm.py \
   guests/staging/test_staging_vm.py \
   lib/test_shared_libs.py \

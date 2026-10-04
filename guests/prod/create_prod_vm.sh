@@ -371,14 +371,11 @@ for row in rows:
         online.append(node)
 
 online.sort(key=lambda value: int(value[3:]))
-expected = [f"mox{index}" for index in range(1, len(online) + 1)]
-if online != expected:
+if len(online) < 2:
     raise SystemExit(
-        "online mox nodes are not contiguous from mox1: "
+        "production HA requires at least two online mox nodes; online: "
         + (", ".join(online) if online else "none")
     )
-if len(online) < 2:
-    raise SystemExit("production HA requires at least two online contiguous mox nodes")
 print(*online, sep="\n")
 PY
 }

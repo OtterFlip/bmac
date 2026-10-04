@@ -20,6 +20,13 @@ LIB_DIR = Path(__file__).resolve().parent
 TOOL = LIB_DIR / "rpool_mirror.sh"
 PASSPHRASE = "correct horse battery staple"
 DISK_BYTES = 2000398934016
+GIB = 1 << 30
+MIB = 1 << 20
+# Member partitions end 1 GiB short of the smaller disk's whole-GiB size.
+MEMBER_END = (DISK_BYTES // GIB * GIB - GIB) // 512 - 1
+EXTRA_GPT = [[1, 2048, MEMBER_END, "8309"]]
+CLEAR_GPT = [[1, 2048, MEMBER_END, "BF01"]]
+REPLACEMENT_BYTES = (MEMBER_END + 1) * 512 + MIB
 
 FAKE_HOST = r'''#!/usr/bin/env python3
 """One fake for every host command the rpool mirror tool runs."""
@@ -51,7 +58,36 @@ def disk_of(device):
 
 
 def member_path(member):
-    return member if isinstance(member, str) else member["path"]
+    path = member if isinstance(member, str) else member["path"]
+    # zpool status -L resolves the by-id symlinks of leaves.
+    if resolve_links and path.startswith("/"):
+        return os.path.realpath(path)
+    return path
+
+
+resolve_links = command == "zpool" and len(args) > 1 and "L" in args[1].lstrip("-")
+
+
+def device_bytes(device):
+    if device.startswith("/dev/mapper/"):
+        return device_bytes(state["mappers"][device.rsplit("/", 1)[1]]["device"]) - 16777216
+    if device in state["disks"]:
+        return state["disks"][device]["size"]
+    disk = disk_of(device)
+    number = int(device[len(disk):].lstrip("p"))
+    for row in state["disks"][disk]["gpt"]:
+        if row[0] == number:
+            return (row[2] - row[1] + 1) * 512
+    raise SystemExit(f"no partition {device}")
+
+
+def signatures(device):
+    found = list(state.get("signatures", {}).get(device, []))
+    if device in state["disks"] and state["disks"][device].get("gpt"):
+        found += ["PMBR", "gpt"]
+    if device in state["luks"]:
+        found.append("crypto_LUKS")
+    return found
 
 
 def member_state(member):
@@ -105,6 +141,9 @@ if command == "lsblk":
                 device in state["disks"] and disk_of(row["device"]) == device
             ):
                 print(f"/dev/mapper/{mapper}")
+    elif args[:2] == ["-dno", "FSTYPE"]:
+        if args[2] in state.get("fs_uuid", {}):
+            print("vfat")
     elif args[:2] == ["-nrpo", "MOUNTPOINT"]:
         for mountpoint in state["disks"].get(args[2], {}).get("mountpoints", []):
             print(mountpoint)
@@ -114,11 +153,15 @@ if command == "lsblk":
         raise SystemExit(f"unexpected lsblk {args}")
 elif command == "blockdev":
     device = args[-1]
-    if device.startswith("/dev/mapper/"):
-        backing = state["mappers"][device.rsplit("/", 1)[1]]["device"]
-        print(state["disks"][disk_of(backing)]["size"] - 16777216)
+    if args[0] == "--getss":
+        print(state["disks"][disk_of(device)].get("sector", 512))
     else:
-        print(state["disks"][device]["size"])
+        print(device_bytes(device))
+elif command == "findmnt":
+    device = args[args.index("--source") + 1]
+    mounted = state["disks"].get(device, {}).get("mountpoints", []) + \
+        state.get("partition_mountpoints", {}).get(device, [])
+    raise SystemExit(0 if mounted else 1)
 elif command == "zpool":
     if args[:2] == ["status", "-x"]:
         print("pool 'rpool' is healthy")
@@ -174,6 +217,8 @@ elif command == "zpool":
                 save()
                 raise SystemExit(0)
         raise SystemExit(f"no single-disk vdev {args[2]}")
+    elif args[0] == "labelclear":
+        record()
     elif args[0] == "offline":
         record()
         for vdev in state["pool"]:
@@ -233,6 +278,8 @@ elif command == "cryptsetup":
         target = args[args.index("--header-backup-file") + 1]
         Path(target).write_text(f"header of {positional[0]}\n")
         record()
+    elif action == "erase":
+        record()
     elif action == "close":
         if state.get("busy_mappers") and positional[0] in state["busy_mappers"]:
             raise SystemExit(5)
@@ -258,6 +305,13 @@ elif command == "sgdisk":
         state["disks"][args[1]].pop("guid", None)
     elif args[0] == "--randomize-guids":
         state["disks"][args[1]]["guid"] = f"RANDOM-{args[1]}-{len(state['actions'])}"
+    elif args[0].startswith("--new="):
+        number, start, end = (int(value) for value in args[0].split("=", 1)[1].split(":"))
+        code = args[1].split(":", 1)[1]
+        state["disks"][args[2]]["gpt"] = [[number, start, end, code]]
+        state["disks"][args[2]]["partitions"] = [f"{args[2]}p{number}"]
+    elif args[0] == "--move-second-header":
+        pass
     elif len(args) == 2 and args[1].startswith("--replicate="):
         target = args[1].split("=", 1)[1]
         state["disks"][target]["gpt"] = [list(row) for row in state["disks"][args[0]]["gpt"]]
@@ -266,6 +320,11 @@ elif command == "sgdisk":
             f"{target}p{row[0]}" for row in state["disks"][args[0]]["gpt"]
         ]
     save()
+elif command == "blkid" and "TYPE" in args:
+    fstype = state.get("fs_type", {}).get(args[-1])
+    if fstype is None:
+        raise SystemExit(2)
+    print(fstype)
 elif command == "blkid":
     uuid = state.get("fs_uuid", {}).get(args[-1])
     if uuid is None:
@@ -292,7 +351,17 @@ elif command == "proxmox-boot-tool":
         present = set(state.get("fs_uuid", {}).values())
         write_boot_uuids([uuid for uuid in boot_uuids() if uuid in present])
     save()
-elif command in {"wipefs", "udevadm", "partx"}:
+elif command == "wipefs":
+    if "--noheadings" in args:
+        for name in signatures(args[-1]):
+            print(name)
+        raise SystemExit(0)
+    record()
+    if "--all" in args:
+        state["luks"].pop(args[-1], None)
+        state.get("signatures", {}).pop(args[-1], None)
+        save()
+elif command in {"udevadm", "partx"}:
     record()
 elif command == "update-initramfs":
     record()
@@ -320,7 +389,7 @@ else:
 BOOT_GPT = [
     [1, 34, 2047, "EF02"],
     [2, 2048, 2099199, "EF00"],
-    [3, 2099200, 3907029134, "BF01"],
+    [3, 2099200, MEMBER_END, "BF01"],
 ]
 
 BOOT_LINES = [
@@ -415,6 +484,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
             "unmkinitramfs",
             "blkid",
             "partx",
+            "findmnt",
         ):
             (self.bin_dir / name).symlink_to(fake)
         self.environment = os.environ.copy()
@@ -471,14 +541,13 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def prepare(self, stdin: str = f"GO\n{PASSPHRASE}\n") -> None:
         self.run_tool(
-            "luks-prepare", "--pair", "2", "--prompt", "--require-equal",
-            "NEW1", "NEW2", stdin=stdin,
+            "luks-prepare", "--pair", "2", "--prompt", "NEW1", "NEW2", stdin=stdin,
         )
 
     # -- check-new --------------------------------------------------------
 
     def test_check_new_reports_fresh_disks_of_equal_size(self) -> None:
-        output = self.run_tool("check-new", "--require-equal", "NEW1", "NEW2").stdout
+        output = self.run_tool("check-new", "NEW1", "NEW2").stdout
         self.assertEqual(
             output.splitlines(),
             [
@@ -490,68 +559,91 @@ class RpoolMirrorToolTest(unittest.TestCase):
     def test_check_new_rejects_unsafe_disks(self) -> None:
         self.assertIn(
             "already part of an imported ZFS pool",
-            self.run_tool("check-new", "--require-equal", "NEW1", "BOOTA", expected=1).stderr,
+            self.run_tool("check-new", "NEW1", "BOOTA", expected=1).stderr,
         )
         state = self.state()
-        state["disks"]["/dev/nvme3n1"]["size"] = DISK_BYTES + 4096
+        # Disks of one nominal capacity may differ slightly, in either order.
+        state["disks"]["/dev/nvme3n1"]["size"] = DISK_BYTES - 400 * MIB
+        self.write_state(state)
+        self.run_tool("check-new", "NEW1", "NEW2")
+        self.run_tool("check-new", "NEW2", "NEW1")
+        state["disks"]["/dev/nvme3n1"]["size"] = DISK_BYTES * 98 // 100
         self.write_state(state)
         self.assertIn(
-            "differ in capacity",
-            self.run_tool("check-new", "--require-equal", "NEW1", "NEW2", expected=1).stderr,
+            "differ in capacity by more than 1%",
+            self.run_tool("check-new", "NEW1", "NEW2", expected=1).stderr,
         )
         self.assertIn(
-            "not the expected",
+            "less than 99% of",
             self.run_tool(
-                "check-new", "--expect-bytes", str(DISK_BYTES), "--match", "exact",
-                "NEW1", "NEW2", expected=1,
+                "check-new", "--expect-bytes", str(DISK_BYTES), "NEW1", "NEW2", expected=1,
             ).stderr,
+        )
+        state["disks"]["/dev/nvme3n1"]["size"] = DISK_BYTES
+        state["disks"]["/dev/nvme3n1"]["sector"] = 4096
+        self.write_state(state)
+        self.assertIn(
+            "different logical sector sizes",
+            self.run_tool("check-new", "NEW1", "NEW2", expected=1).stderr,
+        )
+        state["disks"]["/dev/nvme3n1"]["sector"] = 512
+        state["disks"]["/dev/nvme3n1"]["size"] = 4 * GIB
+        self.write_state(state)
+        self.assertIn(
+            "smaller than 8 GiB",
+            self.run_tool("check-new", "NEW1", "NEW2", expected=1).stderr,
         )
         state["disks"]["/dev/nvme3n1"]["size"] = DISK_BYTES
         state["disks"]["/dev/nvme3n1"]["mountpoints"] = ["/mnt/old"]
         self.write_state(state)
         self.assertIn(
             "mounted filesystem",
-            self.run_tool("check-new", "--require-equal", "NEW1", "NEW2", expected=1).stderr,
+            self.run_tool("check-new", "NEW1", "NEW2", expected=1).stderr,
         )
         self.assertIn(
             "found 0",
-            self.run_tool("check-new", "--require-equal", "NEW1", "MISSING", expected=1).stderr,
+            self.run_tool("check-new", "NEW1", "MISSING", expected=1).stderr,
         )
-        self.run_tool("check-new", "--require-equal", "NEW1", "NEW1", expected=1)
+        self.run_tool("check-new", "NEW1", "NEW1", expected=1)
         # A disk in any other imported pool is in use too.
         state["disks"]["/dev/nvme3n1"]["mountpoints"] = []
         state["other_pools"] = {"tank": ["/dev/nvme3n1"]}
         self.write_state(state)
         self.assertIn(
             "disk NEW2 (/dev/nvme3n1) is already part of an imported ZFS pool",
-            self.run_tool("check-new", "--require-equal", "NEW1", "NEW2", expected=1).stderr,
+            self.run_tool("check-new", "NEW1", "NEW2", expected=1).stderr,
         )
-        self.run_tool("check-new", "--require-equal", "NEW1", "bad;serial", expected=1)
+        self.run_tool("check-new", "NEW1", "bad;serial", expected=1)
 
     # -- luks-prepare -----------------------------------------------------
 
     def test_prepare_proves_passphrase_before_formatting(self) -> None:
         completed = self.run_tool(
-            "luks-prepare", "--pair", "2", "--prompt", "--require-equal", "NEW1", "NEW2",
+            "luks-prepare", "--pair", "2", "--prompt", "NEW1", "NEW2",
             stdin=f"GO\nwrong\n{PASSPHRASE}\n",
         )
         self.assertIn("does not unlock existing rpool member crypt-rpool-a", completed.stderr)
         self.assertIn("prepared successfully", completed.stdout)
         state = self.state()
-        self.assertEqual(state["luks"]["/dev/nvme2n1"]["passphrase"], PASSPHRASE)
-        self.assertEqual(state["luks"]["/dev/nvme3n1"]["passphrase"], PASSPHRASE)
-        self.assertEqual(state["mappers"]["crypt-rpool-mirror2-1"]["device"], "/dev/nvme2n1")
-        self.assertEqual(state["mappers"]["crypt-rpool-mirror2-2"]["device"], "/dev/nvme3n1")
+        self.assertEqual(state["luks"]["/dev/nvme2n1p1"]["passphrase"], PASSPHRASE)
+        self.assertEqual(state["luks"]["/dev/nvme3n1p1"]["passphrase"], PASSPHRASE)
+        self.assertEqual(state["mappers"]["crypt-rpool-mirror2-1"]["device"], "/dev/nvme2n1p1")
+        self.assertEqual(state["mappers"]["crypt-rpool-mirror2-2"]["device"], "/dev/nvme3n1p1")
+        self.assertEqual(state["disks"]["/dev/nvme2n1"]["gpt"], EXTRA_GPT)
+        self.assertEqual(state["disks"]["/dev/nvme3n1"]["gpt"], EXTRA_GPT)
         for index in (1, 2):
             header = self.headers / f"luks-header-mirror2-{index}.bin"
             self.assertTrue(header.exists())
             self.assertEqual(header.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(len(self.actions("wipefs")), 2)
+        self.assertEqual(
+            [row[-1] for row in self.actions("wipefs")],
+            ["/dev/nvme2n1", "/dev/nvme2n1p1", "/dev/nvme3n1", "/dev/nvme3n1p1"],
+        )
         self.assertNotIn(PASSPHRASE, completed.stdout + completed.stderr)
 
     def test_prepare_changes_nothing_without_the_shared_passphrase(self) -> None:
         completed = self.run_tool(
-            "luks-prepare", "--pair", "2", "--prompt", "--require-equal", "NEW1", "NEW2",
+            "luks-prepare", "--pair", "2", "--prompt", "NEW1", "NEW2",
             stdin="GO\nwrong\nstill wrong\n\nagain wrong\n",
             expected=1,
         )
@@ -560,23 +652,25 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_prepare_requires_go(self) -> None:
         self.run_tool(
-            "luks-prepare", "--pair", "2", "--prompt", "--require-equal", "NEW1", "NEW2",
+            "luks-prepare", "--pair", "2", "--prompt", "NEW1", "NEW2",
             stdin="no\n", expected=1,
         )
         self.assertEqual(self.actions(), [])
 
     def test_prepare_reuses_matching_luks_and_refuses_foreign_luks(self) -> None:
+        # An earlier run left NEW1's member partition formatted.
         state = self.state()
-        state["luks"]["/dev/nvme2n1"] = {"passphrase": PASSPHRASE, "uuid": "uuid-NEW1"}
+        state["disks"]["/dev/nvme2n1"].update(gpt=EXTRA_GPT, partitions=["/dev/nvme2n1p1"])
+        state["luks"]["/dev/nvme2n1p1"] = {"passphrase": PASSPHRASE, "uuid": "uuid-NEW1"}
         self.write_state(state)
         self.prepare()
         self.assertEqual(
-            [row[-1] for row in self.actions("wipefs")], ["/dev/nvme3n1"]
+            [row[-1] for row in self.actions("wipefs")], ["/dev/nvme3n1", "/dev/nvme3n1p1"]
         )
 
         self.setUp_fresh_with_foreign_luks()
         completed = self.run_tool(
-            "luks-prepare", "--pair", "2", "--prompt", "--require-equal", "NEW1", "NEW2",
+            "luks-prepare", "--pair", "2", "--prompt", "NEW1", "NEW2",
             stdin=f"GO\n{PASSPHRASE}\n", expected=1,
         )
         self.assertIn("refusing to reuse or erase it", completed.stderr)
@@ -589,8 +683,10 @@ class RpoolMirrorToolTest(unittest.TestCase):
             key: value for key, value in state["mappers"].items()
             if not key.startswith("crypt-rpool-mirror")
         }
+        for disk in ("/dev/nvme2n1", "/dev/nvme3n1"):
+            state["disks"][disk].update(gpt=[], partitions=[])
+            state["luks"].pop(f"{disk}p1", None)
         state["luks"]["/dev/nvme2n1"] = {"passphrase": "someone else", "uuid": "x"}
-        state["luks"].pop("/dev/nvme3n1", None)
         self.write_state(state)
 
     def test_prepare_with_setup_key_file(self) -> None:
@@ -599,14 +695,37 @@ class RpoolMirrorToolTest(unittest.TestCase):
         key_file.chmod(0o600)
         self.run_tool(
             "luks-prepare", "--pair", "3", "--key-file", str(key_file),
-            "--expect-bytes", str(DISK_BYTES), "--match", "within-1pct",
-            "NEW1", "NEW2", stdin="GO\n",
+            "--expect-bytes", str(DISK_BYTES), "NEW1", "NEW2", stdin="GO\n",
         )
         self.assertIn("crypt-rpool-mirror3-1", self.state()["mappers"])
-        self.run_tool(
-            "luks-check-prepared", "--pair", "3", "--expect-bytes", str(DISK_BYTES),
-            "NEW1", "NEW2",
+        self.run_tool("luks-check-prepared", "--pair", "3", "NEW1", "NEW2")
+        state = self.state()
+        state["disks"]["/dev/nvme3n1"]["gpt"] = [[1, 2048, MEMBER_END - 8, "8309"]]
+        self.write_state(state)
+        self.assertIn(
+            "do not have the same member partition",
+            self.run_tool("luks-check-prepared", "--pair", "3", "NEW1", "NEW2", expected=1).stderr,
         )
+
+    def test_pair_partitions_end_at_the_smaller_disk_in_either_order(self) -> None:
+        smaller = DISK_BYTES - 400 * MIB
+        expected = (smaller // GIB * GIB - GIB) // 512 - 1
+        self.assertLess(expected, MEMBER_END)
+        state = self.state()
+        state["disks"]["/dev/nvme2n1"]["size"] = smaller
+        state["disks"]["/dev/nvme4n1"] = {"serial": "NEW3", "size": DISK_BYTES}
+        state["disks"]["/dev/nvme5n1"] = {"serial": "NEW4", "size": smaller}
+        self.write_state(state)
+        self.prepare()
+        self.run_tool(
+            "luks-prepare", "--pair", "3", "--prompt", "NEW3", "NEW4",
+            stdin=f"GO\n{PASSPHRASE}\n",
+        )
+        disks = self.state()["disks"]
+        for disk in ("/dev/nvme2n1", "/dev/nvme3n1", "/dev/nvme4n1", "/dev/nvme5n1"):
+            self.assertEqual(disks[disk]["gpt"], [[1, 2048, expected, "8309"]], disk)
+        self.run_tool("luks-check-prepared", "--pair", "2", "NEW1", "NEW2")
+        self.run_tool("luks-check-prepared", "--pair", "3", "NEW3", "NEW4")
 
     # -- luks-add ---------------------------------------------------------
 
@@ -698,20 +817,22 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_clear_add_uses_stable_paths_and_is_idempotent(self) -> None:
         self.make_clear_pool()
-        self.run_tool("clear-add", "--require-equal", "NEW1", "NEW2")
+        self.run_tool("clear-add", "NEW1", "NEW2")
         self.assertEqual(
             self.state()["pool"][-1]["members"],
-            [str(self.by_id / "nvme-Dell_NEW1"), str(self.by_id / "nvme-Dell_NEW2")],
+            [str(self.by_id / "nvme-Dell_NEW1-part1"), str(self.by_id / "nvme-Dell_NEW2-part1")],
         )
-        self.assertEqual(len(self.actions("wipefs")), 2)
-        output = self.run_tool("clear-add", "--require-equal", "NEW1", "NEW2").stdout
+        self.assertEqual(self.state()["disks"]["/dev/nvme2n1"]["gpt"], CLEAR_GPT)
+        self.assertEqual(self.state()["disks"]["/dev/nvme3n1"]["gpt"], CLEAR_GPT)
+        self.assertEqual(len(self.actions("wipefs")), 4)
+        output = self.run_tool("clear-add", "NEW1", "NEW2").stdout
         self.assertIn("already one rpool mirror", output)
         self.assertEqual(len(self.actions("zpool")), 1)
 
     def test_clear_add_refuses_encrypted_pool_and_luks_disks(self) -> None:
         self.assertIn(
             "rpool is encrypted",
-            self.run_tool("clear-add", "--require-equal", "NEW1", "NEW2", expected=1).stderr,
+            self.run_tool("clear-add", "NEW1", "NEW2", expected=1).stderr,
         )
         self.make_clear_pool()
         state = self.state()
@@ -719,7 +840,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
         self.write_state(state)
         self.assertIn(
             "refusing to erase existing LUKS disk NEW1",
-            self.run_tool("clear-add", "--require-equal", "NEW1", "NEW2", expected=1).stderr,
+            self.run_tool("clear-add", "NEW1", "NEW2", expected=1).stderr,
         )
         self.assertEqual(self.actions("wipefs"), [])
 
@@ -796,7 +917,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
         self.write_state(state)
 
     def replace_boot_member(self) -> None:
-        self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1")
+        self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1")
         self.run_tool("boot-esp", "--survivor", "BOOTA", "NEW1")
         self.run_tool(
             "luks-prepare-member", "--member", "B", "--prompt", "NEW1",
@@ -806,10 +927,11 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_boot_member_replacement_after_reboot(self) -> None:
         self.pull_boot_b(rebooted=True)
-        output = self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1").stdout
+        output = self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1").stdout
         self.assertIn("now has the partition table of BOOTA", output)
         self.assertIn(["sgdisk", "/dev/nvme0n1", "--replicate=/dev/nvme2n1"], self.actions("sgdisk"))
         self.assertIn(["sgdisk", "--randomize-guids", "/dev/nvme2n1"], self.actions("sgdisk"))
+        self.assertIn(["sgdisk", "--move-second-header", "/dev/nvme2n1"], self.actions("sgdisk"))
         self.assertEqual(self.state()["disks"]["/dev/nvme2n1"]["gpt"], BOOT_GPT)
         # The survivor's table is only ever read.
         self.assertFalse(any(
@@ -817,7 +939,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
             for row in self.actions("sgdisk") if row[1] != "/dev/nvme0n1"
         ))
         wipes = len(self.actions("wipefs"))
-        rerun = self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1").stdout
+        rerun = self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1").stdout
         self.assertIn("already has the partition table", rerun)
         # Only partition 3 is cleared again; the table is kept.
         self.assertEqual(self.actions("wipefs")[wipes:],
@@ -870,14 +992,14 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_boot_partition_gives_an_interrupted_copy_its_own_guids(self) -> None:
         self.pull_boot_b(rebooted=True)
-        self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1")
+        self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1")
         self.assertNotEqual(self.state()["disks"]["/dev/nvme2n1"]["guid"], "GUID-BOOTA")
         # A run that stopped right after --replicate left the survivor's GUIDs.
         state = self.state()
         state["disks"]["/dev/nvme2n1"]["guid"] = "GUID-BOOTA"
         state["actions"] = []
         self.write_state(state)
-        output = self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1").stdout
+        output = self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1").stdout
         self.assertIn("already has the partition table", output)
         self.assertEqual(
             self.actions("sgdisk"), [["sgdisk", "--randomize-guids", "/dev/nvme2n1"]]
@@ -889,7 +1011,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_boot_member_replacement_closes_the_pulled_disks_mapping(self) -> None:
         self.pull_boot_b(rebooted=False)
-        self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1")
+        self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1")
         self.run_tool("boot-esp", "--survivor", "BOOTA", "NEW1")
         self.update_state(busy_mappers=["crypt-rpool-b"])
         completed = self.run_tool(
@@ -937,7 +1059,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_boot_member_joins_only_with_a_synced_esp(self) -> None:
         self.pull_boot_b(rebooted=True)
-        self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1")
+        self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1")
         self.update_state(unsynced_esps=["NEW0-N1P2"])
         self.assertIn(
             "does not match the surviving ESP",
@@ -957,7 +1079,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_prepare_member_refuses_a_mounted_partition(self) -> None:
         self.pull_boot_b(rebooted=True)
-        self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1")
+        self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1")
         self.update_state(partition_mountpoints={"/dev/nvme2n1p3": ["/mnt/x"]})
         self.assertIn(
             "has a mounted filesystem",
@@ -971,34 +1093,64 @@ class RpoolMirrorToolTest(unittest.TestCase):
     def test_grub_survivor_gets_a_grub_esp(self) -> None:
         self.pull_boot_b(rebooted=True)
         self.update_state(esp_mode={"AAAA-1111": "grub"})
-        self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1")
+        self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1")
         self.run_tool("boot-esp", "--survivor", "BOOTA", "NEW1")
         self.assertIn(
             ["proxmox-boot-tool", "init", "/dev/nvme2n1p2", "grub"],
             self.actions("proxmox-boot-tool"),
         )
 
-    def test_boot_partition_refuses_unsafe_disks(self) -> None:
+    def test_copy_partitions_refuses_unsafe_disks(self) -> None:
         self.pull_boot_b(rebooted=True)
         state = self.state()
-        state["disks"]["/dev/nvme2n1"]["size"] = DISK_BYTES - 512
+        state["disks"]["/dev/nvme2n1"]["size"] = REPLACEMENT_BYTES - 512
         self.write_state(state)
         self.assertIn(
-            "not the expected",
-            self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1", expected=1).stderr,
+            f"needs at least {REPLACEMENT_BYTES} bytes to hold the partitions of BOOTA",
+            self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1", expected=1).stderr,
         )
         state["disks"]["/dev/nvme2n1"]["size"] = DISK_BYTES
+        state["disks"]["/dev/nvme2n1"]["sector"] = 4096
+        self.write_state(state)
+        self.assertIn(
+            "has 4096-byte logical sectors, but BOOTA has 512-byte sectors",
+            self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1", expected=1).stderr,
+        )
+        state["disks"]["/dev/nvme2n1"]["sector"] = 512
         state["luks"]["/dev/nvme2n1"] = {"passphrase": "someone else", "uuid": "x"}
         self.write_state(state)
         self.assertIn(
             "is not erased automatically",
-            self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1", expected=1).stderr,
+            self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1", expected=1).stderr,
         )
         self.assertIn(
-            "surviving disk NEW2 has no boot-mirror partition table",
-            self.run_tool("boot-partition", "--survivor", "NEW2", "NEW1", expected=1).stderr,
+            "surviving disk NEW2 has no rpool member partition layout",
+            self.run_tool("copy-partitions", "--survivor", "NEW2", "NEW1", expected=1).stderr,
         )
         self.assertEqual(self.actions("wipefs"), [])
+
+    def test_replacements_only_need_room_for_the_survivors_partitions(self) -> None:
+        self.pull_boot_b(rebooted=True)
+        self.assertEqual(
+            self.run_tool("replacement-bytes", "--survivor", "BOOTA").stdout.strip(),
+            str(REPLACEMENT_BYTES),
+        )
+        self.assertIn(
+            "has no partitions",
+            self.run_tool("replacement-bytes", "--survivor", "NEW2", expected=1).stderr,
+        )
+        self.run_tool("replacement-bytes", "--survivor", "BOOTA", "NEW1", expected=1)
+        # A slightly smaller disk and a much larger one both take the layout.
+        state = self.state()
+        state["disks"]["/dev/nvme2n1"]["size"] = REPLACEMENT_BYTES
+        state["disks"]["/dev/nvme3n1"]["size"] = DISK_BYTES + 100 * GIB
+        self.write_state(state)
+        self.assertLess(REPLACEMENT_BYTES, DISK_BYTES)
+        for serial, disk in (("NEW1", "/dev/nvme2n1"), ("NEW2", "/dev/nvme3n1")):
+            self.run_tool("check-new", "--survivor", "BOOTA", serial)
+            self.run_tool("copy-partitions", "--survivor", "BOOTA", serial)
+            self.assertEqual(self.state()["disks"][disk]["gpt"], BOOT_GPT)
+            self.assertIn(["sgdisk", "--move-second-header", disk], self.actions("sgdisk"))
 
     def test_extra_member_replacement(self) -> None:
         self.prepare()
@@ -1007,28 +1159,39 @@ class RpoolMirrorToolTest(unittest.TestCase):
         del state["disks"]["/dev/nvme3n1"]
         del state["mappers"]["crypt-rpool-mirror2-2"]
         state["pool"][1]["members"][1] = {"path": "5550001112223334445", "state": "UNAVAIL"}
-        state["disks"]["/dev/nvme4n1"] = {"serial": "NEW3", "size": DISK_BYTES}
+        # The replacement is slightly smaller than the disk it replaces.
+        state["disks"]["/dev/nvme4n1"] = {"serial": "NEW3", "size": DISK_BYTES - 512 * MIB}
         state["actions"] = []
         self.write_state(state)
         self.assertIn(
-            "not the expected",
+            "copy the partition table onto disk NEW3 first",
             self.run_tool(
-                "luks-prepare-member", "--member", "2-2", "--prompt",
-                "--expect-bytes", str(DISK_BYTES + 1), "--match", "exact", "NEW3",
+                "luks-prepare-member", "--member", "2-2", "--prompt", "NEW3",
                 stdin=f"GO\n{PASSPHRASE}\n", expected=1,
             ).stderr,
         )
+        self.assertIn(
+            "run copy-partitions first",
+            self.run_tool(
+                "replace-member", "--survivor", "NEW1", "--member", "2-2", "NEW3", expected=1
+            ).stderr,
+        )
+        self.run_tool("copy-partitions", "--survivor", "NEW1", "NEW3")
+        self.assertEqual(self.state()["disks"]["/dev/nvme4n1"]["gpt"], EXTRA_GPT)
         self.run_tool(
-            "luks-prepare-member", "--member", "2-2", "--prompt",
-            "--expect-bytes", str(DISK_BYTES), "--match", "exact", "NEW3",
+            "luks-prepare-member", "--member", "2-2", "--prompt", "NEW3",
             stdin=f"GO\n{PASSPHRASE}\n",
         )
-        self.assertEqual(self.state()["mappers"]["crypt-rpool-mirror2-2"]["device"], "/dev/nvme4n1")
-        self.assertEqual([row[-1] for row in self.actions("wipefs")], ["/dev/nvme4n1"])
+        self.assertEqual(
+            self.state()["mappers"]["crypt-rpool-mirror2-2"]["device"], "/dev/nvme4n1p1"
+        )
+        self.assertEqual(
+            [row[-1] for row in self.actions("wipefs")], ["/dev/nvme4n1", "/dev/nvme4n1p1"]
+        )
         self.assertTrue((self.headers / "luks-header-mirror2-2.bin").exists())
         self.run_tool("replace-member", "--survivor", "NEW1", "--member", "2-2", "NEW3")
         self.assertEqual(
-            self.actions("zpool"),
+            [row for row in self.actions("zpool") if row[1] != "labelclear"],
             [["zpool", "replace", "rpool", "5550001112223334445",
               "/dev/mapper/crypt-rpool-mirror2-2"]],
         )
@@ -1054,10 +1217,10 @@ class RpoolMirrorToolTest(unittest.TestCase):
             '"/dev/disk/by-id/nvme-Dell_BOOTA-part3"', json.dumps(str(self.by_id / "nvme-Dell_BOOTA-part3"))
         ))
         self.assertIn(
-            "run boot-partition first",
+            "run copy-partitions first",
             self.run_tool("replace-member", "--survivor", "BOOTA", "NEW1", expected=1).stderr,
         )
-        self.run_tool("boot-partition", "--survivor", "BOOTA", "NEW1")
+        self.run_tool("copy-partitions", "--survivor", "BOOTA", "NEW1")
         self.assertIn(
             "run boot-esp first",
             self.run_tool("replace-member", "--survivor", "BOOTA", "NEW1", expected=1).stderr,
@@ -1071,25 +1234,159 @@ class RpoolMirrorToolTest(unittest.TestCase):
         )
         self.assertEqual(self.actions("update-initramfs"), [])
 
+    def test_clear_boot_member_replacement_reusing_the_pulled_members_path(self) -> None:
+        # The OFFLINE member keeps its by-id path, which the replacement disk's
+        # new partition 3 takes over (the same disk, blanked, in a simulation).
+        self.make_clear_pool()
+        pulled = str(self.by_id / "nvme-Dell_BOOTB-part3")
+        state = self.state()
+        state["pool"][0]["members"][1] = {"path": pulled, "state": "OFFLINE"}
+        state["disks"]["/dev/nvme1n1"].update(gpt=[], partitions=[])
+        del state["fs_uuid"]["/dev/nvme1n1p2"]
+        self.write_state(state)
+        (self.by_id / "nvme-Dell_BOOTA-part3").symlink_to("/dev/nvme0n1p3")
+        (self.by_id / "nvme-Dell_BOOTB-part3").symlink_to("/dev/nvme1n1p3")
+        self.state_path.write_text(self.state_path.read_text().replace(
+            '"/dev/disk/by-id/nvme-Dell_BOOTA-part3"', json.dumps(str(self.by_id / "nvme-Dell_BOOTA-part3"))
+        ))
+        self.run_tool("copy-partitions", "--survivor", "BOOTA", "BOOTB")
+        # A rerun finds the copied table and rechecks the disk.
+        self.assertIn(
+            "already has the partition table",
+            self.run_tool("copy-partitions", "--survivor", "BOOTA", "BOOTB").stdout,
+        )
+        self.run_tool("boot-esp", "--survivor", "BOOTA", "BOOTB")
+        self.run_tool("replace-member", "--survivor", "BOOTA", "BOOTB")
+        self.assertEqual(
+            self.actions("zpool"), [["zpool", "replace", "rpool", pulled, pulled]]
+        )
+
+    def test_offline_member_still_holding_its_label_stays_in_the_pool(self) -> None:
+        self.make_clear_pool()
+        pulled = str(self.by_id / "nvme-Dell_BOOTB-part3")
+        state = self.state()
+        state["pool"][0]["members"][1] = {"path": pulled, "state": "OFFLINE"}
+        state["fs_type"] = {"/dev/nvme1n1p3": "zfs_member"}
+        self.write_state(state)
+        (self.by_id / "nvme-Dell_BOOTA-part3").symlink_to("/dev/nvme0n1p3")
+        (self.by_id / "nvme-Dell_BOOTB-part3").symlink_to("/dev/nvme1n1p3")
+        self.state_path.write_text(self.state_path.read_text().replace(
+            '"/dev/disk/by-id/nvme-Dell_BOOTA-part3"', json.dumps(str(self.by_id / "nvme-Dell_BOOTA-part3"))
+        ))
+        self.assertIn(
+            "already part of an imported ZFS pool",
+            self.run_tool(
+                "copy-partitions", "--survivor", "BOOTA", "BOOTB", expected=1
+            ).stderr,
+        )
+        self.assertIn(
+            "partition 3 of disk BOOTB is already part of rpool",
+            self.run_tool("boot-esp", "--survivor", "BOOTA", "BOOTB", expected=1).stderr,
+        )
+
     def test_clear_mirror_detached_to_one_disk_gets_attached(self) -> None:
         self.make_clear_pool()
         state = self.state()
-        state["pool"].append(
-            {"name": str(self.by_id / "nvme-Dell_NEW1"), "single": True, "members": []}
-        )
+        survivor = str(self.by_id / "nvme-Dell_NEW1-part1")
+        state["pool"].append({"name": survivor, "single": True, "members": []})
+        state["disks"]["/dev/nvme2n1"].update(gpt=CLEAR_GPT, partitions=["/dev/nvme2n1p1"])
         state["disks"]["/dev/nvme4n1"] = {"serial": "NEW3", "size": DISK_BYTES}
         self.write_state(state)
-        (self.by_id / "nvme-Dell_NEW3").symlink_to("/dev/nvme4n1")
+        (self.by_id / "nvme-Dell_NEW3-part1").symlink_to("/dev/nvme4n1p1")
+        self.assertIn(
+            "run copy-partitions first",
+            self.run_tool("replace-member", "--survivor", "NEW1", "NEW3", expected=1).stderr,
+        )
+        self.run_tool("copy-partitions", "--survivor", "NEW1", "NEW3")
+        self.assertEqual(self.state()["disks"]["/dev/nvme4n1"]["gpt"], CLEAR_GPT)
         self.run_tool("replace-member", "--survivor", "NEW1", "NEW3")
         self.assertEqual(
             self.actions("zpool"),
-            [["zpool", "attach", "rpool", str(self.by_id / "nvme-Dell_NEW1"),
-              str(self.by_id / "nvme-Dell_NEW3")]],
+            [["zpool", "attach", "rpool", survivor, str(self.by_id / "nvme-Dell_NEW3-part1")]],
         )
-        self.assertEqual([row[-1] for row in self.actions("wipefs")], ["/dev/nvme4n1"])
+        self.assertEqual(
+            [row[-1] for row in self.actions("wipefs")], ["/dev/nvme4n1", "/dev/nvme4n1p1"]
+        )
         self.assertIn(
             "already part of mirror-1",
             self.run_tool("replace-member", "--survivor", "NEW1", "NEW3").stdout,
+        )
+
+    # -- release-disks ----------------------------------------------------
+
+    def test_release_erases_only_metadata_of_retired_luks_disks(self) -> None:
+        self.prepare()
+        self.run_tool("luks-add", "--pair", "2", "NEW1", "NEW2")
+        completed = self.run_tool("release-disks", "NEW1", "NEW2", expected=1)
+        self.assertIn("mapping /dev/mapper/crypt-rpool-mirror2-1 is still open", completed.stderr)
+        self.assertIn("mapping /dev/mapper/crypt-rpool-mirror2-2 is still open", completed.stderr)
+        self.assertNotIn("release-disks", completed.stdout)
+        # The vdev removal completed, but the mappings were not retired yet.
+        state = self.state()
+        state["pool"] = state["pool"][:1]
+        state["mappers"] = {
+            key: value for key, value in state["mappers"].items()
+            if not key.startswith("crypt-rpool-mirror")
+        }
+        state["actions"] = []
+        self.write_state(state)
+        self.assertIn(
+            "is still listed in",
+            self.run_tool("release-disks", "NEW1", expected=1).stderr,
+        )
+        self.assertEqual(self.actions(), [])
+
+        self.run_tool("retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2")
+        state = self.state()
+        state["actions"] = []
+        self.write_state(state)
+        output = self.run_tool("release-disks", "NEW1", "NEW2", "GONE").stdout
+        self.assertIn("Disk NEW1 (/dev/nvme2n1) now has no partitions or signatures.", output)
+        self.assertIn("Disk GONE is no longer installed", output)
+        self.assertEqual(
+            self.actions("cryptsetup"),
+            [["cryptsetup", "erase", "--batch-mode", "/dev/nvme2n1p1"],
+             ["cryptsetup", "erase", "--batch-mode", "/dev/nvme3n1p1"]],
+        )
+        self.assertIn(["sgdisk", "--zap-all", "/dev/nvme2n1"], self.actions("sgdisk"))
+        state = self.state()
+        for disk in ("/dev/nvme2n1", "/dev/nvme3n1"):
+            self.assertEqual(state["disks"][disk]["gpt"], [])
+            self.assertEqual(state["disks"][disk]["partitions"], [])
+        self.assertNotIn("/dev/nvme2n1p1", state["luks"])
+        # Metadata only: nothing ever writes the data area.
+        self.assertFalse(any(row[0] in {"dd", "shred", "blkdiscard"} for row in self.actions()))
+
+        state["actions"] = []
+        self.write_state(state)
+        rerun = self.run_tool("release-disks", "NEW1", "NEW2").stdout
+        self.assertIn("NEW1 (/dev/nvme2n1) already has no partitions or signatures", rerun)
+        self.assertEqual(self.actions(), [])
+
+    def test_release_refuses_disks_that_are_in_use(self) -> None:
+        self.make_clear_pool()
+        self.run_tool("clear-add", "NEW1", "NEW2")
+        self.assertIn(
+            "is part of an imported ZFS pool",
+            self.run_tool("release-disks", "NEW1", expected=1).stderr,
+        )
+        self.assertIn(
+            "/dev/nvme0n1p2 is a registered boot ESP",
+            self.run_tool("release-disks", "BOOTA", expected=1).stderr,
+        )
+        state = self.state()
+        state["pool"] = state["pool"][:1]
+        state["partition_mountpoints"] = {"/dev/nvme3n1p1": ["/mnt/x"]}
+        state["actions"] = []
+        self.write_state(state)
+        completed = self.run_tool("release-disks", "NEW2", "NEW1", expected=1)
+        self.assertIn("/dev/nvme3n1p1 is mounted or in use as swap", completed.stderr)
+        # One busy disk does not stop the others from being released.
+        self.assertIn("Disk NEW1 (/dev/nvme2n1) now has no partitions", completed.stdout)
+        self.assertEqual(self.state()["disks"]["/dev/nvme3n1"]["gpt"], CLEAR_GPT)
+        self.assertNotIn(["sgdisk", "--zap-all", "/dev/nvme3n1"], self.actions("sgdisk"))
+        self.assertIn(
+            ["zpool", "labelclear", "-f", "/dev/nvme2n1p1"], self.actions("zpool")
         )
 
     def test_setup_converts_a_boot_member_with_its_key_file(self) -> None:

@@ -100,6 +100,22 @@ read-only unless `--apply` is passed. Apply mode only marks expired,
 VM-less reservations failed and marks explicitly reported cleanup IDs
 completed; it does not destroy Proxmox resources.
 
+The registry also records host slots and the control node:
+
+- `host-list`, `host-next [--exclude moxN]`: list slots, and print the lowest
+  free slot that setup recommends.
+- `host-sync [--member LIST | --live]`: record the live membership. It
+  creates or promotes member slots and reports slots whose host is no longer
+  a member as stale.
+- `host-reserve moxN`: mark a slot `joining` before a host joins.
+- `host-release moxN`: free a slot. It is refused while any resource
+  references the host or the host is the control node.
+- `host-references moxN`: list the resources that reference the host, and
+  the control node.
+- `control-get`, `control-set moxN --expected-node moxN|none`: read and
+  compare-and-set the control node. New hosts join through it, and it holds
+  the control-plane lock.
+
 ## `haproxy_routes.py` and `sync_haproxy_routes.sh`
 
 `haproxy_routes.py` converts the registry's exact enabled Host/SNI routes into
@@ -140,13 +156,30 @@ hidden prompt afterwards; proven against every existing LUKS member),
 `luks-check-prepared`, `luks-backup-headers`, `luks-add` (crypttab in the
 host's existing form, initramfs rebuilt and unpacked to prove boot unlock,
 then `zpool add` with the pool's one ashift), `clear-add`, and `retire-luks`.
-One member at a time (A or B on a boot disk's partition 3, N-M on an extra
-mirror's whole disk): `luks-prepare-member`, `luks-check-member`,
+Extra mirror members live on partition 1, ending 1 GiB short of the smaller
+disk's whole-GiB size. `replacement-bytes` reports what a replacement needs to
+hold a survivor's partitions, and `release-disks` erases only the metadata of
+retired disks. One member at a time (A or B on a boot disk's partition 3, N-M
+on partition 1 of an extra mirror's disk): `luks-prepare-member`, `luks-check-member`,
 `luks-backup-headers --member`, and `luks-register`, which setup's boot-mirror
 LUKS conversion and `hosts/add_replacement_disk.sh` share; plus
-`boot-partition` (copy the survivor's partition table), `boot-esp` (format,
+`copy-partitions` (copy the survivor's partition table onto a disk that can
+hold it), `boot-esp` (format,
 register, and sync the new ESP), and `replace-member` (`zpool replace` or
 `zpool attach` without waiting for the resilver).
+
+## `simulated_disk_failure.sh`
+
+Host side of the `hosts/simulate_disk_failure_and_replacement.sh` test aid,
+piped to a host as `bash -s -- COMMAND MARKER`. `offline` proves that the pool
+is healthy and the chosen disk holds exactly one member of a two-way mirror
+whose other member is `ONLINE`. It records the simulation in MARKER, then
+offlines the member and closes its LUKS mapping. `restore` brings the member
+back, or exits 3 when its mapping has to be reopened at the console. `wipe`
+re-proves that the survivor is `ONLINE` and that nothing else uses the disk.
+It then erases the disk: `cryptsetup erase`, `wipefs`, `sgdisk --zap-all`,
+zeroing of the ZFS label areas, and `blkdiscard`. `status` reports a pending
+simulation.
 
 ## `storage_state.py`
 
@@ -159,11 +192,49 @@ mirror-member replacement, so a rerun can tell it from a failed disk.
 
 ## `disk_workflows.sh`
 
-`disk_workflows.sh` is the workstation library sourced by the four disk
+`disk_workflows.sh` is the workstation library sourced by the disk
 workflows: target-host prompting, strict SSH, shared live disk inventory,
 per-run tool installation with a hash check, host-side Python, and long-step
 prompts. Post-setup workflows use the host as their storage source of truth
 and do not read or update `env/moxN.conf`.
+
+## `cluster_control.sh`
+
+Workstation library for the control node. `resolve_control_node
+[--allow-offline]` reads the registry's control node through a reachable
+member. It stops when `PROXMOX_CONTROL_NODE` in `env/cluster.conf`
+disagrees, and prompts when the setting is missing. Before a cluster exists,
+the configured or entered node is the one that creates it.
+`control_offer_cluster_conf_update moxN` offers to rewrite the
+`PROXMOX_CONTROL_NODE` line after the control node changes. Every other
+workstation must then make the same change.
+
+## `host_membership.sh`
+
+Workstation library shared by `hosts/remove_host_from_cluster.sh` and
+`hosts/purge_host_from_cluster.sh`:
+
+- QDevice access check, add, remove, and vote-parity verification;
+- the control-plane lock that host setup also takes;
+- `pvecm delnode` with a wait for the node to leave;
+- removal of the node directory and of the host's cluster-wide SSH trust;
+- archiving of `hosts/artifacts/moxN`;
+- choice of a new control node;
+- the reinstall follow-up list.
+
+## `prod_ha.sh`
+
+Workstation library shared by `guests/prod/change_prod_vm_placement.sh` and
+`guests/prod/change_prod_vm_owner.sh`:
+
+- production VM selection;
+- loading and validating live HA, rule, and replication state;
+- refreshing a stale registry owner;
+- the staging-dependents refusal;
+- the per-resource orchestration lease;
+- registry updates with revision checks;
+- replication health checks and waits;
+- HA node-affinity rule updates.
 
 ## Tests
 

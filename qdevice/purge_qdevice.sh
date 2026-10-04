@@ -9,6 +9,11 @@
 # then removes QDevice/Corosync software and persistent state from the external
 # QDevice host.
 #
+# When the QDevice host cannot be reached (or is not the machine the cluster
+# has registered), it offers to unregister the QDevice from the cluster and
+# remove every association with it from the Proxmox hosts without contacting
+# it. The operator must first remove that machine from Tailscale.
+#
 # Usage:
 #   ./purge_qdevice.sh [qdevice-host] [proxmox-host]
 #
@@ -124,6 +129,14 @@ The script also does NOT erase the systemd journal or other general system
 logs. Historical log entries may therefore still mention the old QDevice or
 cluster even though the QDevice software and active/persistent state are gone.
 
+If the QDevice host CANNOT be reached over SSH, or it is not the machine whose
+address the cluster has registered, nothing is done to it. The script instead
+explains the situation and asks whether to unregister the QDevice from the
+cluster anyway. That option requires you to remove the old QDevice machine
+from Tailscale first, then removes the QDevice from the cluster configuration
+and every association with it from the Proxmox hosts. Every cluster member
+must be online.
+
 Unlike the non-destructive reset script, this script does NOT create a fresh
 QNetd certificate identity after deleting the old one, because QNetd itself is
 being uninstalled.
@@ -198,15 +211,42 @@ run_remote_root() {
   '
 }
 
-# Fail before changing anything if either SSH target is unavailable.
+# Fail before changing anything if the Proxmox host is unavailable. An
+# unreachable QDevice host leads to the unregister-only path below.
 echo "Checking SSH access..."
-ssh "${SSH_OPTS[@]}" "$QDEVICE_HOST" 'true'
 ssh "${SSH_OPTS[@]}" "$PVE_HOST" 'true'
-echo "SSH access OK."
+echo "SSH access to $PVE_HOST OK."
+QDEVICE_REACHABLE=1
+if ! QDEVICE_SSH_ERROR="$(ssh "${SSH_OPTS[@]}" "$QDEVICE_HOST" 'true' 2>&1 </dev/null)"; then
+  QDEVICE_REACHABLE=0
+  echo "SSH access to $QDEVICE_HOST FAILED:"
+  printf '%s\n' "$QDEVICE_SSH_ERROR" | sed 's/^/  /'
+else
+  echo "SSH access to $QDEVICE_HOST OK."
+fi
+echo
+
+# The QDevice address the cluster has registered (corosync.conf quorum.device
+# net host), or empty when none is registered.
+# shellcheck disable=SC2016 # Evaluated on the Proxmox host.
+REGISTERED_QDEVICE_ADDRESS="$(run_remote_root "$PVE_HOST" '
+set -euo pipefail
+if [[ -s /etc/pve/corosync.conf ]]; then
+  awk "/^[[:space:]]*device[[:space:]]*[{]/ { device=1 } device && /^[[:space:]]*host:/ { print \$2; exit }" \
+    /etc/pve/corosync.conf
+fi
+')"
+if [[ -n "$REGISTERED_QDEVICE_ADDRESS" && ! "$REGISTERED_QDEVICE_ADDRESS" =~ ^[0-9A-Fa-f.:]+$ ]]; then
+  echo "ERROR: corosync.conf registers an unexpected QDevice address: $REGISTERED_QDEVICE_ADDRESS" >&2
+  exit 2
+fi
+echo "QDevice address registered in the cluster: ${REGISTERED_QDEVICE_ADDRESS:-none}"
 echo
 
 # Guard against accidentally pointing the destructive target at a Proxmox VE
 # host. An external qnetd server should not contain Proxmox VE tooling/packages.
+QDEVICE_MISMATCH=0
+if (( QDEVICE_REACHABLE )); then
 echo "Verifying that $QDEVICE_HOST does not appear to be a Proxmox VE host..."
 run_remote_root "$QDEVICE_HOST" '
 set -euo pipefail
@@ -226,6 +266,19 @@ fi
 '
 echo "External-host safety check passed."
 echo
+
+# A reachable host whose Tailscale address is not the registered one is a
+# different machine, such as a replacement prepared under the same name.
+QDEVICE_TAILSCALE_IP="$(run_remote_root "$QDEVICE_HOST" '
+if command -v tailscale >/dev/null 2>&1; then
+  tailscale ip -4 2>/dev/null | head -n 1
+fi
+' || true)"
+if [[ -n "$REGISTERED_QDEVICE_ADDRESS" && -n "$QDEVICE_TAILSCALE_IP" &&
+      "$REGISTERED_QDEVICE_ADDRESS" != "$QDEVICE_TAILSCALE_IP" ]]; then
+  QDEVICE_MISMATCH=1
+fi
+fi
 
 # Capture the exact Proxmox root RSA key that current pvecm qdevice setup uses
 # with ssh-copy-id. It can then be removed from the QDevice authorized_keys.
@@ -328,6 +381,232 @@ if STATUS_OUTPUT="$(pvecm status 2>&1)"; then
 fi
 REMOTE
 )
+
+# Remove every association with the QDevice from one Proxmox node: its QDevice
+# client service and certificates, the managed QDevice host-key block that
+# host setup writes, and known_hosts entries for the QDevice name or address
+# (including the cluster-wide /etc/pve/priv/known_hosts).
+NODE_CLEANUP_BODY=$(cat <<'REMOTE'
+begin='# BEGIN app-ha managed qdevice host key'
+end='# END app-ha managed qdevice host key'
+
+filter_known_hosts() {
+  local file="$1" work
+  [[ -f "$file" && ! -L "$file" ]] || return 0
+  work="$(mktemp)"
+  awk -v name="$qdevice_name" -v addr="$qdevice_addr" -v begin="$begin" -v end="$end" '
+    $0 == begin { managed = 1; next }
+    $0 == end { managed = 0; next }
+    managed { next }
+    /^[[:space:]]*(#|$)/ { print; next }
+    {
+      hosts = ($1 ~ /^@/) ? $2 : $1
+      count = split(hosts, names, ",")
+      for (i = 1; i <= count; i++) {
+        host = names[i]
+        sub(/^\[/, "", host)
+        sub(/\](:[0-9]+)?$/, "", host)
+        if (host == name || (addr != "" && host == addr)) next
+      }
+      print
+    }
+  ' "$file" >"$work"
+  if ! cmp -s "$work" "$file"; then
+    cat "$work" >"$file"
+    echo "Removed QDevice entries from $file"
+  fi
+  rm -f "$work"
+}
+
+if systemctl cat corosync-qdevice.service >/dev/null 2>&1; then
+  systemctl disable --now corosync-qdevice.service >/dev/null 2>&1 || true
+fi
+rm -rf /etc/corosync/qdevice
+
+filter_known_hosts /root/.ssh/known_hosts
+for entry in "$qdevice_name" "$qdevice_addr"; do
+  [[ -n "$entry" && -f /root/.ssh/known_hosts ]] || continue
+  if ssh-keygen -F "$entry" -f /root/.ssh/known_hosts >/dev/null 2>&1; then
+    ssh-keygen -R "$entry" -f /root/.ssh/known_hosts >/dev/null 2>&1
+    echo "Removed hashed known_hosts entries for $entry"
+  fi
+done
+rm -f /root/.ssh/known_hosts.old
+filter_known_hosts /etc/pve/priv/known_hosts
+
+if systemctl is-active --quiet corosync-qdevice.service 2>/dev/null; then
+  echo "ERROR: corosync-qdevice.service is still active." >&2
+  exit 41
+fi
+if [[ -e /etc/corosync/qdevice ]]; then
+  echo "ERROR: /etc/corosync/qdevice still exists." >&2
+  exit 42
+fi
+echo "__QDEVICE_NODE_CLEANUP__:OK"
+REMOTE
+)
+
+# The QDevice host cannot be purged: unregister the QDevice from the cluster
+# and the Proxmox hosts without contacting it, after the operator has removed
+# the machine from Tailscale. Never returns.
+unregister_without_qdevice_host() {
+  local reason="$1" answer confirmation cluster_output node state header
+  local -a nodes=()
+
+  cat <<EOF
+==============================================================================
+QDEVICE HOST CANNOT BE PURGED
+==============================================================================
+
+$reason
+
+QDevice address registered in the cluster: ${REGISTERED_QDEVICE_ADDRESS:-none}
+
+Nothing will be done to the QDevice machine. This script can instead
+unregister the QDevice from the cluster without contacting it:
+
+  * run 'pvecm qdevice remove' on $PVE_HOST, which removes the QDevice from
+    the cluster configuration and stops and removes the QDevice client
+    (service and certificates) on every Proxmox node;
+  * on every Proxmox node, remove the managed QDevice host-key block and any
+    known_hosts entry for '$QDEVICE_HOST' or ${REGISTERED_QDEVICE_ADDRESS:-its old address}, including the
+    cluster-wide /etc/pve/priv/known_hosts.
+
+Every cluster member must be online and the cluster must be quorate.
+
+If the cluster has an even number of members, it then has no tie-breaking
+vote: losing any one member loses quorum until a new QDevice is added with
+qdevice/add_qdevice.sh. Add the replacement promptly.
+
+EOF
+  read -r -p "Unregister the QDevice from the cluster without contacting it? [y/N] " answer || answer=""
+  if [[ "${answer,,}" != y && "${answer,,}" != yes ]]; then
+    echo "Aborted. No changes were made."
+    exit 0
+  fi
+
+  if [[ ! "$QDEVICE_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "ERROR: Unregistering requires a plain QDevice hostname, not '$QDEVICE_HOST'." >&2
+    exit 2
+  fi
+
+  cat <<EOF
+
+==============================================================================
+REQUIRED: REMOVE THE OLD QDEVICE FROM TAILSCALE NOW
+==============================================================================
+
+The old QDevice machine still holds this cluster's QDevice certificates. It
+must never be able to communicate with the cluster again. Before continuing:
+
+  1. In the Tailscale admin console, open Machines and find the old QDevice
+     by its address${REGISTERED_QDEVICE_ADDRESS:+ $REGISTERED_QDEVICE_ADDRESS}. Its name may be
+     '$QDEVICE_HOST' or a variant such as '$QDEVICE_HOST-1'. If a replacement
+     already uses the name '$QDEVICE_HOST', do not remove the replacement.
+  2. Use its menu to Remove it from the tailnet, and revoke any auth key that
+     could re-register it.
+  3. If the machine is ever recovered, wipe or reinstall it before it joins
+     any network. Never reconnect it as it is.
+
+Type exactly, in all-caps, once it has been removed: REMOVED FROM TAILSCALE
+EOF
+  printf '> '
+  read -r confirmation || confirmation=""
+  if [[ "$confirmation" != "REMOVED FROM TAILSCALE" ]]; then
+    echo "Aborted. No changes were made."
+    exit 0
+  fi
+  echo
+
+  echo "Checking that every cluster member is online and the cluster is quorate..."
+  cluster_output="$(run_remote_root "$PVE_HOST" '
+set -euo pipefail
+pvecm status | grep -Eq "^Quorate:[[:space:]]+Yes[[:space:]]*$" || {
+  echo "ERROR: The cluster is not quorate." >&2
+  exit 40
+}
+pvesh get /nodes --output-format json | python3 -c "
+import json, sys
+for row in json.load(sys.stdin):
+    print(\"__NODE__\", row[\"node\"], row.get(\"status\", \"unknown\"))
+"
+')" || {
+    echo "ERROR: Could not verify the cluster through $PVE_HOST. No changes were made." >&2
+    exit 1
+  }
+  while IFS=' ' read -r _ node state; do
+    [[ -n "$node" ]] || continue
+    if [[ ! "$node" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+      echo "ERROR: Unexpected cluster node name: $node" >&2
+      exit 1
+    fi
+    if [[ "$state" != online ]]; then
+      echo "ERROR: $node is $state. Every member must be online; no changes were made." >&2
+      exit 1
+    fi
+    nodes+=("$node")
+  done < <(grep '^__NODE__ ' <<<"$cluster_output")
+  (( ${#nodes[@]} > 0 )) || {
+    echo "ERROR: $PVE_HOST listed no cluster members." >&2
+    exit 1
+  }
+  echo "Members: $(printf '%s ' "${nodes[@]}")"
+  for node in "${nodes[@]}"; do
+    ssh "${SSH_OPTS[@]}" "$node" true </dev/null || {
+      echo "ERROR: Cannot SSH to cluster member '$node' from this workstation. No changes were made." >&2
+      exit 1
+    }
+  done
+  echo
+
+  echo "Removing the QDevice from the Proxmox cluster configuration..."
+  set +e
+  PVE_REMOVE_OUTPUT="$(run_remote_root "$PVE_HOST" "$PVE_REMOVE_PAYLOAD" 2>&1)"
+  PVE_REMOVE_RC=$?
+  set -e
+  printf '%s\n' "$PVE_REMOVE_OUTPUT"
+  if (( PVE_REMOVE_RC != 0 )); then
+    echo >&2
+    echo "ERROR: Proxmox-side QDevice removal failed." >&2
+    echo "Fix the cluster-side problem and run this script again." >&2
+    exit "$PVE_REMOVE_RC"
+  fi
+  echo
+
+  printf -v header 'set -euo pipefail\nqdevice_name=%q\nqdevice_addr=%q\n' \
+    "$QDEVICE_HOST" "$REGISTERED_QDEVICE_ADDRESS"
+  for node in "${nodes[@]}"; do
+    echo "Removing QDevice associations from $node..."
+    run_remote_root "$node" "${header}${NODE_CLEANUP_BODY}" || {
+      echo "ERROR: QDevice cleanup failed on $node. Fix it and run this script again;" >&2
+      echo "       every step is safe to repeat." >&2
+      exit 1
+    }
+  done
+
+  echo
+  echo "Done."
+  echo "- The cluster no longer has a QDevice registered."
+  echo "- No Proxmox node runs a QDevice client or trusts the old QDevice's SSH host key."
+  echo "- The QDevice machine was NOT contacted. It must stay removed from Tailscale"
+  echo "  and must be wiped before it is ever reconnected to any network."
+  if (( QDEVICE_REACHABLE == 0 )); then
+    echo "- On this workstation, remove its old host key before preparing a replacement:"
+    echo "      ssh-keygen -R $QDEVICE_HOST"
+  fi
+  echo "- Check the cluster with diagnostics/show_qdevice_state.sh. To add a"
+  echo "  replacement, follow qdevice/QDEVICE_MANUAL_SETUP.md, then run qdevice/add_qdevice.sh."
+  exit 0
+}
+
+if (( QDEVICE_REACHABLE == 0 )); then
+  unregister_without_qdevice_host \
+    "The QDevice host '$QDEVICE_HOST' cannot be reached over SSH, so it cannot be purged."
+fi
+if (( QDEVICE_MISMATCH )); then
+  unregister_without_qdevice_host \
+    "'$QDEVICE_HOST' is reachable, but its Tailscale address ($QDEVICE_TAILSCALE_IP) is not the QDevice address the cluster has registered ($REGISTERED_QDEVICE_ADDRESS). It is a different machine (for example a replacement prepared under the same name), so it is left untouched."
+fi
 
 echo "Checking/removing the QDevice from the Proxmox cluster..."
 set +e

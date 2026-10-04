@@ -11,8 +11,15 @@
 #
 # Every subcommand selects disks by serial and re-proves their identity before
 # changing anything. Boot-mirror members A and B use the LUKS mappings
-# crypt-rpool-a and crypt-rpool-b on partition 3; extra mirror pair N always
-# uses the whole-disk mappings crypt-rpool-mirrorN-1 and crypt-rpool-mirrorN-2.
+# crypt-rpool-a and crypt-rpool-b on partition 3; extra mirror pair N uses
+# partition 1 of each disk, with the mappings crypt-rpool-mirrorN-1 and
+# crypt-rpool-mirrorN-2 on an encrypted host.
+#
+# Mirror members never reach the end of their disks. A new pair's member
+# partitions end at the smaller disk's size rounded down to a whole GiB, less
+# 1 GiB, so the two disks may differ slightly in size and a replacement disk
+# that is slightly smaller than the one it replaces still holds the same
+# partition table. A replacement only has to fit the survivor's partitions.
 
 set -Eeuo pipefail
 set +x
@@ -39,10 +46,16 @@ SHARED_KEY_ID=app-ha-rpool
 SHARED_OPTIONS=luks,initramfs,nofail,keyscript=decrypt_keyctl
 PLAIN_OPTIONS=luks,initramfs,nofail
 
+GIB=1073741824
+RESERVE_BYTES=$GIB
+FIRST_PARTITION_START_BYTES=1048576
+# Room after the last partition for the backup GPT, on 512-byte and 4Kn disks.
+GPT_TAIL_BYTES=1048576
+MIN_DISK_BYTES=$((8 * GIB))
+
 KEY_FILE=""
 PASSPHRASE=""
 EXPECT_BYTES=""
-MATCH=""
 PAIR=""
 MEMBER=""
 SURVIVOR=""
@@ -60,37 +73,53 @@ usage() {
 Usage: app-ha-rpool-mirror COMMAND [OPTIONS] ARGS
 
 Commands:
-  check-new [SIZE] SERIAL_1 [SERIAL_2]
-      Prove disks are safe to erase for a new mirror or a replacement member.
+  check-new [--expect-bytes BYTES] SERIAL_1 SERIAL_2
+  check-new --survivor SERIAL NEW_SERIAL
+      Prove disks are safe to erase for a new mirror (two disks whose sizes
+      differ by at most 1%) or for a replacement member (a disk with the
+      survivor's logical sector size that can hold the survivor's partition
+      table). With --expect-bytes, each disk must have at least 99% of BYTES.
       Prints one "serial<TAB>disk<TAB>bytes<TAB>luks|fresh" line per disk.
-  luks-prepare --pair N (--key-file FILE | --prompt) [SIZE] SERIAL_1 SERIAL_2
+  replacement-bytes --survivor SERIAL
+      Print the fewest bytes a disk needs to hold the survivor's partitions.
+  luks-prepare --pair N (--key-file FILE | --prompt) [--expect-bytes BYTES]
+      SERIAL_1 SERIAL_2
       Interactive, at the host console. Proves the shared rpool LUKS
-      passphrase against every existing member, formats each fresh disk as
-      whole-disk LUKS2 with it, opens both mappings, and backs up both headers
-      to /root/luks-header-mirrorN-{1,2}.bin.
-  luks-check-prepared --pair N [--expect-bytes BYTES] SERIAL_1 SERIAL_2
-      Verify both prepared mappings, their backing disks, and header backups.
+      passphrase against every existing member, gives each fresh disk one
+      member partition, formats that partition as LUKS2 with the passphrase,
+      opens both mappings, and backs up both headers to
+      /root/luks-header-mirrorN-{1,2}.bin.
+  luks-check-prepared --pair N SERIAL_1 SERIAL_2
+      Verify both prepared mappings, their backing partitions, and header
+      backups.
   luks-backup-headers --pair N SERIAL_1 SERIAL_2
       Refresh the header backups of an existing pair.
   luks-add --pair N SERIAL_1 SERIAL_2
       Record both mappings in /etc/crypttab in the form the host already uses,
       rebuild and verify the initramfs, then add them to rpool as one mirror.
       Safe to rerun after the mirror was added.
-  clear-add [SIZE] SERIAL_1 SERIAL_2
-      Erase two disks and add them to an unencrypted rpool as one mirror.
-      Safe to rerun after the mirror was added.
+  clear-add [--expect-bytes BYTES] SERIAL_1 SERIAL_2
+      Erase two disks, give each one member partition, and add the partitions
+      to an unencrypted rpool as one mirror. Safe to rerun after the mirror
+      was added.
   retire-luks MAPPER...
       After a completed vdev removal, close each crypt-rpool-mirrorN-M mapping,
       remove it from /etc/crypttab, and rebuild and verify the initramfs.
+  release-disks SERIAL...
+      After a completed vdev removal, leave each disk with no partition table,
+      LUKS header, ZFS label, or filesystem signature, so it shows as blank and
+      nothing on it can be mounted or imported by accident. This removes only
+      metadata and takes seconds; it does not overwrite the data area. A disk
+      that is in use is left untouched. A disk that is no longer installed is
+      skipped. Safe to rerun.
 
 One mirror member at a time (MEMBER is A or B for partition 3 of a boot-mirror
-disk, or N-M for the whole disk of extra mirror N, member M):
-  luks-prepare-member --member MEMBER (--key-file FILE | --prompt) [SIZE] SERIAL
+disk, or N-M for partition 1 of a disk of extra mirror N, member M):
+  luks-prepare-member --member MEMBER (--key-file FILE | --prompt) SERIAL
       Interactive, at the host console. Proves the shared passphrase like
       luks-prepare, closes a leftover mapping of a pulled disk that holds the
-      member's mapping name, formats the member as LUKS2 (a boot member's
-      partition 3, or an extra member's whole disk), opens it, and backs up its
-      header to /root/luks-header-{A,B,mirrorN-M}.bin.
+      member's mapping name, formats the member's partition as LUKS2, opens
+      it, and backs up its header to /root/luks-header-{A,B,mirrorN-M}.bin.
   luks-check-member --member MEMBER SERIAL
       Verify the member's mapping, its backing device, and its header backup.
   luks-backup-headers --member MEMBER SERIAL
@@ -98,9 +127,9 @@ disk, or N-M for the whole disk of extra mirror N, member M):
   luks-register --member MEMBER SERIAL
       Record the member's mapping in /etc/crypttab in the form the host already
       uses, then rebuild and verify the initramfs.
-  boot-partition --survivor SERIAL NEW_SERIAL
-      Erase a disk of identical capacity and copy the partition table of the
-      surviving boot-mirror disk onto it. Safe to rerun.
+  copy-partitions --survivor SERIAL NEW_SERIAL
+      Erase a disk that can hold the surviving mirror disk's partitions and
+      copy the survivor's partition table onto it. Safe to rerun.
   boot-esp --survivor SERIAL NEW_SERIAL
       Format the new disk's ESP, register it with proxmox-boot-tool, drop ESPs
       of pulled disks, and wait until it holds the same boot files as the
@@ -111,12 +140,6 @@ disk, or N-M for the whole disk of extra mirror N, member M):
       to SERIAL. With --member, first records the new LUKS member for boot
       unlock; for the boot mirror, first proves the new ESP is in sync. Starts
       the resilver without waiting for it. Safe to rerun.
-
-SIZE is one of:
-  --require-equal                      both disks have identical byte counts
-  --expect-bytes BYTES --match exact   each disk has exactly BYTES
-  --expect-bytes BYTES --match within-1pct
-                                       each disk has at least 99% of BYTES
 EOF
 }
 
@@ -162,15 +185,36 @@ pool_leaves() {
   zpool status -P "$POOL" | awk '$1 ~ /^\// { print $1 }'
 }
 
+holds_zfs_label() {
+  [[ "$(blkid -p -o value -s TYPE "$1" 2>/dev/null)" == zfs_member ]]
+}
+
+# Canonical devices that hold a leaf of POOL, or of every imported pool when
+# no pool is named. A replacement disk's new partition can take over the by-id
+# name of the pulled member it replaces, so a leaf that is not ONLINE and now
+# resolves to a device without a ZFS label is not counted: ZFS cannot reopen
+# that member from it.
+held_pool_devices() {
+  local status leaf state resolved
+  status="$(zpool status -P "$@")" || die "could not read the status of the imported pools"
+  while read -r leaf state; do
+    resolved="$(canonical "$leaf")" || exit 1
+    case "$state" in
+      OFFLINE | REMOVED | UNAVAIL | FAULTED)
+        if block_device_exists "$resolved" && ! holds_zfs_label "$resolved"; then
+          continue
+        fi
+        ;;
+    esac
+    printf '%s\n' "$resolved"
+  done < <(awk '$1 ~ /^\// { print $1, $2 }' <<<"$status")
+}
+
 pool_contains() {
-  local wanted leaves leaf
+  local wanted held
   wanted="$(canonical "$1")" || exit 1
-  leaves="$(pool_leaves)" || die "could not read rpool status"
-  while IFS= read -r leaf; do
-    [[ -n "$leaf" ]] || continue
-    [[ "$(canonical "$leaf")" == "$wanted" ]] && return 0
-  done <<<"$leaves"
-  return 1
+  held="$(held_pool_devices "$POOL")" || exit 1
+  grep -Fxq -- "$wanted" <<<"$held"
 }
 
 # Parse the options shared by several subcommands, leaving serials in SERIALS.
@@ -207,21 +251,10 @@ parse_common() {
         SURVIVOR="$2"
         shift 2
         ;;
-      --require-equal)
-        MATCH=equal
-        shift
-        ;;
       --expect-bytes)
         (($# >= 2)) || die "--expect-bytes requires a byte count"
         [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "--expect-bytes must be a positive byte count"
         EXPECT_BYTES="$2"
-        shift 2
-        ;;
-      --match)
-        (($# >= 2)) || die "--match requires exact or within-1pct"
-        [[ "$2" == exact || "$2" == within-1pct ]] ||
-          die "--match must be exact or within-1pct"
-        MATCH="$2"
         shift 2
         ;;
       -*)
@@ -240,13 +273,17 @@ parse_common() {
       die "the new disk and the surviving disk must differ"
   elif ((SERIAL_COUNT == 0 && ${#SERIALS[@]} == 1)); then
     # check-new of a single replacement disk.
-    [[ "$MATCH" != equal ]] || die "--require-equal needs two disk serials"
+    [[ -n "$SURVIVOR" ]] || die "checking one disk requires --survivor"
+    [[ "${SERIALS[0]}" != "$SURVIVOR" ]] ||
+      die "the new disk and the surviving disk must differ"
+  elif ((SERIAL_COUNT == -1)); then
+    # replacement-bytes names only the survivor.
+    ((${#SERIALS[@]} == 0)) || die "replacement-bytes takes no disk serial besides --survivor"
+    [[ -n "$SURVIVOR" ]] || die "--survivor is required"
   else
     ((${#SERIALS[@]} == 2)) || die "exactly two disk serials are required"
     [[ "${SERIALS[0]}" != "${SERIALS[1]}" ]] || die "the two disk serials must differ"
-  fi
-  if [[ "$MATCH" == exact || "$MATCH" == within-1pct ]]; then
-    [[ -n "$EXPECT_BYTES" ]] || die "--match $MATCH requires --expect-bytes"
+    [[ -z "$SURVIVOR" ]] || die "--survivor applies to a single replacement disk"
   fi
 }
 
@@ -290,14 +327,53 @@ partition_path() {
   fi
 }
 
-# The device that holds a member's LUKS: partition 3 of a boot-mirror disk,
-# else the whole disk.
+# The partition that holds a member (or its LUKS): partition 3 of a
+# boot-mirror disk, else partition 1.
 member_target() {
   if is_boot_member "$1"; then
     partition_path "$2" 3
   else
-    printf '%s\n' "$2"
+    partition_path "$2" 1
   fi
+}
+
+logical_sector_size() {
+  local size
+  size="$(blockdev --getss "$1")" && [[ "$size" =~ ^[1-9][0-9]*$ ]] ||
+    die "could not read the logical sector size of $1"
+  printf '%s\n' "$size"
+}
+
+# Byte offset where the member partitions of a new pair end, from the pair's
+# smaller disk size.
+pair_end_bytes() {
+  printf '%s\n' "$(($1 / GIB * GIB - RESERVE_BYTES))"
+}
+
+# Byte offset just past the last partition of DISK.
+layout_end_bytes() {
+  local disk="$1" sector last
+  sector="$(logical_sector_size "$disk")" || exit 1
+  last="$(partition_table "$disk" | awk '$3 > last { last = $3 } END { print last + 0 }')"
+  ((last > 0)) || die "disk $disk has no partitions"
+  printf '%s\n' "$(((last + 1) * sector))"
+}
+
+# The fewest bytes a disk needs to take a copy of DISK's partition table.
+replacement_bytes() {
+  local end
+  end="$(layout_end_bytes "$1")" || exit 1
+  printf '%s\n' "$((end + GPT_TAIL_BYTES))"
+}
+
+# True when any partition or the whole of DISK holds a LUKS header.
+disk_holds_luks() {
+  local device
+  while IFS= read -r device; do
+    [[ -n "$device" && "$device" != /dev/mapper/* ]] || continue
+    cryptsetup isLuks "$device" >/dev/null 2>&1 && return 0
+  done < <(lsblk -nrpo NAME "$1")
+  return 1
 }
 
 # Canonical paths of DISK, its partitions, and the mappings on them.
@@ -359,48 +435,108 @@ pool_rows() {
 }
 
 # Print "serial disk bytes luks|fresh" for each serial after proving that the
-# disk is not part of rpool or any other imported pool, is not mounted, and has
-# the expected capacity.
+# disk is not part of rpool or any other imported pool, is not mounted, and is
+# large enough: with --survivor, large enough for the survivor's partitions
+# and of the same logical sector size; for a new pair, within 1% of the other
+# disk; with --expect-bytes, at least 99% of BYTES.
 check_new_disks() {
-  local serial disk size state device resolved pool
-  local -a sizes=() disks=()
-  [[ -n "$MATCH" ]] || die "a disk size requirement is required"
-  pool="$(zpool status -LP)" || die "could not read the status of the imported pools"
+  local serial disk size sector state device resolved pool index
+  local survivor_disk="" survivor_sector="" required="" smaller larger
+  local -a sizes=() disks=() sectors=()
+  pool="$(held_pool_devices)" || exit 1
+  if [[ -n "$SURVIVOR" ]]; then
+    survivor_disk="$(disk_by_serial "$SURVIVOR")" || exit 1
+    required="$(replacement_bytes "$survivor_disk")" || exit 1
+    survivor_sector="$(logical_sector_size "$survivor_disk")" || exit 1
+  fi
   for serial in "${SERIALS[@]}"; do
     disk="$(disk_by_serial "$serial")" || exit 1
     ((${#disks[@]} == 0)) || [[ "${disks[0]}" != "$disk" ]] ||
       die "both serials resolve to $disk"
-    size="$(blockdev --getsize64 "$disk")" || die "could not read the size of $disk"
-    case "$MATCH" in
-      exact)
-        [[ "$size" == "$EXPECT_BYTES" ]] ||
-          die "disk $serial ($disk) has $size bytes, not the expected $EXPECT_BYTES"
-        ;;
-      within-1pct)
-        ((size * 100 >= EXPECT_BYTES * 99)) ||
-          die "disk $serial ($disk) has $size bytes, less than 99% of $EXPECT_BYTES"
-        ;;
-    esac
+    [[ "$disk" != "$survivor_disk" ]] || die "$SURVIVOR and $serial are the same disk"
+    size="$(blockdev --getsize64 "$disk")" && [[ "$size" =~ ^[0-9]+$ ]] ||
+      die "could not read the size of $disk"
+    sector="$(logical_sector_size "$disk")" || exit 1
+    ((size >= MIN_DISK_BYTES)) || die "disk $serial ($disk) is smaller than 8 GiB"
+    if [[ -n "$survivor_disk" ]]; then
+      ((size >= required)) ||
+        die "disk $serial ($disk) has $size bytes; it needs at least $required bytes to hold the partitions of $SURVIVOR"
+      [[ "$sector" == "$survivor_sector" ]] ||
+        die "disk $serial ($disk) has ${sector}-byte logical sectors, but $SURVIVOR has ${survivor_sector}-byte sectors"
+    fi
+    if [[ -n "$EXPECT_BYTES" ]]; then
+      ((size * 100 >= EXPECT_BYTES * 99)) ||
+        die "disk $serial ($disk) has $size bytes, less than 99% of $EXPECT_BYTES"
+    fi
     while IFS= read -r device; do
       [[ -n "$device" ]] || continue
       resolved="$(canonical "$device")" || exit 1
-      if awk -v target="$resolved" '$1 == target { found=1 } END { exit !found }' <<<"$pool"; then
+      if grep -Fxq -- "$resolved" <<<"$pool"; then
         die "disk $serial ($disk) is already part of an imported ZFS pool as $device"
       fi
     done < <(lsblk -nrpo NAME "$disk")
     if lsblk -nrpo MOUNTPOINT "$disk" | awk 'NF { found=1 } END { exit !found }'; then
       die "disk $serial ($disk) has a mounted filesystem or active swap"
     fi
-    state=fresh
-    ! cryptsetup isLuks "$disk" >/dev/null 2>&1 || state=luks
     sizes+=("$size")
+    sectors+=("$sector")
     disks+=("$disk")
-    printf '%s\t%s\t%s\t%s\n' "$serial" "$disk" "$size" "$state"
   done
-  if [[ "$MATCH" == equal ]]; then
-    [[ "${sizes[0]}" == "${sizes[1]}" ]] ||
-      die "the disks differ in capacity: ${SERIALS[0]} has ${sizes[0]} bytes and ${SERIALS[1]} has ${sizes[1]} bytes"
+  if ((${#sizes[@]} == 2)); then
+    smaller=${sizes[0]}
+    larger=${sizes[1]}
+    ((smaller <= larger)) || {
+      smaller=${sizes[1]}
+      larger=${sizes[0]}
+    }
+    (((larger - smaller) * 100 <= larger)) ||
+      die "the disks differ in capacity by more than 1%: ${SERIALS[0]} has ${sizes[0]} bytes and ${SERIALS[1]} has ${sizes[1]} bytes"
+    [[ "${sectors[0]}" == "${sectors[1]}" ]] ||
+      die "the disks have different logical sector sizes: ${SERIALS[0]} has ${sectors[0]} bytes and ${SERIALS[1]} has ${sectors[1]} bytes"
   fi
+  for index in "${!disks[@]}"; do
+    state=fresh
+    ! disk_holds_luks "${disks[index]}" || state=luks
+    printf '%s\t%s\t%s\t%s\n' "${SERIALS[index]}" "${disks[index]}" "${sizes[index]}" "$state"
+  done
+}
+
+# The end of the member partitions for the pair checked by check_new_disks.
+checked_pair_end_bytes() {
+  local smaller end
+  smaller="$(awk -F '\t' 'NR == 1 || $3 < smaller { smaller = $3 } END { print smaller }' <<<"$1")"
+  [[ "$smaller" =~ ^[0-9]+$ ]] || die "could not read the checked disk sizes"
+  end="$(pair_end_bytes "$smaller")"
+  ((end > FIRST_PARTITION_START_BYTES)) || die "the disks are too small for a mirror member"
+  printf '%s\n' "$end"
+}
+
+# Give DISK one member partition from 1 MiB to END_BYTES with TYPECODE, after
+# erasing every signature and partition table on it.
+partition_member_disk() {
+  local disk="$1" end_bytes="$2" typecode="$3" sector start end device
+  sector="$(logical_sector_size "$disk")" || exit 1
+  start=$((FIRST_PARTITION_START_BYTES / sector))
+  end=$((end_bytes / sector - 1))
+  ((end > start)) || die "disk $disk is too small for a member partition"
+  if [[ "$(partition_table "$disk")" == "1 $start $end $typecode" ]]; then
+    wipefs --all --force "$(partition_path "$disk" 1)"
+    return
+  fi
+  while IFS= read -r device; do
+    [[ -n "$device" && "$device" != "$disk" ]] || continue
+    wipefs --all --force "$device"
+  done < <(lsblk -nrpo NAME "$disk")
+  wipefs --all --force "$disk"
+  sgdisk --zap-all "$disk"
+  sgdisk --new=1:"$start":"$end" --typecode=1:"$typecode" "$disk"
+  partx --update "$disk" || true
+  udevadm settle
+  [[ "$(partition_table "$disk")" == "1 $start $end $typecode" ]] ||
+    die "disk $disk did not receive its member partition"
+  block_device_exists "$(partition_path "$disk" 1)" ||
+    die "partition 1 of disk $disk did not appear"
+  wipefs --all --force "$(partition_path "$disk" 1)"
 }
 
 # Run cryptsetup ACTION with the shared passphrase from the key file or from
@@ -501,16 +637,40 @@ command_check_new() {
   check_new_disks
 }
 
+command_replacement_bytes() {
+  local survivor_disk
+  SERIAL_COUNT=-1
+  parse_common "$@"
+  survivor_disk="$(disk_by_serial "$SURVIVOR")" || exit 1
+  replacement_bytes "$survivor_disk"
+}
+
 command_luks_prepare() {
-  local confirmation checked serial disk size state index mapper header backing
+  local confirmation checked serial disk size state index mapper header end_bytes
+  local sector target
   parse_common "$@"
   require_pair
   [[ -n "$KEY_FILE" || "${PASSPHRASE_PROMPT:-0}" == 1 ]] ||
     die "luks-prepare requires --key-file FILE or --prompt"
 
   checked="$(check_new_disks)" || exit 1
+  end_bytes="$(checked_pair_end_bytes "$checked")" || exit 1
+  local row
+  local -a rows=()
+  mapfile -t rows <<<"$checked"
+  for row in "${rows[@]}"; do
+    IFS=$'\t' read -r serial disk size state <<<"$row"
+    [[ "$state" == luks ]] || continue
+    # Only an earlier run's member partition is reused; other LUKS is never
+    # erased automatically.
+    sector="$(logical_sector_size "$disk")" || exit 1
+    [[ "$(partition_table "$disk")" == "1 $((FIRST_PARTITION_START_BYTES / sector)) $((end_bytes / sector - 1)) 8309" ]] &&
+      cryptsetup isLuks "$(partition_path "$disk" 1)" >/dev/null 2>&1 ||
+      die "disk $serial holds LUKS outside this mirror's member partition; refusing to reuse or erase it. If the disk is truly unused, erase it deliberately (cryptsetup erase, then wipefs --all) and rerun"
+  done
   printf 'Extra mirror %s will use these disks:\n%s\n' "$PAIR" "$checked"
-  printf 'Fresh disks are erased and formatted as LUKS2. Type GO to format extra mirror %s.\n> ' "$PAIR"
+  printf 'Each member partition ends at byte %s.\n' "$end_bytes"
+  printf 'Fresh disks are erased, partitioned, and formatted as LUKS2. Type GO to format extra mirror %s.\n> ' "$PAIR"
   IFS= read -r confirmation || die "input ended before confirmation"
   [[ "$confirmation" == GO ]] || die "confirmation did not match GO; nothing was changed"
 
@@ -518,36 +678,29 @@ command_luks_prepare() {
   # single console prompt (decrypt_keyctl) able to unlock the whole pool.
   obtain_shared_key
 
-  local row
-  local -a rows=()
-  mapfile -t rows <<<"$checked"
   index=0
   for row in "${rows[@]}"; do
     IFS=$'\t' read -r serial disk size state <<<"$row"
     index=$((index + 1))
     mapper="$(mapper_for "$index")"
     header="${HEADER_DIR}/luks-header-mirror${PAIR}-${index}.bin"
-    prepare_luks_target "$serial" "$disk" "$disk" "$mapper" "$header"
+    target="$(partition_path "$disk" 1)"
+    [[ "$state" == luks ]] || partition_member_disk "$disk" "$end_bytes" 8309
+    prepare_luks_target "$serial" "$target" "$mapper" "$header"
   done
   PASSPHRASE=""
   printf 'Extra mirror %s LUKS members prepared successfully.\n' "$PAIR"
 }
 
 # Format TARGET as LUKS2 with the shared passphrase, or reuse LUKS that the
-# passphrase already opens; open it as MAPPER and back up its header. ERASE is
-# the whole disk to wipe before formatting, or empty for a partition.
+# passphrase already opens; open it as MAPPER and back up its header.
 prepare_luks_target() {
-  local serial="$1" target="$2" erase="$3" mapper="$4" header="$5" backing
+  local serial="$1" target="$2" mapper="$3" header="$4" backing
   if cryptsetup isLuks "$target" >/dev/null 2>&1; then
     with_shared_key open --test-passphrase "$target" >/dev/null 2>&1 ||
       die "disk $serial already holds LUKS that the shared passphrase does not open; refusing to reuse or erase it"
     printf 'Reusing LUKS on %s (%s), which opens with the shared passphrase.\n' "$serial" "$target"
   else
-    if [[ -n "$erase" ]]; then
-      wipefs --all --force "$erase"
-      sgdisk --zap-all "$erase"
-      udevadm settle
-    fi
     with_shared_key luksFormat --batch-mode --type luks2 "$target"
   fi
   if ! mapper_active "$mapper"; then
@@ -562,40 +715,30 @@ prepare_luks_target() {
 }
 
 command_luks_check_prepared() {
-  local index serial disk mapper header backing size difference larger
-  local -a sizes=()
-  parse_common --require-equal "$@"
+  local index serial disk target mapper header backing
+  local -a tables=()
+  parse_common "$@"
   require_pair
   for index in 1 2; do
     serial="${SERIALS[index - 1]}"
     disk="$(disk_by_serial "$serial")" || exit 1
+    target="$(partition_path "$disk" 1)"
     mapper="$(mapper_for "$index")"
     header="${HEADER_DIR}/luks-header-mirror${PAIR}-${index}.bin"
     mapper_active "$mapper" || die "$mapper is not open"
     [[ -s "$header" ]] || die "header backup $header is missing"
     backing="$(mapper_backing "$mapper")" || die "could not read the backing device of $mapper"
-    [[ "$(canonical "$backing")" == "$(canonical "$disk")" ]] ||
-      die "$mapper is backed by $backing, not $serial ($disk)"
-    size="$(blockdev --getsize64 "/dev/mapper/$mapper")"
-    if [[ -n "$EXPECT_BYTES" ]]; then
-      ((size * 100 >= EXPECT_BYTES * 98)) ||
-        die "$mapper has $size bytes, less than 98% of $EXPECT_BYTES"
-    fi
-    sizes+=("$size")
+    [[ "$(canonical "$backing")" == "$(canonical "$target")" ]] ||
+      die "$mapper is backed by $backing, not partition 1 of $serial ($target)"
+    tables+=("$(partition_table "$disk")")
   done
-  if ((sizes[0] >= sizes[1])); then
-    difference=$((sizes[0] - sizes[1]))
-    larger=${sizes[0]}
-  else
-    difference=$((sizes[1] - sizes[0]))
-    larger=${sizes[1]}
-  fi
-  ((difference * 100 <= larger)) || die "the two mappings differ in size by more than 1%"
-  printf 'Extra mirror %s mappings, backing disks, and header backups are verified.\n' "$PAIR"
+  [[ "${tables[0]}" == "${tables[1]}" ]] ||
+    die "disks ${SERIALS[0]} and ${SERIALS[1]} do not have the same member partition"
+  printf 'Extra mirror %s mappings, backing partitions, and header backups are verified.\n' "$PAIR"
 }
 
 command_luks_backup_headers() {
-  local index serial disk mapper header backing
+  local index serial disk target mapper header backing
   if [[ " $* " == *" --member "* ]]; then
     SERIAL_COUNT=1
     parse_common "$@"
@@ -603,19 +746,20 @@ command_luks_backup_headers() {
     member_backup_header
     return
   fi
-  parse_common --require-equal "$@"
+  parse_common "$@"
   require_pair
   for index in 1 2; do
     serial="${SERIALS[index - 1]}"
     disk="$(disk_by_serial "$serial")" || exit 1
+    target="$(partition_path "$disk" 1)"
     mapper="$(mapper_for "$index")"
     header="${HEADER_DIR}/luks-header-mirror${PAIR}-${index}.bin"
     mapper_active "$mapper" || die "$mapper is not open"
     backing="$(mapper_backing "$mapper")" || die "could not read the backing device of $mapper"
-    [[ "$(canonical "$backing")" == "$(canonical "$disk")" ]] ||
-      die "$mapper is backed by $backing, not $serial ($disk)"
+    [[ "$(canonical "$backing")" == "$(canonical "$target")" ]] ||
+      die "$mapper is backed by $backing, not partition 1 of $serial ($target)"
     rm -f -- "$header"
-    cryptsetup luksHeaderBackup "$disk" --header-backup-file "$header"
+    cryptsetup luksHeaderBackup "$target" --header-backup-file "$header"
     chmod 0600 "$header"
   done
 }
@@ -726,19 +870,20 @@ pool_healthy() {
 }
 
 command_luks_add() {
-  local index serial disk mapper backing uuid form ashift in_pool=0
+  local index serial disk target mapper backing uuid form ashift in_pool=0
   local -a mappers=() lines=()
-  parse_common --require-equal "$@"
+  parse_common "$@"
   require_pair
   for index in 1 2; do
     serial="${SERIALS[index - 1]}"
     disk="$(disk_by_serial "$serial")" || exit 1
+    target="$(partition_path "$disk" 1)"
     mapper="$(mapper_for "$index")"
     mapper_active "$mapper" || die "$mapper is not open"
     backing="$(mapper_backing "$mapper")" || die "could not read the backing device of $mapper"
-    [[ "$(canonical "$backing")" == "$(canonical "$disk")" ]] ||
-      die "$mapper is backed by $backing, not $serial ($disk)"
-    uuid="$(cryptsetup luksUUID "$disk")" || die "could not read the LUKS UUID of $disk"
+    [[ "$(canonical "$backing")" == "$(canonical "$target")" ]] ||
+      die "$mapper is backed by $backing, not partition 1 of $serial ($target)"
+    uuid="$(cryptsetup luksUUID "$target")" || die "could not read the LUKS UUID of $target"
     mappers+=("$mapper")
     if pool_contains "/dev/mapper/$mapper"; then
       in_pool=$((in_pool + 1))
@@ -772,22 +917,6 @@ command_luks_add() {
     "$PAIR" "$form"
 }
 
-stable_by_id_path() {
-  local disk="$1" serial="$2" candidate stable=""
-  for candidate in "$BY_ID_DIR"/*; do
-    [[ -L "$candidate" && "${candidate##*/}" == *"$serial"* &&
-      "${candidate##*/}" != *-part* &&
-      "$(canonical "$candidate")" == "$(canonical "$disk")" ]] || continue
-    if [[ -z "$stable" || "${#candidate}" -lt "${#stable}" ||
-      ("${#candidate}" -eq "${#stable}" && "$candidate" < "$stable") ]]; then
-      stable="$candidate"
-    fi
-  done
-  [[ -n "$stable" ]] ||
-    die "no stable ${BY_ID_DIR} path contains serial $serial for $disk"
-  printf '%s\n' "$stable"
-}
-
 serials_share_mirror() {
   zpool status -P "$POOL" | awk -v serial_1="$1" -v serial_2="$2" '
     $1 ~ /^mirror-/ { mirror=$1 }
@@ -798,8 +927,8 @@ serials_share_mirror() {
 }
 
 command_clear_add() {
-  local checked serial disk size state ashift
-  local -a stable=() wipe=()
+  local checked serial disk size state ashift end_bytes
+  local -a members=() disks=() serials=()
   parse_common "$@"
   if serials_share_mirror "${SERIALS[0]}" "${SERIALS[1]}"; then
     printf 'Disks %s and %s are already one rpool mirror.\n' "${SERIALS[@]}"
@@ -810,25 +939,25 @@ command_clear_add() {
   if grep -q '^/dev/mapper/' <<<"$leaves"; then
     die "rpool is encrypted; use luks-prepare and luks-add"
   fi
-  local row path
+  local row index path
   local -a rows=()
   checked="$(check_new_disks)" || exit 1
+  end_bytes="$(checked_pair_end_bytes "$checked")" || exit 1
   mapfile -t rows <<<"$checked"
   for row in "${rows[@]}"; do
     IFS=$'\t' read -r serial disk size state <<<"$row"
     [[ "$state" != luks ]] ||
       die "refusing to erase existing LUKS disk $serial without a separate recovery decision"
-    path="$(stable_by_id_path "$disk" "$serial")" || exit 1
-    stable+=("$path")
-    wipe+=("$disk")
+    serials+=("$serial")
+    disks+=("$disk")
   done
   ashift="$(uniform_ashift)"
-  for disk in "${wipe[@]}"; do
-    wipefs --all --force "$disk"
-    sgdisk --zap-all "$disk"
+  for index in "${!disks[@]}"; do
+    partition_member_disk "${disks[index]}" "$end_bytes" BF01
+    path="$(stable_by_id_partition "${disks[index]}" "${serials[index]}" 1)" || exit 1
+    members+=("$path")
   done
-  udevadm settle
-  zpool add -o "ashift=${ashift}" "$POOL" mirror "${stable[0]}" "${stable[1]}"
+  zpool add -o "ashift=${ashift}" "$POOL" mirror "${members[0]}" "${members[1]}"
   serials_share_mirror "${SERIALS[0]}" "${SERIALS[1]}" ||
     die "rpool does not show ${SERIALS[0]} and ${SERIALS[1]} as one mirror"
   pool_healthy || die "rpool is not healthy after adding the mirror"
@@ -864,6 +993,99 @@ command_retire_luks() {
   verify_initramfs_mappers absent "$form" "${mappers[@]}"
   printf 'Retired %s: closed, removed from crypttab, and absent from the initramfs.\n' \
     "${mappers[*]}"
+}
+
+# Print why DISK must stay untouched, or nothing when release-disks may blank it.
+release_blocker() {
+  local disk="$1" pools devices device uuid
+  pools="$(zpool status -LP 2>/dev/null)" || {
+    printf 'could not read the imported ZFS pools\n'
+    return
+  }
+  devices="$(lsblk -nrpo NAME "$disk")"
+  device="$(grep -m1 '^/dev/mapper/' <<<"$devices" || true)"
+  if [[ -n "$device" ]]; then
+    printf 'the mapping %s is still open on it\n' "$device"
+    return
+  fi
+  while IFS= read -r device; do
+    [[ -n "$device" ]] || continue
+    if awk -v device="$device" '$1 == device { found=1 } END { exit !found }' <<<"$pools"; then
+      printf '%s is part of an imported ZFS pool\n' "$device"
+      return
+    fi
+    if findmnt -rno TARGET --source "$device" >/dev/null 2>&1 ||
+      awk -v device="$device" 'NR > 1 && $1 == device { found=1 } END { exit !found }' /proc/swaps; then
+      printf '%s is mounted or in use as swap\n' "$device"
+      return
+    fi
+    uuid="$(fs_uuid "$device")"
+    if esp_registered "$uuid"; then
+      printf '%s is a registered boot ESP\n' "$device"
+      return
+    fi
+    if cryptsetup isLuks "$device" >/dev/null 2>&1; then
+      uuid="$(cryptsetup luksUUID "$device" 2>/dev/null)" || uuid=""
+      if [[ -n "$uuid" ]] && grep -Fq -- "UUID=${uuid}" "$CRYPTTAB" 2>/dev/null; then
+        printf 'the LUKS volume on %s is still listed in %s\n' "$device" "$CRYPTTAB"
+        return
+      fi
+    fi
+  done <<<"$devices"
+}
+
+disk_is_blank() {
+  [[ "$(lsblk -nrpo NAME "$1")" == "$1" && -z "$(wipefs --noheadings --output TYPE "$1")" ]]
+}
+
+# Remove only metadata: LUKS key slots, ZFS labels, filesystem signatures, and
+# the partition table. Data blocks are never overwritten.
+command_release_disks() {
+  local serial disk blocker device failed=0
+  local -a matches=()
+  (($# > 0)) || die "release-disks requires at least one disk serial"
+  for serial in "$@"; do
+    validate_serial "$serial"
+  done
+  for serial in "$@"; do
+    mapfile -t matches < <(lsblk -dnpo PATH,SERIAL |
+      awk -v serial="$serial" '$2 == serial { print $1 }')
+    if ((${#matches[@]} == 0)); then
+      printf 'Disk %s is no longer installed; nothing to release.\n' "$serial"
+      continue
+    fi
+    ((${#matches[@]} == 1)) || die "expected one disk with serial $serial; found ${#matches[@]}"
+    disk="${matches[0]}"
+    blocker="$(release_blocker "$disk")"
+    if [[ -n "$blocker" ]]; then
+      printf 'Disk %s (%s) was left untouched: %s.\n' "$serial" "$disk" "$blocker" >&2
+      failed=1
+      continue
+    fi
+    if disk_is_blank "$disk"; then
+      printf 'Disk %s (%s) already has no partitions or signatures.\n' "$serial" "$disk"
+      continue
+    fi
+    while IFS= read -r device; do
+      [[ -n "$device" ]] || continue
+      if cryptsetup isLuks "$device" >/dev/null 2>&1; then
+        cryptsetup erase --batch-mode "$device"
+      fi
+      zpool labelclear -f "$device" >/dev/null 2>&1 || true
+      wipefs --all --force "$device" >/dev/null
+    done < <(lsblk -nrpo NAME "$disk" | tac)
+    sgdisk --zap-all "$disk" >/dev/null
+    partx --update "$disk" >/dev/null 2>&1 || true
+    udevadm settle
+    if ! disk_is_blank "$disk"; then
+      printf 'Disk %s (%s) still shows partitions or signatures after release.\n' \
+        "$serial" "$disk" >&2
+      failed=1
+      continue
+    fi
+    printf 'Disk %s (%s) now has no partitions or signatures.\n' "$serial" "$disk"
+  done
+  ((failed == 0)) || die "some disks were not released; resolve the reasons above and rerun"
 }
 
 # ---------------------------------------------------------------------------
@@ -916,7 +1138,7 @@ release_stale_mapper() {
 }
 
 command_luks_prepare_member() {
-  local confirmation serial disk target erase="" mapper header
+  local confirmation serial disk target mapper header
   SERIAL_COUNT=1
   parse_common "$@"
   require_member
@@ -930,30 +1152,28 @@ command_luks_prepare_member() {
   if mapper_active "$mapper" && [[ "$(leaf_state "/dev/mapper/$mapper")" == ONLINE ]]; then
     die "$mapper is already an ONLINE member of rpool"
   fi
+  # Setup converts a boot member in place, and a replacement disk received the
+  # survivor's partition table; either way the member partition exists.
+  awk -v number="${target##*[!0-9]}" '$1 == number { found=1 } END { exit !found }' \
+    <<<"$(partition_table "$disk")" && block_device_exists "$target" ||
+    die "$target is missing; copy the partition table onto disk $serial first"
+  ! pool_contains "$target" || die "$target of disk $serial is still part of rpool"
+  if lsblk -nrpo MOUNTPOINT "$target" | awk 'NF { found=1 } END { exit !found }'; then
+    die "$target of disk $serial has a mounted filesystem or active swap"
+  fi
   if is_boot_member "$MEMBER"; then
-    # Setup converts a boot member in place and a replacement disk received
-    # the survivor's partition table; either way partition 3 already exists.
-    block_device_exists "$target" || die "$target is missing; partition disk $serial first"
-    ! pool_contains "$target" || die "$target of disk $serial is still part of rpool"
-    if lsblk -nrpo MOUNTPOINT "$target" | awk 'NF { found=1 } END { exit !found }'; then
-      die "$target of disk $serial has a mounted filesystem or active swap"
-    fi
     [[ -z "$KEY_FILE" ]] || CONVERSION_OK=1
     printf 'Boot-mirror member %s will be LUKS2 on %s of disk %s.\n' "$MEMBER" "$target" "$serial"
   else
-    [[ -n "$MATCH" ]] || die "a disk size requirement is required"
-    check_new_disks >/dev/null || exit 1
-    erase="$disk"
-    printf 'Extra mirror member %s will be whole-disk LUKS2 on disk %s (%s).\n' \
-      "$MEMBER" "$serial" "$disk"
+    printf 'Extra mirror member %s will be LUKS2 on %s of disk %s.\n' "$MEMBER" "$target" "$serial"
   fi
-  printf 'A disk or partition that is not LUKS yet is erased. Type GO to prepare member %s.\n> ' "$MEMBER"
+  printf 'A partition that is not LUKS yet is erased. Type GO to prepare member %s.\n> ' "$MEMBER"
   IFS= read -r confirmation || die "input ended before confirmation"
   [[ "$confirmation" == GO ]] || die "confirmation did not match GO; nothing was changed"
 
   obtain_shared_key
   release_stale_mapper "$mapper"
-  prepare_luks_target "$serial" "$target" "$erase" "$mapper" "$header"
+  prepare_luks_target "$serial" "$target" "$mapper" "$header"
   PASSPHRASE=""
   printf 'LUKS member %s prepared successfully.\n' "$MEMBER"
 }
@@ -1034,22 +1254,45 @@ esp_configuration() {
   ' <<<"$status"
 }
 
+# True when PARTITION, or the LUKS mapping on it, is an ONLINE rpool member.
+partition_is_online_member() {
+  local devices leaf state
+  devices="$(disk_device_set "$1")" || exit 1
+  while read -r leaf state; do
+    [[ -n "$leaf" && "$state" == ONLINE ]] || continue
+    on_device_set "$leaf" "$devices" && return 0
+  done < <(zpool status -P "$POOL" | awk '$1 ~ /^\// { print $1, $2 }')
+  return 1
+}
+
+# Print the number of the partition that holds SURVIVOR's rpool member after
+# proving it: 3 on a healthy boot-mirror disk, or 1 on an extra-mirror disk
+# whose only partition is an ONLINE rpool member.
+survivor_member_partition() {
+  local disk="$1" table
+  table="$(partition_table "$disk")"
+  if grep -q '^2 ' <<<"$table"; then
+    survivor_boot_esp "$disk" >/dev/null || exit 1
+    printf '3\n'
+    return
+  fi
+  [[ "$(awk '{ print $1 }' <<<"$table")" == 1 ]] &&
+    partition_is_online_member "$(partition_path "$disk" 1)" ||
+    die "surviving disk $SURVIVOR has no rpool member partition layout"
+  printf '1\n'
+}
+
 # Prove SURVIVOR's disk is the healthy boot-mirror disk: its partition table
 # has an ESP and partition 3, partition 3 (or the LUKS mapping on it) is an
 # ONLINE rpool member, and its ESP is registered with proxmox-boot-tool.
 # Prints the survivor's ESP UUID.
 survivor_boot_esp() {
-  local disk="$1" table p3 devices uuid leaf state online=0
+  local disk="$1" table uuid
   table="$(partition_table "$disk")"
   grep -q '^2 ' <<<"$table" && grep -q '^3 ' <<<"$table" ||
     die "surviving disk $SURVIVOR has no boot-mirror partition table"
-  p3="$(partition_path "$disk" 3)"
-  devices="$(disk_device_set "$p3")" || exit 1
-  while read -r leaf state; do
-    [[ -n "$leaf" && "$state" == ONLINE ]] || continue
-    on_device_set "$leaf" "$devices" && online=1
-  done < <(zpool status -P "$POOL" | awk '$1 ~ /^\// { print $1, $2 }')
-  ((online)) || die "partition 3 of surviving disk $SURVIVOR is not an ONLINE rpool member"
+  partition_is_online_member "$(partition_path "$disk" 3)" ||
+    die "partition 3 of surviving disk $SURVIVOR is not an ONLINE rpool member"
   uuid="$(fs_uuid "$(partition_path "$disk" 2)")"
   esp_registered "$uuid" ||
     die "the ESP of surviving disk $SURVIVOR is not registered with proxmox-boot-tool"
@@ -1075,8 +1318,8 @@ refuse_existing_luks() {
   done <<<"$devices"
 }
 
-command_boot_partition() {
-  local serial survivor_disk new_disk table device devices number
+command_copy_partitions() {
+  local serial survivor_disk new_disk table device devices number member_number
   SERIAL_COUNT=1
   parse_common "$@"
   require_survivor
@@ -1084,7 +1327,7 @@ command_boot_partition() {
   survivor_disk="$(disk_by_serial "$SURVIVOR")" || exit 1
   new_disk="$(disk_by_serial "$serial")" || exit 1
   [[ "$survivor_disk" != "$new_disk" ]] || die "$SURVIVOR and $serial are the same disk"
-  survivor_boot_esp "$survivor_disk" >/dev/null || exit 1
+  member_number="$(survivor_member_partition "$survivor_disk")" || exit 1
   table="$(partition_table "$survivor_disk")"
   if [[ "$(partition_table "$new_disk")" == "$table" ]]; then
     if shares_survivor_guids "$new_disk" "$survivor_disk"; then
@@ -1096,22 +1339,16 @@ command_boot_partition() {
       ! shares_survivor_guids "$new_disk" "$survivor_disk" ||
         die "disk $serial still has the GUIDs of $SURVIVOR"
     fi
-    # The same layout can come from an earlier installation whose partition 3
-    # still carries another pool's labels. Unless partition 3 already holds
+    # The same layout can come from an earlier installation whose member
+    # partition still carries another pool's labels. Unless it already holds
     # this replacement's LUKS, clear it after the usual safety checks.
-    if ! cryptsetup isLuks "$(partition_path "$new_disk" 3)" >/dev/null 2>&1; then
-      EXPECT_BYTES="$(blockdev --getsize64 "$survivor_disk")" ||
-        die "could not read the size of $survivor_disk"
-      MATCH=exact
+    if ! cryptsetup isLuks "$(partition_path "$new_disk" "$member_number")" >/dev/null 2>&1; then
       check_new_disks >/dev/null || exit 1
-      wipefs --all --force "$(partition_path "$new_disk" 3)"
+      wipefs --all --force "$(partition_path "$new_disk" "$member_number")"
     fi
     printf 'Disk %s already has the partition table of %s.\n' "$serial" "$SURVIVOR"
     return
   fi
-  EXPECT_BYTES="$(blockdev --getsize64 "$survivor_disk")" ||
-    die "could not read the size of $survivor_disk"
-  MATCH=exact
   check_new_disks >/dev/null || exit 1
   refuse_existing_luks "$new_disk" "$serial"
 
@@ -1123,20 +1360,36 @@ command_boot_partition() {
   wipefs --all --force "$new_disk"
   sgdisk --zap-all "$new_disk"
   # The healthy disk is the main device; --replicate writes to the new disk.
+  # A larger new disk then needs its backup GPT moved to its own end.
   sgdisk "$survivor_disk" --replicate="$new_disk"
   sgdisk --randomize-guids "$new_disk"
+  sgdisk --move-second-header "$new_disk"
   partx --update "$new_disk" || true
   udevadm settle
   [[ "$(partition_table "$new_disk")" == "$table" ]] ||
     die "disk $serial did not receive the partition table of $SURVIVOR"
   ! shares_survivor_guids "$new_disk" "$survivor_disk" ||
     die "disk $serial still has the GUIDs of $SURVIVOR"
-  for number in 2 3; do
+  while read -r number _; do
+    [[ -n "$number" ]] || continue
     block_device_exists "$(partition_path "$new_disk" "$number")" ||
       die "partition $number of disk $serial did not appear"
     wipefs --all --force "$(partition_path "$new_disk" "$number")"
-  done
+  done <<<"$table"
   printf 'Disk %s now has the partition table of %s.\n' "$serial" "$SURVIVOR"
+}
+
+# proxmox-boot-tool init reads the filesystem type from udev (lsblk), which
+# can still describe DEVICE as it was before the mkfs that format just ran.
+wait_for_udev_fstype() {
+  local device="$1" wanted="$2" attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    udevadm trigger --action=change "$device" 2>/dev/null || true
+    udevadm settle
+    [[ "$(lsblk -dno FSTYPE "$device" 2>/dev/null)" == "$wanted" ]] && return 0
+    ((attempt == 10)) || sleep 1
+  done
+  die "udev still does not report $device as $wanted after formatting it"
 }
 
 command_boot_esp() {
@@ -1151,7 +1404,7 @@ command_boot_esp() {
   [[ "$survivor_disk" != "$new_disk" ]] || die "$SURVIVOR and $serial are the same disk"
   survivor_uuid="$(survivor_boot_esp "$survivor_disk")" || exit 1
   [[ "$(partition_table "$new_disk")" == "$(partition_table "$survivor_disk")" ]] ||
-    die "disk $serial does not have the partition table of $SURVIVOR; run boot-partition first"
+    die "disk $serial does not have the partition table of $SURVIVOR; run copy-partitions first"
   ! pool_contains "$(partition_path "$new_disk" 3)" ||
     die "partition 3 of disk $serial is already part of rpool"
   survivor_config="$(esp_configuration "$survivor_uuid")"
@@ -1163,6 +1416,7 @@ command_boot_esp() {
   new_uuid="$(fs_uuid "$new_esp")"
   if ! esp_registered "$new_uuid"; then
     proxmox-boot-tool format "$new_esp" --force
+    wait_for_udev_fstype "$new_esp" vfat
     proxmox-boot-tool init "$new_esp" "${mode[@]}"
     new_uuid="$(fs_uuid "$new_esp")"
     esp_registered "$new_uuid" || die "proxmox-boot-tool did not register $new_esp"
@@ -1272,25 +1526,20 @@ command_replace_member() {
     die "$SURVIVOR is part of $survivor_parent; a replacement is already in progress"
   fi
 
+  [[ "$(partition_table "$new_disk")" == "$(partition_table "$survivor_disk")" ]] ||
+    die "disk $serial does not have the partition table of $SURVIVOR; run copy-partitions first"
   if [[ -n "$MEMBER" ]]; then
     new_device="/dev/mapper/$(member_mapper "$MEMBER")"
     register_member
-  elif [[ "$boot" == true ]]; then
-    [[ "$(partition_table "$new_disk")" == "$(partition_table "$survivor_disk")" ]] ||
-      die "disk $serial does not have the partition table of $SURVIVOR; run boot-partition first"
-    new_device="$(stable_by_id_partition "$new_disk" "$serial" 3)" || exit 1
   else
-    grep -q '^/dev/mapper/' <<<"$survivor_leaf" &&
+    if grep -q '^/dev/mapper/' <<<"$survivor_leaf"; then
       die "rpool is encrypted; pass --member for the new LUKS member"
-    EXPECT_BYTES="$(blockdev --getsize64 "$survivor_disk")" ||
-      die "could not read the size of $survivor_disk"
-    MATCH=exact
-    check_new_disks >/dev/null || exit 1
-    refuse_existing_luks "$new_disk" "$serial"
-    new_device="$(stable_by_id_path "$new_disk" "$serial")" || exit 1
-    wipefs --all --force "$new_disk"
-    sgdisk --zap-all "$new_disk"
-    udevadm settle
+    fi
+    if [[ "$boot" == true ]]; then
+      new_device="$(stable_by_id_partition "$new_disk" "$serial" 3)" || exit 1
+    else
+      new_device="$(stable_by_id_partition "$new_disk" "$serial" 1)" || exit 1
+    fi
   fi
   if [[ "$boot" == true ]]; then
     new_uuid="$(fs_uuid "$(partition_path "$new_disk" 2)")"
@@ -1338,7 +1587,9 @@ main() {
     luks-prepare-member) command_luks_prepare_member "$@" ;;
     luks-check-member) command_luks_check_member "$@" ;;
     luks-register) command_luks_register "$@" ;;
-    boot-partition) command_boot_partition "$@" ;;
+    replacement-bytes) command_replacement_bytes "$@" ;;
+    release-disks) command_release_disks "$@" ;;
+    copy-partitions) command_copy_partitions "$@" ;;
     boot-esp) command_boot_esp "$@" ;;
     replace-member) command_replace_member "$@" ;;
     -h | --help) usage ;;

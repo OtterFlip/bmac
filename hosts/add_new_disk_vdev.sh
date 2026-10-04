@@ -3,9 +3,11 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Add two newly installed, identical-capacity disks to a host's rpool as one
-# new ZFS mirror vdev. On an encrypted host both disks become whole-disk LUKS2
-# with the host's single shared rpool passphrase, which the operator types at
+# Add two newly installed disks whose capacities differ by at most 1% to a
+# host's rpool as one new ZFS mirror vdev. Each disk gets one member partition
+# that ends 1 GiB short of the smaller disk's whole-GiB size. On an encrypted
+# host both partitions become LUKS2 with the host's single shared rpool
+# passphrase, which the operator types at
 # the host console; on an unencrypted host they stay unencrypted. The disk,
 # LUKS, and zpool logic is lib/rpool_mirror.sh, the same code
 # hosts/setup_proxmox_host.sh uses for extra mirrors at install time.
@@ -27,11 +29,11 @@ Usage: hosts/add_new_disk_vdev.sh [--host moxN]
 
 Adds two new disks to the chosen host's rpool as one new mirror vdev:
 
-  1. lists the disks that are not part of rpool and asks for two with
-     identical byte capacity;
+  1. lists the disks that are not part of rpool and asks for two whose byte
+     capacities differ by at most 1%;
   2. on an encrypted host, has you run a helper at the host console that asks
      for the shared rpool LUKS passphrase, proves it unlocks every existing
-     rpool member, and formats both disks with it;
+     rpool member, and gives each disk one LUKS partition formatted with it;
   3. records the disks in /etc/crypttab, rebuilds and verifies the initramfs,
      and adds them to rpool;
   4. prints the new disks' serials and exact byte capacities.
@@ -201,7 +203,7 @@ for disk in json.load(open(sys.argv[1]))["unassigned_disks"]:
 PY
   )
   ((${#CANDIDATES[@]} >= 2)) ||
-    dw_die "fewer than two disks outside rpool were found on $DW_HOST; install two identical disks first"
+    dw_die "fewer than two disks outside rpool were found on $DW_HOST; install two disks of the same nominal capacity first"
   for index in "${!CANDIDATES[@]}"; do
     IFS=$'\t' read -r disk serial size model contents <<<"${CANDIDATES[index]}"
     printf '  %d) %-14s serial %-22s %16s bytes  %-20s %s\n' \
@@ -240,8 +242,9 @@ PY
     CAPACITY_2="$CHOSEN_SIZE"
     if [[ "$SERIAL_1" == "$SERIAL_2" ]]; then
       printf 'Choose two different disks.\n'
-    elif [[ "$CAPACITY_1" != "$CAPACITY_2" ]]; then
-      printf 'Those disks differ in capacity (%s vs %s bytes); a mirror needs identical disks.\n' \
+    elif (((CAPACITY_1 > CAPACITY_2 ? CAPACITY_1 - CAPACITY_2 : CAPACITY_2 - CAPACITY_1) * 100 >
+      (CAPACITY_1 > CAPACITY_2 ? CAPACITY_1 : CAPACITY_2))); then
+      printf 'Those disks differ in capacity by more than 1%% (%s vs %s bytes); choose a matching pair.\n' \
         "$CAPACITY_1" "$CAPACITY_2"
     else
       break
@@ -249,7 +252,7 @@ PY
   done
 
   dw_section "Checking the chosen disks on $DW_HOST"
-  CHECKED="$(dw_tool check-new --require-equal "$SERIAL_1" "$SERIAL_2")" ||
+  CHECKED="$(dw_tool check-new "$SERIAL_1" "$SERIAL_2")" ||
     dw_die "the chosen disks are not safe to use"
   printf '%s\n' "$CHECKED"
   if awk -F '\t' '$4 == "luks" { found=1 } END { exit !found }' <<<"$CHECKED"; then
@@ -281,7 +284,7 @@ umask 077
 helper="$1"; tool="$2"; pair="$3"; serial_1="$4"; serial_2="$5"
 {
   printf "#!/usr/bin/env bash\nset -Eeuo pipefail\nset +x\n"
-  printf "exec %q luks-prepare --pair %q --prompt --require-equal %q %q\n" \
+  printf "exec %q luks-prepare --pair %q --prompt %q %q\n" \
     "$tool" "$pair" "$serial_1" "$serial_2"
 } >"$helper"
 chmod 0700 "$helper"
@@ -339,7 +342,7 @@ chmod 0700 "$helper"
     "${DW_REMOTE_ROOT}/luks-header-mirror${PAIR}-2.bin" ||
     printf 'WARNING: could not remove the console helper or header copies from %s\n' "$DW_HOST" >&2
 else
-  dw_tool clear-add --require-equal "$SERIAL_1" "$SERIAL_2" ||
+  dw_tool clear-add "$SERIAL_1" "$SERIAL_2" ||
     dw_die "adding the unencrypted mirror failed"
 fi
 

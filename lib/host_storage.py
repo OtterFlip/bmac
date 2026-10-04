@@ -1084,6 +1084,7 @@ def render_disk_inventory(layout: dict[str, Any]) -> str:
     return "\n".join(out) + "\n"
 
 
+
 def parse_configured(values: Sequence[str]) -> list[tuple[int, int, str]]:
     configured = []
     for value in values:

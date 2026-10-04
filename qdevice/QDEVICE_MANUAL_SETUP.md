@@ -401,7 +401,8 @@ If UDP `41641` is later intentionally opened to improve direct Tailscale connect
 
 ## 16. Install and configure the QDevice software
 
-The Proxmox host setup workflow (`setup_proxmox_host.sh`) installs
+The Proxmox host setup workflow (`setup_proxmox_host.sh`), or
+`qdevice/add_qdevice.sh` for a replacement QDevice, installs
 `corosync-qnetd` here when it is missing, enables the service, and verifies
 that it listens on TCP `5403`. Concurrent mox installers serialize this work
 with `/run/lock/app-ha-qdevice-provision.lock` on the QDevice so their APT
@@ -418,6 +419,14 @@ Because inbound traffic on `tailscale0` is allowed by UFW, qnetd will be reachab
 Do not manually force a QDevice vote into a one-node cluster merely because
 the service is ready. The setup workflow adds or removes the vote according
 to the current odd/even Proxmox membership.
+
+`hosts/remove_host_from_cluster.sh` and `hosts/purge_host_from_cluster.sh`
+follow the same rule. They remove the QDevice before deleting a node and add
+it back only when the remaining node count is even. Re-adding it uses the
+workstation's `ssh qdevice` access to install a temporary key, as setup does,
+so both scripts ask about and check that access before making any change.
+The Tailscale policy must still allow the mox hosts to reach this machine on
+TCP `22` for `pvecm qdevice setup`.
 
 ---
 
@@ -450,11 +459,58 @@ Also verify that the Proxmox nodes can reach the QDevice over Tailscale before c
 
 ---
 
+## Checking the QDevice
+
+```bash
+diagnostics/show_qdevice_state.sh
+```
+
+This read-only report says whether the cluster needs a QDevice (it does with
+an even number of members), whether one is registered in corosync.conf, and
+whether every member sees it alive and voting. For a functional QDevice it
+prints the registered address, each member's vote view, and the QDevice
+host's OS, Tailscale address, `corosync-qnetd` version and state, and
+connected clusters. When the QDevice is missing or has failed, it says what to
+do next.
+
+## Replacing a failed QDevice
+
+When the cluster needs its QDevice and the registered one is inaccessible:
+
+1. Run `qdevice/purge_qdevice.sh`. It cannot purge a machine it cannot reach,
+   so it explains this and offers to unregister the QDevice from the cluster
+   anyway. If you accept, you must first remove the old machine from the
+   Tailscale admin console (type `REMOVED FROM TAILSCALE`) so it can never
+   communicate with the cluster again. The script then runs
+   `pvecm qdevice remove`, and on every Proxmox node removes the QDevice
+   client service and certificates and every `known_hosts` entry for the old
+   QDevice, including the managed QDevice host-key block. Every member must be
+   online. An even-member cluster has no tie-breaking vote until the
+   replacement is added, so add it promptly.
+2. On the workstation, remove the old machine's host key:
+   `ssh-keygen -R qdevice`.
+3. Prepare the replacement with sections 1 through 15 of this guide. Give it
+   the same hostname and the `tag:proxmox-qdevice` tag. The Tailscale policy
+   must still allow `tag:proxmox-host` to reach it on TCP `5403`, and on TCP
+   `22` while the next step runs.
+4. Run `qdevice/add_qdevice.sh`. It checks that the cluster needs a QDevice,
+   asks for the QDevice hostname (default `PROXMOX_QDEVICE_HOST`) and checks
+   `ssh` access to it, refuses a Proxmox VE host, then does section 16 and the
+   cluster side as host setup does. It installs and verifies `corosync-qnetd`,
+   pins the new SSH host key on every member, runs `pvecm qdevice setup`
+   through the control node, removes the temporary setup key, and checks that
+   every member reports the QDevice alive and voting.
+
+If you prepared the replacement under the same name before purging, the purge
+script sees that the reachable machine is not the registered one (its
+Tailscale address differs). It then offers the same unregister-only path and
+leaves the new machine untouched.
+
 ## Destructive QDevice teardown and clean-room retesting
 
-Use [`purge_qdevice.sh`](purge_qdevice.sh) only when intentionally retiring
-the QDevice or returning the dedicated host to a pre-QDevice state for a full
-setup test:
+Use [`purge_qdevice.sh`](purge_qdevice.sh) when intentionally retiring the
+QDevice, replacing a failed one (above), or returning the dedicated host to a
+pre-QDevice state for a full setup test:
 
 ```bash
 qdevice/purge_qdevice.sh [qdevice-host] [proxmox-host]
@@ -469,4 +525,8 @@ After safe detachment it removes the identified Proxmox setup key, QNetd
 TLS/NSS identity and certificates, Corosync/QDevice services and packages,
 package-specific state, and the `coroqnetd` account/group. It intentionally
 does not run `apt autoremove` and does not erase general system journals.
-Review its complete warning before use.
+That leaves a plain Ubuntu machine that can only act as a QDevice again if it
+is deliberately re-added, so it does not need to be removed from Tailscale.
+If the QDevice host cannot be reached, the script follows the unregister-only
+path described under "Replacing a failed QDevice". Review its complete
+warning before use.

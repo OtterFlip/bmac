@@ -26,9 +26,12 @@ physically.
 
 When a vdev removal started by hosts/decommission_disks.sh has completed,
 this script asks before closing its LUKS mappings, removing their crypttab
-entries, rebuilding the initramfs, and marking the disks retired. Run this
-script after decommissioning to finish retirement and identify disks that
-are safe to pull.
+entries, rebuilding the initramfs, releasing the disks, and marking them
+retired. Releasing a disk erases only its metadata (LUKS key slots, ZFS labels,
+filesystem signatures, and the partition table) so it shows as blank; it takes
+seconds and does not overwrite the data area. The off-host LUKS header backups
+of released disks are deleted. Run this script after decommissioning to finish
+retirement and identify disks that are safe to pull.
 EOF
 }
 
@@ -90,7 +93,14 @@ for row in state["removals"]:
 PY
 )
 
-FINALIZED=false
+print_release_note() {
+  printf 'Releasing a disk erases only its metadata (LUKS key slots, ZFS labels,\n'
+  printf 'filesystem signatures, and the partition table) so it shows as blank. It\n'
+  printf 'takes seconds and does not overwrite the data area; a full data wipe is\n'
+  printf 'outside the scope of these scripts.\n'
+}
+
+CHANGED=false
 for row in "${PENDING[@]}"; do
   IFS=$'\t' read -r removal_id vdev status serials mappers <<<"$row"
   dw_section "Retirement status of $vdev (disks ${serials//,/, })"
@@ -129,8 +139,10 @@ for member in record["members"]:
 PY
       printf '\nFinalizing these disks will close LUKS mappings %s, remove their\n' \
         "${mappers//,/ }"
-      printf 'entries from /etc/crypttab, rebuild and verify every initramfs, and mark\n'
-      printf 'their host-side removal record retired.\n'
+      printf 'entries from /etc/crypttab, rebuild and verify every initramfs, release the\n'
+      printf 'disks, delete their off-host LUKS header backups, and mark their host-side\n'
+      printf 'removal record retired.\n'
+      print_release_note
       if ! prompt_yes "Do you give permission to finalize these disks now?"; then
         printf 'Permission was not given. No retirement changes were made for %s.\n' "$vdev"
         continue
@@ -139,6 +151,7 @@ PY
       IFS=',' read -r -a mapper_list <<<"$mappers"
       dw_tool retire-luks "${mapper_list[@]}" ||
         dw_die "finalizing the LUKS retirement failed; its disks are not safe to pull"
+      CHANGED=true
       ;;
     complete)
       printf 'The following unencrypted disks will be marked retired:\n'
@@ -158,26 +171,39 @@ for member in record["members"]:
         )
     )
 PY
-      printf '\nNo LUKS or crypttab change is needed. The host-side removal record will\n'
-      printf 'be changed to retired so these disks can be reported as removable.\n'
+      printf '\nNo LUKS or crypttab change is needed. The disks will be released and the\n'
+      printf 'host-side removal record changed to retired so they can be reported as\n'
+      printf 'removable.\n'
+      print_release_note
       if ! prompt_yes "Do you give permission to finalize these disks now?"; then
         printf 'Permission was not given. No retirement changes were made for %s.\n' "$vdev"
         continue
       fi
+      dw_install_tool
+      mapper_list=()
       ;;
     *) dw_die "unexpected removal status $status" ;;
   esac
 
+  IFS=',' read -r -a serial_list <<<"$serials"
+  if ! dw_tool release-disks "${serial_list[@]}"; then
+    printf 'WARNING: not every disk of %s could be released; its removal record stays open.\n' "$vdev" >&2
+    printf 'Resolve the reasons above and run this inventory again.\n' >&2
+    continue
+  fi
+  CHANGED=true
+  for mapper in "${mapper_list[@]}"; do
+    rm -f -- "${DW_ARTIFACTS_DIR}/${DW_HOST}/luks-headers/rpool-${mapper#crypt-rpool-}.bin"
+  done
   dw_state set-removal "$removal_id" --state retired \
-    --note "removal complete; LUKS closed, crypttab and initramfs updated" >/dev/null ||
+    --note "removal complete; LUKS closed, crypttab and initramfs updated, disks released" >/dev/null ||
     dw_die "could not mark the disks retired on $DW_HOST"
-  FINALIZED=true
   printf 'Retirement of %s is finalized.\n' "$vdev"
 done
 
 # Recollect only after a finalization changed host state. With no change, the
 # complete inventory printed at startup is still current and need not repeat.
-if [[ "$FINALIZED" == true ]]; then
+if [[ "$CHANGED" == true ]]; then
   dw_section "Disk inventory after retirement finalization"
   dw_collect_layout "$LAYOUT" --allow-missing-pool
   dw_render_inventory "$LAYOUT"

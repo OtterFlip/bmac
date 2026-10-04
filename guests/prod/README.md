@@ -24,7 +24,8 @@ afterward through each application's own deployment tooling.
 - Install workstation commands `python3`, `openssl`, `ssh`, and `scp`.
 - Ensure strict SSH host-key entries and key-based root access work for at
   least one `moxN`.
-- Keep at least two contiguous nodes (`mox1`, `mox2`, …) online, quorate, and
+- Keep at least two nodes (for example `mox1` and `mox2`; slots may have
+  gaps, such as `mox1` and `mox3`) online, quorate, and
   provisioned with `local-zfs`, disk-backed local ISO storage, and the
   lifecycle hook. A two-node cluster must report its external QDevice alive
   and voting from both placement nodes (three expected/total votes).
@@ -321,6 +322,76 @@ command to run on a mox host.
 The script does not take a lease against `create_staging_vm.sh`. Avoid
 running both at once for the same production VM.
 
+## Changing placement
+
+`change_prod_vm_placement.sh` adds hosts to, or removes hosts from, one
+production VM's placement. It lists the registered production VMs (default:
+the lowest active `prodN`) with their placement, live owner, and staging
+count, then asks whether to add or remove hosts and which ones.
+
+The VM must be running under HA with exactly one strict node-affinity rule
+(`production-<name>-<vmid>`) that includes the live owner, and its registry
+`ha_nodes` must equal its placement (the guest-role hook enforces this at
+start). A stale registry owner is refreshed from live HA state first, as
+`extend_prod_vm_disk.sh` does. The script refuses a VM with staging VMs
+derived from it.
+
+Adding a host:
+
+1. The host must be online and hold fewer production placements than its
+   `MAX_PROD_VM_COUNT_ON_THIS_HOST` in `env/moxN.conf`. Its `local-zfs`
+   storage must be active, the VM's hookscript must be present, and it must
+   hold no volumes for the VMID. After receiving a replica the size of the
+   VM's volumes (their summed ZFS `used` on the owner), its pool must still
+   have at least 10% of its size available.
+2. The registry placement and `ha_nodes` are widened first, so the hook
+   accepts the host. Nothing starts the VM there yet, because the HA rule
+   still excludes it.
+3. `pvesr create-local-job` runs on the live owner with the VM's existing
+   schedule (or `PROD_VM_REPLICATION_INTERVAL`). The script waits for a
+   successful initial replication (`--replication-timeout-seconds`,
+   default 3600).
+4. Only then is the host added to the HA rule, and the registry replication
+   targets are updated.
+
+Removing a host never removes the live owner (move the VM first with
+`change_prod_vm_owner.sh`), and keeps at least two placement hosts. Existing
+replication must be healthy. HA stops using the host first, then the registry
+placement narrows, then `pvesr delete` removes the job and its replica. The
+script waits until the job is gone and warns if the host still lists volumes
+for the VMID.
+
+The registry placement is the record of intent. On each run the script first
+compares it with the HA rule, the replication jobs, and the registry
+`ha_nodes` and targets. If an earlier run stopped partway, it offers to
+finish adding or removing the hosts involved. An HA rule that allows a host
+outside the registry placement is never guessed at; correct it manually.
+
+## Changing the owner
+
+`change_prod_vm_owner.sh` moves one production VM to another of its placement
+hosts. It is equivalent to `ha-manager relocate vm:<vmid> <node>`, with
+checks around it:
+
+1. It reads the live HA owner and refreshes a stale registry owner.
+2. It refuses a VM with staging VMs derived from it. It also refuses unless
+   the HA rule equals the placement, the replication targets equal the
+   placement minus the owner, every placement host is online, and every
+   replication job is healthy. Stale registry replication targets are
+   corrected.
+3. It lists the other placement hosts with their free memory and staging VMs.
+   You pick one, or `q` to stop. Starting a production VM on a host stops and
+   destroys staging VMs there, so the script warns first.
+4. After `GO` and the per-resource lease, it replicates the latest changes to
+   the target, runs `ha-manager relocate`, and waits up to 15 minutes for
+   `service vm:<vmid> (<node>, started)`.
+5. Proxmox reverses the job that targeted the new owner. The script waits
+   until the targets equal the placement minus the new owner, waits for each
+   job to sync, and records the new owner and targets in the registry.
+
+If it fails after the relocation, rerun it: it records the live owner, then
+offers the remaining hosts (answer `q` to stop there).
+
 ## Failure and resume behavior
 
 Temporary local request material lives under `guests/prod/artifacts` with
@@ -369,4 +440,9 @@ bash -n guests/prod/extend_prod_vm_disk.sh
 
 PYTHONDONTWRITEBYTECODE=1 python3 \
   guests/prod/test_extend_prod_vm_disk.py -v
+
+bash -n guests/prod/change_prod_vm_placement.sh guests/prod/change_prod_vm_owner.sh
+
+PYTHONDONTWRITEBYTECODE=1 python3 \
+  guests/prod/test_change_prod_vm_placement.py -v
 ```

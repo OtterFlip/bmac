@@ -468,7 +468,7 @@ main --dry-run
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
-    def test_live_nodes_must_be_contiguous_and_placement_needs_two(self) -> None:
+    def test_live_nodes_may_have_slot_gaps_and_placement_needs_two(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             nodes = Path(temporary) / "nodes.json"
             nodes.write_text(
@@ -510,6 +510,33 @@ main --dry-run
                 ),
                 encoding="utf-8",
             )
+            gapped = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'PRODUCTION_VM_SOURCE_ONLY=1 source "$1"; '
+                    'parse_online_nodes_json "$2" 3',
+                    "bash",
+                    str(SCRIPT),
+                    str(nodes),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(gapped.returncode, 0, gapped.stderr)
+            self.assertEqual(gapped.stdout.split(), ["mox1", "mox3"])
+
+            nodes.write_text(
+                json.dumps(
+                    [
+                        {"node": "mox1", "status": "offline"},
+                        {"node": "mox3", "status": "online"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
             invalid = subprocess.run(
                 [
                     "bash",
@@ -526,7 +553,7 @@ main --dry-run
                 check=False,
             )
             self.assertNotEqual(invalid.returncode, 0)
-            self.assertIn("not contiguous", invalid.stderr)
+            self.assertIn("at least two online mox nodes", invalid.stderr)
 
         too_few = self.run_sourced(
             'ONLINE_NODES=(mox1 mox2); validate_placement_csv "mox1"',

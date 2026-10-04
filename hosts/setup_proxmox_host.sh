@@ -32,6 +32,13 @@ ARTIFACTS_DIR="${SCRIPT_DIR}/artifacts"
 }
 # shellcheck source=../lib/config.sh
 source "$CONFIG_LIB"
+CONTROL_LIB="${SCRIPT_DIR}/../lib/cluster_control.sh"
+[[ -f "$CONTROL_LIB" ]] || {
+  printf 'ERROR: Missing cluster control-node library: %s\n' "$CONTROL_LIB" >&2
+  exit 1
+}
+# shellcheck source=../lib/cluster_control.sh
+source "$CONTROL_LIB"
 
 SELECTED_HOST=""
 HOST_ID=""
@@ -122,7 +129,7 @@ prompt_yes() {
 choose_hardware_inventory_mode() {
   printf '\nDISK INVENTORY METHOD\n'
   printf 'iDRAC mode queries Redfish to verify configured disk serials, capacities, and health.\n'
-  printf 'Manual mode uses serials and exact byte capacities gathered beforehand by running hosts/inventory_disks.sh against the host while it is in a reachable Live Linux environment.\n'
+  printf 'Manual mode uses serials and exact byte capacities gathered beforehand by copying hosts/cluster_setup_prereq.sh to a Linux Live environment booted on the host and running it there.\n'
   if prompt_yes "Use iDRAC/Redfish for disk inventory on this run?"; then
     HARDWARE_INVENTORY_MODE=idrac
   else
@@ -168,7 +175,8 @@ usage() {
 Usage: $0 [--host moxN] [--encrypt | --no-encrypt] [--skip-boot-tests | --run-boot-tests]
 
   --host moxN         Configure one host, mox1 through mox10. If omitted,
-                      choose from the moxN.conf files interactively.
+                      show every slot's status and prompt, recommending
+                      the lowest free slot.
   --encrypt          Convert every configured rpool member to LUKS2.
   --no-encrypt       Keep every configured rpool member unencrypted.
   --skip-boot-tests  Skip the optional mirror-member and final boot tests.
@@ -176,6 +184,86 @@ Usage: $0 [--host moxN] [--encrypt | --no-encrypt] [--skip-boot-tests | --run-bo
 
 The selected encryption and test policies are recorded and reused on resume.
 EOF
+}
+
+host_artifacts_present() {
+  local -a existing=()
+  [[ -d "${ARTIFACTS_DIR}/$1" ]] || return 1
+  shopt -s nullglob dotglob
+  existing=("${ARTIFACTS_DIR}/$1"/*)
+  shopt -u nullglob dotglob
+  ((${#existing[@]} > 0))
+}
+
+# Show every slot's status and prompt for the host. The recommendation is the
+# lowest slot that is not a cluster member, has no registry slot record, and
+# has no local setup artifacts; before any cluster exists it is the control
+# node, which creates the cluster.
+choose_host_slot() {
+  load_proxmox_config --no-secrets >/dev/null ||
+    fail "Could not load env/cluster.conf to list host slots"
+  local status=0 slots_json="" index node state config recommended=""
+  local -A slot_state=()
+  info "Looking for a reachable cluster member..."
+  control_find_cluster || status=$?
+  ((status != 2)) ||
+    fail "Cluster membership reported through $CONTROL_PROBE_NODE is malformed"
+  if ((status == 0)) && control_read_recorded &&
+    [[ "$CONTROL_REGISTRY_SUPPORTS_HOSTS" == true ]]; then
+    slots_json="$(control_registry "$CONTROL_PROBE_NODE" host-list 2>/dev/null)" ||
+      slots_json=""
+  fi
+  if [[ -n "$slots_json" ]]; then
+    while read -r node state; do
+      [[ -n "$node" ]] && slot_state["$node"]="$state"
+    done < <(
+      python3 -c '
+import json, sys
+for row in json.loads(sys.argv[1]):
+    print(row["node"], row["state"])
+' "$slots_json"
+    )
+  fi
+
+  printf '\nProxmox host slots:\n'
+  for ((index = 1; index <= MAX_MOX_HOSTS; index += 1)); do
+    node="mox${index}"
+    state=""
+    if control_list_contains "$node" "${CONTROL_MEMBER_NODES[@]}"; then
+      if control_list_contains "$node" "${CONTROL_ONLINE_NODES[@]}"; then
+        state="cluster member"
+      else
+        state="cluster member (OFFLINE)"
+      fi
+    elif [[ "${slot_state[$node]:-}" == joining ]]; then
+      state="reserved for a joining host"
+    elif [[ "${slot_state[$node]:-}" == member ]]; then
+      state="recorded member missing from the cluster"
+    fi
+    if host_artifacts_present "$node"; then
+      state="${state:+${state}; }setup artifacts present"
+    fi
+    if [[ -z "$state" ]]; then
+      state="free"
+      [[ -n "$recommended" ]] || recommended="$node"
+    fi
+    config="no env/${node}.conf"
+    [[ ! -f "${SCRIPT_DIR}/../env/${node}.conf" ]] || config="env/${node}.conf"
+    printf '  %-6s %-44s %s\n' "$node" "$state" "$config"
+  done
+  if ((status != 0)); then
+    recommended="${PROXMOX_CONTROL_NODE:-mox1}"
+    printf '\nNo reachable cluster member was found. The first host must be the control node, which creates the cluster.\n'
+  fi
+  [[ -n "$recommended" ]] ||
+    fail "Every host slot through mox${MAX_MOX_HOSTS} is in use"
+  printf '\nRecommended host slot: %s\n' "$recommended"
+  [[ -f "${SCRIPT_DIR}/../env/${recommended}.conf" ]] ||
+    printf 'Create env/%s.conf with that host'"'"'s values before continuing with it.\n' \
+      "$recommended"
+  printf 'To resume an interrupted setup, enter that host instead.\n'
+  read -r -p "Host to configure [${recommended}]: " SELECTED_HOST
+  SELECTED_HOST="${SELECTED_HOST:-$recommended}"
 }
 
 parse_args() {
@@ -214,20 +302,7 @@ parse_args() {
     shift
   done
   if [[ -z "$SELECTED_HOST" ]]; then
-    local -a host_configs=()
-    local config candidate
-    shopt -s nullglob
-    host_configs=("${SCRIPT_DIR}/../env"/mox*.conf)
-    shopt -u nullglob
-    ((${#host_configs[@]} > 0)) ||
-      fail "No env/moxN.conf files are available"
-    printf '\nAvailable Proxmox host configurations:\n'
-    for config in "${host_configs[@]}"; do
-      candidate="$(basename -- "$config" .conf)"
-      [[ "$candidate" =~ ^mox([1-9]|10)$ ]] || continue
-      printf '  %s\n' "$candidate"
-    done
-    read -r -p "Host to configure: " SELECTED_HOST
+    choose_host_slot
   fi
   mox_index "$SELECTED_HOST" >/dev/null ||
     fail "--host must be mox1 through mox10"
@@ -358,7 +433,7 @@ load_configuration() {
         capacity_name="NVME_MIRROR_${pair}_CAPACITY_BYTES_${member}"
         capacity="${!capacity_name:-}"
         [[ "$capacity" =~ ^[1-9][0-9]*$ ]] ||
-          fail "$capacity_name must be an exact positive byte count in manual inventory mode; gather it by running hosts/inventory_disks.sh against the Live Linux host"
+          fail "$capacity_name must be an exact positive byte count in manual inventory mode; gather it by running hosts/cluster_setup_prereq.sh in a Linux Live environment booted on the host"
       fi
     done
   done
@@ -544,30 +619,92 @@ reserve_fresh_tailscale_auth_key() {
   write_state tailscale-auth-key-sha256 "$key_hash"
 }
 
+# A host creates the cluster only when it is the control node and no cluster
+# member is reachable; every other host joins through the control node.
 choose_role() {
+  log "Resolving the cluster control node"
+  resolve_control_node || fail "Could not determine the cluster control node"
+  local cluster_exists=false host_is_member=false
+  if [[ -n "$CONTROL_PROBE_NODE" ]]; then
+    cluster_exists=true
+    if control_list_contains "$HOST_ID" "${CONTROL_MEMBER_NODES[@]}"; then
+      host_is_member=true
+    fi
+    info "Cluster members: ${CONTROL_MEMBER_NODES[*]}"
+  fi
+  info "Control node: $CONTROL_NODE"
+
   if has_state setup-role; then
     SETUP_ROLE="$(read_state setup-role)"
     EXISTING_NODE="$(read_state existing-node)"
-    if [[ "$HOST_ID" == mox1 ]]; then
-      [[ "$SETUP_ROLE" == first && "$EXISTING_NODE" == none ]] ||
-        fail "Recorded cluster role for mox1 is invalid; expected first/none"
-    else
-      [[ "$SETUP_ROLE" == join && "$EXISTING_NODE" == mox1 ]] ||
-        fail "Recorded cluster role for $HOST_ID is invalid; expected join/mox1"
-    fi
-    return
-  fi
-
-  if [[ "$HOST_ID" == mox1 ]]; then
+    case "$SETUP_ROLE" in
+      first)
+        [[ "$EXISTING_NODE" == none ]] ||
+          fail "Recorded cluster role for $HOST_ID is invalid; expected first/none"
+        if [[ "$cluster_exists" == true && "$host_is_member" != true ]]; then
+          fail "$HOST_ID was recorded as the host that creates the cluster, but cluster members ${CONTROL_MEMBER_NODES[*]} already exist without it. Delete this host's setup artifacts and rerun so it joins through $CONTROL_NODE."
+        fi
+        [[ "$cluster_exists" == true || "$HOST_ID" == "$CONTROL_NODE" ]] ||
+          fail "$HOST_ID was recorded as the host that creates the cluster, but the control node is now $CONTROL_NODE"
+        ;;
+      join)
+        [[ "$EXISTING_NODE" =~ ^mox([1-9]|10)$ ]] ||
+          fail "Recorded cluster role for $HOST_ID is invalid; expected join/moxN"
+        ;;
+      *)
+        fail "Recorded cluster role for $HOST_ID is invalid: $SETUP_ROLE"
+        ;;
+    esac
+  elif [[ "$cluster_exists" != true && "$HOST_ID" != "$CONTROL_NODE" ]]; then
+    SETUP_ROLE='join'
+  elif [[ "$cluster_exists" != true ]]; then
+    confirm_exact \
+      "No member of an existing Proxmox cluster is reachable from this workstation. $HOST_ID is the control node, so it will CREATE a new cluster named $PROXMOX_CLUSTER_NAME. If a cluster already exists but is unreachable, stop now and restore connectivity instead." \
+      "CREATE CLUSTER ON ${HOST_ID}"
     SETUP_ROLE=first
     EXISTING_NODE=none
   else
     SETUP_ROLE='join'
-    EXISTING_NODE=mox1
-    info "$HOST_ID will join the cluster through mox1 after its private VLAN is verified."
+  fi
+
+  if [[ "$SETUP_ROLE" == join ]]; then
+    [[ "$CONTROL_NODE" != "$HOST_ID" || "$host_is_member" == true ]] ||
+      fail "$HOST_ID is the control node but is not a cluster member; PROXMOX_CONTROL_NODE must name an existing member"
+    EXISTING_NODE="$CONTROL_NODE"
+    if [[ "$cluster_exists" != true ]]; then
+      info "No reachable cluster member was found yet. Assuming control node $CONTROL_NODE will create the cluster; $HOST_ID will wait for it before joining, after its private VLAN is verified."
+    elif [[ "$host_is_member" == true ]]; then
+      info "$HOST_ID is already a cluster member; cluster changes go through control node $CONTROL_NODE."
+    else
+      info "$HOST_ID will join the cluster through control node $CONTROL_NODE after its private VLAN is verified."
+    fi
   fi
   write_state setup-role "$SETUP_ROLE"
   write_state existing-node "$EXISTING_NODE"
+}
+
+# The member that runs cluster-wide commands: this host when it created the
+# cluster or is itself the control node, otherwise the control node.
+cluster_control_node() {
+  if [[ "$SETUP_ROLE" == first || "$EXISTING_NODE" == "$HOST_ID" ]]; then
+    printf '%s\n' "$HOST_ID"
+  else
+    printf '%s\n' "$EXISTING_NODE"
+  fi
+}
+
+# Print every configured cluster member, lowest-numbered first.
+cluster_member_nodes() {
+  local nodes_json
+  nodes_json="$(cluster_control pvesh get /nodes --output-format json)" ||
+    fail "Could not list cluster members through $(cluster_control_node)"
+  jq -er --argjson max "$MAX_MOX_HOSTS" '
+    [ .[] | .node |
+      if type == "string" and test("^mox([1-9]|10)$") and
+         ((ltrimstr("mox") | tonumber) <= $max)
+      then . else error("unexpected cluster node: \(.)") end ] |
+    sort_by(ltrimstr("mox") | tonumber) | .[]
+  ' <<<"$nodes_json" || fail "Cluster membership is malformed"
 }
 
 choose_encryption_policy() {
@@ -695,7 +832,7 @@ discover_hardware() {
 
   if [[ "$HARDWARE_INVENTORY_MODE" == manual ]]; then
     log "Validating manually inventoried disk capacities"
-    local capacity_1_name capacity_2_name capacity_1 capacity_2
+    local capacity_1_name capacity_2_name capacity_1 capacity_2 smaller larger
     for pair in "${CONFIGURED_MIRROR_PAIRS[@]}"; do
       capacity_1_name="NVME_MIRROR_${pair}_CAPACITY_BYTES_1"
       capacity_2_name="NVME_MIRROR_${pair}_CAPACITY_BYTES_2"
@@ -705,10 +842,12 @@ discover_hardware() {
         fail "Mirror $pair capacities must be exact positive byte counts"
       ((capacity_1 >= 8 * 1073741824 && capacity_2 >= 8 * 1073741824)) ||
         fail "Mirror $pair contains a disk smaller than 8 GiB"
-      [[ "$capacity_1" == "$capacity_2" ]] ||
-        fail "Mirror $pair disks must have identical byte capacities in manual inventory mode"
-      write_state "mirror-${pair}-minimum-capacity-bytes" "$capacity_1"
-      info "Mirror $pair: ${capacity_1} bytes per disk"
+      smaller=$((capacity_1 < capacity_2 ? capacity_1 : capacity_2))
+      larger=$((capacity_1 < capacity_2 ? capacity_2 : capacity_1))
+      (((larger - smaller) * 100 <= larger)) ||
+        fail "Mirror $pair disk capacities differ by more than 1% (${capacity_1} and ${capacity_2} bytes)"
+      write_state "mirror-${pair}-minimum-capacity-bytes" "$smaller"
+      info "Mirror $pair: ${capacity_1} and ${capacity_2} bytes; the mirror uses ${smaller}"
     done
 
     local manual_hdsize_gib
@@ -1656,10 +1795,13 @@ rebuild_luks_member() {
   local member=$1 serial mapper survivor state prepared_state helper
   local phase_file backup remote_header local_header probe
   local raw_present=false mapper_in_pool=false luks_present=false phase_present=false
+  local partner_serial
   if [[ "$member" == A ]]; then
     serial="$NVME_MIRROR_1_SERIAL_1"; mapper=crypt-rpool-a; survivor=B
+    partner_serial="$NVME_MIRROR_1_SERIAL_2"
   else
     serial="$NVME_MIRROR_1_SERIAL_2"; mapper=crypt-rpool-b; survivor=A
+    partner_serial="$NVME_MIRROR_1_SERIAL_1"
   fi
   state="luks-${member}-attached"
   prepared_state="luks-${member}-prepared"
@@ -1719,7 +1861,7 @@ REMOTE
     if [[ "$raw_present" == true ]]; then
       assert_pool_healthy
       confirm_exact \
-        "Detach rpool member $member ($serial), expand only partition 3 into the reserved tail, and remove its obsolete ZFS signatures." \
+        "Detach rpool member $member ($serial), expand only partition 3 to 1 GiB short of the smaller boot disk's whole-GiB size, and remove its obsolete ZFS signatures." \
         "PREPARE MEMBER ${member} FOR LUKS"
     elif [[ "$phase_present" == true || "$probe" == *$'backup=yes'* ]]; then
       confirm_exact \
@@ -1730,10 +1872,11 @@ REMOTE
       fail "Member $member is neither a canonical raw rpool member nor LUKS, and has no trusted preparation record"
     fi
 
-    remote_script "$serial" "$phase_file" "$backup" <<'REMOTE'
+    remote_script "$serial" "$phase_file" "$backup" "$partner_serial" <<'REMOTE'
 set -Eeuo pipefail
-serial="$1"; phase_file="$2"; backup="$3"
+serial="$1"; phase_file="$2"; backup="$3"; partner_serial="$4"
 disk="$(app-ha-disk-by-serial "$serial")"
+partner="$(app-ha-disk-by-serial "$partner_serial")"
 if [[ -s "$phase_file" ]]; then
   [[ "$(sed -n '1p' "$phase_file")" == "$serial" ]]
   start="$(sed -n '2p' "$phase_file")"
@@ -1762,25 +1905,41 @@ last_usable="$(
     awk '/First usable sector is / { value=$10; gsub(/[^0-9]/, "", value); print value; exit }'
 )"
 [[ "$last_usable" =~ ^[0-9]+$ && "$start" -lt "$last_usable" ]]
+logical_sector_size="$(blockdev --getss "$disk")"
+[[ "$logical_sector_size" =~ ^[0-9]+$ ]]
+[[ "$(blockdev --getss "$partner")" == "$logical_sector_size" ]]
+# Both boot disks end partition 3 at the same byte: 1 GiB short of the smaller
+# disk's whole-GiB size, whichever disk is smaller, so a slightly smaller
+# replacement still holds the layout.
+disk_bytes="$(blockdev --getsize64 "$disk")"
+partner_bytes="$(blockdev --getsize64 "$partner")"
+[[ "$disk_bytes" =~ ^[0-9]+$ && "$partner_bytes" =~ ^[0-9]+$ ]]
+smaller_bytes=$((disk_bytes < partner_bytes ? disk_bytes : partner_bytes))
+gib=1073741824
+reference_end=$(((smaller_bytes / gib * gib - gib) / logical_sector_size - 1))
+((start < reference_end && reference_end <= last_usable))
 current_end=""
 current_start="$(sgdisk -i 3 "$disk" 2>/dev/null | awk '/First sector/ { print $3; exit }' || true)"
 if [[ -n "$current_start" ]]; then
   current_end="$(sgdisk -i 3 "$disk" | awk '/Last sector/ { print $3; exit }')"
   [[ "$current_start" == "$start" ]]
+  ((current_end <= reference_end)) || {
+    printf 'Partition 3 of %s already ends past sector %s\n' "$serial" "$reference_end" >&2
+    exit 1
+  }
 fi
-if [[ "$current_end" != "$last_usable" ]]; then
+if [[ "$current_end" != "$reference_end" ]]; then
   if [[ -n "$current_start" ]]; then
-    sgdisk --delete=3 --new=3:"$start":"$last_usable" --typecode=3:BF01 "$disk"
+    sgdisk --delete=3 --new=3:"$start":"$reference_end" --typecode=3:BF01 "$disk"
   else
-    sgdisk --new=3:"$start":"$last_usable" --typecode=3:BF01 "$disk"
+    sgdisk --new=3:"$start":"$reference_end" --typecode=3:BF01 "$disk"
   fi
 fi
 partx --update --nr 3 "$disk" || true
 udevadm settle
 [[ -b "${disk}p3" ]]
 end="$(sgdisk -i 3 "$disk" | awk '/Last sector/ {print $3}')"
-logical_sector_size="$(blockdev --getss "$disk")"
-[[ "$logical_sector_size" =~ ^[0-9]+$ ]]
+[[ "$end" == "$reference_end" ]]
 expected_bytes=$(((end - start + 1) * logical_sector_size))
 [[ "$(blockdev --getsize64 "${disk}p3")" == "$expected_bytes" ]]
 wipefs --types zfs_member --all "${disk}p3"
@@ -2049,15 +2208,10 @@ install_rpool_mirror_tool() {
     fail "Installed $RPOOL_MIRROR_TOOL does not match $RPOOL_MIRROR_SOURCE"
 }
 
-# Disk-size requirement for the rpool mirror tool: exact recorded bytes in
-# manual inventory mode, within 1% of the iDRAC-reported size otherwise.
+# Disk-size requirement for the rpool mirror tool: each disk must hold at
+# least 99% of the smaller recorded (manual or iDRAC) capacity of its pair.
 rpool_mirror_size_args() {
-  local expected_capacity=$1
-  if [[ "$HARDWARE_INVENTORY_MODE" == manual ]]; then
-    printf '%s\n' --expect-bytes "$expected_capacity" --match exact
-  else
-    printf '%s\n' --expect-bytes "$expected_capacity" --match within-1pct
-  fi
+  printf '%s\n' --expect-bytes "$1"
 }
 
 configure_extra_mirror() {
@@ -2136,7 +2290,7 @@ configure_extra_mirror() {
           "ADOPT OR FORMAT EXTRA MIRROR ${pair}"
       else
         confirm_exact \
-          "Erase the two serial-selected disks for extra mirror $pair, format each as whole-disk LUKS, and prepare them for an rpool mirror vdev. These disks receive no ESP." \
+          "Erase the two serial-selected disks for extra mirror $pair, give each one LUKS partition, and prepare them for an rpool mirror vdev. These disks receive no ESP." \
           "FORMAT EXTRA MIRROR ${pair}"
       fi
 
@@ -2179,7 +2333,7 @@ REMOTE
     "both encrypted members of extra mirror ${pair} were prepared"
 
   remote "$RPOOL_MIRROR_TOOL" luks-check-prepared --pair "$pair" \
-    --expect-bytes "$expected_capacity" "$serial_1" "$serial_2" ||
+    "$serial_1" "$serial_2" ||
     fail "Extra mirror $pair was not fully prepared; rerun the helper at the console"
   copy_from_host "$remote_header_1" "$header_1"
   copy_from_host "$remote_header_2" "$header_2"
@@ -2225,7 +2379,7 @@ REMOTE
     fail "Recorded unencrypted extra mirror $pair is no longer present in rpool"
 
   confirm_exact \
-    "Erase both serial-selected disks for extra mirror $pair and add them as one unencrypted top-level rpool mirror vdev. These disks receive no ESP. A later top-level vdev removal is possible (hosts/decommission_disks.sh) but evacuates its data first." \
+    "Erase both serial-selected disks for extra mirror $pair, give each one partition, and add the partitions as one unencrypted top-level rpool mirror vdev. These disks receive no ESP. A later top-level vdev removal is possible (hosts/decommission_disks.sh) but evacuates its data first." \
     "ADD UNENCRYPTED EXTRA MIRROR ${pair}"
   install_rpool_mirror_tool
   remote "$RPOOL_MIRROR_TOOL" clear-add "${size_args[@]}" "$serial_1" "$serial_2" ||
@@ -2599,9 +2753,15 @@ REMOTE
 
 configure_cluster_host_resolution() {
   log "Pinning every mox hostname to its private VLAN address"
-  local index node expected_fqdn
-  for ((index = 1; index <= MOX_INDEX; index += 1)); do
-    node="mox${index}"
+  local node expected_fqdn members
+  local -a nodes=()
+  members="$(cluster_member_nodes)" ||
+    fail "Could not list cluster members through $(cluster_control_node)"
+  mapfile -t nodes < <(
+    printf '%s\n' "$HOST_ID" "$members" | sed '/^$/d' | sort -u -t x -k 2,2n
+  )
+  info "Hosts to pin: ${nodes[*]}"
+  for node in "${nodes[@]}"; do
     expected_fqdn="${node}.${PROXMOX_INTERNAL_DOMAIN}"
     ssh -o BatchMode=yes -o ClearAllForwardings=yes \
       -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
@@ -2683,7 +2843,7 @@ REMOTE
 }
 
 cluster_control() {
-  if [[ "$HOST_ID" == mox1 ]]; then
+  if [[ "$(cluster_control_node)" == "$HOST_ID" ]]; then
     remote "$@"
   else
     local command_string
@@ -2697,7 +2857,7 @@ cluster_control() {
 
 cluster_control_tty() {
   local command_string=$1
-  if [[ "$HOST_ID" == mox1 ]]; then
+  if [[ "$(cluster_control_node)" == "$HOST_ID" ]]; then
     local -a options
     mapfile -t options < <(ssh_options)
     ssh -tt "${options[@]}" "$(remote_target)" "$command_string"
@@ -2746,30 +2906,36 @@ qdevice_absent_status_is_healthy() {
 }
 
 assert_healthy_qdevice() {
-  local status=$1 node_count=$2 index node_status
+  local status=$1 node_count=$2 control node node_status members
+  control="$(cluster_control_node)"
   qdevice_status_is_healthy "$status" "$node_count" ||
-    fail "mox1 does not report a configured, alive, voting QDevice with expected/total votes $((node_count + 1)) and the Qdevice flag"
-  for ((index = 2; index <= node_count; index += 1)); do
+    fail "$control does not report a configured, alive, voting QDevice with expected/total votes $((node_count + 1)) and the Qdevice flag"
+  members="$(cluster_member_nodes)" ||
+    fail "Could not list cluster members through $control"
+  for node in $members; do
+    [[ "$node" != "$control" ]] || continue
     node_status="$(
       cluster_control ssh -o BatchMode=yes -o ConnectTimeout=8 \
         -o StrictHostKeyChecking=yes \
         -o CheckHostIP=no \
-        -o "HostKeyAlias=mox${index}" \
-        -o "UserKnownHostsFile=/etc/pve/nodes/mox${index}/ssh_known_hosts" \
+        -o "HostKeyAlias=${node}" \
+        -o "UserKnownHostsFile=/etc/pve/nodes/${node}/ssh_known_hosts" \
         -o GlobalKnownHostsFile=none \
-        "root@mox${index}.${PROXMOX_INTERNAL_DOMAIN}" pvecm status
-    )" || fail "Could not validate QDevice status from mox${index}"
+        "root@${node}.${PROXMOX_INTERNAL_DOMAIN}" pvecm status
+    )" || fail "Could not validate QDevice status from ${node}"
     qdevice_status_is_healthy "$node_status" "$node_count" ||
-      fail "mox${index} does not report the QDevice alive and voting with expected/total votes $((node_count + 1)) and the Qdevice flag"
+      fail "${node} does not report the QDevice alive and voting with expected/total votes $((node_count + 1)) and the Qdevice flag"
   done
 }
 
 assert_all_cluster_nodes_online() {
-  local expected_count=${1:-} status nodes_json node_count api_count offline index
+  local expected_count=${1:-} status nodes_json node_count api_count offline
+  local control
+  control="$(cluster_control_node)"
   status="$(cluster_control pvecm status)" ||
-    fail "Could not read cluster status from mox1"
+    fail "Could not read cluster status from $control"
   grep -Eq "^Name:[[:space:]]+${PROXMOX_CLUSTER_NAME}[[:space:]]*$" <<<"$status" ||
-    fail "mox1 is not a member of expected cluster $PROXMOX_CLUSTER_NAME"
+    fail "$control is not a member of expected cluster $PROXMOX_CLUSTER_NAME"
   grep -Eq '^Quorate:[[:space:]]+Yes' <<<"$status" ||
     fail "Cluster is not quorate; refusing a membership or QDevice change"
   node_count="$(awk '/^Nodes:/ {print $2; exit}' <<<"$status")"
@@ -2790,12 +2956,12 @@ assert_all_cluster_nodes_online() {
   offline="$(jq -r '[.[] | select(.status != "online") | .node] | join(", ")' <<<"$nodes_json")"
   [[ -z "$offline" ]] ||
     fail "Every configured node must be online; unavailable nodes: $offline"
-  for ((index = 1; index <= node_count; index += 1)); do
-    jq -e --arg node "mox${index}" \
-      'any(.[]; .node == $node and .status == "online")' \
-      <<<"$nodes_json" >/dev/null ||
-      fail "Configured nodes must be contiguous mox1..mox${node_count}; mox${index} is absent or offline"
-  done
+  # Removed and purged hosts leave gaps; every member must still use a slot name.
+  jq -e --argjson max "$MAX_MOX_HOSTS" '
+    all(.[]; (.node | type == "string" and test("^mox([1-9]|10)$")) and
+      ((.node | ltrimstr("mox") | tonumber) <= $max))
+  ' <<<"$nodes_json" >/dev/null ||
+    fail "Every configured node must be named mox1 through mox${MAX_MOX_HOSTS}"
   printf '%s\n' "$node_count"
 }
 
@@ -2836,6 +3002,28 @@ remove_qdevice_before_membership_change() {
     fail "Cluster lost quorum after QDevice removal; do not continue the join"
 }
 
+# Record this slot as joining so slot recommendations skip it while the host
+# joins. A registry that is not initialized yet records the slot later, when
+# the shared tools are installed.
+reserve_registry_host_slot() {
+  local registry=/usr/local/lib/app-ha-proxmox/lib/cluster_registry.py help_text
+  if ! cluster_control test -x "$registry" ||
+    ! cluster_control test -s "${CLUSTER_STATE_DIR}/policy.json"; then
+    info "The cluster registry is not initialized yet; $HOST_ID's slot is recorded when the shared tools are installed."
+    return 0
+  fi
+  help_text="$(cluster_control "$registry" --help)" ||
+    fail "Could not run the installed cluster registry on ${EXISTING_NODE}"
+  if ! grep -q -- 'host-reserve' <<<"$help_text"; then
+    info "The installed cluster registry predates host slots; $HOST_ID's slot is recorded when the shared tools are installed."
+    return 0
+  fi
+  cluster_control "$registry" --state-dir "$CLUSTER_STATE_DIR" \
+    host-reserve "$HOST_ID" >/dev/null ||
+    fail "Could not reserve registry host slot $HOST_ID"
+  info "Registry host slot $HOST_ID is reserved for this join."
+}
+
 cluster_setup() {
   local private_ip="${PROXMOX_SECONDARY_IP%/*}" ts_ip target_status
   local target_cluster_name="" already_member=false expected_count existing_private
@@ -2863,16 +3051,29 @@ cluster_setup() {
     ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
       -o ConnectTimeout=10 "root@${EXISTING_NODE}" true ||
       fail "Cannot SSH to root@${EXISTING_NODE}. Verify its SSH fingerprint at that host's trusted console, refresh any stale workstation known_hosts entry, and connect once manually."
-    expected_count="$((MOX_INDEX - 1))"
-    assert_all_cluster_nodes_online "$expected_count" >/dev/null
+    expected_count="$(assert_all_cluster_nodes_online)"
+    ((expected_count < MAX_MOX_HOSTS)) ||
+      fail "The cluster already has $expected_count nodes, the MAX_MOX_HOSTS limit"
+    local members
+    members="$(cluster_member_nodes)" ||
+      fail "Could not list cluster members through ${EXISTING_NODE}"
+    if grep -Fxq "$HOST_ID" <<<"$members"; then
+      fail "$HOST_ID is already listed as a cluster member, but it does not report membership itself. If this host was reinstalled, first purge the old $HOST_ID with hosts/purge_host_from_cluster.sh"
+    fi
+    if cluster_control test -e "/etc/pve/nodes/${HOST_ID}"; then
+      fail "/etc/pve/nodes/${HOST_ID} still exists although $HOST_ID is not a member. Finish removing the previous $HOST_ID with hosts/purge_host_from_cluster.sh before reusing the slot."
+    fi
+    reserve_registry_host_slot
 
+    local expected_private
+    expected_private="${PRIVATE_SUBNET_PREFIX}.$((MOX_IP_START_OCTET + ${EXISTING_NODE#mox} - 1))"
     existing_private="$(
       cluster_control ip -4 -o address show dev "$PROXMOX_PRIVATE_BRIDGE" |
         awk 'NR == 1 {sub(/\/.*/, "", $4); print $4}'
     )"
-    [[ "$existing_private" == "$MOX_IP_START" ]] ||
-      fail "mox1 private VLAN address is ${existing_private:-missing}; expected ${MOX_IP_START}"
-    existing_fqdn="mox1.${PROXMOX_INTERNAL_DOMAIN}"
+    [[ "$existing_private" == "$expected_private" ]] ||
+      fail "${EXISTING_NODE} private VLAN address is ${existing_private:-missing}; expected ${expected_private}"
+    existing_fqdn="${EXISTING_NODE}.${PROXMOX_INTERNAL_DOMAIN}"
     resolved_join_ip="$(
       remote getent ahostsv4 "$existing_fqdn" |
         awk 'NR == 1 { print $1 }'
@@ -2880,7 +3081,7 @@ cluster_setup() {
     [[ "$resolved_join_ip" == "$existing_private" ]] ||
       fail "$existing_fqdn resolves to ${resolved_join_ip:-nothing} on $HOST_ID; expected private address $existing_private"
     fingerprint_output="$(
-      # shellcheck disable=SC2016 # The script expands on trusted mox1.
+      # shellcheck disable=SC2016 # The script expands on the trusted control node.
       cluster_control bash -c '
         certificate=/etc/pve/local/pve-ssl.pem
         if [[ -s /etc/pve/local/pveproxy-ssl.pem ]]; then
@@ -2888,10 +3089,10 @@ cluster_setup() {
         fi
         openssl x509 -in "$certificate" -noout -sha256 -fingerprint
       '
-    )" || fail "Could not obtain mox1's cluster certificate fingerprint through trusted SSH"
+    )" || fail "Could not obtain ${EXISTING_NODE}'s cluster certificate fingerprint through trusted SSH"
     cluster_fingerprint="${fingerprint_output#*=}"
     [[ "$cluster_fingerprint" =~ ^([0-9A-F]{2}:){31}[0-9A-F]{2}$ ]] ||
-      fail "mox1 returned an invalid SHA-256 cluster certificate fingerprint"
+      fail "${EXISTING_NODE} returned an invalid SHA-256 cluster certificate fingerprint"
     served_fingerprint_output="$(
       remote_script "$existing_fqdn" <<'REMOTE'
 set -Eeuo pipefail
@@ -2906,7 +3107,7 @@ REMOTE
     remove_qdevice_before_membership_change
     printf '\nThe Proxmox join command will use %s at verified private address %s.\n' \
       "$existing_fqdn" "$existing_private"
-    info "Pinned mox1 X.509 fingerprint: $cluster_fingerprint"
+    info "Pinned ${EXISTING_NODE} X.509 fingerprint: $cluster_fingerprint"
     printf 'The command will prompt only for root@pam credentials.\n'
     local -a options
     mapfile -t options < <(ssh_options)
@@ -2918,7 +3119,7 @@ REMOTE
       }
     enable_admin_ssh_for_target
     retire_setup_key_with_admin_identity
-    wait_for_all_cluster_nodes_online "$MOX_INDEX"
+    wait_for_all_cluster_nodes_online "$((expected_count + 1))"
   fi
 
   remote_script "$PROXMOX_MIGRATION_NETWORK" <<'REMOTE'
@@ -2938,13 +3139,18 @@ REMOTE
 }
 
 reconcile_private_cluster_ssh_trust() {
-  local node_count index node qdevice_key key_type key_data qdevice_trust
-  local qdevice_trust_b64
+  local node_count node qdevice_key key_type key_data qdevice_trust
+  local qdevice_trust_b64 members
+  local -a member_nodes=()
   node_count="$(assert_all_cluster_nodes_online)"
+  members="$(cluster_member_nodes)" ||
+    fail "Could not list cluster members through $(cluster_control_node)"
+  mapfile -t member_nodes <<<"$members"
+  ((${#member_nodes[@]} == node_count)) ||
+    fail "Cluster status reports $node_count nodes but lists ${member_nodes[*]}"
 
   log "Refreshing Proxmox 9 per-node SSH pins and private mox trust"
-  for ((index = 1; index <= node_count; index += 1)); do
-    node="mox${index}"
+  for node in "${member_nodes[@]}"; do
     ssh -o BatchMode=yes -o ClearAllForwardings=yes \
       -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
       -o "ConnectTimeout=${MOX_SSH_CONNECT_TIMEOUT:-8}" \
@@ -2971,8 +3177,7 @@ reconcile_private_cluster_ssh_trust() {
   info "$(printf '%s %s\n' "$key_type" "$key_data" | ssh-keygen -lf -) [${PROXMOX_QDEVICE_HOST} / $QDEVICE_IPV4]"
   qdevice_trust_b64="$(printf '%s\n' "$qdevice_trust" | base64 -w0)"
 
-  for ((index = 1; index <= node_count; index += 1)); do
-    node="mox${index}"
+  for node in "${member_nodes[@]}"; do
     ssh -o BatchMode=yes -o ClearAllForwardings=yes \
       -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
       -o "ConnectTimeout=${MOX_SSH_CONNECT_TIMEOUT:-8}" \
@@ -3014,17 +3219,18 @@ rm -f "$work"
 REMOTE
   done
 
-  for ((index = 1; index <= node_count; index += 1)); do
-    node="mox${index}"
+  for node in "${member_nodes[@]}"; do
     ssh -o BatchMode=yes -o ClearAllForwardings=yes \
       -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
       -o "ConnectTimeout=${MOX_SSH_CONNECT_TIMEOUT:-8}" \
-      "root@${node}" bash -s -- "$node_count" "$PROXMOX_INTERNAL_DOMAIN" \
-      "$PRIVATE_SUBNET_PREFIX" "$MOX_IP_START_OCTET" <<'REMOTE'
+      "root@${node}" bash -s -- "$PROXMOX_INTERNAL_DOMAIN" \
+      "$PRIVATE_SUBNET_PREFIX" "$MOX_IP_START_OCTET" "${member_nodes[@]}" <<'REMOTE'
 set -Eeuo pipefail
-node_count="$1"; internal_domain="$2"; prefix="$3"; mox_start="$4"
-for ((peer = 1; peer <= node_count; peer += 1)); do
-  peer_node="mox${peer}"
+internal_domain="$1"; prefix="$2"; mox_start="$3"
+shift 3
+for peer_node in "$@"; do
+  [[ "$peer_node" =~ ^mox([1-9]|10)$ ]]
+  peer="${peer_node#mox}"
   peer_fqdn="${peer_node}.${internal_domain}"
   peer_ip="${prefix}.$((mox_start + peer - 1))"
   [[ "$(getent ahostsv4 "$peer_fqdn" | awk 'NR == 1 { print $1 }')" == "$peer_ip" ]]
@@ -3048,7 +3254,7 @@ remove_qdevice_setup_key() {
   local cluster_key key_b64
   cluster_key="$(cluster_control cat /root/.ssh/id_rsa.pub)"
   [[ "$cluster_key" == ssh-rsa\ * ]] ||
-    fail "Could not obtain mox1's QDevice setup SSH key for cleanup"
+    fail "Could not obtain $(cluster_control_node)'s QDevice setup SSH key for cleanup"
   key_b64="$(printf '%s' "$cluster_key" | base64 -w0)"
   ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
     "root@${PROXMOX_QDEVICE_HOST}" "KEY_B64='$key_b64' bash -s" <<'REMOTE'
@@ -3073,7 +3279,7 @@ setup_qdevice_vote() {
   fi
   cluster_key="$(cluster_control cat /root/.ssh/id_rsa.pub)"
   [[ "$cluster_key" == ssh-rsa\ * ]] ||
-    fail "Could not obtain mox1's QDevice setup SSH key"
+    fail "Could not obtain $(cluster_control_node)'s QDevice setup SSH key"
   key_b64="$(printf '%s' "$cluster_key" | base64 -w0)"
   # shellcheck disable=SC2029 # key_b64 is restricted to base64 output.
   ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
@@ -3144,9 +3350,28 @@ reconcile_qdevice() {
   write_state qdevice-configured "present-for-${node_count}-node-cluster"
 }
 
+# A joining host may have started before its control node created the cluster.
+# Wait outside the control-plane locks, which the control node itself needs in
+# order to create the cluster.
+wait_for_control_node_cluster() {
+  local deadline=$((SECONDS + 1800))
+  [[ "$SETUP_ROLE" == join && "$EXISTING_NODE" != "$HOST_ID" ]] || return 0
+  cluster_control test -s /etc/pve/corosync.conf </dev/null 2>/dev/null && return 0
+  info "Waiting for control node $EXISTING_NODE to be reachable and to create the cluster..."
+  until cluster_control test -s /etc/pve/corosync.conf </dev/null 2>/dev/null; do
+    ((SECONDS < deadline)) ||
+      fail "Control node $EXISTING_NODE did not create a reachable cluster within 30 minutes. Let its setup create the cluster, verify this workstation can SSH to root@${EXISTING_NODE}, then rerun to resume."
+    sleep 15
+  done
+  info "Control node $EXISTING_NODE has created the cluster."
+}
+
 reconcile_cluster_control_plane() {
   local cluster_lock_file="${ARTIFACTS_DIR}/cluster-control-plane.lock"
-  local cluster_lock_fd remote_lock_command
+  local cluster_lock_fd remote_lock_command lock_host="$CONTROL_NODE"
+  [[ "$lock_host" =~ ^mox([1-9]|10)$ ]] ||
+    fail "The cluster control node is unknown; cannot take the control-plane lock"
+  wait_for_control_node_cluster
   exec {cluster_lock_fd}>"$cluster_lock_file"
   chmod 0600 "$cluster_lock_file"
   info "Waiting for exclusive cluster membership, SSH-trust, and QDevice reconciliation..."
@@ -3156,16 +3381,17 @@ reconcile_cluster_control_plane() {
     printf '%s:%s:%s' "$HOST_ID" "$(date -u +%Y%m%dT%H%M%SZ)" \
       "$(openssl rand -hex 16)"
   )"
-  # shellcheck disable=SC2016 # The lock program expands only on mox1.
+  # shellcheck disable=SC2016 # The lock program expands only on the lock host.
   printf -v remote_lock_command '%q ' bash -c '
     set -Eeuo pipefail
     token="$1"
+    host="$2"
     lease=/run/lock/app-ha-cluster-control-plane.lease
     lock=/run/lock/app-ha-cluster-control-plane.lock
     if ! mkdir "$lease" 2>/dev/null; then
       owner="$(cat "$lease/owner" 2>/dev/null || printf unknown)"
-      printf "Cluster control-plane lease already exists on mox1 (owner: %s). Verify that no installer is active; if it is stale, remove %s manually on mox1.\n" \
-        "$owner" "$lease" >&2
+      printf "Cluster control-plane lease already exists on %s (owner: %s). Verify that no installer is active; if it is stale, remove %s manually on %s.\n" \
+        "$host" "$owner" "$lease" "$host" >&2
       exit 1
     fi
     printf "%s\n" "$token" >"$lease/owner"
@@ -3177,11 +3403,11 @@ reconcile_cluster_control_plane() {
     IFS= read -r release || exit 2
     [[ "$release" == "RELEASE:${token}" ]] || exit 3
     rm -rf -- "$lease"
-  ' _ "$REMOTE_CLUSTER_LOCK_TOKEN"
+  ' _ "$REMOTE_CLUSTER_LOCK_TOKEN" "$lock_host"
   coproc REMOTE_CLUSTER_LOCK_PROCESS {
     ssh -o BatchMode=yes -o ClearAllForwardings=yes \
       -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-      -o "ConnectTimeout=${MOX_SSH_CONNECT_TIMEOUT:-8}" root@mox1 \
+      -o "ConnectTimeout=${MOX_SSH_CONNECT_TIMEOUT:-8}" "root@${lock_host}" \
       "$remote_lock_command"
   }
   REMOTE_CLUSTER_LOCK_READ_FD="${REMOTE_CLUSTER_LOCK_PROCESS[0]}"
@@ -3189,9 +3415,9 @@ reconcile_cluster_control_plane() {
   REMOTE_CLUSTER_LOCK_PID="$REMOTE_CLUSTER_LOCK_PROCESS_PID"
   local remote_lock_status=""
   IFS= read -r -u "$REMOTE_CLUSTER_LOCK_READ_FD" remote_lock_status ||
-    fail "Could not acquire the cluster control-plane lock hosted on mox1"
+    fail "Could not acquire the cluster control-plane lock hosted on ${lock_host}"
   [[ "$remote_lock_status" == LOCKED ]] ||
-    fail "Unexpected response while acquiring the mox1 cluster control-plane lock"
+    fail "Unexpected response while acquiring the ${lock_host} cluster control-plane lock"
   CLUSTER_CONTROL_LOCK_HELD=1
   configure_cluster_host_resolution
   cluster_setup
@@ -3530,7 +3756,7 @@ install_shared_orchestration_tools() {
     "$GUEST_ROLE_HOOK_COMPAT_NAME" "$PROXMOX_INTERNAL_DOMAIN" \
     "$MOX_IP_START" "$MOX_IP_END" "$HAPROXY_IP_START" "$HAPROXY_IP_END" \
     "$PRODUCTION_IP_START" "$PRODUCTION_IP_END" \
-    "$STAGING_IP_START" "$STAGING_IP_END" <<'REMOTE'
+    "$STAGING_IP_START" "$STAGING_IP_END" "$CONTROL_NODE" <<'REMOTE'
 set -Eeuo pipefail
 source_dir="$1"; state_dir="$2"; network="$3"; guest_gateway="$4"
 max_hosts="$5"; production_tag="$6"; staging_tag="$7"; evictable_tag="$8"
@@ -3543,6 +3769,8 @@ mox_ip_start="${20}"; mox_ip_end="${21}"
 haproxy_ip_start="${22}"; haproxy_ip_end="${23}"
 production_ip_start="${24}"; production_ip_end="${25}"
 staging_ip_start="${26}"; staging_ip_end="${27}"
+control_node="${28}"
+[[ "$control_node" =~ ^mox([1-9]|10)$ ]]
 install_root=/usr/local/lib/app-ha-proxmox
 
 if ! command -v fuser >/dev/null 2>&1 ||
@@ -3950,6 +4178,17 @@ replication_minutes="${replication_schedule##*/}"
   --staging-memory-mb "$staging_memory" \
   --staging-disk-gib "$staging_disk" \
   --replication-interval "$replication_minutes" >/dev/null
+
+# Record every member's host slot, then the control node if none is recorded.
+"$install_root/lib/cluster_registry.py" --state-dir "$state_dir" \
+  host-sync --live >/dev/null
+recorded_control="$(
+  "$install_root/lib/cluster_registry.py" --state-dir "$state_dir" control-get
+)"
+if [[ "$recorded_control" == null ]]; then
+  "$install_root/lib/cluster_registry.py" --state-dir "$state_dir" \
+    control-set "$control_node" --expected-node none >/dev/null
+fi
 REMOTE
   write_state shared-orchestration-tools-installed
 }
@@ -4381,6 +4620,12 @@ NOTE: You can typically run multiple instances of this script concurrently
 for different Proxmox hosts. Some operations may still collide because not
 every concurrency issue has been eliminated. If an instance fails, rerun it;
 the workflow is resumable and will generally continue from where it stopped.
+
+When building a brand-new cluster with concurrent instances, the other hosts
+assume the control node (PROXMOX_CONTROL_NODE) will create the cluster. At the
+"PRIVATE VLAN VERIFIED" prompt, let the control node's instance continue past
+that prompt and finish first, and only then continue past that prompt in the
+other hosts' instances, so the control node is reachable when they join.
 
 
 This script will install packages on the QDevice if it is not yet already set

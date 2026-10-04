@@ -208,7 +208,7 @@ Flags:            Quorate Qdevice
         self.assertIn("bootable media supported by the target host", completed.stdout)
         self.assertNotIn("iDRAC", completed.stdout)
 
-    def test_manual_inventory_requires_exact_pair_capacities(self) -> None:
+    def test_manual_inventory_allows_pair_capacities_within_one_percent(self) -> None:
         self.run_bash(
             """
             STATE_DIR="$(mktemp -d)"
@@ -216,12 +216,12 @@ Flags:            Quorate Qdevice
             HARDWARE_INVENTORY_MODE=manual
             HOST_SETUP_CONFIG_SHA256=config-hash
             CONFIGURED_MIRROR_PAIRS=(1 2)
-            NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
-            NVME_MIRROR_1_CAPACITY_BYTES_2=1000204886016
+            NVME_MIRROR_1_CAPACITY_BYTES_1=2000398934016
+            NVME_MIRROR_1_CAPACITY_BYTES_2=1999998934016
             NVME_MIRROR_2_CAPACITY_BYTES_1=2000398934016
             NVME_MIRROR_2_CAPACITY_BYTES_2=2000398934016
             discover_hardware
-            [[ "$(read_state mirror-1-minimum-capacity-bytes)" == 1000204886016 ]]
+            [[ "$(read_state mirror-1-minimum-capacity-bytes)" == 1999998934016 ]]
             [[ "$(read_state mirror-2-minimum-capacity-bytes)" == 2000398934016 ]]
             [[ "$(read_state hardware-verified)" == manual ]]
             [[ "$(read_state zfs-hdsize-gib)" =~ ^[1-9][0-9]*$ ]]
@@ -253,12 +253,12 @@ Flags:            Quorate Qdevice
             HOST_SETUP_CONFIG_SHA256=config-hash
             CONFIGURED_MIRROR_PAIRS=(1)
             NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
-            NVME_MIRROR_1_CAPACITY_BYTES_2=1000204886017
+            NVME_MIRROR_1_CAPACITY_BYTES_2=980000000000
             discover_hardware
             """,
             expected=1,
         )
-        self.assertIn("identical byte capacities", completed.stderr)
+        self.assertIn("differ by more than 1%", completed.stderr)
 
     def test_inventory_helper_uses_live_host_state(self) -> None:
         text = INVENTORY_SCRIPT.read_text()
@@ -438,7 +438,7 @@ Flags:            Quorate Qdevice
     def test_private_identity_join_and_ssh_trust_are_reconciled_before_qdevice(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         main = source[source.index("main() {") :]
-        self.assertIn("mox1.${PROXMOX_INTERNAL_DOMAIN}", source)
+        self.assertIn("${EXISTING_NODE}.${PROXMOX_INTERNAL_DOMAIN}", source)
         self.assertIn("PROXMOX_INTERNAL_DOMAIN", source)
         self.assertIn("# BEGIN app-ha managed mox private identities", source)
         self.assertIn("/etc/pve/nodes/${peer_node}/ssh_known_hosts", source)
@@ -447,7 +447,9 @@ Flags:            Quorate Qdevice
         self.assertIn("/etc/ssh/ssh_host_ed25519_key.pub", source)
         self.assertIn("--fingerprint '${cluster_fingerprint}'", source)
         self.assertIn('openssl s_client -connect "${fqdn}:8006"', source)
-        join_preflight = source[source.index('existing_fqdn="mox1.${PROXMOX_INTERNAL_DOMAIN}"') :]
+        join_preflight = source[
+            source.index('existing_fqdn="${EXISTING_NODE}.${PROXMOX_INTERNAL_DOMAIN}"') :
+        ]
         self.assertLess(
             join_preflight.index("served_fingerprint"),
             join_preflight.index("remove_qdevice_before_membership_change"),
@@ -701,6 +703,82 @@ Flags:            Quorate Qdevice
         self.assertNotIn("root-password =", source)
         self.assertIn("curl --config -", source)
         self.assertNotIn('--user "$IDRAC_USER:$IDRAC_PASSWORD"', source)
+
+    def choose_role_body(self, host: str, control: str, members: str, extra: str = "") -> str:
+        return f"""
+            STATE_DIR="$(mktemp -d)"
+            trap 'rm -rf "$STATE_DIR"' EXIT
+            HOST_ID={host}
+            PROXMOX_CLUSTER_NAME=MyAppCloud
+            resolve_control_node() {{
+              CONTROL_NODE={control}
+              CONTROL_MEMBER_NODES=({members})
+              CONTROL_ONLINE_NODES=({members})
+              CONTROL_PROBE_NODE="${{CONTROL_MEMBER_NODES[0]:-}}"
+            }}
+            confirm_exact() {{ printf 'CONFIRM %s\\n' "$1"; }}
+            {extra}
+            choose_role
+            printf 'ROLE=%s EXISTING=%s CONTROL=%s\\n' \\
+              "$SETUP_ROLE" "$EXISTING_NODE" "$(cluster_control_node)"
+            """
+
+    def test_control_node_creates_cluster_only_when_no_member_is_reachable(self) -> None:
+        created = self.run_bash(self.choose_role_body("mox1", "mox1", ""))
+        self.assertIn("CONFIRM No member of an existing Proxmox cluster", created.stdout)
+        self.assertIn("ROLE=first EXISTING=none CONTROL=mox1", created.stdout)
+
+        assumed = self.run_bash(self.choose_role_body("mox2", "mox1", ""))
+        self.assertIn("Assuming control node mox1 will create the cluster", assumed.stdout)
+        self.assertIn("ROLE=join EXISTING=mox1 CONTROL=mox1", assumed.stdout)
+        self.assertNotIn("CONFIRM", assumed.stdout)
+
+        resumed = self.run_bash(
+            self.choose_role_body(
+                "mox2", "mox1", "", "write_state setup-role join; write_state existing-node mox1"
+            )
+        )
+        self.assertIn("ROLE=join EXISTING=mox1 CONTROL=mox1", resumed.stdout)
+
+    def test_hosts_join_through_the_control_node_and_slots_may_have_gaps(self) -> None:
+        joined = self.run_bash(self.choose_role_body("mox1", "mox3", "mox3 mox4"))
+        self.assertIn("ROLE=join EXISTING=mox3 CONTROL=mox3", joined.stdout)
+        self.assertNotIn("CONFIRM", joined.stdout)
+
+        member = self.run_bash(self.choose_role_body("mox3", "mox3", "mox3 mox4"))
+        self.assertIn("ROLE=join EXISTING=mox3 CONTROL=mox3", member.stdout)
+
+        stale_first = self.run_bash(
+            self.choose_role_body(
+                "mox1",
+                "mox3",
+                "mox3 mox4",
+                "write_state setup-role first; write_state existing-node none",
+            ),
+            expected=1,
+        )
+        self.assertIn("already exist without it", stale_first.stderr)
+
+        resumed = self.run_bash(
+            self.choose_role_body(
+                "mox5",
+                "mox4",
+                "mox3 mox4",
+                "write_state setup-role join; write_state existing-node mox1",
+            )
+        )
+        self.assertIn("ROLE=join EXISTING=mox4 CONTROL=mox4", resumed.stdout)
+
+    def test_cluster_wide_loops_use_live_members_instead_of_contiguous_slots(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("Configured nodes must be contiguous", source)
+        self.assertNotIn("root@mox1", source)
+        self.assertNotIn('[[ "$HOST_ID" == mox1 ]]', source)
+        self.assertIn('"root@${lock_host}"', source)
+        self.assertIn("host-sync --live", source)
+        self.assertIn('control-set "$control_node" --expected-node none', source)
+        self.assertIn("reserve_registry_host_slot", source)
+        self.assertIn("/etc/pve/nodes/${HOST_ID} still exists", source)
 
 
 

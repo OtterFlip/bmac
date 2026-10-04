@@ -22,8 +22,11 @@
 # configured pair follows the clear or LUKS storage policy selected by the host
 # setup run.
 # Corresponding *_CAPACITY_BYTES_* values are required only when running
-# setup_proxmox_host.sh without iDRAC/Redfish inventory; gather them with
-# hosts/inventory_disks.sh.
+# setup_proxmox_host.sh without iDRAC/Redfish inventory. Without iDRAC, gather
+# serials and capacities by running hosts/cluster_setup_prereq.sh in a Linux
+# Live environment booted on this machine; with iDRAC, read the serials in the
+# iDRAC web UI. The two disks of a pair may differ in capacity by
+# up to 1%, and either may be listed first: the mirror uses the smaller one.
 NVME_MIRROR_1_SERIAL_1=ABCD012345678900BGN
 NVME_MIRROR_1_SERIAL_2=DEFD012345678900BGN
 NVME_MIRROR_1_CAPACITY_BYTES_1=2000398934016
@@ -54,6 +57,9 @@ PROXMOX_PREFIX=24
 TAILSCALE_HOSTNAME=mox1
 
 # NICs are selected by permanent MAC, never by unstable enoN names.
+# Read them in the iDRAC web UI, or run hosts/cluster_setup_prereq.sh in a
+# Linux Live environment booted on this machine.
+# In the iDRAC web UI they're under the network Port tab with the field label "Virtual MAC Addresses"
 PROXMOX_PUBLIC_MAC=AA:BB:CC:DD:EE:FF
 PROXMOX_SECONDARY_MAC=BB:AA:BB:CC:DD:EE
 PROXMOX_SECONDARY_IP=10.213.0.11/24

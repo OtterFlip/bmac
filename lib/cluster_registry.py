@@ -111,6 +111,24 @@ ORCHESTRATION_CONTRACT_KEYS = ORCHESTRATION_LEGACY_CONTRACT_KEYS | {
     "install_mode",
 }
 LEASE_KEYS = {"nonce", "owner", "acquired_at", "expires_at"}
+HOST_SLOT_KEYS = {
+    "schema_version",
+    "record_type",
+    "node",
+    "state",
+    "created_at",
+    "updated_at",
+    "revision",
+}
+HOST_SLOT_STATES = {"joining", "member"}
+CLUSTER_CONTROL_KEYS = {
+    "schema_version",
+    "record_type",
+    "control_node",
+    "created_at",
+    "updated_at",
+    "revision",
+}
 
 RESOURCE_STATES = {
     "reserved",
@@ -464,6 +482,41 @@ def validate_ingress_generation_record(value: Any) -> None:
             f"ingress route_count must be between 0 and {MAX_ROUTES}"
         )
     parse_timestamp(value["created_at"])
+
+
+def _validate_revision(value: Any, context: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise RegistryError(f"{context} revision must be positive")
+
+
+def validate_host_slot_record(value: Any, policy: dict[str, Any]) -> None:
+    if not isinstance(value, dict):
+        raise RegistryError("host slot record must be an object")
+    require_exact_keys(value, HOST_SLOT_KEYS, "host slot record")
+    if value["schema_version"] != SCHEMA_VERSION:
+        raise RegistryError("host slot schema version is unsupported")
+    if value["record_type"] != "host-slot":
+        raise RegistryError("host slot record has the wrong record_type")
+    validate_nodes([value["node"]], policy)
+    if value["state"] not in HOST_SLOT_STATES:
+        raise RegistryError(f"unknown host slot state: {value['state']!r}")
+    _validate_revision(value["revision"], "host slot")
+    parse_timestamp(value["created_at"])
+    parse_timestamp(value["updated_at"])
+
+
+def validate_cluster_control_record(value: Any, policy: dict[str, Any]) -> None:
+    if not isinstance(value, dict):
+        raise RegistryError("cluster control record must be an object")
+    require_exact_keys(value, CLUSTER_CONTROL_KEYS, "cluster control record")
+    if value["schema_version"] != SCHEMA_VERSION:
+        raise RegistryError("cluster control schema version is unsupported")
+    if value["record_type"] != "cluster-control":
+        raise RegistryError("cluster control record has the wrong record_type")
+    validate_nodes([value["control_node"]], policy)
+    _validate_revision(value["revision"], "cluster control")
+    parse_timestamp(value["created_at"])
+    parse_timestamp(value["updated_at"])
 
 
 def validate_ingress_desired_record(
@@ -896,6 +949,8 @@ class Registry:
         self.ingress_generations_dir = self.ingress_dir / "generations"
         self.ingress_nodes_dir = self.ingress_dir / "nodes"
         self.ingress_desired_path = self.ingress_dir / "desired.json"
+        self.hosts_dir = root / "hosts"
+        self.control_path = root / "cluster-control.json"
         self.lock_timeout = lock_timeout
         self.stale_lock_seconds = stale_lock_seconds
         self.break_stale_lock = break_stale_lock
@@ -909,6 +964,7 @@ class Registry:
         ensure_directory(self.ingress_dir)
         ensure_directory(self.ingress_generations_dir)
         ensure_directory(self.ingress_nodes_dir)
+        ensure_directory(self.hosts_dir)
 
     def lock(self) -> AllocatorLock:
         self.ensure_layout()
@@ -946,6 +1002,34 @@ class Registry:
         if not MOX_RE.fullmatch(node):
             raise RegistryError(f"invalid ingress node name: {node!r}")
         return self.ingress_nodes_dir / f"{node}.json"
+
+    def host_slot_path(self, node: str) -> Path:
+        if not MOX_RE.fullmatch(node):
+            raise RegistryError(f"invalid host slot name: {node!r}")
+        return self.hosts_dir / f"{node}.json"
+
+    def host_slots(self) -> list[dict[str, Any]]:
+        policy = self.policy()
+        records: list[dict[str, Any]] = []
+        if not self.hosts_dir.exists():
+            return records
+        for path in sorted(self.hosts_dir.glob("*.json")):
+            record = read_json_file(path, "host slot record")
+            validate_host_slot_record(record, policy)
+            if path.name != f"{record['node']}.json":
+                raise RegistryError(
+                    f"host slot filename does not match record: {path}"
+                )
+            records.append(record)
+        return sorted(records, key=lambda record: int(record["node"][3:]))
+
+    def cluster_control(self) -> dict[str, Any] | None:
+        if not self.control_path.exists():
+            return None
+        policy = self.policy()
+        record = read_json_file(self.control_path, "cluster control record")
+        validate_cluster_control_record(record, policy)
+        return record
 
     def ingress_desired(self) -> dict[str, Any] | None:
         if not self.ingress_desired_path.exists():
@@ -3075,6 +3159,260 @@ def command_finalize_staging_cleanup(
         }
 
 
+def _live_cluster_members(pvesh: Path) -> list[str]:
+    raw_nodes = _run_pvesh_json(pvesh, ["get", "/nodes"])
+    if not isinstance(raw_nodes, list) or not raw_nodes:
+        raise RegistryError("pvesh /nodes returned no cluster members")
+    members: list[str] = []
+    for raw_node in raw_nodes:
+        if not isinstance(raw_node, dict):
+            raise RegistryError("pvesh returned a malformed node entry")
+        name = raw_node.get("node", raw_node.get("name"))
+        if not isinstance(name, str):
+            raise RegistryError("pvesh node entry has no node name")
+        members.append(name)
+    return members
+
+
+def _validated_members(values: Sequence[str], policy: dict[str, Any]) -> list[str]:
+    members = validate_nodes(values, policy)
+    return sorted(members, key=lambda node: int(node[3:]))
+
+
+def _node_references(
+    node: str,
+    resources: Sequence[dict[str, Any]],
+    cleanup_records: Sequence[dict[str, Any]],
+) -> list[str]:
+    references: list[str] = []
+    for resource in resources:
+        proxmox = resource["proxmox"]
+        snapshot = proxmox["snapshot"] or {}
+        if (
+            node in resource["placement"]
+            or node == resource["initial_node"]
+            or node == resource["owner_node"]
+            or node in proxmox["ha_nodes"]
+            or node in proxmox["replication_targets"]
+            or node == snapshot.get("owner_node")
+            or node in (snapshot.get("guids") or {})
+        ):
+            references.append(resource["name"])
+    for record in cleanup_records:
+        if record["node"] == node and record["state"] == "pending":
+            references.append(record["id"])
+    return references
+
+
+def command_host_list(registry: Registry, args: argparse.Namespace) -> Any:
+    return registry.host_slots()
+
+
+def command_host_references(registry: Registry, args: argparse.Namespace) -> Any:
+    """Report every resource and pending cleanup record that names a node."""
+
+    policy = registry.policy()
+    validate_nodes([args.node], policy)
+    control = registry.cluster_control()
+    return {
+        "node": args.node,
+        "control_node": control["control_node"] if control else None,
+        "references": _node_references(
+            args.node, registry.resources(), registry.cleanup_records()
+        ),
+    }
+
+
+def command_host_sync(registry: Registry, args: argparse.Namespace) -> Any:
+    """Record every live cluster member as a member slot."""
+
+    policy = registry.policy()
+    if args.live:
+        members = _validated_members(_live_cluster_members(args.pvesh), policy)
+    else:
+        members = _validated_members(flatten_nodes(args.member), policy)
+    created: list[str] = []
+    promoted: list[str] = []
+    with registry.lock():
+        slots = {record["node"]: record for record in registry.host_slots()}
+        now = utc_now()
+        for node in members:
+            record = slots.get(node)
+            if record is None:
+                record = {
+                    "schema_version": SCHEMA_VERSION,
+                    "record_type": "host-slot",
+                    "node": node,
+                    "state": "member",
+                    "created_at": now,
+                    "updated_at": now,
+                    "revision": 1,
+                }
+                created.append(node)
+            elif record["state"] == "joining":
+                record = copy.deepcopy(record)
+                record["state"] = "member"
+                record["updated_at"] = now
+                record["revision"] += 1
+                promoted.append(node)
+            else:
+                continue
+            validate_host_slot_record(record, policy)
+            atomic_write_json(registry.host_slot_path(node), record)
+            slots[node] = record
+        stale = [
+            node
+            for node, record in slots.items()
+            if record["state"] == "member" and node not in members
+        ]
+        return {
+            "members": members,
+            "created": created,
+            "promoted": promoted,
+            "stale": sorted(stale, key=lambda node: int(node[3:])),
+            "slots": registry.host_slots(),
+        }
+
+
+def command_host_next(registry: Registry, args: argparse.Namespace) -> Any:
+    """Return the lowest slot that has no registry record and is not excluded."""
+
+    policy = registry.policy()
+    excluded = set(validate_nodes(flatten_nodes(args.exclude), policy, allow_empty=True))
+    used = {record["node"] for record in registry.host_slots()}
+    for index in range(1, policy["limits"]["max_hosts"] + 1):
+        node = f"mox{index}"
+        if node not in used and node not in excluded:
+            return {"node": node}
+    raise RegistryError(
+        f"every host slot through mox{policy['limits']['max_hosts']} is in use"
+    )
+
+
+def command_host_reserve(registry: Registry, args: argparse.Namespace) -> Any:
+    policy = registry.policy()
+    validate_nodes([args.node], policy)
+    with registry.lock():
+        path = registry.host_slot_path(args.node)
+        if path.exists():
+            record = read_json_file(path, "host slot record")
+            validate_host_slot_record(record, policy)
+            if record["state"] == "member":
+                if args.allow_member:
+                    return {"created": False, "slot": record}
+                raise RegistryError(f"{args.node} is already a cluster member slot")
+            return {"created": False, "slot": record}
+        now = utc_now()
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "record_type": "host-slot",
+            "node": args.node,
+            "state": "joining",
+            "created_at": now,
+            "updated_at": now,
+            "revision": 1,
+        }
+        validate_host_slot_record(record, policy)
+        atomic_write_json(path, record)
+        return {"created": True, "slot": record}
+
+
+def command_host_release(registry: Registry, args: argparse.Namespace) -> Any:
+    """Archive and free one host slot that no registry record references."""
+
+    policy = registry.policy()
+    validate_nodes([args.node], policy)
+    if len(args.reason) > 240 or "\n" in args.reason:
+        raise RegistryError("release reason must be one line of at most 240 characters")
+    with registry.lock():
+        path = registry.host_slot_path(args.node)
+        if not path.exists():
+            return {"released": False, "node": args.node, "reason": "slot-absent"}
+        record = read_json_file(path, "host slot record")
+        validate_host_slot_record(record, policy)
+        if args.expected_state is not None and record["state"] != args.expected_state:
+            raise RegistryError(
+                f"{args.node} slot is {record['state']}, not {args.expected_state}"
+            )
+        control = registry.cluster_control()
+        if control is not None and control["control_node"] == args.node:
+            raise RegistryError(
+                f"{args.node} is the cluster control node; set a new control "
+                "node before releasing its slot"
+            )
+        references = _node_references(
+            args.node, registry.resources(), registry.cleanup_records()
+        )
+        if references:
+            raise RegistryError(
+                f"cannot release {args.node}; registry records still reference it: "
+                + ", ".join(references)
+            )
+        now = utc_now()
+        history = {
+            "schema_version": SCHEMA_VERSION,
+            "record_type": "host-release",
+            "released_at": now,
+            "reason": args.reason,
+            "slot": record,
+        }
+        history_path = registry.history_dir / (
+            f"{now.replace(':', '').replace('+00:00', 'Z')}-"
+            f"{args.node}-{uuid.uuid4().hex[:8]}.json"
+        )
+        registry.prune_history(MAX_HISTORY_RECORDS - 1)
+        atomic_write_json(history_path, history)
+        path.unlink()
+        _fsync_directory(registry.hosts_dir)
+        return {"released": True, "node": args.node, "history": str(history_path)}
+
+
+def command_control_get(registry: Registry, args: argparse.Namespace) -> Any:
+    return registry.cluster_control()
+
+
+def command_control_set(registry: Registry, args: argparse.Namespace) -> Any:
+    policy = registry.policy()
+    validate_nodes([args.node], policy)
+    with registry.lock():
+        slots = {record["node"]: record for record in registry.host_slots()}
+        slot = slots.get(args.node)
+        if slot is None or slot["state"] != "member":
+            raise RegistryError(
+                f"{args.node} is not a recorded cluster member slot; run host-sync first"
+            )
+        current = registry.cluster_control()
+        if (
+            args.expected_node is not None
+            and (current["control_node"] if current else "none") != args.expected_node
+        ):
+            raise RegistryError(
+                "cluster control node changed: expected "
+                f"{args.expected_node}, found "
+                f"{current['control_node'] if current else 'none'}"
+            )
+        now = utc_now()
+        if current is None:
+            updated = {
+                "schema_version": SCHEMA_VERSION,
+                "record_type": "cluster-control",
+                "control_node": args.node,
+                "created_at": now,
+                "updated_at": now,
+                "revision": 1,
+            }
+        elif current["control_node"] == args.node:
+            return {"changed": False, "control": current}
+        else:
+            updated = copy.deepcopy(current)
+            updated["control_node"] = args.node
+            updated["updated_at"] = now
+            updated["revision"] += 1
+        validate_cluster_control_record(updated, policy)
+        atomic_write_json(registry.control_path, updated)
+        return {"changed": True, "control": updated}
+
+
 def build_routes(resources: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     routes: list[dict[str, Any]] = []
     for resource in resources:
@@ -4397,6 +4735,86 @@ def build_parser() -> argparse.ArgumentParser:
         help="mark stale reservations failed and explicit cleanup ids completed",
     )
     reconcile.set_defaults(handler=command_reconcile)
+
+    host_list = subparsers.add_parser(
+        "host-list", help="list recorded moxN host slots"
+    )
+    host_list.set_defaults(handler=command_host_list)
+
+    host_references = subparsers.add_parser(
+        "host-references",
+        help="list resources and pending cleanup records that reference a node",
+    )
+    host_references.add_argument("node")
+    host_references.set_defaults(handler=command_host_references)
+
+    host_sync = subparsers.add_parser(
+        "host-sync",
+        help="record every current cluster member as a member host slot",
+    )
+    members_source = host_sync.add_mutually_exclusive_group(required=True)
+    members_source.add_argument(
+        "--member",
+        action="append",
+        help="current cluster member; repeat or comma-separate",
+    )
+    members_source.add_argument(
+        "--live",
+        action="store_true",
+        help="read cluster membership from the local Proxmox API",
+    )
+    host_sync.add_argument(
+        "--pvesh",
+        type=Path,
+        default=Path("/usr/bin/pvesh"),
+        help="absolute pvesh path used with --live (default: /usr/bin/pvesh)",
+    )
+    host_sync.set_defaults(handler=command_host_sync)
+
+    host_next = subparsers.add_parser(
+        "host-next", help="report the lowest unrecorded moxN host slot"
+    )
+    host_next.add_argument(
+        "--exclude",
+        action="append",
+        help="slot the caller knows is in use; repeat or comma-separate",
+    )
+    host_next.set_defaults(handler=command_host_next)
+
+    host_reserve = subparsers.add_parser(
+        "host-reserve", help="reserve one moxN host slot for a joining host"
+    )
+    host_reserve.add_argument("node")
+    host_reserve.add_argument(
+        "--allow-member",
+        action="store_true",
+        help="succeed without change when the slot is already a member",
+    )
+    host_reserve.set_defaults(handler=command_host_reserve)
+
+    host_release = subparsers.add_parser(
+        "host-release",
+        help="archive and free one unreferenced moxN host slot",
+    )
+    host_release.add_argument("node")
+    host_release.add_argument("--expected-state", choices=sorted(HOST_SLOT_STATES))
+    host_release.add_argument("--reason", default="host removed from the cluster")
+    host_release.set_defaults(handler=command_host_release)
+
+    control_get = subparsers.add_parser(
+        "control-get", help="read the recorded cluster control node"
+    )
+    control_get.set_defaults(handler=command_control_get)
+
+    control_set = subparsers.add_parser(
+        "control-set", help="record the cluster control node"
+    )
+    control_set.add_argument("node")
+    control_set.add_argument(
+        "--expected-node",
+        help="current control node, or none; refuses if it differs",
+    )
+    control_set.set_defaults(handler=command_control_set)
     return parser
 
 

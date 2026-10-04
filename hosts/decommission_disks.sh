@@ -9,7 +9,8 @@
 # copies, scrubs rpool, and offers only vdevs whose removal keeps at least the
 # operator's minimum free space. ZFS removes one top-level vdev at a time, so
 # each run starts at most one removal; hosts/inventory_disks.sh finalizes a
-# completed removal and reports when its disks can be pulled.
+# completed removal, leaving its disks with no partitions or signatures (a
+# metadata-only release, not a data wipe), and reports when they can be pulled.
 
 set -Eeuo pipefail
 set +x
@@ -44,6 +45,10 @@ starts its removal:
 Trims and scrubs completed in the last 24 hours are recorded on the host and
 not repeated, so an interrupted run can simply be started again. Run the
 script once per vdev; ZFS removes one top-level vdev at a time.
+
+After the evacuation, hosts/inventory_disks.sh finalizes the removal: it
+erases only the disks' metadata (LUKS key slots, ZFS labels, signatures, and
+the partition table) so they show as blank. It does not overwrite their data.
 EOF
 }
 
