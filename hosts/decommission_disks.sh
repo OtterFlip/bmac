@@ -452,6 +452,7 @@ while true; do
   printf 'Enter a number from the list.\n'
 done
 VDEV="${ELIGIBLE[choice - 1]}"
+VDEV_STATE="$(dw_json "$LAYOUT" "next(v['state'] for v in d['vdevs'] if v['name'] == '$VDEV')")"
 
 REQUEST="$(python3 - "$LAYOUT" "$VDEV" <<'PY'
 import json
@@ -543,3 +544,35 @@ printf '\n%s has been marked for removal from rpool on %s. ZFS is copying its da
 printf 'onto the other vdevs. You must run\n  hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
 printf 'to finalize retirement after evacuation and determine which disks are safe to pull. To remove another vdev, run this\n'
 printf 'script again after this removal completes.\n'
+
+[[ "$VDEV_STATE" != ONLINE ]] || exit 0
+
+# ZFS keeps a removed vdev as a hidden indirect vdev that remembers the state
+# it had when removal started, so rpool reports DEGRADED until a scrub.
+dw_section "Clearing the leftover DEGRADED state"
+printf '%s was %s when its removal started. Once the evacuation finishes, rpool\n' "$VDEV" "$VDEV_STATE"
+printf 'keeps reporting DEGRADED even though every remaining disk is ONLINE, until\n'
+printf 'a scrub re-evaluates it.\n'
+if ! dw_ready "wait for the evacuation of $VDEV (zpool wait -t remove rpool), then scrub rpool (zpool scrub -w rpool)" \
+  "as long as the evacuation plus one scrub"; then
+  printf '\nAfter the evacuation completes, clear the DEGRADED state with\n'
+  printf '  ssh %s zpool scrub -w rpool\n' "$DW_HOST"
+  printf 'and finalize the retirement of %s with\n' "$VDEV"
+  printf '  hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
+  exit 0
+fi
+dw_on_host zpool wait -t remove rpool ||
+  dw_die "waiting for the evacuation failed; run zpool scrub -w rpool on $DW_HOST after it completes"
+dw_on_host zpool scrub -w rpool ||
+  dw_die "the scrub did not complete; run zpool scrub -w rpool on $DW_HOST again"
+dw_collect_layout "$LAYOUT"
+SCAN="$(dw_json "$LAYOUT" '(d["pool"]["scan"] or "").splitlines()[0] if d["pool"]["scan"] else ""')"
+if [[ "$SCAN" == *scrub* ]]; then
+  dw_state record-scrub --result "$SCAN" >/dev/null ||
+    printf 'WARNING: could not record the scrub on %s.\n' "$DW_HOST" >&2
+  printf '  %s\n' "$SCAN"
+fi
+printf 'rpool on %s now reports state %s.\n' "$DW_HOST" \
+  "$(dw_json "$LAYOUT" 'd["pool"]["state"] or "unknown"')"
+printf '\nThe evacuation of %s is complete. Finalize its retirement now with\n' "$VDEV"
+printf '  hosts/inventory_disks.sh --host %s\n' "$DW_HOST"

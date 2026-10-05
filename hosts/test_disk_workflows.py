@@ -321,6 +321,14 @@ elif words[:2] == ["pvesr", "schedule-now"]:
 elif words == ["zpool", "scrub", "-w", "rpool"] or words == ["zpool", "wait", "-t", "scrub", "rpool"]:
     act("zpool", *words[1:])
     layout["pool"]["scan"] = "scrub repaired 0B in 03:12:44 with 0 errors on Thu Sep 25 03:12:44 2026"
+    if not layout["pool"]["removal_in_progress"]:
+        layout["pool"]["state"] = "ONLINE"
+    save()
+elif words == ["zpool", "wait", "-t", "remove", "rpool"]:
+    act("zpool", *words[1:])
+    layout["pool"]["removal_in_progress"] = False
+    layout["pool"]["remove"] = "Removal of vdev 1 copied 1.66G in 0h0m, completed on Thu Sep 25 04:01:00 2026"
+    layout["vdevs"] = [vdev for vdev in layout["vdevs"] if not vdev["removing"]]
     save()
 elif words[:3] == ["zpool", "remove", "rpool"]:
     act("zpool", *words[1:])
@@ -1105,6 +1113,8 @@ class DiskWorkflowTest(unittest.TestCase):
             for disk in devices["blockdevices"]
         ]
         layout = healthy_layout(status_text=status, lsblk_text=json.dumps(devices))
+        layout["pool"]["state"] = "DEGRADED"
+        layout["vdevs"][1]["state"] = "DEGRADED"
         return make_clear(layout) if clear else layout
 
     def decommission_mirror_1(self, layout: dict, expected: int = 0) -> subprocess.CompletedProcess[str]:
@@ -1127,6 +1137,40 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertEqual([m["serial"] for m in members], ["S2EXTRA1", None])
         self.assertEqual([m["mapper"] for m in members], [None, None])
         self.assertFalse(members[1]["luks"])
+        self.assertIn("ssh mox1 zpool scrub -w rpool", completed.stdout)
+        self.assertTrue(
+            completed.stdout.rstrip().endswith("hosts/inventory_disks.sh --host mox1")
+        )
+        self.assertNotIn(["zpool", "wait", "-t", "remove", "rpool"], self.actions("zpool"))
+
+    def test_decommission_scrubs_away_the_stale_degraded_state(self) -> None:
+        recent = int(time.time()) - 60
+        self.seed_host_state(
+            trims={"prod1": {"completed_at": recent}, "prod2": {"completed_at": recent}},
+            scrubs=[{"completed_at": recent, "result": "scrub repaired 0B with 0 errors"}],
+        )
+        self.update_fake(layout=self.offlined_mirror_1_layout(clear=True))
+        completed = self.run_script(DECOMMISSION, "Y\ny\n100\n1\nGO\ny\n")
+        self.assertIn("mirror-1 was DEGRADED when its removal started", completed.stdout)
+        self.assertEqual(
+            self.actions("zpool")[-3:],
+            [
+                ["zpool", "remove", "rpool", "mirror-1"],
+                ["zpool", "wait", "-t", "remove", "rpool"],
+                ["zpool", "scrub", "-w", "rpool"],
+            ],
+        )
+        self.assertIn("rpool on mox1 now reports state ONLINE.", completed.stdout)
+        self.assertTrue(
+            completed.stdout.rstrip().endswith(
+                "Finalize its retirement now with\n  hosts/inventory_disks.sh --host mox1"
+            )
+        )
+        self.assertEqual(len(self.host_storage_state()["scrubs"]), 2)
+
+    def test_decommission_of_a_healthy_vdev_does_not_offer_the_scrub(self) -> None:
+        completed = self.decommission_mirror_1(healthy_layout())
+        self.assertNotIn("leftover DEGRADED state", completed.stdout)
 
     def test_decommission_luks_vdev_with_an_offlined_member(self) -> None:
         completed = self.decommission_mirror_1(self.offlined_mirror_1_layout())
