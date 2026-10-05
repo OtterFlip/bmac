@@ -866,14 +866,26 @@ printf '%s\\n' "$ROOT_VOLUME"
             flags = "Quorate Qdevice" if qdevice else "Quorate"
             rows = []
             for index in range(1, node_count + 1):
-                voter_flags = "NA,NV" if index == unhealthy_node else "A,V,NMW"
                 local = " (local)" if index == 1 else ""
-                rows.append(
-                    f"0x{index:08x}          1    {voter_flags} "
-                    f"mox{index}{local}"
-                )
+                if index == unhealthy_node and not qdevice:
+                    continue
+                if qdevice:
+                    voter_flags = (
+                        "NA,NV" if index == unhealthy_node else "A,V,NMW"
+                    )
+                    rows.append(
+                        f"0x{index:08x}          1    {voter_flags} "
+                        f"mox{index}{local}"
+                    )
+                else:
+                    rows.append(f"0x{index:08x}          1 mox{index}{local}")
             if qdevice:
                 rows.append("0x00000000          1            Qdevice")
+            header = (
+                "    Nodeid      Votes    Qdevice Name"
+                if qdevice
+                else "    Nodeid      Votes Name"
+            )
             return "\n".join(
                 (
                     "Name:             production-test",
@@ -882,11 +894,50 @@ printf '%s\\n' "$ROOT_VOLUME"
                     f"Expected votes:   {votes}",
                     f"Total votes:      {votes}",
                     f"Flags:            {flags}",
-                    "    Nodeid      Votes    Qdevice Name",
+                    "",
+                    "Membership information",
+                    "----------------------",
+                    header,
                     *rows,
                     "",
                 )
             )
+
+        live_three_node = "\n".join(
+            (
+                "Cluster information",
+                "-------------------",
+                "Name:             production-test",
+                "Config Version:   5",
+                "Transport:        knet",
+                "Secure auth:      on",
+                "",
+                "Quorum information",
+                "------------------",
+                "Date:             Sun Oct  4 18:11:01 2026",
+                "Quorum provider:  corosync_votequorum",
+                "Nodes:            3",
+                "Node ID:          0x00000001",
+                "Ring ID:          1.1f",
+                "Quorate:          Yes",
+                "",
+                "Votequorum information",
+                "----------------------",
+                "Expected votes:   3",
+                "Highest expected: 3",
+                "Total votes:      3",
+                "Quorum:           2  ",
+                "Flags:            Quorate ",
+                "",
+                "Membership information",
+                "----------------------",
+                "    Nodeid      Votes Name",
+                "0x00000001          1 10.213.0.11 (local)",
+                "0x00000002          1 10.213.0.12",
+                "0x00000003          1 10.213.0.13",
+                "",
+            )
+        )
 
         with tempfile.TemporaryDirectory() as temporary:
             status = Path(temporary) / "pvecm-status.txt"
@@ -903,7 +954,17 @@ printf '%s\\n' "$ROOT_VOLUME"
                     f"production-test {node_count}"
                 )
 
+            status.write_text(live_three_node, encoding="utf-8")
+            self.run_sourced(
+                f"validate_pvecm_status_file {str(status)!r} production-test 3"
+            )
+
             invalid_cases = (
+                (
+                    render_status(3, qdevice=False, unhealthy_node=2),
+                    3,
+                    "alive and voting",
+                ),
                 (render_status(4, qdevice=False), 4, "QDevice"),
                 (render_status(3, qdevice=True), 3, "no QDevice"),
                 (

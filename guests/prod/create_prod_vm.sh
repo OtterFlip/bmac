@@ -2547,21 +2547,42 @@ if (
 ):
     raise SystemExit("cluster votes or identity are inconsistent")
 node_count = int(nodes.group(1))
-voters = re.findall(
-    r"^0x([0-9a-fA-F]+)\s+([0-9]+)\s+(\S+)\s+"
-    r"(\S+)",
-    text,
-    re.M,
+# pvecm prints a per-node Qdevice flags column (A,V,NMW) only while a
+# QDevice is configured; without one, rows are "Nodeid Votes Name" and
+# corosync lists only current members.
+membership = re.search(
+    r"^Membership information\s*\n-+\s*\n(.*)\Z", text, re.M | re.S
 )
-node_ids = [int(node_id, 16) for node_id, _, _, _ in voters]
+headers = re.findall(r"^\s*Nodeid\s+Votes\s+(.*?)\s*$", text, re.M)
+if not membership or len(headers) != 1 or headers[0] not in (
+    "Qdevice Name",
+    "Name",
+):
+    raise SystemExit("cluster status has no recognizable membership table")
+has_qdevice_column = headers[0] == "Qdevice Name"
+voters = []
+qdevice_rows = []
+for line in membership.group(1).splitlines():
+    fields = line.split()
+    if not fields or not re.fullmatch(r"0x[0-9a-fA-F]+", fields[0]):
+        continue
+    if has_qdevice_column and len(fields) == 3 and fields[2] == "Qdevice":
+        qdevice_rows.append((fields[0][2:], fields[1]))
+    elif has_qdevice_column and len(fields) >= 4:
+        voters.append((fields[0][2:], fields[1], fields[2]))
+    elif not has_qdevice_column and len(fields) >= 3:
+        voters.append((fields[0][2:], fields[1], None))
+    else:
+        raise SystemExit("cluster status has a malformed membership row")
+node_ids = [int(node_id, 16) for node_id, _, _ in voters]
 if (
     len(voters) != node_count
     or len(node_ids) != len(set(node_ids))
     or any(node_id == 0 for node_id in node_ids)
-    or any(votes != "1" for _, votes, _, _ in voters)
+    or any(votes != "1" for _, votes, _ in voters)
     or any(
-        not {"A", "V"}.issubset(set(flags.split(",")))
-        for _, _, flags, _ in voters
+        flags is not None and not {"A", "V"}.issubset(set(flags.split(",")))
+        for _, _, flags in voters
     )
 ):
     raise SystemExit("every configured mox voter must be uniquely alive and voting")
@@ -2570,11 +2591,6 @@ flags_rows = re.findall(r"^Flags:\s*(.*?)\s*$", text, re.M)
 if len(flags_rows) != 1:
     raise SystemExit("cluster status must contain exactly one Flags row")
 has_qdevice_flag = "Qdevice" in flags_rows[0].split()
-qdevice_rows = re.findall(
-    r"^0x([0-9a-fA-F]+)\s+([0-9]+)\s+Qdevice\s*$",
-    text,
-    re.M,
-)
 if node_count % 2 == 0:
     required_votes = node_count + 1
     if (
@@ -2591,6 +2607,7 @@ else:
         int(expected.group(1)) != node_count
         or int(total.group(1)) != node_count
         or has_qdevice_flag
+        or has_qdevice_column
         or qdevice_rows
     ):
         raise SystemExit(
