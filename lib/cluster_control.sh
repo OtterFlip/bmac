@@ -279,9 +279,9 @@ control_offer_cluster_conf_update() {
   fi
   printf 'Every workstation that runs the host scripts must set PROXMOX_CONTROL_NODE=%s in env/cluster.conf.\n' \
     "$node"
-  IFS= read -r -p "Update PROXMOX_CONTROL_NODE in ${PROXMOX_CLUSTER_CONFIG} now? [y/N] " answer ||
-    answer=""
-  if [[ "${answer,,}" == y || "${answer,,}" == yes ]]; then
+  IFS= read -r -p "Update PROXMOX_CONTROL_NODE in ${PROXMOX_CLUSTER_CONFIG} now? [Y/n] " answer ||
+    answer=n
+  if [[ -z "$answer" || "${answer,,}" == y || "${answer,,}" == yes ]]; then
     if control_rewrite_cluster_conf "$PROXMOX_CLUSTER_CONFIG" "$node"; then
       PROXMOX_CONTROL_NODE="$node"
       printf 'Updated %s: PROXMOX_CONTROL_NODE=%s\n' "$PROXMOX_CLUSTER_CONFIG" "$node"
