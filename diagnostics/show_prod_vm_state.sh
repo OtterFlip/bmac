@@ -463,10 +463,76 @@ fi
 
 section "Production VM diagnostic verdict" \
   "summarize whether durable policy and live guest health agree."
+verdict_rc=1
 if ((contract_ready && runtime_ready)); then
   printf '  [HEALTHY] %s is active, HA-managed, replicated, routed, QGA-responsive, and reachable by strict SSH.\n' \
     "$RESOURCE_NAME"
-  exit 0
+  verdict_rc=0
+else
+  printf '  [UNHEALTHY] %s has one or more failed checks above.\n' "$RESOURCE_NAME"
 fi
-printf '  [UNHEALTHY] %s has one or more failed checks above.\n' "$RESOURCE_NAME"
-exit 1
+
+section "Hello application deployment (optional)" \
+  "report whether app/deploy_hello_app_to_prod.sh has deployed the hello app inside the guest; informational only."
+hello_answer=""
+if [[ -t 0 ]]; then
+  printf 'This check runs from this workstation using exactly: ssh %s\n' "$RESOURCE_NAME"
+  read -r -p "Check whether the hello app is deployed inside $RESOURCE_NAME? [y/N] " \
+    hello_answer || hello_answer=""
+fi
+if [[ ! "$hello_answer" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+  printf '  [SKIP] Hello application check was not run.\n'
+elif ! ssh -o BatchMode=yes -o ConnectTimeout=8 "$RESOURCE_NAME" true </dev/null; then
+  printf "  [SKIP] Could not connect with 'ssh %s' in BatchMode.\n" "$RESOURCE_NAME"
+elif ssh -o BatchMode=yes -o ConnectTimeout=8 "$RESOURCE_NAME" \
+  bash -s -- "$PRIMARY_DOMAIN" <<'GUEST'
+set -u
+set -o pipefail
+primary_domain="$1"
+site=/etc/nginx/sites-available/hello-app
+link=/etc/nginx/sites-enabled/hello-app
+index=/var/www/hello-app/index.html
+deployed=1
+
+check() {
+  local description="$1"
+  shift
+  if "$@" >/dev/null 2>&1; then
+    printf '  [PASS] %s\n' "$description"
+  else
+    printf '  [FAIL] %s\n' "$description"
+    deployed=0
+  fi
+}
+
+check "nginx is installed" command -v nginx
+check "managed NGINX site exists at $site" \
+  grep -Fq 'Managed by app/deploy_hello_app_to_prod.sh' "$site"
+check "NGINX site is enabled at $link" \
+  test "$(readlink "$link" 2>/dev/null)" = ../sites-available/hello-app
+check "hello page exists at $index" grep -Fq '<h1>Hello, world!</h1>' "$index"
+check "origin certificate and key are installed" \
+  test -s /etc/nginx/ssl/cloudflare-origin.pem -a -s /etc/nginx/ssl/cloudflare-origin.key
+check "nginx.service is active" systemctl is-active --quiet nginx
+if command -v curl >/dev/null 2>&1; then
+  check "HTTPS /healthz for $primary_domain returns ok" bash -c '
+curl --noproxy "*" -fsS -k --max-time 5 \
+  --resolve "$1:443:127.0.0.1" "https://$1/healthz" | grep -Fxq ok
+' -- "$primary_domain"
+  check "HTTPS / for $primary_domain serves the hello page" bash -c '
+curl --noproxy "*" -fsS -k --max-time 5 \
+  --resolve "$1:443:127.0.0.1" "https://$1/" | grep -Fq "<h1>Hello, world!</h1>"
+' -- "$primary_domain"
+else
+  printf '  [FAIL] curl is not installed, so local HTTPS checks cannot run\n'
+  deployed=0
+fi
+((deployed))
+GUEST
+then
+  printf '  [DEPLOYED] The hello app is deployed and serving on %s.\n' "$RESOURCE_NAME"
+else
+  printf '  [NOT DEPLOYED] The hello app is missing or incomplete on %s; see app/deploy_hello_app_to_prod.sh.\n' \
+    "$RESOURCE_NAME"
+fi
+exit "$verdict_rc"
