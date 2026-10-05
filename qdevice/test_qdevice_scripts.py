@@ -280,6 +280,67 @@ class AddQdeviceTest(unittest.TestCase):
 
 
 class PurgeQdeviceTest(unittest.TestCase):
+    def test_hosts_default_to_cluster_conf(self) -> None:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(root)], check=False))
+        env_dir, bin_dir = root / "env", root / "bin"
+        env_dir.mkdir()
+        bin_dir.mkdir()
+        (env_dir / "cluster.conf").write_text(
+            "\n".join(
+                (
+                    "PROXMOX_CLUSTER_NAME=MyAppCloud",
+                    "PROXMOX_QDEVICE_HOST=qdevice2",
+                    "PROXMOX_CONTROL_NODE=mox3",
+                    "MAX_MOX_HOSTS=10",
+                    "PROXMOX_INTERNAL_DOMAIN=pve.internal",
+                    "PRIVATE_SUBNET_CIDR=10.213.0.0/24",
+                    "PROXMOX_MIGRATION_NETWORK=10.213.0.240/28",
+                    "DATACENTER_PRIVATE_VLAN_GATEWAY=10.213.0.1",
+                    "GUEST_EGRESS_VIP=10.213.0.10/24",
+                    "MOX_IP_START=10.213.0.11",
+                    "MOX_IP_END=10.213.0.20",
+                    "MOX_REPLICATION_IP_START=10.213.0.241",
+                    "MOX_REPLICATION_IP_END=10.213.0.250",
+                    "HAPROXY_IP_START=10.213.0.21",
+                    "HAPROXY_IP_END=10.213.0.30",
+                    "PRODUCTION_IP_START=10.213.0.31",
+                    "PRODUCTION_IP_END=10.213.0.50",
+                    "STAGING_IP_START=10.213.0.51",
+                    "STAGING_IP_END=10.213.0.200",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        calls = root / "ssh-calls"
+        fake_ssh = bin_dir / "ssh"
+        fake_ssh.write_text(
+            '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >>"$FAKE_SSH_CALLS"\nexit 255\n',
+            encoding="utf-8",
+        )
+        fake_ssh.chmod(0o755)
+        completed = subprocess.run(
+            [str(PURGE_SCRIPT)],
+            input="GO\n\n\n",
+            env={
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "HOME": str(root),
+                "APP_HA_CONFIG_TEST_MODE": "1",
+                "APP_HA_ENV_DIR": str(env_dir),
+                "FAKE_SSH_CALLS": str(calls),
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("QDevice host : qdevice2", completed.stdout)
+        self.assertIn("Proxmox host : mox3", completed.stdout)
+        recorded = calls.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(recorded), 1)
+        self.assertTrue(recorded[0].endswith(" mox3 true"), recorded[0])
+
     def test_unreachable_qdevice_is_unregistered_without_contacting_it(self) -> None:
         source = PURGE_SCRIPT.read_text(encoding="utf-8")
         start = source.index("unregister_without_qdevice_host() {")

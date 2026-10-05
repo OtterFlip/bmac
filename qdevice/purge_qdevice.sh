@@ -20,11 +20,11 @@
 # Examples:
 #   ./purge_qdevice.sh
 #   ./purge_qdevice.sh qdevice
-#   ./purge_qdevice.sh qdevice mox1
+#   ./purge_qdevice.sh qdevice mox2
 #
-# Defaults when prompted:
-#   QDevice host:  qdevice
-#   Proxmox host:  mox1
+# Defaults when prompted, from env/cluster.conf:
+#   QDevice host:  PROXMOX_QDEVICE_HOST (qdevice when unset)
+#   Proxmox host:  PROXMOX_CONTROL_NODE (mox1 when unset)
 #
 # Remote privilege requirement:
 #   Each SSH target must either log in as root or allow passwordless sudo.
@@ -33,10 +33,24 @@
 # confirming execution.
 
 set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+CONFIG_LIB="${SCRIPT_DIR}/../lib/config.sh"
+[[ -f "$CONFIG_LIB" && ! -L "$CONFIG_LIB" ]] || {
+  printf 'ERROR: Missing library: %s\n' "$CONFIG_LIB" >&2
+  exit 1
+}
+# shellcheck source=../lib/config.sh
+source "$CONFIG_LIB"
+load_proxmox_config --no-secrets || {
+  printf 'ERROR: Could not load cluster configuration from %s\n' "$PROXMOX_CLUSTER_CONFIG" >&2
+  exit 1
+}
+
 IFS=$'\n\t'
 
-DEFAULT_QDEVICE_HOST="qdevice"
-DEFAULT_PVE_HOST="mox1"
+DEFAULT_QDEVICE_HOST="${PROXMOX_QDEVICE_HOST:-qdevice}"
+DEFAULT_PVE_HOST="${PROXMOX_CONTROL_NODE:-mox1}"
 SSH_OPTS=(
   -o ConnectTimeout=10
   -o ServerAliveInterval=5
@@ -50,10 +64,11 @@ Usage: $(basename "$0") [qdevice-host] [proxmox-host]
 Examples:
   $(basename "$0")
   $(basename "$0") qdevice
-  $(basename "$0") qdevice mox1
+  $(basename "$0") qdevice mox2
 
-If omitted, qdevice-host defaults to '${DEFAULT_QDEVICE_HOST}' and
-proxmox-host defaults to '${DEFAULT_PVE_HOST}' after an interactive prompt.
+If omitted, qdevice-host defaults to '${DEFAULT_QDEVICE_HOST}' (PROXMOX_QDEVICE_HOST)
+and proxmox-host defaults to '${DEFAULT_PVE_HOST}' (PROXMOX_CONTROL_NODE) from
+${PROXMOX_CLUSTER_CONFIG} after an interactive prompt.
 EOF
 }
 
