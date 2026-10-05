@@ -147,8 +147,10 @@ def record_removal(state: dict[str, Any], request: Any, now: int) -> str:
     for member in members:
         if not isinstance(member, dict) or set(member) != MEMBER_KEYS:
             raise StateError("each removal member needs exactly " + ", ".join(sorted(MEMBER_KEYS)))
-        if not member["serial"]:
-            raise StateError("every removed member must have a disk serial")
+        if not member["serial"] and member["disk"]:
+            raise StateError("every installed removed member must have a disk serial")
+    if not any(member["serial"] for member in members):
+        raise StateError("at least one removed member must be an installed disk with a serial")
     if any(row["state"] == "requested" for row in state["removals"]):
         raise StateError("another vdev removal is still recorded as in progress")
     removal_id = f"removal-{now}-{vdev}"

@@ -1087,7 +1087,98 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertIn("inventory_disks.sh --host mox1", completed.stdout)
         self.assertEqual(self.host_storage_state()["removals"][-1]["state"], "requested")
 
+    def offlined_mirror_1_layout(self, *, clear: bool = False) -> dict:
+        """S3EXTRA2's member of mirror-1 was offlined and its disk erased."""
+        leaf = (
+            "/dev/disk/by-id/nvme-S3EXTRA2-part1" if clear
+            else "/dev/mapper/crypt-rpool-mirror2-2"
+        )
+        status = strip_remove(fixtures.LUKS_STATUS).replace(
+            "\t    /dev/mapper/crypt-rpool-mirror2-2  ONLINE",
+            f"\t    {leaf}  OFFLINE",
+        )
+        assert "OFFLINE" in status
+        devices = json.loads(fixtures.LUKS_LSBLK)
+        devices["blockdevices"] = [
+            fixtures.disk("/dev/nvme3n1", "S3EXTRA2", 2000398934016)
+            if disk["serial"] == "S3EXTRA2" else disk
+            for disk in devices["blockdevices"]
+        ]
+        layout = healthy_layout(status_text=status, lsblk_text=json.dumps(devices))
+        return make_clear(layout) if clear else layout
+
+    def decommission_mirror_1(self, layout: dict, expected: int = 0) -> subprocess.CompletedProcess[str]:
+        recent = int(time.time()) - 60
+        self.seed_host_state(
+            trims={"prod1": {"completed_at": recent}, "prod2": {"completed_at": recent}},
+            scrubs=[{"completed_at": recent, "result": "scrub repaired 0B with 0 errors"}],
+        )
+        self.update_fake(layout=layout)
+        return self.run_script(DECOMMISSION, "Y\ny\n100\n1\nGO\n", expected=expected)
+
+    def test_decommission_unencrypted_vdev_with_an_erased_member(self) -> None:
+        completed = self.decommission_mirror_1(self.offlined_mirror_1_layout(clear=True))
+        self.assertIn(
+            "missing member /dev/disk/by-id/nvme-S3EXTRA2-part1; its disk is no longer installed",
+            completed.stdout,
+        )
+        self.assertIn(["zpool", "remove", "rpool", "mirror-1"], self.actions("zpool"))
+        members = self.host_storage_state()["removals"][-1]["members"]
+        self.assertEqual([m["serial"] for m in members], ["S2EXTRA1", None])
+        self.assertEqual([m["mapper"] for m in members], [None, None])
+        self.assertFalse(members[1]["luks"])
+
+    def test_decommission_luks_vdev_with_an_offlined_member(self) -> None:
+        completed = self.decommission_mirror_1(self.offlined_mirror_1_layout())
+        self.assertIn("(LUKS mapping crypt-rpool-mirror2-2)", completed.stdout)
+        members = self.host_storage_state()["removals"][-1]["members"]
+        self.assertEqual([m["serial"] for m in members], ["S2EXTRA1", None])
+        self.assertEqual(
+            [m["mapper"] for m in members],
+            ["/dev/mapper/crypt-rpool-mirror2-1", "/dev/mapper/crypt-rpool-mirror2-2"],
+        )
+        self.assertTrue(members[1]["luks"])
+
+    def test_decommission_luks_vdev_with_a_pulled_member(self) -> None:
+        layout = degraded_layout("crypt-rpool-mirror2-2", "S3EXTRA2", "S8NEW")
+        self.decommission_mirror_1(layout)
+        members = self.host_storage_state()["removals"][-1]["members"]
+        self.assertEqual(members[1]["path"], "8093158935163316232")
+        self.assertIsNone(members[1]["serial"])
+        self.assertEqual(members[1]["mapper"], "/dev/mapper/crypt-rpool-mirror2-2")
+        self.assertTrue(members[1]["luks"])
+
+    def test_decommission_refuses_a_vdev_without_an_online_disk(self) -> None:
+        layout = self.offlined_mirror_1_layout(clear=True)
+        layout["vdevs"][1]["members"][0]["state"] = "FAULTED"
+        completed = self.decommission_mirror_1(layout, expected=1)
+        self.assertIn("ZFS has no copy to evacuate", completed.stderr)
+        self.assertEqual(self.actions("zpool"), [])
+        self.assertEqual(self.host_storage_state()["removals"], [])
+
+    def test_decommission_refuses_an_installed_member_without_a_serial(self) -> None:
+        layout = healthy_layout()
+        layout["vdevs"][1]["members"][1]["serial"] = None
+        completed = self.decommission_mirror_1(layout, expected=1)
+        self.assertIn("has no disk serial; it cannot be tracked", completed.stderr)
+        self.assertEqual(self.actions("zpool"), [])
+
     # -- inventory_disks.sh -------------------------------------------------
+
+    def test_inventory_finalizes_a_removal_whose_member_was_already_gone(self) -> None:
+        self.decommission_mirror_1(self.offlined_mirror_1_layout())
+        self.update_fake(actions=[], layout=self.completed_removal_layout())
+        completed = self.run_script(INVENTORY, "y\n")
+        self.assertIn(
+            "missing member /dev/mapper/crypt-rpool-mirror2-2; its disk was already gone",
+            completed.stdout,
+        )
+        self.assertEqual(
+            self.retirements(),
+            [["tool", "retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2"]],
+        )
+        self.assertIn(["tool", "release-disks", "S2EXTRA1"], self.actions("tool"))
+        self.assertEqual(self.host_storage_state()["removals"][-1]["state"], "retired")
 
     def record_mirror_1_removal(self) -> None:
         layout = healthy_layout()

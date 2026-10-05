@@ -76,7 +76,8 @@ evacuating = re.search(r"Evacuation of (\S+) in progress", pool["remove"] or "")
 for row in state["removals"]:
     if row["state"] != "requested":
         continue
-    serials = [m["serial"] for m in row["members"]]
+    # A member whose disk was already gone at removal has no serial.
+    serials = [m["serial"] for m in row["members"] if m["serial"]]
     mappers = [
         m["mapper"].rsplit("/", 1)[-1]
         for m in row["members"] if m["luks"] and m["mapper"]
@@ -100,6 +101,30 @@ print_release_note() {
   printf 'outside the scope of these scripts.\n'
 }
 
+print_removal_members() {
+  python3 - "$STATE" "$1" <<'PY'
+import json
+import sys
+
+state = json.load(open(sys.argv[1]))
+record = next(row for row in state["removals"] if row["id"] == sys.argv[2])
+for member in record["members"]:
+    if not member["serial"]:
+        print("  missing member {path}; its disk was already gone, so nothing is released".format(
+            path=member["path"],
+        ))
+        continue
+    print(
+        "  serial {serial}  device {disk}  {size} bytes  model {model}".format(
+            serial=member["serial"],
+            disk=member["disk"],
+            size=member["disk_size"],
+            model=member["model"] or "-",
+        )
+    )
+PY
+}
+
 CHANGED=false
 for row in "${PENDING[@]}"; do
   IFS=$'\t' read -r removal_id vdev status serials mappers <<<"$row"
@@ -121,22 +146,7 @@ for row in "${PENDING[@]}"; do
       ;;
     needs-retire)
       printf 'The following disks will be finalized:\n'
-      python3 - "$STATE" "$removal_id" <<'PY'
-import json
-import sys
-
-state = json.load(open(sys.argv[1]))
-record = next(row for row in state["removals"] if row["id"] == sys.argv[2])
-for member in record["members"]:
-    print(
-        "  serial {serial}  device {disk}  {size} bytes  model {model}".format(
-            serial=member["serial"],
-            disk=member["disk"],
-            size=member["disk_size"],
-            model=member["model"] or "-",
-        )
-    )
-PY
+      print_removal_members "$removal_id"
       printf '\nFinalizing these disks will close LUKS mappings %s, remove their\n' \
         "${mappers//,/ }"
       printf 'entries from /etc/crypttab, rebuild and verify every initramfs, release the\n'
@@ -155,22 +165,7 @@ PY
       ;;
     complete)
       printf 'The following unencrypted disks will be marked retired:\n'
-      python3 - "$STATE" "$removal_id" <<'PY'
-import json
-import sys
-
-state = json.load(open(sys.argv[1]))
-record = next(row for row in state["removals"] if row["id"] == sys.argv[2])
-for member in record["members"]:
-    print(
-        "  serial {serial}  device {disk}  {size} bytes  model {model}".format(
-            serial=member["serial"],
-            disk=member["disk"],
-            size=member["disk_size"],
-            model=member["model"] or "-",
-        )
-    )
-PY
+      print_removal_members "$removal_id"
       printf '\nNo LUKS or crypttab change is needed. The disks will be released and the\n'
       printf 'host-side removal record changed to retired so they can be reported as\n'
       printf 'removable.\n'

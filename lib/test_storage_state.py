@@ -68,6 +68,22 @@ class StorageStateTest(unittest.TestCase):
                 state["replacements"]["SURVIVOR"]["serial"], "REPLACEMENT"
             )
 
+    def test_removal_may_include_a_member_whose_disk_is_gone(self) -> None:
+        state = storage_state.empty_state()
+        gone = {**MEMBERS[1], "disk": None, "serial": None, "model": None, "disk_size": None}
+        storage_state.record_removal(
+            state, {"vdev": "mirror-1", "members": [MEMBERS[0], gone]}, 100
+        )
+        self.assertIsNone(state["removals"][0]["members"][1]["serial"])
+
+        for members in ([gone], [MEMBERS[0], {**MEMBERS[1], "serial": None}]):
+            with self.assertRaises(storage_state.StateError):
+                storage_state.record_removal(
+                    storage_state.empty_state(),
+                    {"vdev": "mirror-1", "members": members},
+                    100,
+                )
+
     def test_rejects_malformed_removal(self) -> None:
         with self.assertRaises(storage_state.StateError):
             storage_state.record_removal(

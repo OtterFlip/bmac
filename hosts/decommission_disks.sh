@@ -455,11 +455,17 @@ VDEV="${ELIGIBLE[choice - 1]}"
 
 REQUEST="$(python3 - "$LAYOUT" "$VDEV" <<'PY'
 import json
+import re
 import sys
 layout, vdev_name = sys.argv[1:]
 vdev = next(v for v in json.load(open(layout))["vdevs"] if v["name"] == vdev_name)
-members = [
-    {
+mapper_re = re.compile(r"^/dev/mapper/crypt-rpool-mirror([2-5])-([12])$")
+installed = [m for m in vdev["members"] if m["serial"]]
+if not any(m["state"] == "ONLINE" for m in installed):
+    raise SystemExit("no member of this vdev is an ONLINE disk with a serial, so ZFS has no copy to evacuate")
+members = []
+for m in vdev["members"]:
+    row = {
         "path": m["path"],
         "mapper": m["mapper"],
         "luks": m["luks"],
@@ -468,10 +474,23 @@ members = [
         "model": m["model"],
         "disk_size": m["disk_size"],
     }
-    for m in vdev["members"]
-]
-if any(not m["serial"] for m in members):
-    raise SystemExit("a member of this vdev has no disk serial; it cannot be tracked for removal")
+    if not m["serial"]:
+        # A member whose disk is gone (pulled, or offlined and erased) has
+        # nothing left to release, but its LUKS mapping must still be retired.
+        if m["disk"] or m["state"] == "ONLINE":
+            raise SystemExit(f"member {m['path']} is {m['state']} but has no disk serial; it cannot be tracked for removal")
+        if not row["mapper"] and mapper_re.match(m["path"]):
+            row["mapper"] = m["path"]
+        elif not row["mapper"] and any(p["luks"] for p in installed):
+            # A pulled member shows as a GUID; extra-mirror mappings come in
+            # crypt-rpool-mirrorN-1/-2 pairs, so it used the survivor's partner.
+            partners = [mapper_re.match(p["mapper"] or "") for p in installed]
+            if len(vdev["members"]) != 2 or len(partners) != 1 or not partners[0]:
+                raise SystemExit(f"cannot tell which LUKS mapping the missing member {m['path']} used")
+            pair, number = partners[0].groups()
+            row["mapper"] = f"/dev/mapper/crypt-rpool-mirror{pair}-{3 - int(number)}"
+        row["luks"] = bool(row["mapper"])
+    members.append(row)
 print(json.dumps({"vdev": vdev_name, "members": members}))
 PY
 )" || dw_die "could not describe $VDEV for the removal record"
@@ -481,10 +500,16 @@ python3 - "$REQUEST" <<'PY'
 import json
 import sys
 for member in json.loads(sys.argv[1])["members"]:
-    print("  serial {serial}  {disk}  {disk_size} bytes  {model}".format(
-        serial=member["serial"], disk=member["disk"],
-        disk_size=member["disk_size"], model=member["model"] or "-",
-    ))
+    if member["serial"]:
+        print("  serial {serial}  {disk}  {disk_size} bytes  {model}".format(
+            serial=member["serial"], disk=member["disk"],
+            disk_size=member["disk_size"], model=member["model"] or "-",
+        ))
+    else:
+        print("  missing member {path}{mapper}; its disk is no longer installed".format(
+            path=member["path"],
+            mapper=f" (LUKS mapping {member['mapper'].rsplit('/', 1)[-1]})" if member["mapper"] else "",
+        ))
 PY
 confirm_exact "Start removing $VDEV from rpool on $DW_HOST? ZFS copies its data onto the other vdevs in the background. You must then run hosts/inventory_disks.sh; it finalizes completed retirement and identifies disks that are safe to remove physically."
 
