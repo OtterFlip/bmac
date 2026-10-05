@@ -51,18 +51,18 @@ Prepare for Proxmox Host Setup
 - Read the top of `env/secrets_dot_env` and make a copy of it as the instructions direct, to `env/secrets.env` and choose your password values.  If you're using iDRAC then make sure all of your hosts use the same iDRAC password and set it in your `env/secrets.env` file.
 - Read the top of `env/mox1_dot_conf` and `env/mox2_dot_conf` and make a copy of each, to `env/mox1.conf` and `env/mox2.conf` which you should fill in with your actual host values.
 - Set appropriate values in `env/cluster.conf`, `env/mox1.conf`, and `env/mox2.conf` for your hardware and network. The example values are for hosts with 128GB RAM, two 2TB NVMe disks, and 40 cores/80 threads, with a shared private network on `10.213.0.0/24` and a separate public IP and Internet gateway per host. Adjust all network, storage, CPU, and RAM values for your environment and expected production/staging workload. Each `env/moxN.conf` also needs the serial numbers of the NVMe drives for each rpool mirror (mirror 1 is mandatory and becomes the boot mirror), the exact byte capacity of each of those drives, and the MAC addresses of the host's public NIC (`PROXMOX_PUBLIC_MAC`) and private NIC (`PROXMOX_SECONDARY_MAC`). To collect them, boot a Linux Live environment (USB or CD, in its try/live mode) on each machine you intend to set up as a Proxmox host, copy the standalone `hosts/cluster_setup_prereq.sh` into it, and run it there with `bash cluster_setup_prereq.sh`. It changes nothing and lists every NVMe drive's serial number and byte capacity and every NIC's MAC address. If you use iDRAC for setup, you must still set the drive serial numbers and MAC addresses but not the byte capacities, which setup reads through Redfish; the iDRAC admin web UI shows the serial numbers and MAC addresses, so you do not need to run the prereq script from a Live environment. See [`hosts/README.md`](hosts/README.md#host-setup-flow) for details. In the iDRAC admin web UI the MAC addresses to look for are under the Port tab(s) and are the field labeled "Virtual MAC Addresses".
-- Download the Proxmox VE x64 installer ISO to your dev workstation (the machine from which you'll be running `hosts/setup_proxmox_host.sh`) and set its path and SHA256 hash value in `env/cluster.conf` for PROXMOX_ISO_FILE_PATH and PROXMOX_ISO_FILE_SHA256. The path may be absolute, start with `~/`, or be relative to the repo root.
+- Download the Proxmox VE x64 installer ISO to your dev workstation (the machine from which you'll be running `hosts/add_proxmox_host.sh`) and set its path and SHA256 hash value in `env/cluster.conf` for PROXMOX_ISO_FILE_PATH and PROXMOX_ISO_FILE_SHA256. The path may be absolute, start with `~/`, or be relative to the repo root.
 - Add your (and another colleague's) SSH public key to the ADMIN_1_PUBLIC_SSH_KEY and ADMIN_2_PUBLIC_SSH_KEY values in `env/cluster.conf`
 - Follow the instructions in `qdevice/QDEVICE_MANUAL_SETUP.MD` to set up your qdevice and add it to your tailscale network. Before doing that you'll need to follow the Tailscale setup steps below to add the appropriate tailscale tags and access policies.
 - Follow the Cloudflare instructions to setup your website's domain for active/passive load-balancing.  This will cost you ~$5/month.
 
-If you've completed the above steps then you're now ready to setup your Proxmox cluster hosts.  From a Debian-based (such as Ubuntu) workstation, run the `hosts/setup_proxmox_host.sh` script and choose to setup `mox1`.  A Debian-based workstation is required for the Proxmox host setup because that script must create a custom Proxmox installer ISO, and the Proxmox project only provides a Debian-based helper tool for this task.  Follow the `hosts/setup_proxmox_host.sh` script's instructions.  You  can actually run the same script in another terminal session to setup `mox2` at the same time, however I recommend at the point where the scipt asks you if you have verified that the VLAN (or private network connedtion) is working, that you only let one script at a time proceed past that point rather than letting many run beyond that point concurrently.
+If you've completed the above steps then you're now ready to setup your Proxmox cluster hosts.  From a Debian-based (such as Ubuntu) workstation, run the `hosts/add_proxmox_host.sh` script and choose to setup `mox1`.  A Debian-based workstation is required for the Proxmox host setup because that script must create a custom Proxmox installer ISO, and the Proxmox project only provides a Debian-based helper tool for this task.  Follow the `hosts/add_proxmox_host.sh` script's instructions.  You  can actually run the same script in another terminal session to setup `mox2` at the same time, however I recommend at the point where the scipt asks you if you have verified that the VLAN (or private network connedtion) is working, that you only let one script at a time proceed past that point rather than letting many run beyond that point concurrently.
 
 After our cluster is configured, you should be able to access the Proxmox admin web UI at:  [https://mox1:8006/](https://mox1:8006/) or [https://mox2:8006/](https://mox2:8006/)
 
-You can now use the `guests/prod/create_prod_vm.sh` script to create your first production VM to host your application, which will deploy a blank/vanilla Ubuntu x64 OS to that VM and setup SSH access, and nothing else.  You can always tear it back down if you're not satisfied with it using `guests/prod/destroy_prod_vm.sh`.  If you like, you can also deploy a test "hello world" static webapp to your new production VM using `app/deploy_hello_app_to_prod.sh`.
+You can now use the `guests/prod/add_prod_vm.sh` script to create your first production VM to host your application, which will deploy a blank/vanilla Ubuntu x64 OS to that VM and setup SSH access, and nothing else.  You can always tear it back down if you're not satisfied with it using `guests/prod/remove_prod_vm.sh`.  If you like, you can also deploy a test "hello world" static webapp to your new production VM using `app/deploy_hello_app_to_prod.sh`.
 
-After creating a production VM, you can test creation and teardown of a staging VM, based on that production VM, using the `guests/staging/create_staging_vm.sh` and `guests/staging/destroy_staging_vm.sh` scripts.
+After creating a production VM, you can test creation and teardown of a staging VM, based on that production VM, using the `guests/staging/add_staging_vm.sh` and `guests/staging/remove_staging_vm.sh` scripts.
 
 ### Instructions for Cloudflare Setup
 
@@ -212,7 +212,7 @@ Next, navigate to "Access controls" | "Policies" and under "General access rules
 }
 
 // Initial QDevice Setup by Proxmox Setup
-// This rule is required by setup_proxmox_host.sh when it adds an even number of hosts, and by add_qdevice.sh
+// This rule is required by add_proxmox_host.sh when it adds an even number of hosts, and by add_qdevice.sh
 {
 	"src": ["tag:proxmox-host"],
 	"dst": ["tag:proxmox-qdevice"],
@@ -227,7 +227,7 @@ Next, navigate to "Access controls" | "Policies" and under "General access rules
 }
 ```
 
-Each time you set up a proxmox host, the script will prompt you for a unique Tailscale Auth Key.  You can generate in the Tailscale web UI unser "Settings | "Keys" and on that page under "Auth Keys" use the "Generate auth key..." button and give the key any name (typically something like `mox1`) of the key, make sure Reusable is Off, any expiration day count value is fine (as these will switch to never expiring once they're actually used), and keep Ephemeral Off, and most importantly turn Tags ON and select the tag:proxmox-host tag.  Generate the key and copy it somewhere so that you have it ready for when the `hosts/setup_proxmox_host.sh` script prompts for it.  You'll need one key for each proxmox host you setup.
+Each time you set up a proxmox host, the script will prompt you for a unique Tailscale Auth Key.  You can generate in the Tailscale web UI unser "Settings | "Keys" and on that page under "Auth Keys" use the "Generate auth key..." button and give the key any name (typically something like `mox1`) of the key, make sure Reusable is Off, any expiration day count value is fine (as these will switch to never expiring once they're actually used), and keep Ephemeral Off, and most importantly turn Tags ON and select the tag:proxmox-host tag.  Generate the key and copy it somewhere so that you have it ready for when the `hosts/add_proxmox_host.sh` script prompts for it.  You'll need one key for each proxmox host you setup.
 
 Your SSH access from your dev workstation to your proxmox hosts will be via your Tailscale network.
 
@@ -313,8 +313,8 @@ Start with the read-only preflight, then run the creator and answer its
 placement, sizing, purpose, domain, and installer questions:
 
 ```bash
-./guests/prod/create_prod_vm.sh --dry-run
-./guests/prod/create_prod_vm.sh
+./guests/prod/add_prod_vm.sh --dry-run
+./guests/prod/add_prod_vm.sh
 ```
 
 The workflow allocates the next `prodN`, installs its OS, verifies guest
@@ -326,8 +326,8 @@ To permanently remove a production VM, inspect the exact destruction plan
 first:
 
 ```bash
-./guests/prod/destroy_prod_vm.sh --dry-run prod1
-./guests/prod/destroy_prod_vm.sh prod1
+./guests/prod/remove_prod_vm.sh --dry-run prod1
+./guests/prod/remove_prod_vm.sh prod1
 ```
 
 This removes the VM, its HA and replication configuration, routes, owned
@@ -358,8 +358,8 @@ filesystem online. Deploy the updated registry with
 Preview and then create a staging VM from a selected production VM:
 
 ```bash
-./guests/staging/create_staging_vm.sh --dry-run
-./guests/staging/create_staging_vm.sh
+./guests/staging/add_staging_vm.sh --dry-run
+./guests/staging/add_staging_vm.sh
 ```
 
 The script selects an eligible standby placement host and creates a stopped
@@ -371,8 +371,8 @@ Destroy staging guests as soon as testing is complete so their snapshots do
 not continue pinning production pool space:
 
 ```bash
-./guests/staging/destroy_staging_vm.sh --dry-run stage1prod1
-./guests/staging/destroy_staging_vm.sh stage1prod1
+./guests/staging/remove_staging_vm.sh --dry-run stage1prod1
+./guests/staging/remove_staging_vm.sh stage1prod1
 ```
 
 Omit `stage1prod1` to select a registered staging guest interactively.
@@ -464,7 +464,7 @@ An interrupted replacement can be resumed by rerunning the same command.
 
 1. Delete unnecessary files inside every production VM that runs on or
    replicates to the target host.
-2. Destroy related staging VMs with `destroy_staging_vm.sh`; their clones and
+2. Destroy related staging VMs with `remove_staging_vm.sh`; their clones and
    snapshots can pin blocks that must be freed.
 3. Start one non-boot vdev removal:
 
@@ -496,7 +496,7 @@ Run `decommission_disks.sh` once per vdev.
 
 Host names are slots `mox1` through `moxMAX_MOX_HOSTS`. The cluster registry
 records which slots are in use, and setup recommends the lowest free slot, so
-a slot freed by removing or purging a host is reused first. Slots need not be
+a slot freed by removing a host is reused first. Slots need not be
 contiguous: a cluster of `mox1` and `mox3` is valid. Each host must fit the
 host, replication, and HAProxy ranges already configured in
 `env/cluster.conf`.
@@ -521,9 +521,9 @@ authoritative control node and setup stops if `env/cluster.conf` disagrees.
    as the existing hosts:
 
    ```bash
-   ./hosts/setup_proxmox_host.sh --host mox3 --encrypt
+   ./hosts/add_proxmox_host.sh --host mox3 --encrypt
    # or, for a clear-storage cluster:
-   ./hosts/setup_proxmox_host.sh --host mox3 --no-encrypt
+   ./hosts/add_proxmox_host.sh --host mox3 --no-encrypt
    ```
 
    Choose `--run-boot-tests` or `--skip-boot-tests` explicitly when desired.
@@ -578,7 +578,7 @@ from `mox1`/`mox2` to `mox3`/`mox4`:
    live owner and keeps at least two placement hosts. HA stops using a host
    first, then the registry placement narrows, then the replication job and
    its replica are deleted.
-5. Retire each old host with `hosts/remove_host_from_cluster.sh` (see below).
+5. Retire each old host with `hosts/remove_proxmox_host.sh` (see below).
 
 Both production scripts refuse a VM that has staging VMs derived from it;
 destroy those staging VMs first. If either script stops partway, rerun it: the
@@ -593,18 +593,23 @@ stage with:
 
 ### Removing a Host from the Cluster
 
-Run this for a healthy host that is no longer needed:
-
 ```bash
-./hosts/remove_host_from_cluster.sh
+./hosts/remove_proxmox_host.sh
 ```
 
-It first asks whether `ssh qdevice` works from this workstation, and checks
-it. The host is offered only if no registry record references it (no
+The script removes a host gracefully when it can be contacted, and forcefully
+when it cannot. It lists every host with how it can be removed. It first
+checks whether the QDevice is accessible; if it is not, it continues only
+when an odd number of hosts remains, which needs no QDevice. The cluster must
+be quorate with every other host online.
+
+#### Graceful removal
+
+A host that is online and answers SSH from this workstation is removed
+gracefully. It is offered only if no registry record references it (no
 production placement, no staging VM, no pending cleanup), it holds no guest
 other than its own HAProxy container, and no HA rule or replication job names
-it. The cluster must be quorate, keep at least two hosts afterwards, and have
-every other host online.
+it. At least two hosts must remain.
 
 The script asks you to type `REMOVE moxN`. It then removes the QDevice, powers
 the host off, deletes it from the cluster, removes its SSH trust, and adds the
@@ -620,38 +625,44 @@ Never boot the removed host on the cluster network with its old disks. Wipe
 or reinstall it first; the script lists the remaining cleanup (Tailscale
 device, `known_hosts`, `env/moxN.conf`, Cloudflare).
 
-### Purging a Dead Host from the Cluster
+#### Forced removal
 
-Use this only for a host that has failed and has been physically disconnected
-from the cluster permanently:
+A host that cannot be contacted is removed forcefully: an offline member that
+does not answer SSH, a leftover `/etc/pve/nodes` directory, or a registry
+slot that is stale or never finished joining. The script explains why it
+cannot remove the host gracefully and asks whether to remove it forcefully.
+Answer no if the host is only temporarily unreachable, bring it back online,
+and rerun to remove it gracefully. The script refuses a host that Proxmox
+sees online but that does not answer SSH, or that answers SSH while Proxmox
+sees it offline.
 
-```bash
-./hosts/purge_host_from_cluster.sh
-```
+Forced removal shows this warning:
 
-The script shows this warning first, and you must accept it:
-
-> The purpose of this script is to enable the removal of a cluster host that
-> is no longer functioning and has been physically disconnected from the
-> cluster, permanently. The purged machine must never be allowed to
+> The purpose of a forced removal is to enable the removal of a cluster host
+> that is no longer functioning and has been physically disconnected from
+> the cluster, permanently. The removed machine must never be allowed to
 > communicate with the cluster via the network in any way after it has been
-> purged from the cluster.
+> removed from the cluster.
 
-It offers offline members, leftover `/etc/pve/nodes` directories, and
-registry slots that never finished joining. The cluster must be quorate with
-every other host online, and Proxmox HA must already have restarted any
-production VM that ran on the dead host elsewhere. The script refuses a
-production VM placed only on the dead host, and any guest it cannot account
-for.
+Proxmox HA must already have restarted any production VM that ran on the dead
+host elsewhere. The script refuses a production VM placed only on the dead
+host, and any guest it cannot account for. After showing the plan, it asks you
+to physically disconnect the machine from every network, remove it from the
+Tailscale admin console (Machines), and make sure it never connects to a
+network again in its old role. Confirm that by typing
+`moxN IS PERMANENTLY DISCONNECTED`.
 
-After you type `PURGE moxN`, it destroys staging VMs on the dead host or
-derived from production VMs that used it, narrows each affected production VM's HA rule, replication, and
-registry placement to the surviving hosts, abandons the dead host's
-deferred cleanup, deletes the node from the cluster, keeps the vote count odd
-with the QDevice, frees the slot, and archives the host's artifacts. Purging
+It then destroys staging VMs on the dead host or derived from production VMs
+that used it, narrows each affected production VM's HA rule, replication, and
+registry placement to the surviving hosts, abandons the dead host's deferred
+cleanup, deletes the node from the cluster, keeps the vote count odd with the
+QDevice, frees the slot, and archives the host's artifacts. A forced removal
 may leave a single host; the production VMs then have one placement host
-until you add hosts back with `change_prod_vm_placement.sh`. Like removal, it
-selects a new control node when the purged host held that role.
+until you add hosts back with `change_prod_vm_placement.sh`. Like a graceful
+removal, it selects a new control node when the removed host held that role.
+
+A graceful removal interrupted after it powered the host off is finished by
+rerunning the script, which then removes the host forcefully.
 
 ### Replacing a Failed QDevice
 
@@ -664,16 +675,16 @@ survive losing a host. Check it with:
 
 If the report says the registered QDevice is inaccessible and has failed:
 
-1. Unregister it:
+1. Remove it:
 
    ```bash
-   ./qdevice/purge_qdevice.sh
+   ./qdevice/remove_qdevice.sh
    ```
 
-   The script cannot purge a machine it cannot reach, so it offers to
-   unregister the QDevice from the cluster without contacting it. You must
-   first remove the old machine from the Tailscale admin console, so it can
-   never communicate with the cluster again, and type `REMOVED FROM TAILSCALE`.
+   The script cannot remove an inaccessible QDevice gracefully, so it offers
+   to remove it forcefully, without contacting it. You must first remove the
+   old machine from the Tailscale admin console, so it can never communicate
+   with the cluster again, and type `REMOVED FROM TAILSCALE`.
    The script then runs `pvecm qdevice remove` and removes the QDevice client,
    its certificates, and its pinned SSH host key from every Proxmox host.
    Every host must be online.
@@ -693,29 +704,31 @@ If the report says the registered QDevice is inaccessible and has failed:
    setup does. Finally it checks that every host sees the QDevice voting.
 
 Until step 4 finishes, losing any host of an even cluster loses quorum, so
-replace the QDevice promptly. `hosts/remove_host_from_cluster.sh` and
-`hosts/purge_host_from_cluster.sh` also need a working `ssh qdevice`. When the
-QDevice is reachable, `purge_qdevice.sh` purges it fully and leaves a plain
-Ubuntu machine.
+replace the QDevice promptly. Host setup and `hosts/remove_proxmox_host.sh`
+remove an inaccessible QDevice the same forced way when a membership change needs it removed, and stop before any
+change when the cluster would need a QDevice afterward. When the QDevice is
+reachable, `remove_qdevice.sh` removes it gracefully, uninstalls its QDevice
+software, and leaves a plain Ubuntu machine, still in Tailscale, that
+`add_qdevice.sh` can add again.
 
 ### Wiping a Test Cluster and Starting Over
 
 If you've already set up a test cluster with BMAC and want to wipe it and set
 it all up again from scratch, this is the easiest sequence:
 
-1. Run `./qdevice/purge_qdevice.sh` to reset the existing QDevice back to a
-   plain, non-Proxmox machine. `mox1` must still be reachable over SSH when
-   you do this.
+1. Run `./qdevice/remove_qdevice.sh` to reset the existing QDevice back to a
+   plain, non-Proxmox machine. Every Proxmox host must still be online and
+   reachable over SSH when you do this.
 2. In the Tailscale admin web UI, under "Machines", remove your current
    Proxmox hosts (typically `mox1` and `mox2`). Leave the QDevice there so
-   you can reuse it for the new cluster. `hosts/setup_proxmox_host.sh`
+   you can reuse it for the new cluster. `hosts/add_proxmox_host.sh`
    configures it when it sets up the second Proxmox host, so the cluster has
    3 quorum votes.
 3. Also in the Tailscale admin web UI, generate a new auth key for each
    Proxmox host of the new cluster. Each key must be non-reusable,
    non-ephemeral, and tagged `tag:proxmox-host` (see
    [Instructions for Tailscale Setup](#instructions-for-tailscale-setup)).
-4. Run `./hosts/setup_proxmox_host.sh` for each Proxmox host. You can run it
+4. Run `./hosts/add_proxmox_host.sh` for each Proxmox host. You can run it
    for `mox1` and `mox2` concurrently. It will likely find the setup artifacts
    left from the earlier test cluster; since you're setting up a new
    cluster, tell it to delete them and start from the beginning.  These
@@ -727,16 +740,16 @@ A simple CI/CD workflow can be made for most webapps by doing the following
 
 You need to make a deploy script that can target a host using SSH to access that host.  This deploy script, if it finds that the target host has never been configured, should do initial configuration such as by updating the OS and installing things like NGINX etc.  This deploy script should be able to build all of your webapp's assets and copy them to the target host.  Prior to building, your deploy script should create a new tag in version control (usually git) of the code it's building.  This tag, in some form, should accompany the assets that get copied to the target host, so that it's always clear on that target host the exact code that was deployed, and when assets are deployed to a staging host the prior deployment tag value should be preserved on the staging host before the current deployment tag value is updated, so that for any staging host you can always determine the prior and current tag values - the prior tag value is the tag value of the assets that were deployed to production, and the current tag value is the tag value of the updated code that overwrote production's assets on your staging VM.  Your deploy script should also have a mode where it can be told of a staging VM that has passed tests, and that you wish that staging VM's code changes to be pushed to production.
 
-1. Create your production VM (a one-time step for your webapp) by running `guests/prod/create_prod_vm.sh`
+1. Create your production VM (a one-time step for your webapp) by running `guests/prod/add_prod_vm.sh`
 2. Test your webapp locally.  When it passes your tests, run your deploy script targetting the new production VM (ex: `prod1`)
 
 Then for any future updates to production, do the following:
 
 1. Build your webapp and test it locally on your own dev workstation.  When your local tests pass the next step is to test in staging.
-2. Create a temorary staging VM using `guests/staging/create_staging_vm.sh`
+2. Create a temorary staging VM using `guests/staging/add_staging_vm.sh`
 3. Run your deploy script targetting the new staging VM (ex: `stage1prod1`)
 4. Test your app in staging.  If it passes your tests then call your Deloy script with parameters sufficient to tell it that you wish to push staging to production, specifying which staging VM passed tests.  The depoy code must then look at the staging VM's prior tag and ensure that it still matches the production VM's current tag, and if they match then the deploy code must checkout the code at the staging VM's current tag and build that code and deploy it to production, updating production's old current tag with this new current tag.  This way you only ever push to production changes that have been made directly against both production's prior code state AND its data state.
-5. Cleanup: Remove the staging VM using `guests/staging/destroy_staging_vm.sh`
+5. Cleanup: Remove the staging VM using `guests/staging/remove_staging_vm.sh`
 
 ## Why not use Kubernetes (K8s)?
 

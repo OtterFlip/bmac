@@ -468,7 +468,7 @@ choose_add_hosts() {
     list_contains "$node" "${PLACEMENT_NODES[@]}" || candidates+=("$node")
   done
   ((${#candidates[@]} > 0)) ||
-    die "Every cluster member already holds $RESOURCE_NAME; add a host with hosts/setup_proxmox_host.sh first"
+    die "Every cluster member already holds $RESOURCE_NAME; add a host with hosts/add_proxmox_host.sh first"
   measure_replica
   printf '\nHosts that can be added (replica needs %s bytes in pool %s):\n' \
     "$REPLICA_BYTES" "$POOL_NAME"

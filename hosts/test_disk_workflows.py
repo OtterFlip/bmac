@@ -1019,7 +1019,7 @@ class DiskWorkflowTest(unittest.TestCase):
             completed.stdout,
         )
         self.assertNotIn("stage1prod3", completed.stdout)
-        self.assertIn("guests/staging/destroy_staging_vm.sh stageNprodN", completed.stdout)
+        self.assertIn("guests/staging/remove_staging_vm.sh stageNprodN", completed.stdout)
         self.assertEqual(self.actions("fstrim"), [])
 
     def test_decommission_flags_leftover_staging_snapshots(self) -> None:

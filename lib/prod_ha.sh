@@ -394,7 +394,7 @@ PY
 
 prod_refuse_staging_dependents() {
   ((${#STAGING_DEPENDENTS[@]} == 0)) && return 0
-  die "$RESOURCE_NAME has staging VMs derived from it (${STAGING_DEPENDENTS[*]}); destroy them with guests/staging/destroy_staging_vm.sh first"
+  die "$RESOURCE_NAME has staging VMs derived from it (${STAGING_DEPENDENTS[*]}); destroy them with guests/staging/remove_staging_vm.sh first"
 }
 
 # Read live HA and replication state for the selected VM into OWNER_NODE,

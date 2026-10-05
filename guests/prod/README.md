@@ -5,9 +5,9 @@ SPDX-License-Identifier: GPL-3.0-only
 
 # Production VM creation
 
-`create_prod_vm.sh` creates or resumes a movable `prodN` VM from an
+`add_prod_vm.sh` creates or resumes a movable `prodN` VM from an
 administrator workstation. It uses the shared strict configuration loader and
-the pmxcfs registry installed by `setup_proxmox_host.sh`.
+the pmxcfs registry installed by `add_proxmox_host.sh`.
 
 This is intentionally generic. Application installation and updates happen
 afterward through each application's own deployment tooling.
@@ -45,19 +45,19 @@ the password hash.
 Start with a live read-only rehearsal:
 
 ```bash
-guests/prod/create_prod_vm.sh --dry-run
+guests/prod/add_prod_vm.sh --dry-run
 ```
 
 Create or resume:
 
 ```bash
-guests/prod/create_prod_vm.sh
+guests/prod/add_prod_vm.sh
 ```
 
 The purpose slug is an arbitrary operator-chosen application/workload label,
 such as `mydomain`. It becomes the `purpose-<slug>` Proxmox tag and is the
 durable resume key. It does **not** select the guest role: this script always
-creates production guests, while `create_staging_vm.sh` creates staging
+creates production guests, while `add_staging_vm.sh` creates staging
 guests and inherits the source production purpose. A rerun with the same
 purpose shows the existing allocation and registered sizing, asks for
 confirmation, and continues after validating live state.
@@ -184,7 +184,7 @@ health endpoint are ready. The final warning makes that state explicit.
 
 ## Application handoff
 
-After `create_prod_vm.sh` completes, provision and deploy the intended
+After `add_prod_vm.sh` completes, provision and deploy the intended
 application over the private guest address, then verify its HTTPS health from
 the mox network and through every public origin. Until then, an unavailable
 backend response is expected. The creator does not deploy application code.
@@ -223,8 +223,8 @@ diagnostics/show_prod_vm_state.sh prodN >prodN_state.txt
 Rehearse and then permanently remove one production resource:
 
 ```bash
-guests/prod/destroy_prod_vm.sh --dry-run prodN
-guests/prod/destroy_prod_vm.sh prodN
+guests/prod/remove_prod_vm.sh --dry-run prodN
+guests/prod/remove_prod_vm.sh prodN
 ```
 
 The destroyer refuses production resources with staging dependents, requires
@@ -256,7 +256,7 @@ Prerequisites:
   `hosts/update_cluster_runtime.sh`. Older registries reject a record that
   carries the exact grown size, so the script checks every node first.
 - Non-interactive root SSH to the guest works from the workstation, normally
-  through the `ssh prodN` alias that `create_prod_vm.sh` offers to configure.
+  through the `ssh prodN` alias that `add_prod_vm.sh` offers to configure.
   The script asks for the alias (default `prodN`) and checks that it resolves
   to the registry's private IP and logs in as root.
 - The guest has Python 3, `findmnt`, `sfdisk`, `tune2fs`, `growpart`
@@ -272,7 +272,7 @@ active one. Before calculating anything it:
   replication to every placement node other than the owner;
 - takes the owner from live cluster state, not the registry. If a failover
   left the registry owner stale, it updates the registry owner, as
-  `create_staging_vm.sh` does;
+  `add_staging_vm.sh` does;
 - checks that the VM config, every placement copy of the zvol, and the guest
   disk all have the registered exact size, and that no Proxmox lock is held.
 
@@ -307,8 +307,8 @@ a new prompt, if it exceeds the limit. Enter `q` to quit without changes.
 
 After the exact increase is shown and you type `GO`, the script:
 
-1. acquires the production orchestration lease, so `create_prod_vm.sh` and
-   `destroy_prod_vm.sh` cannot run against the VM concurrently. Then it
+1. acquires the production orchestration lease, so `add_prod_vm.sh` and
+   `remove_prod_vm.sh` cannot run against the VM concurrently. Then it
    rechecks the live owner, registry revision, guest disk, and capacity limit;
 2. runs `qm resize <vmid> scsi0 <size>M` on the live owner. This updates the
    VM config, grows the zvol, and notifies the running QEMU. For reserved
@@ -327,7 +327,7 @@ partition, and offers to finish the guest growth first. If the registry update
 itself failed, the failure message prints the exact `update --disk-bytes`
 command to run on a mox host.
 
-The script does not take a lease against `create_staging_vm.sh`. Avoid
+The script does not take a lease against `add_staging_vm.sh`. Avoid
 running both at once for the same production VM.
 
 ## Changing placement
@@ -439,10 +439,10 @@ absence of destructive rollback commands.
 ## Tests
 
 ```bash
-bash -n guests/prod/create_prod_vm.sh
+bash -n guests/prod/add_prod_vm.sh
 
 PYTHONDONTWRITEBYTECODE=1 python3 \
-  guests/prod/test_create_prod_vm.py -v
+  guests/prod/test_add_prod_vm.py -v
 
 bash -n guests/prod/extend_prod_vm_disk.sh
 

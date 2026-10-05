@@ -34,8 +34,8 @@ defaults. In that example:
 - supported host names are slots `mox1` through at most `mox10`, recorded in
   the cluster registry; slots may have gaps and freed slots are reused
   lowest first;
-- hosts can be removed (`hosts/remove_host_from_cluster.sh`) or purged after
-  a permanent failure (`hosts/purge_host_from_cluster.sh`), and production
+- hosts can be removed gracefully, or forcefully after a permanent failure
+  (`hosts/remove_proxmox_host.sh`), and production
   placement and ownership can be changed
   (`guests/prod/change_prod_vm_placement.sh`,
   `guests/prod/change_prod_vm_owner.sh`);
@@ -167,20 +167,20 @@ nothing can prompt mid-run. Before the first use from any workstation:
 Verified from macOS against the live cluster (2026-09-21, full
 destroy/create/deploy/stage cycle on the test domain):
 
-- `guests/prod/create_prod_vm.sh`, including `--dry-run`, the local root
+- `guests/prod/add_prod_vm.sh`, including `--dry-run`, the local root
   password hash, the `scp` uploads, and the jump-SSH alias it writes to
   `~/.ssh/config`;
-- `guests/prod/destroy_prod_vm.sh`, including `--dry-run`;
+- `guests/prod/remove_prod_vm.sh`, including `--dry-run`;
 - `app/deploy_hello_app_to_prod.sh`;
 - `diagnostics/show_prod_vm_state.sh`;
-- `guests/staging/create_staging_vm.sh`, without `--sanitizer`;
-- `guests/staging/destroy_staging_vm.sh`.
+- `guests/staging/add_staging_vm.sh`, without `--sanitizer`;
+- `guests/staging/remove_staging_vm.sh`.
 
 Expected to work on macOS, not yet run there against a cluster:
 
 - `guests/prod/extend_prod_vm_disk.sh`. Its local work is the config load,
   `ssh -G`, `python3`, and strict SSH, the same as the production creator;
-- `guests/staging/create_staging_vm.sh --sanitizer PATH`. The sanitizer size
+- `guests/staging/add_staging_vm.sh --sanitizer PATH`. The sanitizer size
   check was the macOS-specific part; it is covered by unit tests only;
 - `diagnostics/show_cluster_state.sh`. Its only local work is the config load
   and two `sha256sum` calls. It needs a terminal;
@@ -194,7 +194,6 @@ Expected to work on macOS, not yet run there against a cluster:
 - `hosts/update_cluster_runtime.sh`. Local commands are portable and its unit
   tests pass on macOS. It rewrites the runtime on every node, so treat the
   first macOS run as a test, not as routine;
-- `qdevice/purge_qdevice.sh`. Plain Bash plus SSH locally, read but not run.
 - `diagnostics/show_qdevice_state.sh`. Config load, `python3`, and strict SSH;
   covered by unit tests only.
 - `diagnostics/show_cluster_health.sh`. Config load, `python3`, and strict SSH;
@@ -202,12 +201,12 @@ Expected to work on macOS, not yet run there against a cluster:
 
 Linux workstation only:
 
-- `hosts/setup_proxmox_host.sh`. It needs `flock` and `ip` locally, and the
+- `hosts/add_proxmox_host.sh`. It needs `flock` and `ip` locally, and the
   install-ISO phase executes the amd64 Linux `proxmox-auto-install-assistant`,
   so it also cannot run on arm64 Linux.
-- `hosts/remove_host_from_cluster.sh`, `hosts/purge_host_from_cluster.sh`,
-  and `qdevice/add_qdevice.sh`. They take the same workstation `flock` as
-  host setup.
+- `hosts/remove_proxmox_host.sh`, `qdevice/add_qdevice.sh`, and
+  `qdevice/remove_qdevice.sh`. They take the
+  same workstation `flock` as host setup.
 
 Expected to work on macOS, not yet run anywhere against a cluster:
 `guests/prod/change_prod_vm_placement.sh` and
@@ -505,7 +504,7 @@ Cloudflare configuration is external and is never mutated by this repository.
 For each production resource:
 
 1. Use the public origin addresses printed by
-   `create_prod_vm.sh`, with the initial/preferred node first. Additional mox
+   `add_prod_vm.sh`, with the initial/preferred node first. Additional mox
    origins are an explicit operator decision.
 2. Configure TCP 443 and, while needed, TCP 80. Restrict origins to current
    Cloudflare source ranges at the provider/host edge; the generated nftables
@@ -823,40 +822,40 @@ backup or security boundary.
 
 ## The main workflows
 
-There are fifteen operator workflows in this project: six (1-6) that build
+There are fourteen operator workflows in this project: six (1-6) that build
 hosts and create, grow, or remove guests, four (7-10) that grow, shrink, or
-repair a host's storage, four (11-14) that move production between hosts and
-change cluster membership, and one (15) that replaces a failed QDevice:
+repair a host's storage, three (11-13) that move production between hosts and
+change cluster membership, and one (14) that replaces a failed QDevice:
 
-1. `hosts/setup_proxmox_host.sh` — destructively install or reconcile
+1. `hosts/add_proxmox_host.sh` — destructively install or reconcile
    one `moxN`, create or join the cluster, and install storage, networking,
    QDevice, VRRP, HAProxy, registry, lifecycle, and cleanup services. Read
    [`hosts/README.md`](hosts/README.md). Usage:
 
    ```bash
-   hosts/setup_proxmox_host.sh \
+   hosts/add_proxmox_host.sh \
      --host moxN [--encrypt | --no-encrypt] \
      [--run-boot-tests | --skip-boot-tests]
    ```
 
-2. `guests/prod/create_prod_vm.sh` — create or safely resume one
+2. `guests/prod/add_prod_vm.sh` — create or safely resume one
    replicated, HA-managed `prodN`. Read
    [`guests/prod/README.md`](guests/prod/README.md). Start with:
 
    ```bash
-   guests/prod/create_prod_vm.sh --dry-run
-   guests/prod/create_prod_vm.sh
+   guests/prod/add_prod_vm.sh --dry-run
+   guests/prod/add_prod_vm.sh
    ```
 
-3. `guests/prod/destroy_prod_vm.sh` — permanently remove one production VM
+3. `guests/prod/remove_prod_vm.sh` — permanently remove one production VM
    after exact identity and dependency validation. It removes routes, HA and
    affinity, replication and target copies, QEMU config/disks, orchestration,
    and registry metadata while retaining the shared source ISO cache. Start
    with the read-only rehearsal:
 
    ```bash
-   guests/prod/destroy_prod_vm.sh --dry-run prodN
-   guests/prod/destroy_prod_vm.sh prodN
+   guests/prod/remove_prod_vm.sh --dry-run prodN
+   guests/prod/remove_prod_vm.sh prodN
    ```
 
 4. `guests/prod/extend_prod_vm_disk.sh` — after placement pools gain
@@ -871,26 +870,26 @@ change cluster membership, and one (15) that replaces a failed QDevice:
    guests/prod/extend_prod_vm_disk.sh
    ```
 
-5. `guests/staging/create_staging_vm.sh` — create one
+5. `guests/staging/add_staging_vm.sh` — create one
    disposable, non-HA `stageNprodN` linked clone from a registered active
    production VM. Read
    [`guests/staging/README.md`](guests/staging/README.md). Start with:
 
    ```bash
-   guests/staging/create_staging_vm.sh --dry-run
-   guests/staging/create_staging_vm.sh \
+   guests/staging/add_staging_vm.sh --dry-run
+   guests/staging/add_staging_vm.sh \
      --sanitizer /absolute/path/to/staging-sanitizer.sh
    ```
 
-6. `guests/staging/destroy_staging_vm.sh` — interactively select and
+6. `guests/staging/remove_staging_vm.sh` — interactively select and
    permanently remove one staging VM after exact identity, clone-origin, and
    snapshot-GUID validation. It removes only that guest's route, VM-owned
    disks, linked clone, one exact source-owned snapshot and its replicated
    copies, and registry allocation. Start with:
 
    ```bash
-   guests/staging/destroy_staging_vm.sh --dry-run
-   guests/staging/destroy_staging_vm.sh
+   guests/staging/remove_staging_vm.sh --dry-run
+   guests/staging/remove_staging_vm.sh
    ```
 
 7. `hosts/add_new_disk_vdev.sh` — add two new identical-capacity disks to a
@@ -939,26 +938,33 @@ hosts/inventory_disks.sh --host moxN
    placement host with `ha-manager relocate` after checking that HA,
    replication, and the registry agree. It then verifies the reversed
    replication and records the new owner.
-13. `hosts/remove_host_from_cluster.sh` — retire a healthy host that holds
-   nothing: remove the QDevice, power the host off, `pvecm delnode`, strip its
-   SSH trust, restore odd vote parity, free its registry slot, and choose a
-   new control node if needed. Requires `REMOVE moxN`.
-14. `hosts/purge_host_from_cluster.sh` — delete a dead host that has been
-   physically disconnected permanently. It destroys dependent staging,
-   narrows affected production placement, abandons the host's cleanup,
-   deletes the node (including the two-to-one-node case), and frees the
-   slot. Requires `PURGE moxN`. The purged machine must never communicate
-   with the cluster again.
-
-15. `qdevice/add_qdevice.sh` — add a QDevice to an even-member cluster that
-   has none, typically after `qdevice/purge_qdevice.sh` unregistered a failed
+13. `hosts/remove_proxmox_host.sh` — remove one host, gracefully when it is
+   an online member that answers SSH, and forcefully when it cannot be
+   contacted. Either way it chooses a new control node if needed and frees
+   the host's registry slot.
+   - Graceful removal retires a healthy host that holds nothing: remove the
+     QDevice, power the host off, `pvecm delnode`, strip its SSH trust, and
+     restore odd vote parity. Requires `REMOVE moxN`.
+   - Forced removal deletes a dead host (an offline member, leftover node
+     directory, or stale or unfinished slot) that does not answer SSH, after
+     the operator agrees to it. It destroys dependent staging, narrows
+     affected production placement, abandons the host's cleanup, and deletes
+     the node (including the two-to-one-node case). The operator confirms
+     that the machine is physically disconnected, removed from Tailscale, and
+     will never reconnect in its old role by typing
+     `moxN IS PERMANENTLY DISCONNECTED`. The removed machine must never
+     communicate with the cluster again.
+   - A host Proxmox sees online that does not answer SSH, or that answers SSH
+     while Proxmox sees it offline, is refused.
+14. `qdevice/add_qdevice.sh` — add a QDevice to an even-member cluster that
+   has none, typically after `qdevice/remove_qdevice.sh` removed a failed
    one. `diagnostics/show_qdevice_state.sh` reports whether a QDevice is
    needed, functional, or inaccessible. The full replacement procedure is in
    [`qdevice/QDEVICE_MANUAL_SETUP.md`](qdevice/QDEVICE_MANUAL_SETUP.md#replacing-a-failed-qdevice).
 
-Workflows 11-14 are described in
+Workflows 11-13 are described in
 [`guests/prod/README.md`](guests/prod/README.md#changing-placement) and
-[`hosts/README.md`](hosts/README.md#removing-and-purging-hosts). The
+[`hosts/README.md`](hosts/README.md#removing-hosts). The
 documented order for moving to bigger hosts is: set up the new hosts, add
 them to placement, change the owner, remove the old hosts from placement,
 then remove the old hosts.
@@ -970,7 +976,8 @@ conversion, and cluster membership cannot be faithfully rehearsed that way.
 Use its explicit boot-test policy and read every destructive confirmation.
 Creation gates use the case-sensitive token `GO`; branching installer recovery
 may additionally offer `WIPE`, while production destruction requires
-`DESTROY prodN`, host removal `REMOVE moxN`, and host purge `PURGE moxN`.
+`DESTROY prodN`, graceful host removal `REMOVE moxN`, and forced host
+removal `moxN IS PERMANENTLY DISCONNECTED`.
 
 ## Helper inventory
 
@@ -1042,7 +1049,7 @@ scripts/libraries named in their descriptions.
   registered, shows each member's vote view, and shows the QDevice host's
   qnetd state and connected clusters. It ends with a verdict: OK, needs a
   QDevice (`qdevice/add_qdevice.sh`), registered but inaccessible
-  (`qdevice/purge_qdevice.sh`, then `qdevice/add_qdevice.sh`), or reachable
+  (`qdevice/remove_qdevice.sh`, then `qdevice/add_qdevice.sh`), or reachable
   but unhealthy (the problems found). It exits 1 when anything needs
   attention.
 - `qdevice/add_qdevice.sh` adds a QDevice to an all-online, quorate cluster
@@ -1051,27 +1058,41 @@ scripts/libraries named in their descriptions.
   control-plane lock. It installs `corosync-qnetd`, pins the QDevice's SSH
   host key on every member, runs `pvecm qdevice setup` through the control
   node, and verifies every member's vote layout, as host setup does.
-- `qdevice/purge_qdevice.sh` is an intentionally destructive maintenance tool
-  for teardown, clean-room retesting, or replacing a failed QDevice. It first
-  removes the QDevice through the supported Proxmox cluster command and
-  refuses to purge the external host if cluster-side detachment cannot be
-  proven. It then removes the temporary
-  Proxmox SSH key, QNetd TLS/NSS identity, Corosync/QDevice packages, services,
-  account, and package-specific state from the dedicated QDevice. It does not
-  run `apt autoremove` or erase general journals. When the QDevice host
-  cannot be reached, or is not the registered machine, it never touches it.
-  It offers to unregister the QDevice instead, only after the operator
-  confirms the old machine was removed from Tailscale. It then runs
-  `pvecm qdevice remove` and removes the QDevice client, certificates, and
-  host-key trust from every Proxmox node. Read
+- `lib/qdevice.sh` is the one implementation of the QDevice vote: verifying
+  access, preparing `corosync-qnetd`, pinning its host key, adding, removing,
+  reconciling, clearing stale registrations, forgetting a retired QDevice,
+  and checking vote layouts. Host setup, host removal,
+  `qdevice/add_qdevice.sh`, `qdevice/remove_qdevice.sh`, and the diagnostics
+  use it. It removes a QDevice gracefully when this workstation reaches it as
+  root and it is the registered machine. Otherwise the removal is forced: the
+  operator must agree and confirm the machine was removed from Tailscale, and
+  every member forgets it. Membership changes continue with an inaccessible
+  QDevice only when the resulting member count is odd. Each caller supplies
+  how it reaches the cluster: `lib/host_membership.sh` through its
+  coordinator, host setup through its cluster control node.
+- `qdevice/remove_qdevice.sh` is an intentionally destructive maintenance tool
+  for teardown, clean-room retesting, or replacing a failed QDevice. Every
+  member must be online and the cluster quorate. Under the cluster
+  control-plane lock it first removes the QDevice through the supported
+  Proxmox cluster command, clears any stale registration, and removes the
+  QDevice's host-key trust from every member; it refuses to purge the
+  external host if cluster-side detachment cannot be proven. It then removes
+  the control node's setup SSH key, QNetd TLS/NSS identity, Corosync/QDevice
+  packages, services, account, and package-specific state from the dedicated
+  QDevice. It does not run `apt autoremove` or erase general journals. When
+  the QDevice host cannot be reached, or is not the registered machine, it
+  never touches it. It offers a forced removal instead, only after the
+  operator confirms the old machine was removed from Tailscale. It then
+  runs `pvecm qdevice remove` and removes the QDevice client, certificates,
+  and host-key trust from every Proxmox node. Read
   [`qdevice/QDEVICE_MANUAL_SETUP.md`](qdevice/QDEVICE_MANUAL_SETUP.md) and its
   exact `GO` destructive confirmation before running:
 
   ```bash
-  qdevice/purge_qdevice.sh [qdevice-host] [proxmox-host]
+  qdevice/remove_qdevice.sh [qdevice-host]
   ```
 
-- `hosts/setup_proxmox_host.sh` is the host setup workflow. It depends on
+- `hosts/add_proxmox_host.sh` is the host setup workflow. It depends on
   `lib/`, layered `env/` configuration, either iDRAC/Redfish or a manual Live
   Linux disk inventory, Tailscale, the reviewed Proxmox ISO, and Proxmox
   cluster tools.
@@ -1079,7 +1100,7 @@ scripts/libraries named in their descriptions.
   on every mox node. It depends on installed `config.sh`,
   `cluster_registry.py`, Proxmox/QEMU/ZFS tools, and the deferred-cleanup
   service; it protects production starts and rejects unsafe staging starts.
-- `hosts/test_setup_proxmox_host.py` tests host safety, QDevice parity, resume,
+- `hosts/test_add_proxmox_host.py` tests host safety, QDevice parity, resume,
   storage, and VRRP invariants without installing a host.
 - `hosts/test_app_ha_guest_role_hook.py` tests fail-closed production/staging
   admission and cleanup behavior against synthetic Proxmox and registry state.
@@ -1090,7 +1111,7 @@ scripts/libraries named in their descriptions.
 - `guests/prod/build_ubuntu_autoinstall.py` verifies a configured compatible
   Ubuntu source and builds the answer-file-driven per-VM installer when
   `PROD_GUEST_OS_INSTALL_MODE=ubuntu-autoinstall`.
-- `guests/prod/test_create_prod_vm.py` tests installer rendering, allocation,
+- `guests/prod/test_add_prod_vm.py` tests installer rendering, allocation,
   resume, SSH, HA, and destructive guards for production creation.
 - `guests/prod/extend_prod_vm_disk.sh` runs from the workstation. It uses
   strict mox SSH for Proxmox/ZFS work and the operator's `ssh prodN` alias
@@ -1107,12 +1128,13 @@ scripts/libraries named in their descriptions.
 - `guests/prod/test_change_prod_vm_placement.py` tests host eligibility,
   add/remove ordering, partial-change repair, and the owner script's
   agreement checks.
-- `hosts/remove_host_from_cluster.sh` and `hosts/purge_host_from_cluster.sh`
-  run from the workstation and share `lib/host_membership.sh` (QDevice
-  access and parity, control-plane lock, node deletion, SSH-trust removal)
-  and `lib/cluster_control.sh` (control-node resolution and the
-  `cluster.conf` update). `hosts/test_host_membership.py` tests their
-  blockers, the purge plan, candidates, and QDevice vote checks.
+- `hosts/remove_proxmox_host.sh` runs from the workstation and uses
+  `lib/host_membership.sh` (QDevice access and parity, control-plane lock,
+  node deletion, SSH-trust removal) and `lib/cluster_control.sh`
+  (control-node resolution and the `cluster.conf` update).
+  `hosts/test_host_membership.py` tests the choice between graceful and
+  forced removal, graceful-removal blockers, the forced-removal plan and
+  candidates, and QDevice vote checks.
 - `guests/staging/patch_staging_clone.sh` is the root-only host wrapper for
   offline clone validation, mounting, and teardown. It is invoked by the
   staging creator and depends on ZFS block-device, filesystem, and Proxmox
@@ -1227,8 +1249,8 @@ Run the host workflow first for the control node, then for each later host,
 one at a time:
 
 ```bash
-hosts/setup_proxmox_host.sh --host mox1 --run-boot-tests
-hosts/setup_proxmox_host.sh --host mox2 --run-boot-tests
+hosts/add_proxmox_host.sh --host mox1 --run-boot-tests
+hosts/add_proxmox_host.sh --host mox2 --run-boot-tests
 ```
 
 Keep every existing node online while adding another. Enter the LUKS
@@ -1244,8 +1266,8 @@ registry health before proceeding.
 ### 4. Create a generic production VM
 
 ```bash
-guests/prod/create_prod_vm.sh --dry-run
-guests/prod/create_prod_vm.sh
+guests/prod/add_prod_vm.sh --dry-run
+guests/prod/add_prod_vm.sh
 ```
 
 Choose at least two online placement nodes with enough CPU, RAM, and
@@ -1260,7 +1282,7 @@ Deploy the intended application, origin TLS certificate, and health endpoint
 over the private address. Then configure Cloudflare origins/DNS/health checks
 and verify both public paths.
 
-For a first HTTPS smoke test after `create_prod_vm.sh` finishes,
+For a first HTTPS smoke test after `add_prod_vm.sh` finishes,
 `app/deploy_hello_app_to_prod.sh` installs a minimal NGINX hello-world site on
 one active `prodN`, including `/healthz` and the registered
 production/staging hostnames. It requires a working `ssh prodN` alias from
@@ -1274,8 +1296,8 @@ ready.
 First supply an idempotent app-specific sanitizer or choose link-down:
 
 ```bash
-guests/staging/create_staging_vm.sh --dry-run
-guests/staging/create_staging_vm.sh \
+guests/staging/add_staging_vm.sh --dry-run
+guests/staging/add_staging_vm.sh \
   --sanitizer /absolute/path/to/staging-sanitizer.sh
 ```
 
@@ -1292,7 +1314,7 @@ before depending on the platform.
 
 ## Host workflow in detail
 
-`hosts/setup_proxmox_host.sh` is the host workflow. It is destructive and
+`hosts/add_proxmox_host.sh` is the host workflow. It is destructive and
 resumable:
 
 1. **Load and fingerprint inputs.** It strictly loads `cluster.conf`,
@@ -1390,7 +1412,7 @@ Cloudflare configuration. Those belong to later workflows.
 
 ### Preconditions and input
 
-`create_prod_vm.sh` runs from an administrator workstation and accepts:
+`add_prod_vm.sh` runs from an administrator workstation and accepts:
 
 ```text
 --dry-run
@@ -2391,8 +2413,8 @@ For an even cluster, restore `corosync-qnetd`, Tailscale TCP 5403, literal IP
 identity, and voting state. `diagnostics/show_qdevice_state.sh` reports which
 case applies. When the QDevice machine is lost, replace it:
 
-1. `qdevice/purge_qdevice.sh` unregisters it without contacting it, after
-   you confirm it was removed from Tailscale;
+1. `qdevice/remove_qdevice.sh` removes it forcefully, without contacting it,
+   after you confirm it was removed from Tailscale;
 2. prepare a new machine with `qdevice/QDEVICE_MANUAL_SETUP.md`;
 3. `qdevice/add_qdevice.sh` adds it.
 
@@ -2662,11 +2684,11 @@ Run shell syntax checks from the repository root:
 
 ```bash
 bash -n \
-  hosts/setup_proxmox_host.sh \
+  hosts/add_proxmox_host.sh \
   hosts/app-ha-guest-role-hook.sh \
-  guests/prod/create_prod_vm.sh \
-  guests/staging/create_staging_vm.sh \
-  guests/staging/destroy_staging_vm.sh \
+  guests/prod/add_prod_vm.sh \
+  guests/staging/add_staging_vm.sh \
+  guests/staging/remove_staging_vm.sh \
   guests/staging/patch_staging_clone.sh \
   lib/config.sh \
   lib/sync_haproxy_routes.sh \
@@ -2677,9 +2699,9 @@ Run the complete Proxmox unit suite:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-  hosts/test_setup_proxmox_host.py \
+  hosts/test_add_proxmox_host.py \
   hosts/test_app_ha_guest_role_hook.py \
-  guests/prod/test_create_prod_vm.py \
+  guests/prod/test_add_prod_vm.py \
   guests/prod/test_extend_prod_vm_disk.py \
   guests/staging/test_staging_vm.py \
   lib/test_shared_libs.py \
@@ -2699,7 +2721,7 @@ every tracked `test_*.py` inside a Debian 13 Lima VM; see
 
 Coverage by test helper:
 
-- `hosts/test_setup_proxmox_host.py`: QDevice vote/parity parsing, current ISO
+- `hosts/test_add_proxmox_host.py`: QDevice vote/parity parsing, current ISO
   resume, changed boot ID, destructive confirmations, serial storage
   selection, strict SSH, VRRP peers/priorities, and host safety invariants.
 - `hosts/test_app_ha_guest_role_hook.py`: exact role identity, no destructive
@@ -2707,7 +2729,7 @@ Coverage by test helper:
   reservations, stopping every staging guest before queuing any destruction,
   the real cleanup worker deferring destruction until post-start, and remote
   deferral.
-- `guests/prod/test_create_prod_vm.py`: autoinstall network/root/QGA/SSH,
+- `guests/prod/test_add_prod_vm.py`: autoinstall network/root/QGA/SSH,
   startup retry semantics, ISO hash/release/boot metadata/atomicity, live
   nodes with slot gaps, QDevice gate, resume sentinels, exact VM/Secure Boot contract,
   argv-safe SSH, non-mutating dry-run, and absence of destructive rollback.
@@ -2775,9 +2797,9 @@ Only the workflows named above exist as supported operator entry points.
 The following potential future commands/functions are explicitly out of scope
 and must not be inferred from registry primitives or old design prose:
 
-- **Automatic rebalancing.** Host removal, host purge, and production
+- **Automatic rebalancing.** Host removal and production
   placement/owner changes are operator-driven scripts. Nothing moves
-  production automatically to balance capacity, and a purge never re-adds
+  production automatically to balance capacity, and a forced removal never re-adds
   placement hosts on its own.
 - **Cluster status report.** A future read-only `GetClusterStatus` workflow
   will summarize hosts, tags, quorum/QDevice, VRRP owner, HA guests,

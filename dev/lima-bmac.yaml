@@ -18,7 +18,7 @@
 # cache; the runner therefore sets TMPDIR=/var/tmp.
 #
 # Not enabled: Rosetta (vmOpts.vz.rosetta) for the amd64-only
-# proxmox-auto-install-assistant used by hosts/setup_proxmox_host.sh.
+# proxmox-auto-install-assistant used by hosts/add_proxmox_host.sh.
 
 minimumLimaVersion: 2.0.0
 base:

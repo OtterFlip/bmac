@@ -3,14 +3,17 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Workstation helpers shared by hosts/remove_host_from_cluster.sh,
-# hosts/purge_host_from_cluster.sh, qdevice/add_qdevice.sh, and
-# diagnostics/show_qdevice_state.sh: logging and prompts, command execution on
-# cluster members through one coordinator, QDevice parity, the cluster
-# control-plane lock that host setup also takes, Proxmox node deletion, and
-# host-slot bookkeeping. Source after lib/config.sh, load_proxmox_config, and
-# lib/cluster_control.sh. Callers set HM_COORDINATOR to an online member that
-# survives the change.
+# Workstation helpers shared by hosts/remove_proxmox_host.sh,
+# qdevice/add_qdevice.sh, qdevice/remove_qdevice.sh, and the diagnostics:
+# logging and prompts, command execution on cluster members through one
+# coordinator, the cluster control-plane lock that host setup also takes,
+# Proxmox node deletion, and host-slot bookkeeping. It connects lib/qdevice.sh, which holds the QDevice
+# logic, to the cluster through the coordinator. Source after lib/config.sh,
+# load_proxmox_config, and lib/cluster_control.sh. Callers set HM_COORDINATOR
+# to an online member that survives the change.
+
+# shellcheck source=qdevice.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/qdevice.sh"
 
 HM_REMOTE_ROOT="/usr/local/lib/app-ha-proxmox"
 HM_REMOTE_REGISTRY="${HM_REMOTE_ROOT}/lib/cluster_registry.py"
@@ -18,7 +21,6 @@ HM_REMOTE_REGISTRY="${HM_REMOTE_ROOT}/lib/cluster_registry.py"
 HM_REMOTE_HAPROXY_SYNC="${HM_REMOTE_ROOT}/lib/sync_haproxy_routes.sh"
 
 HM_COORDINATOR=""
-HM_QDEVICE_IPV4=""
 HM_LOCK_FILE_FD=""
 HM_LOCK_TOKEN=""
 HM_LOCK_PID=""
@@ -165,376 +167,38 @@ hm_cluster_status() {
   hm_exec "$HM_COORDINATOR" pvecm status
 }
 
-hm_status_value() {
-  awk -v key="$2" '$0 ~ "^" key ":" { print $NF; exit }' <<<"$1"
+# lib/qdevice.sh reaches the cluster through HM_COORDINATOR.
+qd_coordinator() {
+  printf '%s\n' "$HM_COORDINATOR"
 }
 
-hm_status_is_quorate() {
-  grep -Eq '^Quorate:[[:space:]]+Yes[[:space:]]*$' <<<"$1"
+qd_exec() {
+  hm_exec "$@"
 }
 
-hm_has_qdevice() {
-  grep -Eq '^Flags:.*(^|[[:space:]])Qdevice([[:space:]]|$)' <<<"$1"
+qd_member_states() {
+  hm_member_states
 }
 
-# The same exact vote checks host setup applies (see setup_proxmox_host.sh).
-hm_qdevice_status_is_healthy() {
-  local status=$1 node_count=$2 qdevice_voters
-  [[ "$(hm_status_value "$status" 'Expected votes')" == "$((node_count + 1))" ]] ||
-    return 1
-  [[ "$(hm_status_value "$status" 'Total votes')" == "$((node_count + 1))" ]] ||
-    return 1
-  hm_status_is_quorate "$status" || return 1
-  hm_has_qdevice "$status" || return 1
-  qdevice_voters="$(
-    awk '
-      $1 ~ /^0x[0-9a-fA-F]+$/ && $1 != "0x00000000" &&
-      $2 == 1 && $3 ~ /^A,V,/ { count++ }
-      END { print count + 0 }
-    ' <<<"$status"
-  )"
-  [[ "$qdevice_voters" == "$node_count" ]] || return 1
-  awk '
-    $1 == "0x00000000" && $2 == 1 && $3 == "Qdevice" { found++ }
-    END { exit !(found == 1) }
-  ' <<<"$status"
+qd_exec_coordinator_tty() {
+  local destination
+  _mox_ssh_options "$HM_COORDINATOR" || return 1
+  destination="$(_mox_ssh_destination "$HM_COORDINATOR")" || return 1
+  # shellcheck disable=SC2029 # The command string is assembled by lib/qdevice.sh.
+  ssh -tt "${MOX_SSH_OPTIONS[@]}" "${MOX_SSH_USER:-root}@${destination}" "$1"
 }
 
-hm_qdevice_absent_status_is_healthy() {
-  local status=$1 node_count=$2
-  [[ "$(hm_status_value "$status" 'Expected votes')" == "$node_count" &&
-    "$(hm_status_value "$status" 'Total votes')" == "$node_count" ]] ||
-    return 1
-  hm_status_is_quorate "$status" || return 1
-  ! hm_has_qdevice "$status"
-}
-
-# Ask whether the workstation can reach the QDevice, then prove it and resolve
-# the QDevice's literal Tailscale IPv4 the same way host setup does.
+# Check that this workstation reaches the QDevice as root and resolve its
+# Tailscale IPv4 into QD_IPV4. Returns 1, with QD_IPV4 empty, when it does
+# not; callers decide whether the change they make needs the QDevice.
 hm_verify_qdevice_access() {
   log "QDevice access"
-  info "Membership changes reconcile the external QDevice vote. This script"
-  info "connects to it as: ssh root@${PROXMOX_QDEVICE_HOST}"
-  hm_prompt_yes "Can you run 'ssh ${PROXMOX_QDEVICE_HOST}' from this workstation without a password prompt?" ||
-    die "Set up workstation SSH access to ${PROXMOX_QDEVICE_HOST} (see qdevice/QDEVICE_MANUAL_SETUP.md) and rerun"
-  ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-    -o ConnectTimeout=10 "root@${PROXMOX_QDEVICE_HOST}" true </dev/null ||
-    die "Non-interactive 'ssh root@${PROXMOX_QDEVICE_HOST}' failed"
-  local resolved remote_ip
-  resolved="$(
-    tailscale status --json | jq -er --arg host "$PROXMOX_QDEVICE_HOST" '
-      [
-        .Peer | to_entries[] | .value |
-        select(
-          .HostName == $host or
-          ((.DNSName // "") | rtrimstr(".") |
-            (. == $host or startswith($host + ".")))
-        ) |
-        .TailscaleIPs[]? |
-        select(type == "string" and test("^100\\.[0-9]+\\.[0-9]+\\.[0-9]+$"))
-      ] | unique |
-      if length == 1 then .[0]
-      else error("QDevice hostname did not resolve to exactly one Tailscale IPv4")
-      end
-    '
-  )" || die "Could not resolve $PROXMOX_QDEVICE_HOST to one stable Tailscale IPv4"
-  [[ "$resolved" =~ ^100\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] ||
-    die "Resolved QDevice address is not a Tailscale IPv4: $resolved"
-  remote_ip="$(
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-      -o ConnectTimeout=10 "root@${PROXMOX_QDEVICE_HOST}" \
-      "tailscale ip -4" </dev/null |
-      awk '/^100\./ { print; exit }'
-  )" || die "Could not verify the Tailscale IPv4 on $PROXMOX_QDEVICE_HOST"
-  [[ "$remote_ip" == "$resolved" ]] ||
-    die "MagicDNS resolved $PROXMOX_QDEVICE_HOST to $resolved, but that host reports $remote_ip"
-  HM_QDEVICE_IPV4="$resolved"
-  info "Verified ssh root@${PROXMOX_QDEVICE_HOST} (Tailscale $HM_QDEVICE_IPV4)"
-}
-
-hm_prepare_qdevice() {
-  info "Verifying the corosync-qnetd service on ${PROXMOX_QDEVICE_HOST}"
-  # shellcheck disable=SC2029 # HM_QDEVICE_IPV4 is a validated literal IPv4.
-  ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-    -o ConnectTimeout=10 "root@${PROXMOX_QDEVICE_HOST}" \
-    "flock -w 1800 /run/lock/app-ha-qdevice-provision.lock bash -s -- '$HM_QDEVICE_IPV4'" <<'REMOTE'
-set -Eeuo pipefail
-expected_tailscale_ip="$1"
-actual_tailscale_ip="$(tailscale ip -4 | awk '/^100\./ { print; exit }')"
-[[ "$actual_tailscale_ip" == "$expected_tailscale_ip" ]]
-if ! dpkg-query -W -f='${Status}\n' corosync-qnetd 2>/dev/null |
-     grep -Fxq 'install ok installed'; then
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y corosync-qnetd
-fi
-systemctl enable --now corosync-qnetd
-for _ in $(seq 1 10); do
-  systemctl is-active --quiet corosync-qnetd &&
-    ss -lnt | awk '$4 ~ /:5403$/ { found=1 } END { exit !found }' &&
-    exit 0
-  sleep 1
-done
-printf 'corosync-qnetd did not become active and listen on TCP 5403\n' >&2
-exit 1
-REMOTE
-}
-
-# Add or remove the coordinator's root key on the QDevice. pvecm qdevice setup
-# copies its certificates over that SSH trust.
-hm_qdevice_setup_key() {
-  local mode="$1" key key_b64
-  key="$(hm_exec "$HM_COORDINATOR" cat /root/.ssh/id_rsa.pub)" ||
-    die "Could not read $HM_COORDINATOR's QDevice setup SSH key"
-  [[ "$key" == ssh-rsa\ * ]] ||
-    die "$HM_COORDINATOR's QDevice setup SSH key is not an RSA public key"
-  key_b64="$(printf '%s' "$key" | base64 -w0)"
-  # shellcheck disable=SC2029 # key_b64 is restricted to base64 output.
-  ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-    -o ConnectTimeout=10 "root@${PROXMOX_QDEVICE_HOST}" \
-    "KEY_B64='$key_b64' MODE='$mode' bash -s" <<'REMOTE'
-set -Eeuo pipefail
-key="$(printf '%s' "$KEY_B64" | base64 -d)"
-install -d -m 0700 /root/.ssh
-touch /root/.ssh/authorized_keys
-chmod 0600 /root/.ssh/authorized_keys
-if [[ "$MODE" == add ]]; then
-  grep -Fxq "$key" /root/.ssh/authorized_keys ||
-    printf '%s\n' "$key" >>/root/.ssh/authorized_keys
-else
-  work="$(mktemp /root/.ssh/authorized_keys.app-ha.XXXXXX)"
-  awk -v key="$key" '$0 != key { print }' /root/.ssh/authorized_keys >"$work"
-  install -o root -g root -m 0600 "$work" /root/.ssh/authorized_keys
-  rm -f "$work"
-fi
-REMOTE
-}
-
-# Require every member to report the expected QDevice layout for NODE_COUNT.
-hm_assert_qdevice_layout() {
-  local node_count="$1" node state status states members=0
-  states="$(hm_member_states)" || die "Could not list cluster members"
-  while read -r node state; do
-    [[ -n "$node" ]] || continue
-    members=$((members + 1))
-    [[ "$state" == online ]] || die "$node is not online"
-    status="$(hm_exec "$node" pvecm status)" ||
-      die "Could not read cluster status from $node"
-    if ((node_count % 2 == 0)); then
-      hm_qdevice_status_is_healthy "$status" "$node_count" ||
-        die "$node does not report the QDevice alive and voting with expected/total votes $((node_count + 1))"
-    else
-      hm_qdevice_absent_status_is_healthy "$status" "$node_count" ||
-        die "$node does not report $node_count votes with the QDevice absent"
-    fi
-  done <<<"$states"
-  ((members == node_count)) ||
-    die "Expected $node_count cluster members, found $members"
-}
-
-# Print the first reason the members do not show the QDevice layout for
-# NODE_COUNT, or nothing when they all do. Returns 1 when there is a reason.
-hm_qdevice_layout_problem() {
-  local node_count="$1" node state status states members=0
-  states="$(hm_member_states)" || {
-    printf 'could not list cluster members\n'
-    return 1
-  }
-  while read -r node state; do
-    [[ -n "$node" ]] || continue
-    members=$((members + 1))
-    if [[ "$state" != online ]]; then
-      printf '%s is not online\n' "$node"
-      return 1
-    fi
-    if ! status="$(hm_exec "$node" pvecm status)"; then
-      printf 'could not read cluster status from %s\n' "$node"
-      return 1
-    fi
-    if ((node_count % 2 == 0)); then
-      if ! hm_qdevice_status_is_healthy "$status" "$node_count"; then
-        printf '%s does not report the QDevice alive and voting with expected/total votes %s\n' \
-          "$node" "$((node_count + 1))"
-        return 1
-      fi
-    elif ! hm_qdevice_absent_status_is_healthy "$status" "$node_count"; then
-      printf '%s does not report %s votes with the QDevice absent\n' "$node" "$node_count"
-      return 1
-    fi
-  done <<<"$states"
-  if ((members != node_count)); then
-    printf 'expected %s cluster members, found %s\n' "$node_count" "$members"
-    return 1
-  fi
-}
-
-# Replace the managed QDevice host-key block in a known_hosts file with one
-# trusted line. Run on a cluster member as: bash -c "$HM_QDEVICE_PIN_SCRIPT"
-# bash TRUST_B64 KNOWN_HOSTS. The same block is written by host setup.
-HM_QDEVICE_PIN_SCRIPT="$(
-  cat <<'REMOTE'
-set -Eeuo pipefail
-trust="$(printf '%s' "$1" | base64 -d)"
-known_hosts="$2"
-begin='# BEGIN app-ha managed qdevice host key'
-end='# END app-ha managed qdevice host key'
-[[ "$trust" =~ ^[A-Za-z0-9._-]+,[0-9.]+\ ssh-ed25519\ [A-Za-z0-9+/]+={0,2}$ ]]
-install -d -m 0700 "$(dirname -- "$known_hosts")"
-touch "$known_hosts"
-[[ -f "$known_hosts" && ! -L "$known_hosts" ]]
-chmod 0600 "$known_hosts"
-begin_count="$(grep -Fxc "$begin" "$known_hosts" || true)"
-end_count="$(grep -Fxc "$end" "$known_hosts" || true)"
-if ! { [[ "$begin_count" == 0 && "$end_count" == 0 ]] ||
-  [[ "$begin_count" == 1 && "$end_count" == 1 ]]; }; then
-  printf 'Managed QDevice host-key markers are unbalanced or duplicated in %s\n' \
-    "$known_hosts" >&2
-  exit 1
-fi
-work="$(mktemp "${known_hosts}.app-ha.XXXXXX")"
-awk -v begin="$begin" -v end="$end" '
-  $0 == begin { managed=1; next }
-  $0 == end { managed=0; next }
-  !managed { print }
-' "$known_hosts" >"$work"
-printf '%s\n%s\n%s\n' "$begin" "$trust" "$end" >>"$work"
-chmod 0600 "$work"
-mv -f -- "$work" "$known_hosts"
-REMOTE
-)"
-
-# Pin the QDevice's ED25519 host key, read over the operator-verified
-# workstation SSH connection, in every member's root known_hosts. pvecm
-# qdevice setup connects to the QDevice by its Tailscale IPv4, and a
-# replacement QDevice has a new host key.
-hm_pin_qdevice_host_key() {
-  local host_key key_type key_data trust trust_b64 node state states
-  [[ "$HM_QDEVICE_IPV4" =~ ^100\. ]] ||
-    die "A verified Tailscale IPv4 is required to pin the QDevice host key"
-  host_key="$(
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-      -o ConnectTimeout=10 "root@${PROXMOX_QDEVICE_HOST}" \
-      cat /etc/ssh/ssh_host_ed25519_key.pub </dev/null
-  )" || die "Could not read the ED25519 host key of ${PROXMOX_QDEVICE_HOST}"
-  read -r key_type key_data _ <<<"$host_key"
-  [[ "$key_type" == ssh-ed25519 && "$key_data" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] ||
-    die "${PROXMOX_QDEVICE_HOST} returned an invalid ED25519 host key"
-  info "QDevice host key: $(printf '%s %s\n' "$key_type" "$key_data" | ssh-keygen -lf -)"
-  trust="${PROXMOX_QDEVICE_HOST},${HM_QDEVICE_IPV4} ${key_type} ${key_data}"
-  trust_b64="$(printf '%s' "$trust" | base64 | tr -d '\n')"
-  states="$(hm_member_states)" || die "Could not list cluster members"
-  while read -r node state; do
-    [[ -n "$node" ]] || continue
-    [[ "$state" == online ]] || die "$node is not online"
-    hm_exec "$node" bash -c "$HM_QDEVICE_PIN_SCRIPT" bash "$trust_b64" \
-      /root/.ssh/known_hosts ||
-      die "Could not pin the QDevice host key on $node"
-  done <<<"$states"
-  info "Pinned the QDevice host key on every member"
-}
-
-# Print the QDevice address registered in corosync.conf, or nothing.
-hm_registered_qdevice_address() {
-  # shellcheck disable=SC2016 # awk program.
-  hm_exec "$HM_COORDINATOR" awk '
-    /^[[:space:]]*device[[:space:]]*[{]/ { device=1 }
-    device && /^[[:space:]]*host:/ { print $2; exit }
-  ' /etc/pve/corosync.conf
-}
-
-hm_add_qdevice() {
-  local node_count="$1"
-  [[ "$HM_QDEVICE_IPV4" =~ ^100\. ]] ||
-    die "A verified Tailscale IPv4 is required for QDevice setup"
-  log "Adding the external QDevice vote for the ${node_count}-node cluster"
-  info "This needs the Tailscale ACL that lets tag:proxmox-host reach tag:proxmox-qdevice on tcp:22."
-  hm_prepare_qdevice
-  hm_pin_qdevice_host_key
-  hm_exec "$HM_COORDINATOR" bash -c \
-    'test -f /root/.ssh/id_rsa.pub || ssh-keygen -q -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa' ||
-    die "Could not prepare $HM_COORDINATOR's QDevice setup SSH key"
-  hm_qdevice_setup_key add
-  _mox_ssh_options "$HM_COORDINATOR" || die "Could not prepare SSH to $HM_COORDINATOR"
-  local destination
-  destination="$(_mox_ssh_destination "$HM_COORDINATOR")" ||
-    die "Could not resolve $HM_COORDINATOR"
-  # shellcheck disable=SC2029 # HM_QDEVICE_IPV4 is a validated literal IPv4.
-  ssh -tt "${MOX_SSH_OPTIONS[@]}" "${MOX_SSH_USER:-root}@${destination}" \
-    "pvecm qdevice setup '${HM_QDEVICE_IPV4}' --force" ||
-    die "pvecm qdevice setup failed on $HM_COORDINATOR"
-  hm_qdevice_setup_key remove ||
-    warn "Could not remove $HM_COORDINATOR's setup key from ${PROXMOX_QDEVICE_HOST}; remove it manually"
-  hm_assert_qdevice_layout "$node_count"
-  info "Every member reports the QDevice alive and voting"
-}
-
-# Remove the QDevice vote. Proxmox stops the qdevice service over SSH on every
-# configured node, so an offline node can make the command report failure
-# after it already removed the device from corosync.conf; the configuration,
-# not the exit status, decides.
-hm_remove_qdevice() {
-  log "Removing the external QDevice vote before the membership change"
-  hm_exec "$HM_COORDINATOR" pvecm qdevice remove ||
-    warn "pvecm qdevice remove reported an error; checking corosync.conf"
-  hm_qdevice_configured &&
-    die "corosync.conf still configures the QDevice; inspect 'pvecm status' on $HM_COORDINATOR and remove it with 'pvecm qdevice remove' before rerunning"
-  info "The QDevice is no longer configured"
-}
-
-hm_qdevice_configured() {
-  hm_exec "$HM_COORDINATOR" grep -Eq '^[[:space:]]*device[[:space:]]*[{]' \
-    /etc/pve/corosync.conf
-}
-
-# Corosync can keep a removed QDevice registered (the Qdevice flag with 0
-# votes) until it restarts. Vote checks and a later host join would treat that
-# as a configured QDevice, so restart corosync, one member at a time, on each
-# member that still reports it.
-hm_clear_stale_qdevice() {
-  local node state states status deadline
-  ! hm_qdevice_configured || return 0
-  states="$(hm_member_states)" || die "Could not list cluster members"
-  while read -r node state; do
-    [[ -n "$node" ]] || continue
-    [[ "$state" == online ]] || die "$node is not online"
-    status="$(hm_exec "$node" pvecm status)" ||
-      die "Could not read cluster status from $node"
-    hm_has_qdevice "$status" || continue
-    log "Restarting corosync on $node to clear the removed QDevice registration"
-    hm_exec "$node" systemctl restart corosync.service ||
-      die "Could not restart corosync on $node"
-    deadline=$((SECONDS + 120))
-    while true; do
-      if status="$(hm_exec "$node" pvecm status 2>/dev/null)" &&
-        hm_status_is_quorate "$status" && ! hm_has_qdevice "$status"; then
-        break
-      fi
-      ((SECONDS < deadline)) ||
-        die "$node is not quorate without a QDevice registration 120 seconds after restarting corosync"
-      sleep 3
-    done
-    info "$node no longer reports a QDevice registration"
-  done <<<"$states"
-}
-
-# Bring the QDevice to the layout required for NODE_COUNT online members.
-hm_reconcile_qdevice() {
-  local node_count="$1" status
-  status="$(hm_cluster_status)" || die "Could not read cluster status"
-  if ((node_count % 2 == 1)); then
-    if hm_qdevice_configured; then
-      hm_remove_qdevice
-    fi
-    hm_clear_stale_qdevice
-    hm_assert_qdevice_layout "$node_count"
-    info "The ${node_count}-node cluster has an odd vote count; the QDevice is correctly absent"
+  if qd_probe_access; then
+    info "Verified ssh root@${PROXMOX_QDEVICE_HOST} (Tailscale $QD_IPV4)"
     return 0
   fi
-  if hm_has_qdevice "$status" && hm_qdevice_configured; then
-    hm_assert_qdevice_layout "$node_count"
-    info "The QDevice is configured, alive, and voting"
-    return 0
-  fi
-  hm_add_qdevice "$node_count"
+  warn "The QDevice is not accessible: ${QD_ACCESS_PROBLEM}"
+  return 1
 }
 
 # Take the same control-plane lock host setup takes: a workstation flock plus
@@ -778,7 +442,7 @@ hm_print_reinstall_follow_ups() {
   printf '    future host in this slot can register the same Tailscale hostname.\n'
   printf '  - On this workstation: ssh-keygen -R %s\n' "$node"
   printf '  - Remove or update env/%s.conf. A future host may reuse the %s slot;\n' "$node" "$node"
-  printf '    hosts/setup_proxmox_host.sh recommends the lowest free slot.\n'
+  printf '    hosts/add_proxmox_host.sh recommends the lowest free slot.\n'
   printf '  - In Cloudflare Load Balancing, remove the %s pool and monitor from every\n' "$node"
   printf '    load balancer if you have not already done so.\n'
 }

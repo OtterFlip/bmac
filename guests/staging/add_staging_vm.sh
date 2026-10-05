@@ -105,7 +105,7 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: create_staging_vm.sh [options]
+Usage: add_staging_vm.sh [options]
 
 Run from an administrator workstation. The script lists production registry
 resources, prompts for a source prodN, selects a standby of its live HA owner
@@ -2266,7 +2266,7 @@ PY
   done <<<"$inventory"
 }
 
-destroy_staging_vm_and_clone() {
+remove_staging_vm_and_clone() {
   local ok=true live_presence=""
   if [[ "$VM_MAY_EXIST" == true && -n "$STAGING_VMID" && -n "$STAGING_NODE" ]]; then
     if node_exec "$STAGING_NODE" qm status "$STAGING_VMID" >/dev/null 2>&1; then
@@ -2523,7 +2523,7 @@ rollback_failed_creation() {
   fi
   warn "Rolling back newly-created staging resources; production is never started or modified beyond its staging snapshot."
   local storage_ok=true snapshot_ok=true registry_ok=true route_ok=true
-  destroy_staging_vm_and_clone || storage_ok=false
+  remove_staging_vm_and_clone || storage_ok=false
   if [[ "$storage_ok" == true ]]; then
     delete_snapshot_and_trigger_cleanup || snapshot_ok=false
   else

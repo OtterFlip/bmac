@@ -5,15 +5,15 @@ SPDX-License-Identifier: GPL-3.0-only
 
 # Staging VM creation
 
-`create_staging_vm.sh` creates a disposable, non-HA `stageNprodN` staging VM from
+`add_staging_vm.sh` creates a disposable, non-HA `stageNprodN` staging VM from
 a currently-running registered production VM. Run it from an administrator
 workstation:
 
 ```bash
 hosts/update_cluster_runtime.sh --dry-run
 hosts/update_cluster_runtime.sh
-guests/staging/create_staging_vm.sh --dry-run
-guests/staging/create_staging_vm.sh \
+guests/staging/add_staging_vm.sh --dry-run
+guests/staging/add_staging_vm.sh \
   --sanitizer /absolute/path/to/local-staging-sanitizer.sh
 ```
 
@@ -209,8 +209,8 @@ Run the read-only plan first, or omit the resource name to list registered
 staging guests and select one interactively:
 
 ```bash
-guests/staging/destroy_staging_vm.sh --dry-run
-guests/staging/destroy_staging_vm.sh
+guests/staging/remove_staging_vm.sh --dry-run
+guests/staging/remove_staging_vm.sh
 ```
 
 Destruction requires every source production placement node online. It
@@ -248,15 +248,15 @@ staging environment.
 
 ```bash
 bash -n \
-  guests/staging/create_staging_vm.sh \
-  guests/staging/destroy_staging_vm.sh \
+  guests/staging/add_staging_vm.sh \
+  guests/staging/remove_staging_vm.sh \
   guests/staging/patch_staging_clone.sh
 
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
   guests/staging/test_staging_vm.py -v
 
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-  guests/staging/test_destroy_staging_vm.py -v
+  guests/staging/test_remove_staging_vm.py -v
 
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
   lib/test_shared_libs.py -v

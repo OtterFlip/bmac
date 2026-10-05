@@ -3,11 +3,20 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Purge one dead host that was never gracefully removed and has been
-# physically disconnected from the cluster for good. Staging VMs that depend
-# on it are destroyed, production placement, HA rules, and replication drop
-# it, the QDevice vote is reconciled, the host is deleted from corosync and
-# pmxcfs, and its registry slot is freed.
+# Remove one Proxmox host from the cluster, gracefully when it can be
+# contacted and forcefully when it cannot.
+#
+# Graceful removal is for a healthy host that no production VM, replica,
+# staging VM, HA rule, route, or deferred cleanup depends on. The host is
+# powered off, deleted from corosync and pmxcfs, the QDevice is reconciled so
+# the vote count stays odd, and the host's registry slot is freed for reuse.
+#
+# Forced removal is for a host that has failed and has been physically
+# disconnected from the cluster for good, after the operator agrees and
+# confirms that. Staging VMs that depend on it are destroyed, production
+# placement, HA rules, and replication drop it, the host is deleted from
+# corosync and pmxcfs, the QDevice vote is reconciled, and its registry slot
+# is freed.
 
 set -Eeuo pipefail
 set +x
@@ -32,11 +41,20 @@ source "$CONTROL_LIB"
 # shellcheck source=../lib/host_membership.sh
 source "$MEMBERSHIP_LIB"
 
+SHUTDOWN_TIMEOUT_SECONDS=600
 STAGING_CLEANUP_TIMEOUT_SECONDS=1200
+LIVE_VMS_JSON=""
+LIVE_RULES_JSON=""
+LIVE_REPLICATION_JSON=""
 
 CURRENT_PHASE="startup"
 TARGET_HOST=""
+# graceful or forced, chosen by choose_removal_mode.
+REMOVAL_MODE=""
 TARGET_IS_MEMBER=false
+TARGET_ONLINE=false
+TARGET_DESCRIPTION=""
+TARGET_KEY=""
 NEW_CONTROL_NODE=""
 CONTROL_CHANGED=false
 CLUSTER_CHANGED=false
@@ -48,31 +66,41 @@ declare -a PRODUCTION_NAMES=()
 
 usage() {
   cat <<'EOF'
-Usage: purge_host_from_cluster.sh [--host moxN]
+Usage: remove_proxmox_host.sh [--host moxN]
 
-Run from an administrator workstation. Purges one dead cluster host that can
-no longer be removed gracefully with hosts/remove_host_from_cluster.sh. The
-purpose of this script is to enable the removal of a cluster host that is no
-longer functioning and has been physically disconnected from the cluster,
-permanently. The purged machine must never be allowed to communicate with the
-cluster via the network in any way after it has been purged from the cluster.
+Run from an administrator workstation. Removes one Proxmox host from the
+cluster: gracefully when the host can be contacted, and forcefully when it
+cannot. Every other member must be online and the cluster must be quorate.
 
-Every other member must be online and the cluster must be quorate. HA must
-already have recovered every production VM that ran on the dead host. The
-script then:
-  - destroys staging VMs on the dead host or derived from production VMs that
-    used it, abandoning cleanup that only the dead host could perform;
-  - removes the dead host from each production VM's registry placement, HA
+Graceful removal, for an online host that answers SSH from this workstation,
+requires that nothing depends on it: no production placement (move production
+away first with guests/prod/change_prod_vm_owner.sh and
+guests/prod/change_prod_vm_placement.sh), no replica, staging VM, HA rule,
+route, or pending deferred cleanup. At least two hosts must remain. Under the
+cluster control-plane lock it removes the QDevice vote, powers the host off,
+deletes it from the cluster, re-adds the QDevice when the remaining member
+count is even, and frees the host's registry slot so a future host can reuse
+its moxN name.
+
+Forced removal is for a host that cannot be contacted: an offline member, a
+leftover /etc/pve/nodes/moxN directory, or a registry slot that is stale or
+never finished joining. It is offered only after explaining why, and proceeds
+only after you confirm that the machine has been permanently disconnected
+from every network, including Tailscale. HA must already have recovered
+every production VM that ran on the host. It then:
+  - destroys staging VMs on the host or derived from production VMs that used
+    it, abandoning cleanup that only that host could perform;
+  - removes the host from each production VM's registry placement, HA
     node-affinity rule, and replication jobs (a production VM may be left with
     a single placement host; add hosts back with
     guests/prod/change_prod_vm_placement.sh);
-  - reconciles the QDevice vote, deletes the host from corosync and pmxcfs,
-    removes its cluster SSH trust, and frees its registry slot.
-A host slot that was reserved but never joined can be purged the same way.
-When the dead host is the cluster control node, you choose its replacement.
+  - deletes the host from corosync and pmxcfs, removes its cluster SSH trust,
+    reconciles the QDevice vote, and frees its registry slot.
+
+When the host is the cluster control node, you choose its replacement first.
 
 Options:
-  --host moxN   Host to purge. Prompted when omitted.
+  --host moxN   Host to remove. Prompted when omitted.
   -h, --help
 EOF
 }
@@ -110,32 +138,15 @@ cleanup() {
         "$NEW_CONTROL_NODE" "$PROXMOX_CLUSTER_CONFIG" >&2
     fi
     if [[ "$CLUSTER_CHANGED" == true ]]; then
-      printf 'The purge of %s is partly complete. Correct the fault and rerun this\n' \
+      printf 'The removal of %s is partly complete. Correct the fault and rerun this\n' \
         "$TARGET_HOST" >&2
-      printf 'script for %s; completed steps are skipped.\n' "$TARGET_HOST" >&2
+      printf 'script for %s; completed steps are skipped. A host that was already\n' \
+        "$TARGET_HOST" >&2
+      printf 'powered off can then only be removed forcefully.\n' >&2
     fi
   fi
   [[ -z "$RUN_DIR" ]] || rm -rf -- "$RUN_DIR"
   exit "$code"
-}
-
-print_purge_warning() {
-  cat <<EOF
-
-=============================================================================
-  PURGE A DEAD HOST FROM CLUSTER ${PROXMOX_CLUSTER_NAME}
-=============================================================================
-The purpose of this script is to enable the removal of a cluster host that is
-no longer functioning and has been physically disconnected from the cluster,
-permanently.
-
-The purged machine must never be allowed to communicate with the cluster via
-the network in any way after it has been purged from the cluster. Before it is
-ever connected to any network again, wipe its disks or reinstall it.
-
-To remove a healthy host, use hosts/remove_host_from_cluster.sh instead.
-=============================================================================
-EOF
 }
 
 load_member_states() {
@@ -166,8 +177,65 @@ choose_coordinator() {
   die "No online cluster member is reachable"
 }
 
-# Print "NODE DESCRIPTION" for every host that this script can purge.
-purge_candidates() {
+load_live_state() {
+  LIVE_VMS_JSON="$(hm_pvesh_get /cluster/resources --type vm)" ||
+    die "Could not list cluster guests"
+  LIVE_RULES_JSON="$(
+    hm_exec "$HM_COORDINATOR" ha-manager rules config --output-format json
+  )" || die "Could not list HA rules"
+  LIVE_REPLICATION_JSON="$(hm_pvesh_get /cluster/replication)" ||
+    die "Could not list replication jobs"
+}
+
+# Print the reasons NODE cannot be removed, one per line; print nothing when it
+# is eligible. Uses the state from load_live_state.
+removal_blockers() {
+  local node="$1" references
+  references="$(hm_registry host-references "$node")" ||
+    die "Could not read registry references to $node"
+  python3 - "$node" "$references" "$LIVE_VMS_JSON" "$LIVE_RULES_JSON" \
+    "$LIVE_REPLICATION_JSON" <<'PY'
+import json
+import sys
+
+node = sys.argv[1]
+references = json.loads(sys.argv[2])
+vms, rules, replication = (json.loads(value) for value in sys.argv[3:6])
+index = int(node[3:])
+haproxy_vmid = 9110 + index
+
+
+def values(raw):
+    return raw if isinstance(raw, list) else [
+        part for part in str(raw or "").split(",") if part
+    ]
+
+
+for name in references["references"]:
+    print(f"registry record {name} references {node}")
+for row in vms:
+    if row.get("node") != node:
+        continue
+    vmid = int(row.get("vmid", 0))
+    if (
+        row.get("type") == "lxc"
+        and vmid == haproxy_vmid
+        and row.get("name") in (None, f"haproxy{index}")
+    ):
+        continue
+    print(f"guest {vmid} ({row.get('name', '?')}, {row.get('type', '?')}) is on {node}")
+for rule in rules:
+    nodes = {str(part).partition(":")[0] for part in values(rule.get("nodes"))}
+    if node in nodes:
+        print(f"HA rule {rule.get('rule', rule.get('id', '?'))} includes {node}")
+for job in replication:
+    if job.get("target") == node:
+        print(f"replication job {job.get('id', '?')} targets {node}")
+PY
+}
+
+# Print "NODE DESCRIPTION" for every host that can only be removed forcefully.
+forced_candidates() {
   local slots directories
   slots="$(hm_registry host-list)" || die "Could not list registry host slots"
   directories="$(
@@ -199,42 +267,128 @@ for node in sorted(candidates, key=lambda value: int(value[3:])):
 PY
 }
 
-choose_target() {
-  CURRENT_PHASE="choosing the host to purge"
-  local candidates node description
-  candidates="$(purge_candidates)"
-  [[ -n "$candidates" ]] ||
-    die "No offline member, leftover node directory, or stale slot exists; nothing can be purged"
-  printf '\nHosts that can be purged:\n'
+show_hosts() {
+  local node blockers candidates description
+  load_live_state
+  candidates="$(forced_candidates)"
+  printf '\nHosts:\n'
+  for node in "${ONLINE_MEMBERS[@]}"; do
+    blockers="$(removal_blockers "$node")"
+    if [[ -n "$blockers" ]]; then
+      printf '  %-6s online   in use (%s)\n' "$node" "$(head -n 1 <<<"$blockers")"
+    else
+      printf '  %-6s online   removable gracefully%s\n' "$node" \
+        "$([[ "$node" != "$CONTROL_NODE" ]] || printf ' (control node)')"
+    fi
+  done
   while read -r node description; do
-    printf '  %-6s %s\n' "$node" "$description"
+    [[ -n "$node" ]] || continue
+    printf '  %-6s OFFLINE  %s; removable only forcefully\n' "$node" "$description"
   done <<<"$candidates"
+}
+
+choose_target() {
+  CURRENT_PHASE="choosing the host to remove"
+  show_hosts
   if [[ -z "$TARGET_HOST" ]]; then
-    IFS= read -r -p "Host to purge: " TARGET_HOST ||
+    IFS= read -r -p "Host to remove: " TARGET_HOST ||
       die "Input ended before a host was chosen"
   fi
   hm_valid_node "$TARGET_HOST" ||
     die "Host must be mox1 through mox${MAX_MOX_HOSTS}: ${TARGET_HOST}"
-  awk -v node="$TARGET_HOST" '$1 == node { found=1 } END { exit !found }' \
-    <<<"$candidates" ||
-    die "$TARGET_HOST is not offline or has nothing to purge. A healthy host is removed with hosts/remove_host_from_cluster.sh"
+  TARGET_IS_MEMBER=false
+  TARGET_ONLINE=false
+  TARGET_DESCRIPTION=""
+  control_list_contains "$TARGET_HOST" "${MEMBERS[@]}" && TARGET_IS_MEMBER=true
+  control_list_contains "$TARGET_HOST" "${ONLINE_MEMBERS[@]}" && TARGET_ONLINE=true
+  [[ "$TARGET_ONLINE" == true ]] && return 0
+  TARGET_DESCRIPTION="$(
+    forced_candidates | awk -v node="$TARGET_HOST" '$1 == node { sub(/^[^ ]+ /, ""); print; exit }'
+  )"
+  [[ -n "$TARGET_DESCRIPTION" ]] ||
+    die "$TARGET_HOST is not a cluster member, and no node directory or registry slot remains for it; there is nothing to remove"
 }
 
-validate_cluster_shape() {
+# Remove gracefully when the target is an online member that answers SSH, and
+# forcefully, if the operator agrees, when it is not a member or is offline
+# and does not answer. Refuse the states in between, which a forced removal
+# would make unsafe.
+choose_removal_mode() {
+  CURRENT_PHASE="checking whether $TARGET_HOST can be contacted"
+  if [[ "$TARGET_ONLINE" == true ]]; then
+    mox_is_reachable "$TARGET_HOST" ||
+      die "Proxmox reports $TARGET_HOST online, but it does not answer SSH from this workstation. Restore SSH access to it and rerun to remove it gracefully; a host the cluster still sees online cannot be removed forcefully."
+    REMOVAL_MODE=graceful
+    info "$TARGET_HOST is online and answers SSH; it is removed gracefully"
+    return 0
+  fi
+  ! mox_is_reachable "$TARGET_HOST" ||
+    die "$TARGET_HOST answers SSH from this workstation, but the cluster does not see it online (${TARGET_DESCRIPTION}). Restore its cluster connectivity and rerun to remove it gracefully, or physically disconnect it for good to remove it forcefully."
+  confirm_forced_removal
+  REMOVAL_MODE=forced
+}
+
+confirm_forced_removal() {
+  cat <<EOF
+
+=============================================================================
+  ${TARGET_HOST} CANNOT BE REMOVED GRACEFULLY
+=============================================================================
+${TARGET_HOST}: ${TARGET_DESCRIPTION}. It does not answer SSH from this
+workstation, so it cannot be shut down and removed gracefully.
+
+If it is only temporarily unreachable (powered off, or a network or
+Tailscale outage), answer no, bring it back online, and rerun this script to
+remove it gracefully.
+
+Otherwise it can be removed forcefully, without contacting it. The purpose of
+a forced removal is to enable the removal of a cluster host that is
+no longer functioning and has been physically disconnected from the cluster,
+permanently.
+
+The removed machine must never be allowed to communicate with the cluster via
+the network in any way after it has been removed from the cluster. Before it
+is ever connected to any network again, wipe its disks or reinstall it.
+=============================================================================
+EOF
+  hm_prompt_yes "Remove ${TARGET_HOST} forcefully?" ||
+    die "No change was made"
+}
+
+validate_graceful_cluster_shape() {
+  CURRENT_PHASE="validating cluster membership and quorum"
+  local status node
+  status="$(hm_cluster_status)" || die "Could not read cluster status"
+  grep -Eq "^Name:[[:space:]]+${PROXMOX_CLUSTER_NAME}[[:space:]]*$" <<<"$status" ||
+    die "$HM_COORDINATOR is not a member of cluster $PROXMOX_CLUSTER_NAME"
+  pvecm_status_is_quorate "$status" ||
+    die "The cluster is not quorate; refusing a membership change"
+  ((${#MEMBERS[@]} >= 3)) ||
+    die "At least two hosts must remain; the cluster has ${#MEMBERS[@]} members"
+  for node in "${MEMBERS[@]}"; do
+    [[ "$node" != "$TARGET_HOST" ]] || continue
+    control_list_contains "$node" "${ONLINE_MEMBERS[@]}" ||
+      die "Every remaining member must be online; $node is offline"
+  done
+  control_list_contains "$TARGET_HOST" "${ONLINE_MEMBERS[@]}" ||
+    die "$TARGET_HOST is no longer online; rerun this script to remove it"
+}
+
+validate_forced_cluster_shape() {
   CURRENT_PHASE="validating cluster membership and quorum"
   local status node
   TARGET_IS_MEMBER=false
   ! control_list_contains "$TARGET_HOST" "${ONLINE_MEMBERS[@]}" ||
-    die "$TARGET_HOST is online; use hosts/remove_host_from_cluster.sh"
+    die "$TARGET_HOST is online again; rerun this script to remove it gracefully"
   if mox_is_reachable "$TARGET_HOST"; then
-    die "$TARGET_HOST answers SSH from this workstation. Purge is only for a host that is permanently disconnected; physically disconnect it or use hosts/remove_host_from_cluster.sh"
+    die "$TARGET_HOST answers SSH from this workstation. Forced removal is only for a host that is permanently disconnected; physically disconnect it, or rerun this script to remove it gracefully once the cluster sees it online"
   fi
   control_list_contains "$TARGET_HOST" "${MEMBERS[@]}" && TARGET_IS_MEMBER=true
   status="$(hm_cluster_status)" || die "Could not read cluster status"
   grep -Eq "^Name:[[:space:]]+${PROXMOX_CLUSTER_NAME}[[:space:]]*$" <<<"$status" ||
     die "$HM_COORDINATOR is not a member of cluster $PROXMOX_CLUSTER_NAME"
-  hm_status_is_quorate "$status" ||
-    die "The cluster is not quorate; restore quorum before purging $TARGET_HOST (if an earlier purge of a two-node cluster already removed the QDevice, run 'pvecm expected 1' on the survivor)"
+  pvecm_status_is_quorate "$status" ||
+    die "The cluster is not quorate; restore quorum before removing $TARGET_HOST (if an earlier forced removal from a two-node cluster already removed the QDevice, run 'pvecm expected 1' on the survivor)"
   for node in "${MEMBERS[@]}"; do
     [[ "$node" != "$TARGET_HOST" ]] || continue
     control_list_contains "$node" "${ONLINE_MEMBERS[@]}" ||
@@ -246,8 +400,25 @@ validate_cluster_shape() {
   fi
 }
 
+validate_eligibility() {
+  CURRENT_PHASE="checking that nothing depends on $TARGET_HOST"
+  local blockers
+  load_live_state
+  blockers="$(removal_blockers "$TARGET_HOST")"
+  if [[ -n "$blockers" ]]; then
+    printf '\n%s cannot be removed yet:\n' "$TARGET_HOST" >&2
+    sed 's/^/  - /' <<<"$blockers" >&2
+    printf '\nMove production placement off %s with guests/prod/change_prod_vm_owner.sh\n' \
+      "$TARGET_HOST" >&2
+    printf 'and guests/prod/change_prod_vm_placement.sh, destroy staging VMs that use it, and\n' >&2
+    printf 'wait for deferred cleanup to finish.\n' >&2
+    exit 1
+  fi
+  info "No registry record, guest, HA rule, or replication job depends on $TARGET_HOST"
+}
+
 # Analyze registry and live state. Writes the plan to RUN_DIR/plan.json and
-# prints refusals, one per line, when the purge cannot proceed.
+# prints refusals, one per line, when the forced removal cannot proceed.
 analyze() {
   CURRENT_PHASE="analyzing what depends on $TARGET_HOST"
   local resources cleanup vms rules replication
@@ -269,7 +440,8 @@ analyze() {
 }
 
 # build_plan DIR DEAD "ONLINE..." reads DIR/*.json, writes DIR/plan.json, and
-# prints one refusal per line (nothing when the purge can proceed).
+# prints one refusal per line (nothing when the forced removal can
+# proceed).
 build_plan() {
   python3 - "$@" <<'PY'
 import json
@@ -333,7 +505,7 @@ for row in sorted(
         )
         continue
     if not placement:
-        refusals.append(f"{name} is placed only on {dead}; destroy it with guests/prod/destroy_prod_vm.sh")
+        refusals.append(f"{name} is placed only on {dead}; destroy it with guests/prod/remove_prod_vm.sh")
         continue
     if vm is None or vm.get("name") != name or vm.get("type") != "qemu":
         refusals.append(f"{name} (VMID {vmid}) is missing from live cluster resources")
@@ -474,7 +646,7 @@ validate_plan() {
   local refusals
   refusals="$(analyze)"
   if [[ -n "$refusals" ]]; then
-    printf '\n%s cannot be purged yet:\n' "$TARGET_HOST" >&2
+    printf '\n%s cannot be removed forcefully yet:\n' "$TARGET_HOST" >&2
     sed 's/^/  - /' <<<"$refusals" >&2
     exit 1
   fi
@@ -482,20 +654,63 @@ validate_plan() {
   mapfile -t STAGING_NAMES < <(plan_field names staging)
 }
 
-show_plan() {
+confirm_cloudflare() {
+  printf '\nCloudflare Load Balancing sends traffic to each host by public IP. Before\n'
+  printf 'removing %s, remove its pool from every load balancer (and its monitor),\n' \
+    "$TARGET_HOST"
+  printf 'after adding pools for any hosts that replace it.\n'
+  hm_prompt_yes "Is ${TARGET_HOST} out of every Cloudflare load balancer?" ||
+    die "Update Cloudflare first; no change was made"
+}
+
+choose_control_replacement() {
+  [[ "$TARGET_HOST" == "$CONTROL_NODE" ]] || return 0
+  local -a candidates=() node
+  for node in "${ONLINE_MEMBERS[@]}"; do
+    [[ "$node" == "$TARGET_HOST" ]] || candidates+=("$node")
+  done
+  hm_choose_new_control_node "$TARGET_HOST" NEW_CONTROL_NODE "${candidates[@]}"
+}
+
+show_control_plan() {
+  if [[ -n "$NEW_CONTROL_NODE" ]]; then
+    info "Control node: $TARGET_HOST -> $NEW_CONTROL_NODE"
+  else
+    info "Control node: $CONTROL_NODE (unchanged)"
+  fi
+}
+
+show_qdevice_plan() {
+  local remaining="$1"
+  if ((remaining % 2 == 0)); then
+    info "QDevice: present afterward ($remaining nodes + 1 QDevice vote)"
+  else
+    info "QDevice: absent afterward ($remaining votes)"
+    [[ "$QD_IPV4" =~ ^100\. ]] ||
+      info "The QDevice is not accessible, so a registered one is removed forcefully; you will be asked to remove it from Tailscale first."
+  fi
+}
+
+show_graceful_plan() {
+  local remaining=$((${#MEMBERS[@]} - 1))
+  log "Graceful removal plan"
+  info "Host: $TARGET_HOST (online)"
+  info "Cluster: ${MEMBERS[*]} -> $remaining members"
+  show_qdevice_plan "$remaining"
+  show_control_plan
+  info "The host is powered off and must be wiped or reinstalled before it joins any cluster again."
+}
+
+show_forced_plan() {
   local name remaining
-  log "Purge plan"
-  info "Host: $TARGET_HOST ($([[ "$TARGET_IS_MEMBER" == true ]] && printf 'offline cluster member' || printf 'not a cluster member'))"
+  log "Forced removal plan"
+  info "Host: $TARGET_HOST (${TARGET_DESCRIPTION})"
   if [[ "$TARGET_IS_MEMBER" == true ]]; then
     remaining=$((${#MEMBERS[@]} - 1))
     info "Cluster: ${MEMBERS[*]} -> $remaining members"
-    if ((remaining % 2 == 0)); then
-      info "QDevice: present afterward ($remaining nodes + 1 QDevice vote)"
-    else
-      info "QDevice: absent afterward ($remaining votes)"
-    fi
+    show_qdevice_plan "$remaining"
     ((remaining > 1)) ||
-      info "A single remaining host cannot provide production HA; add hosts with hosts/setup_proxmox_host.sh"
+      info "A single remaining host cannot provide production HA; add hosts with hosts/add_proxmox_host.sh"
   fi
   if ((${#STAGING_NAMES[@]} > 0)); then
     info "Staging VMs destroyed: ${STAGING_NAMES[*]}"
@@ -507,20 +722,32 @@ show_plan() {
   done
   ((${#PRODUCTION_NAMES[@]} > 0)) || info "Production VMs changed: none"
   info "Pending cleanup abandoned on $TARGET_HOST: $(plan_field abandoned)"
-  if [[ -n "$NEW_CONTROL_NODE" ]]; then
-    info "Control node: $TARGET_HOST -> $NEW_CONTROL_NODE"
-  else
-    info "Control node: $CONTROL_NODE (unchanged)"
-  fi
+  show_control_plan
 }
 
-choose_control_replacement() {
-  [[ "$TARGET_HOST" == "$CONTROL_NODE" ]] || return 0
-  local -a candidates=() node
-  for node in "${ONLINE_MEMBERS[@]}"; do
-    [[ "$node" == "$TARGET_HOST" ]] || candidates+=("$node")
-  done
-  hm_choose_new_control_node "$TARGET_HOST" NEW_CONTROL_NODE "${candidates[@]}"
+# The final confirmation of a forced removal is the operator's statement that
+# the machine is disconnected for good.
+confirm_forced_disconnection() {
+  cat <<EOF
+
+=============================================================================
+  CONFIRM THAT ${TARGET_HOST} IS PERMANENTLY DISCONNECTED
+=============================================================================
+Forced removal permanently removes ${TARGET_HOST} from cluster
+${PROXMOX_CLUSTER_NAME} and destroys the staging VMs listed above. Before
+continuing:
+
+  1. Physically disconnect ${TARGET_HOST} from every network: its public, private
+     VLAN, and management connections.
+  2. In the Tailscale admin console, open Machines and remove ${TARGET_HOST}, so it
+     cannot reach the cluster over Tailscale if it ever starts again.
+  3. Make sure it will never be connected to any network again in its old role.
+     Wipe its disks or reinstall it before it is connected to any network.
+=============================================================================
+EOF
+  hm_confirm_phrase \
+    "Type the phrase below only when ${TARGET_HOST} is permanently disconnected and removed from Tailscale." \
+    "${TARGET_HOST} IS PERMANENTLY DISCONNECTED"
 }
 
 switch_control_node() {
@@ -535,6 +762,57 @@ switch_control_node() {
   CONTROL_NODE="$NEW_CONTROL_NODE"
   HM_COORDINATOR="$NEW_CONTROL_NODE"
   info "The registry records $NEW_CONTROL_NODE as the cluster control node"
+}
+
+remove_qdevice_before_change() {
+  CURRENT_PHASE="removing the QDevice vote"
+  qd_is_registered || {
+    info "No QDevice is configured"
+    return 0
+  }
+  CLUSTER_CHANGED=true
+  qd_remove "The QDevice is removed before $TARGET_HOST leaves the cluster."
+  local status
+  status="$(hm_cluster_status)" || die "Could not read cluster status"
+  pvecm_status_is_quorate "$status" ||
+    die "The cluster lost quorum after QDevice removal"
+}
+
+power_off_target() {
+  [[ "$TARGET_ONLINE" == true ]] || return 0
+  CURRENT_PHASE="powering off $TARGET_HOST"
+  log "Powering off $TARGET_HOST"
+  TARGET_KEY="$(mox_ssh "$TARGET_HOST" cat /root/.ssh/id_rsa.pub </dev/null 2>/dev/null || true)"
+  CLUSTER_CHANGED=true
+  # Disabling corosync keeps the host from rejoining if it is powered on
+  # before it is wiped.
+  mox_ssh "$TARGET_HOST" bash -c '
+set -Eeuo pipefail
+systemctl disable corosync.service >/dev/null 2>&1 || true
+if systemctl list-unit-files corosync-qdevice.service >/dev/null 2>&1; then
+  systemctl disable corosync-qdevice.service >/dev/null 2>&1 || true
+fi
+systemd-run --quiet --on-active=3 --unit=app-ha-remove-poweroff systemctl poweroff
+' </dev/null || die "Could not schedule the power-off of $TARGET_HOST"
+  info "Waiting up to ${SHUTDOWN_TIMEOUT_SECONDS} seconds for $TARGET_HOST to go offline"
+  hm_wait_until_offline "$TARGET_HOST" "$SHUTDOWN_TIMEOUT_SECONDS" ||
+    die "$TARGET_HOST did not go offline within ${SHUTDOWN_TIMEOUT_SECONDS} seconds"
+  info "$TARGET_HOST is offline"
+}
+
+delete_target() {
+  CURRENT_PHASE="deleting $TARGET_HOST from the cluster"
+  CLUSTER_CHANGED=true
+  hm_delete_cluster_node "$TARGET_HOST"
+  hm_strip_node_ssh_trust "$TARGET_HOST" "$TARGET_KEY"
+}
+
+reconcile_after_removal() {
+  CURRENT_PHASE="reconciling the QDevice for the remaining members"
+  load_member_states
+  ((${#MEMBERS[@]} == ${#ONLINE_MEMBERS[@]})) ||
+    die "Every remaining member must be online (members: ${MEMBERS[*]}; online: ${ONLINE_MEMBERS[*]})"
+  qd_reconcile "${#MEMBERS[@]}"
 }
 
 registry_update_staging() {
@@ -563,7 +841,7 @@ queue_staging_cleanup() {
     cleanup_pending) ;;
     *) die "Unsupported staging state for $name: $state" ;;
   esac
-  local reason="purge of dead host ${TARGET_HOST}"
+  local reason="forced removal of host ${TARGET_HOST}"
   hm_registry defer-cleanup --resource "$name" --node "$node" \
     --action destroy-vm --target "vm:${vmid}" --reason "$reason" >/dev/null ||
     die "Could not queue destruction of staging VM $name"
@@ -738,7 +1016,7 @@ delete_dead_member() {
   hm_delete_cluster_node "$TARGET_HOST" "$((${#MEMBERS[@]} - 1))"
   local status
   status="$(hm_cluster_status)" || die "Could not read cluster status"
-  hm_status_is_quorate "$status" ||
+  pvecm_status_is_quorate "$status" ||
     die "The cluster is not quorate after deleting $TARGET_HOST; run 'pvecm expected $((${#MEMBERS[@]} - 1))' on $HM_COORDINATOR and rerun"
 }
 
@@ -751,7 +1029,7 @@ finish_cluster_cleanup() {
   load_member_states
   ((${#MEMBERS[@]} == ${#ONLINE_MEMBERS[@]})) ||
     die "Every remaining member must be online (members: ${MEMBERS[*]}; online: ${ONLINE_MEMBERS[*]})"
-  hm_reconcile_qdevice "${#MEMBERS[@]}"
+  qd_reconcile "${#MEMBERS[@]}"
 }
 
 release_slot() {
@@ -759,55 +1037,77 @@ release_slot() {
   hm_registry host-sync --live >/dev/null ||
     die "Could not record current cluster membership in the registry"
   hm_registry host-release "$TARGET_HOST" \
-    --reason "purged with hosts/purge_host_from_cluster.sh" >/dev/null ||
+    --reason "${REMOVAL_MODE} removal with hosts/remove_proxmox_host.sh" >/dev/null ||
     die "Could not free the $TARGET_HOST registry slot"
   info "The $TARGET_HOST slot is free for a future host"
 }
 
-main() {
-  parse_args "$@"
-  load_proxmox_config --no-secrets || die "Could not load cluster configuration"
-  require_vars PROXMOX_CLUSTER_NAME MAX_MOX_HOSTS CLUSTER_STATE_DIR \
-    PROXMOX_QDEVICE_HOST PROXMOX_INTERNAL_DOMAIN PRIVATE_SUBNET_PREFIX \
-    MOX_IP_START_OCTET || die "Configuration is incomplete"
-  local command_name
-  for command_name in awk flock jq mktemp openssl python3 ssh tailscale; do
-    command -v "$command_name" >/dev/null 2>&1 ||
-      die "Required workstation command is unavailable: $command_name"
-  done
-  RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/purge-host.XXXXXX")"
-  chmod 0700 "$RUN_DIR"
-  trap cleanup EXIT
+sync_ingress() {
+  CURRENT_PHASE="synchronizing HAProxy on the remaining members"
+  mox_ssh "$HM_COORDINATOR" "$HM_REMOTE_HAPROXY_SYNC" --lock-timeout 240 \
+    </dev/null >/dev/null ||
+    warn "HAProxy route synchronization failed; run it later on $HM_COORDINATOR: $HM_REMOTE_HAPROXY_SYNC"
+}
 
-  print_purge_warning
-  hm_verify_qdevice_access
+# Stop before any change when the remaining members need a QDevice that is
+# not accessible.
+require_qdevice_access_afterward() {
+  local remaining=${#MEMBERS[@]}
+  [[ "$TARGET_IS_MEMBER" != true ]] || remaining=$((remaining - 1))
+  qd_require_access_for "$remaining"
+}
 
-  CURRENT_PHASE="resolving the cluster control node"
-  log "Cluster control node"
-  resolve_control_node --allow-offline || exit 1
-  [[ -n "$CONTROL_PROBE_NODE" ]] || die "No reachable cluster member was found"
-  [[ "$CONTROL_REGISTRY_SUPPORTS_HOSTS" == true ]] ||
-    die "The installed cluster registry predates host slots; run hosts/update_cluster_runtime.sh first"
-  choose_coordinator
-  info "Control node: $CONTROL_NODE; commands run through $HM_COORDINATOR"
-  hm_require_slot_registry
-
-  load_member_states
-  choose_target
-  validate_cluster_shape
-  validate_plan
+remove_gracefully() {
+  validate_graceful_cluster_shape
+  require_qdevice_access_afterward
+  validate_eligibility
+  confirm_cloudflare
   choose_control_replacement
-  show_plan
-  print_purge_warning
+  show_graceful_plan
   hm_confirm_phrase \
-    "Purging permanently removes $TARGET_HOST from cluster $PROXMOX_CLUSTER_NAME and destroys the staging VMs listed above." \
-    "PURGE ${TARGET_HOST}"
+    "This powers off $TARGET_HOST and permanently removes it from cluster $PROXMOX_CLUSTER_NAME." \
+    "REMOVE ${TARGET_HOST}"
 
   switch_control_node
   CURRENT_PHASE="acquiring the cluster control-plane lock"
   hm_acquire_control_plane_lock "$HM_COORDINATOR"
   load_member_states
-  validate_cluster_shape
+  validate_graceful_cluster_shape
+  validate_eligibility
+
+  remove_qdevice_before_change
+  power_off_target
+  delete_target
+  reconcile_after_removal
+  release_slot
+  sync_ingress
+  hm_release_control_plane_lock
+  hm_archive_host_artifacts "$TARGET_HOST"
+
+  log "Graceful host removal complete"
+  info "$TARGET_HOST is powered off and no longer a member of $PROXMOX_CLUSTER_NAME"
+  info "Members: ${MEMBERS[*]}"
+  if [[ "$CONTROL_CHANGED" == true ]]; then
+    control_offer_cluster_conf_update "$NEW_CONTROL_NODE"
+  fi
+  hm_print_reinstall_follow_ups "$TARGET_HOST"
+  printf '  - Wipe or reinstall %s before it is connected to any network again.\n' \
+    "$TARGET_HOST"
+}
+
+remove_forcefully() {
+  validate_forced_cluster_shape
+  validate_plan
+  require_qdevice_access_afterward
+  choose_control_replacement
+  show_forced_plan
+  confirm_forced_disconnection
+
+  switch_control_node
+  CURRENT_PHASE="acquiring the cluster control-plane lock"
+  hm_acquire_control_plane_lock "$HM_COORDINATOR"
+  load_member_states
+  validate_forced_cluster_shape
   validate_plan
 
   destroy_dependent_staging
@@ -815,13 +1115,11 @@ main() {
   delete_dead_member
   finish_cluster_cleanup
   release_slot
-  mox_ssh "$HM_COORDINATOR" "$HM_REMOTE_HAPROXY_SYNC" --lock-timeout 240 \
-    </dev/null >/dev/null ||
-    warn "HAProxy route synchronization failed; run it later on $HM_COORDINATOR: $HM_REMOTE_HAPROXY_SYNC"
+  sync_ingress
   hm_release_control_plane_lock
   hm_archive_host_artifacts "$TARGET_HOST"
 
-  log "Host purge complete"
+  log "Forced host removal complete"
   info "$TARGET_HOST is no longer part of $PROXMOX_CLUSTER_NAME"
   info "Members: ${MEMBERS[*]}"
   local name
@@ -838,9 +1136,47 @@ main() {
     "$TARGET_HOST"
   printf 'network in any way. Wipe its disks or reinstall it before it is connected to\n'
   printf 'any network again.\n'
+}
+
+main() {
+  parse_args "$@"
+  load_proxmox_config --no-secrets || die "Could not load cluster configuration"
+  require_vars PROXMOX_CLUSTER_NAME MAX_MOX_HOSTS CLUSTER_STATE_DIR \
+    PROXMOX_QDEVICE_HOST PROXMOX_INTERNAL_DOMAIN PRIVATE_SUBNET_PREFIX \
+    MOX_IP_START_OCTET || die "Configuration is incomplete"
+  local command_name
+  for command_name in awk flock jq mktemp openssl python3 ssh tailscale; do
+    command -v "$command_name" >/dev/null 2>&1 ||
+      die "Required workstation command is unavailable: $command_name"
+  done
+  RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/remove-host.XXXXXX")"
+  chmod 0700 "$RUN_DIR"
+  trap cleanup EXIT
+
+  hm_verify_qdevice_access ||
+    info "Continuing: the QDevice is needed only if an even number of members remains."
+
+  CURRENT_PHASE="resolving the cluster control node"
+  log "Cluster control node"
+  resolve_control_node --allow-offline || exit 1
+  [[ -n "$CONTROL_PROBE_NODE" ]] || die "No reachable cluster member was found"
+  [[ "$CONTROL_REGISTRY_SUPPORTS_HOSTS" == true ]] ||
+    die "The installed cluster registry predates host slots; run hosts/update_cluster_runtime.sh first"
+  choose_coordinator
+  info "Control node: $CONTROL_NODE; commands run through $HM_COORDINATOR"
+  hm_require_slot_registry
+
+  load_member_states
+  choose_target
+  choose_removal_mode
+  if [[ "$REMOVAL_MODE" == graceful ]]; then
+    remove_gracefully
+  else
+    remove_forcefully
+  fi
   bash "${REPO_ROOT}/lib/report_stale_jump_ssh.sh" "$TARGET_HOST" || true
 }
 
-if [[ "${PURGE_HOST_SOURCE_ONLY:-0}" != 1 ]]; then
+if [[ "${REMOVE_PROXMOX_HOST_SOURCE_ONLY:-0}" != 1 ]]; then
   main "$@"
 fi

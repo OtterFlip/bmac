@@ -21,7 +21,7 @@ import unittest
 tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
 
 STAGING_DIR = Path(__file__).resolve().parent
-CREATE_SCRIPT = STAGING_DIR / "create_staging_vm.sh"
+CREATE_SCRIPT = STAGING_DIR / "add_staging_vm.sh"
 PATCH_SCRIPT = STAGING_DIR / "patch_staging_clone.sh"
 TREE_HELPER = STAGING_DIR / "patch_staging_guest_tree.py"
 

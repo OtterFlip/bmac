@@ -14,7 +14,7 @@
 # host. On an encrypted host the new member gets the
 # shared rpool LUKS passphrase, which the operator types at the host console.
 # The disk, LUKS, ESP, and zpool logic is lib/rpool_mirror.sh, the same code
-# hosts/setup_proxmox_host.sh uses.
+# hosts/add_proxmox_host.sh uses.
 
 set -Eeuo pipefail
 set +x

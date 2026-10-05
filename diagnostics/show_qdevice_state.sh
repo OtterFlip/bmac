@@ -58,7 +58,7 @@ whether every member sees it alive and voting. When it is functional, print
 its details from the cluster and from the QDevice host
 (PROXMOX_QDEVICE_HOST, reached as root over SSH). When it is missing or has
 failed, explain what to do, including replacing it with
-qdevice/purge_qdevice.sh and qdevice/add_qdevice.sh.
+qdevice/remove_qdevice.sh and qdevice/add_qdevice.sh.
 
 Nothing is changed. Commands create normal SSH and command-access log entries.
 
@@ -107,7 +107,7 @@ qdevice_verdict() {
     fi
     printf 'ATTENTION: a QDevice (%s) is registered, but the %s-member cluster has an odd\n' \
       "${REGISTERED_ADDRESS:-unknown address}" "$MEMBER_COUNT"
-    printf 'number of votes and must not use one. hosts/setup_proxmox_host.sh removes it on its\n'
+    printf 'number of votes and must not use one. hosts/add_proxmox_host.sh removes it on its\n'
     printf 'next run, or run "pvecm qdevice remove" on a member while every member is online.\n'
     return 1
   fi
@@ -154,10 +154,11 @@ qdevice_verdict() {
     fi
     printf '\nIf it is only temporarily unreachable (network or Tailscale), restore access\n'
     printf 'and rerun this script. If it has failed and must be replaced:\n'
-    printf '  1. Run qdevice/purge_qdevice.sh. It cannot purge an unreachable machine, but it\n'
-    printf '     offers to unregister the QDevice from the cluster and remove every\n'
-    printf '     association with it from the Proxmox hosts. You must first remove the old\n'
-    printf '     machine from Tailscale so it can never communicate with the cluster again.\n'
+    printf '  1. Run qdevice/remove_qdevice.sh. It cannot remove an inaccessible QDevice\n'
+    printf '     gracefully, so it offers to remove it forcefully: it removes the QDevice and\n'
+    printf '     every association with it from the cluster without contacting it, once you\n'
+    printf '     have removed the old machine from Tailscale so it can never communicate\n'
+    printf '     with the cluster again.\n'
     printf '  2. Prepare the new machine with qdevice/QDEVICE_MANUAL_SETUP.md.\n'
     printf '  3. Run qdevice/add_qdevice.sh to add it to the cluster.\n'
   else
@@ -174,7 +175,7 @@ qdevice_verdict() {
   if ((inaccessible == 0)); then
     printf '\nRepair the problems above (for example restart corosync-qnetd on the QDevice or\n'
     printf 'corosync-qdevice on a member). If the QDevice cannot be repaired, replace it:\n'
-    printf 'qdevice/purge_qdevice.sh, then qdevice/QDEVICE_MANUAL_SETUP.md, then\n'
+    printf 'qdevice/remove_qdevice.sh, then qdevice/QDEVICE_MANUAL_SETUP.md, then\n'
     printf 'qdevice/add_qdevice.sh.\n'
   fi
   ((${#OFFLINE_MEMBERS[@]} == 0)) ||
@@ -224,11 +225,11 @@ collect_cluster() {
     inside && depth == 0 { exit }
   ' /etc/pve/corosync.conf </dev/null 2>&1 | indent
   local registered_status=0
-  hm_qdevice_configured 2>/dev/null || registered_status=$?
+  qd_check_registered 2>/dev/null || registered_status=$?
   case "$registered_status" in
     0)
       REGISTERED=1
-      REGISTERED_ADDRESS="$(hm_registered_qdevice_address 2>/dev/null)"
+      REGISTERED_ADDRESS="$(qd_registered_address 2>/dev/null)"
       printf '\nRegistered QDevice address: %s\n' "${REGISTERED_ADDRESS:-unknown}"
       ;;
     1)
@@ -254,15 +255,15 @@ collect_members() {
       continue
     fi
     printf '    Expected votes: %s  Total votes: %s  Quorate: %s\n' \
-      "$(hm_status_value "$status" 'Expected votes')" \
-      "$(hm_status_value "$status" 'Total votes')" \
-      "$(hm_status_value "$status" 'Quorate')"
+      "$(pvecm_status_value "$status" 'Expected votes')" \
+      "$(pvecm_status_value "$status" 'Total votes')" \
+      "$(pvecm_status_value "$status" 'Quorate')"
     service="$(mox_ssh "$node" systemctl is-active corosync-qdevice </dev/null 2>/dev/null)"
     printf '    corosync-qdevice: %s\n' "${service:-unknown}"
     if ((REGISTERED)); then
       mox_ssh "$node" corosync-qdevice-tool -sv </dev/null 2>&1 | indent | indent
       if ((MEMBER_COUNT % 2 == 0)) &&
-        ! hm_qdevice_status_is_healthy "$status" "$MEMBER_COUNT"; then
+        ! qd_status_is_healthy "$status" "$MEMBER_COUNT"; then
         PROBLEMS+=("$node does not see the QDevice alive and voting with $((MEMBER_COUNT + 1)) expected/total votes")
         healthy=0
       fi

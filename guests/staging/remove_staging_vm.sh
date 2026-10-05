@@ -55,7 +55,7 @@ info() {
 
 usage() {
   cat <<'EOF'
-Usage: destroy_staging_vm.sh [--dry-run] [stageNprodN]
+Usage: remove_staging_vm.sh [--dry-run] [stageNprodN]
 
 With no resource argument, lists registered staging guests and prompts for one.
 Permanently removes the selected guest's route, QEMU VM and VM-owned disks,

@@ -15,6 +15,7 @@ umask 077
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
+APT_LOCK_LIB="${REPO_ROOT}/lib/apt_lock_wait.sh"
 REMOTE_INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_INSTALL_ROOT}/lib/cluster_registry.py"
 
@@ -108,6 +109,9 @@ load_config() {
   require_regular_file "$CONFIG_LIB" "Configuration library"
   # shellcheck source=../lib/config.sh
   source "$CONFIG_LIB"
+  require_regular_file "$APT_LOCK_LIB" "Apt lock wait library"
+  # shellcheck source=../lib/apt_lock_wait.sh
+  source "$APT_LOCK_LIB"
   load_proxmox_config --no-secrets >/dev/null ||
     die "Could not load env/cluster.conf"
 
@@ -578,6 +582,9 @@ set -Eeuo pipefail
 set +x
 umask 077
 
+EOF2
+  printf '%s\n\n' "$APT_LOCK_WAIT_FUNCTIONS" >>"$remote_helper"
+  cat >>"$remote_helper" <<'EOF2'
 stage_dir="${1:?remote staging directory is required}"
 primary_domain="${2:?primary domain is required}"
 
@@ -644,8 +651,10 @@ for file in cloudflare-origin.pem cloudflare-origin.key hello-app.nginx index.ht
 done
 
 if ! command -v nginx >/dev/null 2>&1; then
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y nginx
+  apt_wait_for_locks
+  # The timeout covers another process taking the lock just after the wait above.
+  apt-get -o DPkg::Lock::Timeout=60 update
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y nginx
 fi
 
 install -d -m 0755 /etc/nginx/ssl /etc/nginx/sites-available /etc/nginx/sites-enabled /var/www/hello-app

@@ -10,8 +10,9 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).with_name("setup_proxmox_host.sh")
+SCRIPT = Path(__file__).with_name("add_proxmox_host.sh")
 INVENTORY_SCRIPT = Path(__file__).with_name("inventory_disks.sh")
+QDEVICE_LIB = SCRIPT.parent.parent / "lib" / "qdevice.sh"
 MOX1_CONFIG = SCRIPT.parent.parent / "env" / "mox1.conf"
 TEST_IDRAC_IP = "192.0.2.63"
 
@@ -71,7 +72,7 @@ Flags:            Quorate Qdevice
         self.run_bash(
             f"""
             status={shlex.quote(status)}
-            qdevice_status_is_healthy "$status" 2
+            qd_status_is_healthy "$status" 2
             """
         )
 
@@ -79,7 +80,7 @@ Flags:            Quorate Qdevice
         self.run_bash(
             f"""
             status={shlex.quote(not_voting)}
-            if qdevice_status_is_healthy "$status" 2; then
+            if qd_status_is_healthy "$status" 2; then
               exit 9
             fi
             """
@@ -89,7 +90,7 @@ Flags:            Quorate Qdevice
         self.run_bash(
             f"""
             status={shlex.quote(wrong_total)}
-            if qdevice_status_is_healthy "$status" 2; then
+            if qd_status_is_healthy "$status" 2; then
               exit 9
             fi
             """
@@ -99,13 +100,46 @@ Flags:            Quorate Qdevice
         self.run_bash(
             """
             status=$'Quorate:          Yes\\nExpected votes:   3\\nTotal votes:      3\\nFlags:            Quorate'
-            qdevice_absent_status_is_healthy "$status" 3
+            qd_status_absent_is_healthy "$status" 3
             status+=$' Qdevice'
-            if qdevice_absent_status_is_healthy "$status" 3; then
+            if qd_status_absent_is_healthy "$status" 3; then
               exit 9
             fi
             """
         )
+
+    def test_qdevice_hooks_reach_members_through_the_control_node(self) -> None:
+        completed = self.run_bash(
+            r"""
+            cluster_node_control() { printf 'node=%s\n' "$1" >&2; shift; "$@"; }
+            cluster_control() {
+              printf '%s\n' '[{"node":"mox3","status":"offline"},{"node":"mox1","status":"online"}]'
+            }
+            MAX_MOX_HOSTS=10
+            qd_exec mox2 printf '<%s>' 'a b' '$HOME' "it's"
+            printf '\n'
+            qd_member_states
+            """
+        )
+        self.assertEqual(completed.stdout, "<a b><$HOME><it's>\nmox1 online\nmox3 offline\n")
+        self.assertIn("node=mox2", completed.stderr)
+
+    def test_host_apt_commands_wait_for_the_apt_lock(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        lines = source.splitlines()
+        checked = 0
+        for number, line in enumerate(lines):
+            if not line.lstrip().startswith(("apt-get", "DEBIAN_FRONTEND=noninteractive apt-get")):
+                continue
+            if "tailscale" in line:
+                continue
+            checked += 1
+            self.assertIn("-o DPkg::Lock::Timeout=60", line, f"line {number + 1}")
+            if " update" in line:
+                self.assertEqual(lines[number - 1].strip(), "apt_wait_for_locks", f"line {number + 1}")
+        self.assertEqual(checked, 12)
+        self.assertEqual(source.count("remote_apt_script "), 5)
+        self.assertEqual(source.count("declare -f apt_lock_holder apt_wait_for_locks"), 2)
 
     def test_current_prepared_iso_defers_source_iso_requirement(self) -> None:
         self.run_bash(
@@ -295,10 +329,10 @@ Flags:            Quorate Qdevice
 
     def test_safety_mechanisms_are_present_in_generated_host_flow(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("pvecm qdevice setup '${QDEVICE_IPV4}' --force", source)
-        self.assertNotIn(
-            "pvecm qdevice setup '${PROXMOX_QDEVICE_HOST}' --force", source
-        )
+        library = QDEVICE_LIB.read_text(encoding="utf-8")
+        self.assertIn("pvecm qdevice setup '${QD_IPV4}' --force", library)
+        self.assertNotIn("pvecm qdevice setup '${PROXMOX_QDEVICE_HOST}' --force", library)
+        self.assertNotIn("pvecm qdevice setup", source)
         self.assertIn('flock -x "$lock_fd"', source)
         self.assertIn('logical_sector_size="$(blockdev --getss "$disk")"', source)
         self.assertIn("app-ha-rpool-member-for-serial", source)
@@ -422,12 +456,15 @@ Flags:            Quorate Qdevice
 
     def test_first_node_prepares_qdevice_without_violating_vote_parity(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("dpkg-query -W -f='${Status}", source)
-        self.assertIn("systemctl enable --now corosync-qnetd", source)
-        self.assertIn("/run/lock/app-ha-qdevice-provision.lock", source)
-        self.assertIn("/var/cache/apt/pkgcache.bin.*", source)
-        self.assertIn("$4 ~ /:5403$/", source)
-        self.assertIn("awk -v key=\"$key\" '$0 != key { print }'", source)
+        library = QDEVICE_LIB.read_text(encoding="utf-8")
+        self.assertIn("dpkg-query -W -f='${Status}", library)
+        self.assertIn("systemctl enable --now corosync-qnetd", library)
+        self.assertIn("/run/lock/app-ha-qdevice-provision.lock", library)
+        self.assertIn("/var/cache/apt/pkgcache.bin.*", library)
+        self.assertIn("$4 ~ /:5403$/", library)
+        self.assertIn("awk -v key=\"$key\" '$0 != key { print }'", library)
+        prepare = source[source.index("prepare_qdevice() {") :]
+        self.assertIn("qd_prepare_qnetd", prepare[: prepare.index("\n}\n")])
         main = source[source.index("main() {") :]
         self.assertLess(
             main.index("prepare_qdevice"),
@@ -444,7 +481,7 @@ Flags:            Quorate Qdevice
         self.assertIn("/etc/pve/nodes/${peer_node}/ssh_known_hosts", source)
         self.assertIn("pvecm updatecerts --unmerge-known-hosts", source)
         self.assertNotIn(">/etc/pve/priv/known_hosts", source)
-        self.assertIn("/etc/ssh/ssh_host_ed25519_key.pub", source)
+        self.assertNotIn("managed qdevice host key", source)
         self.assertIn("--fingerprint '${cluster_fingerprint}'", source)
         self.assertIn('openssl s_client -connect "${fqdn}:8006"', source)
         join_preflight = source[
@@ -471,16 +508,25 @@ Flags:            Quorate Qdevice
         )
         self.assertIn("reconcile_cluster_control_plane", main)
         self.assertNotIn("cluster_has_qdevice", source)
-        for function in (
-            "remove_qdevice_before_membership_change() {",
-            "reconcile_qdevice() {",
+        library = QDEVICE_LIB.read_text(encoding="utf-8")
+        for function, first, then in (
+            ("qd_reconcile() {", "qd_remove", "qd_clear_stale"),
+            ("qd_remove() {", "pvecm qdevice remove", "qd_clear_stale"),
+            ("qd_remove() {", "qd_confirm_forced_removal", "pvecm qdevice remove"),
         ):
-            body = source[source.index(function) :]
+            body = library[library.index(function) :]
             body = body[: body.index("\n}\n")]
-            self.assertLess(
-                body.index("pvecm qdevice remove"),
-                body.rindex("clear_stale_qdevice_registration"),
-            )
+            self.assertLess(body.index(first), body.rindex(then))
+        before_join = source[source.index("remove_qdevice_before_membership_change() {") :]
+        self.assertIn("  qd_remove ", before_join[: before_join.index("\n}\n")])
+        self.assertLess(
+            join_preflight.index('qd_require_access_for "$((expected_count + 1))"'),
+            join_preflight.index("remove_qdevice_before_membership_change"),
+        )
+        reconcile = source[source.index("reconcile_qdevice() {") :]
+        self.assertIn('qd_reconcile "$node_count"', reconcile[: reconcile.index("\n}\n")])
+        remove = library[library.index("qd_remove() {") :]
+        self.assertIn("pvecm qdevice remove", remove[: remove.index("\n}\n")])
         self.assertIn('flock -w 1800 "$cluster_lock_fd"', source)
         self.assertIn("cluster-control-plane.lock", source)
         self.assertIn("/run/lock/app-ha-cluster-control-plane", source)

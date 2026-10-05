@@ -7,7 +7,7 @@
 # booted on a machine that will become a Proxmox host, and run it there. It
 # lists every NVMe drive's serial number and exact byte capacity and every
 # physical Ethernet NIC's MAC address: the values env/moxN.conf needs before
-# hosts/setup_proxmox_host.sh runs. It depends on nothing else in this repo.
+# hosts/add_proxmox_host.sh runs. It depends on nothing else in this repo.
 
 set -Eeuo pipefail
 
@@ -26,7 +26,7 @@ It lists:
   - every physical Ethernet NIC's MAC address and link state
 
 Copy these values into that host's env/moxN.conf on your administrator
-workstation before running hosts/setup_proxmox_host.sh:
+workstation before running hosts/add_proxmox_host.sh:
   - For each rpool mirror (mirror 1 is mandatory and becomes the boot mirror),
     pick two NVMe drives whose capacities differ by at most 1% and set
     NVME_MIRROR_<P>_SERIAL_<M> and NVME_MIRROR_<P>_CAPACITY_BYTES_<M>.

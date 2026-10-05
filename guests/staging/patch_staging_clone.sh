@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Offline-patch one unattached staging zvol. This helper is copied to the
-# selected Proxmox node by create_staging_vm.sh and runs there as root.
+# selected Proxmox node by add_staging_vm.sh and runs there as root.
 
 set -Eeuo pipefail
 set +x

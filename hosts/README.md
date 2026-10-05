@@ -15,8 +15,8 @@ The implementation supports a cluster whose hosts occupy slots `mox1` through
 records each slot, and setup recommends the lowest free one. The control node
 (`PROXMOX_CONTROL_NODE`, normally `mox1`, recorded authoritatively in the
 registry) creates the cluster. Each later host joins through it only after
-every existing node is online. `remove_host_from_cluster.sh` retires a healthy
-host and `purge_host_from_cluster.sh` deletes a dead one; both free the slot. A
+every existing node is online. `remove_proxmox_host.sh` retires a healthy host
+gracefully or removes a dead one forcefully; either way it frees the slot. A
 production VM is one movable `prodN`, active on one HA placement node at a
 time. A `stageNprodN` staging VM is disposable, non-HA, and fixed to one eligible
 standby node. Membership/parity logic covers one through ten nodes; the
@@ -286,7 +286,7 @@ Fill in `env/moxN.conf`:
 Run host setup from an administrator workstation:
 
 ```bash
-hosts/setup_proxmox_host.sh \
+hosts/add_proxmox_host.sh \
   --host moxN [--encrypt | --no-encrypt] \
   [--run-boot-tests | --skip-boot-tests]
 ```
@@ -344,7 +344,7 @@ skip a manual gate merely because local state says an earlier phase completed;
 the script also reconciles live hardware, disk, cluster, and remote phase
 state. Membership, native SSH-pin, and QDevice reconciliation is protected by
 both a checkout-local lock and an SSH-held `flock` on the control node, so
-installers, host removal, and host purge from
+installers and host removals from
 separate workstations cannot mutate the control plane concurrently. A
 companion `/run` lease remains fail-closed if the SSH holder disappears; the
 next run identifies its owner and requires an operator to verify that no
@@ -459,7 +459,7 @@ top-level vdev removal:
    the host, and staging cloned from a production guest whose disk lives on
    the host (running there or replicating there). Leftover `stg-base-`
    snapshots and pending cleanup records for the host count too. Destroy them
-   with `guests/staging/destroy_staging_vm.sh stageNprodN`;
+   with `guests/staging/remove_staging_vm.sh stageNprodN`;
 3. lists the production guests that run on or replicate to the host, asks
    whether unwanted files have been deleted inside them, and checks that
    `ssh prodN` works for each;
@@ -501,7 +501,7 @@ current inventory.
 
 ## Production and staging lifecycle
 
-`guests/prod/create_prod_vm.sh` allocates a deterministic `prodN`, an address
+`guests/prod/add_prod_vm.sh` allocates a deterministic `prodN`, an address
 from `PRODUCTION_IP_START` through `PRODUCTION_IP_END`, a MAC, and a
 live-checked VMID in pmxcfs. Host setup installs the production ISO
 cache/builder tools and their `curl`/`xorriso` dependencies on every mox. The
@@ -522,7 +522,7 @@ sparse by default, so `rpool` can be overcommitted; monitor pool free space on e
 placement node. Staging eviction is emergency reclamation, not production
 capacity.
 
-`guests/staging/create_staging_vm.sh` selects an active production source and
+`guests/staging/add_staging_vm.sh` selects an active production source and
 an online placement standby, takes a unique source-owned Proxmox snapshot,
 requires the replicated snapshot GUID to match on every production placement
 node, creates a direct local ZFS clone, patches it offline, and registers one
@@ -715,7 +715,7 @@ keys, and LUKS headers stay outside pmxcfs.
 - QDevice failure: packet flow is unchanged, but even-node quorum safety is
   degraded. Do not perform membership changes until parity is healthy.
   `diagnostics/show_qdevice_state.sh` reports the state. A lost QDevice is
-  replaced with `qdevice/purge_qdevice.sh` (which can unregister an
+  replaced with `qdevice/remove_qdevice.sh` (which can forcefully remove an
   unreachable one) and then `qdevice/add_qdevice.sh`.
 - Replication lag/failure: HA can recover only the last successful replicated
   state. A fully reserved production zvol also consumes reservation capacity
@@ -726,12 +726,12 @@ keys, and LUKS headers stay outside pmxcfs.
 - LUKS: boot requires iDRAC passphrase entry. Lost passphrase/header recovery,
   mistaken serial selection, or both members of one vdev failing can make the
   host unavailable.
-- Membership: every other member must be online for a join, removal, or
-  purge; QDevice must be removed before the change and restored only when
-  the resulting node count is even. A removal stops if the departing host
-  still holds anything; a purge refuses when HA has not yet recovered a
-  production VM from the dead host.
-- Purged host: a purged machine still holds the cluster's Corosync key and
+- Membership: every other member must be online for a join or a removal;
+  QDevice must be removed before the change and restored only when the
+  resulting node count is even. A graceful removal stops if the departing
+  host still holds anything; a forced removal refuses when HA has not yet
+  recovered a production VM from the dead host.
+- Forcefully removed host: the machine still holds the cluster's Corosync key and
   configuration. It must never communicate with the cluster again; wipe its
   disks before any reuse.
 - Route transaction: a node changing liveness during target selection aborts
@@ -741,22 +741,42 @@ Do not introduce Ceph, another storage/recovery plane, more than ten host
 slots, another guest subnet, or automatic snapshot deletion without
 revisiting this design and its failure drills.
 
-## Removing and purging hosts
+## Removing hosts
 
-Both scripts run from the administrator workstation. They first ask whether
-`ssh qdevice` works there, and check it, because they may need to remove and
-re-add the QDevice. They resolve the control node from the registry and
-`PROXMOX_CONTROL_NODE`, and hold the same control-plane lock as host setup
-while they change membership.
+`remove_proxmox_host.sh` runs from the administrator workstation and removes
+one host, gracefully when it can be contacted and forcefully when it cannot.
+It first checks whether the QDevice is accessible, because it may need to
+remove and re-add the QDevice; when it is not, the script continues only if
+an odd number of members remains. It resolves the control node from the
+registry and `PROXMOX_CONTROL_NODE`, and holds the same control-plane lock as
+host setup while it changes membership.
 
-`remove_host_from_cluster.sh` retires a healthy host:
+It lists every online member with what still blocks its graceful removal,
+and every host that can only be removed forcefully: offline members, leftover
+`/etc/pve/nodes/moxN` directories, and slots that are stale or never finished
+joining. The mode follows from the chosen host:
+
+- An online member that answers SSH from the workstation is removed
+  gracefully.
+- An offline member, or a leftover that is not a member, that does not
+  answer SSH can be removed forcefully. The script explains why a graceful
+  removal is impossible and asks whether to remove it forcefully; answer no
+  if the host is only temporarily unreachable, bring it back, and rerun.
+- A host in between (online in Proxmox but not answering SSH, or answering
+  SSH while Proxmox reports it offline) is refused, because neither removal
+  is safe until that is fixed.
+
+A host that an interrupted graceful run already powered off is offline and
+unreachable, so a rerun finishes it as a forced removal.
+
+### Graceful removal
 
 1. It shows every member with what still blocks its removal: registry
    references (production placement, staging, pending cleanup), guests other
    than its `haproxyN` LXC, HA rules, or replication jobs. Move production
    with `guests/prod/change_prod_vm_placement.sh` first.
-2. The cluster must be quorate with at least three members, every one online
-   except a target being resumed after an interrupted run.
+2. The cluster must be quorate with at least three members, every one
+   online.
 3. You confirm that the host is out of every Cloudflare load balancer. If it
    is the control node, you pick its successor, which is recorded in the
    registry before the change. Then you type `REMOVE moxN`.
@@ -770,12 +790,12 @@ while they change membership.
    update `PROXMOX_CONTROL_NODE`, and lists the manual cleanup: Tailscale
    device, `known_hosts`, `env/moxN.conf`, and Cloudflare.
 
-`purge_host_from_cluster.sh` deletes a host that has failed and has been
-physically disconnected permanently. It begins with the warning that a
-purged machine must never be allowed to communicate with the cluster again.
-It offers offline members, leftover `/etc/pve/nodes/moxN` directories, and
-slots that are stale or never finished joining. The target must not answer
-SSH, every other member must be online, and the cluster must be quorate.
+### Forced removal
+
+Forced removal is for a host that has failed and has been physically
+disconnected permanently. After you agree to it, the script warns that the
+removed machine must never be allowed to communicate with the cluster again.
+Every other member must be online, and the cluster must be quorate.
 
 The script builds a plan from the registry and live Proxmox state, and
 refuses when:
@@ -787,7 +807,10 @@ refuses when:
 - a resource is in an unsupported state;
 - the dead host holds a guest the registry does not know.
 
-After `PURGE moxN`, it:
+You then confirm the disconnection by typing `moxN IS PERMANENTLY
+DISCONNECTED`, after physically disconnecting the machine from every network,
+removing it from the Tailscale admin console (Machines), and making sure it
+will never be connected to a network again in its old role. Then it:
 
 1. destroys each staging VM that is on the dead host, or derived from a
    production VM that used it: it disables routes, queues the cleanup, and
@@ -893,22 +916,21 @@ Repository checks:
 
 ```bash
 bash -n \
-  hosts/setup_proxmox_host.sh \
+  hosts/add_proxmox_host.sh \
   hosts/app-ha-guest-role-hook.sh \
-  hosts/remove_host_from_cluster.sh \
-  hosts/purge_host_from_cluster.sh \
-  guests/prod/create_prod_vm.sh \
-  guests/staging/create_staging_vm.sh \
+  hosts/remove_proxmox_host.sh \
+  guests/prod/add_prod_vm.sh \
+  guests/staging/add_staging_vm.sh \
   guests/staging/patch_staging_clone.sh \
   lib/config.sh \
   lib/sync_haproxy_routes.sh \
   lib/process_deferred_cleanup.sh
 
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-  hosts/test_setup_proxmox_host.py \
+  hosts/test_add_proxmox_host.py \
   hosts/test_app_ha_guest_role_hook.py \
   hosts/test_host_membership.py \
-  guests/prod/test_create_prod_vm.py \
+  guests/prod/test_add_prod_vm.py \
   guests/staging/test_staging_vm.py \
   lib/test_shared_libs.py \
   lib/test_haproxy_routes.py \

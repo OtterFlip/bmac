@@ -26,7 +26,7 @@ This setup was verified on 2026-09-24 on an Apple Silicon Mac running macOS
 | Editing, `bash -n` | yes | yes | |
 | Unit suite | all but one test; some suites skip | complete, nothing skipped | |
 | `guests/`, `app/`, `diagnostics/` against a cluster | yes | not configured | |
-| `hosts/setup_proxmox_host.sh` | no | no | amd64 Linux |
+| `hosts/add_proxmox_host.sh` | no | no | amd64 Linux |
 | Real Proxmox, ZFS, HA, LUKS, or network behavior | no | no | the cluster |
 
 ## 1. Native macOS setup
@@ -62,7 +62,7 @@ it turns a skipped test into a failing one. The VM runs that check properly.
 The tests also read two files from your workstation:
 
 - `env/mox1.conf`. `lib/test_shared_libs.py` and
-  `hosts/test_setup_proxmox_host.py` take example host values from it, and
+  `hosts/test_add_proxmox_host.py` take example host values from it, and
   both fail on a fresh clone without it. If you have not already created it
   as part of cluster setup, copy the template:
 
@@ -165,7 +165,7 @@ something else, set `BMAC_LIMA_INSTANCE` to another name.
 
 ### Operator workflows
 
-- **`hosts/setup_proxmox_host.sh` cannot run here.** It needs Linux with
+- **`hosts/add_proxmox_host.sh` cannot run here.** It needs Linux with
   `flock` and `ip`, and its install-ISO phase executes Proxmox's amd64-only
   `proxmox-auto-install-assistant`. Untested options are Rosetta in an arm64
   Lima VM (`vmOpts.vz.rosetta`), an emulated x86_64 Lima VM (`vmType: qemu`,

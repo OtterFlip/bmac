@@ -55,7 +55,7 @@ Proxmox to reverse the replication jobs and records the new owner and
 replication targets in the registry.
 
 The VM must not have staging VMs derived from it; destroy them first with
-guests/staging/destroy_staging_vm.sh. Staging VMs of other production VMs on
+guests/staging/remove_staging_vm.sh. Staging VMs of other production VMs on
 the chosen host are evicted when production starts there.
 
 Options:

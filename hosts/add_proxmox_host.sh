@@ -39,6 +39,13 @@ CONTROL_LIB="${SCRIPT_DIR}/../lib/cluster_control.sh"
 }
 # shellcheck source=../lib/cluster_control.sh
 source "$CONTROL_LIB"
+QDEVICE_LIB="${SCRIPT_DIR}/../lib/qdevice.sh"
+[[ -f "$QDEVICE_LIB" ]] || {
+  printf 'ERROR: Missing QDevice library: %s\n' "$QDEVICE_LIB" >&2
+  exit 1
+}
+# shellcheck source=../lib/qdevice.sh
+source "$QDEVICE_LIB"
 
 SELECTED_HOST=""
 HOST_ID=""
@@ -57,7 +64,6 @@ GUEST_ROLE_HOOK_SOURCE=""
 GUEST_ROLE_HOOK_NAME=""
 GUEST_ROLE_HOOK_COMPAT_NAME=""
 TAILSCALE_IP=""
-QDEVICE_IPV4=""
 QDEVICE_REMOVED_FOR_JOIN=0
 USE_ADMIN_SSH=0
 CLUSTER_CONTROL_LOCK_HELD=0
@@ -562,12 +568,13 @@ preflight() {
     require_yes "Is the FiberState IPMI VPN connected and have you verified that iDRAC ${IDRAC_IP} is reachable?"
     ip route get "$IDRAC_IP" >/dev/null || fail "No route to iDRAC $IDRAC_IP"
   fi
-  require_yes "Is this workstation connected to Tailscale and able to SSH as root to ${PROXMOX_QDEVICE_HOST} with your normal SSH identity?"
+  require_yes "Is this workstation connected to Tailscale?"
   tailscale status >/dev/null 2>&1 || fail "The local Tailscale client is not connected"
-  resolve_qdevice_ipv4
-  ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-    -o ConnectTimeout=10 "root@${PROXMOX_QDEVICE_HOST}" true ||
-    fail "Cannot SSH to root@${PROXMOX_QDEVICE_HOST} with the calling user's SSH identity"
+  if qd_probe_access; then
+    write_state qdevice-ipv4 "$QD_IPV4"
+  else
+    printf '\nWARNING: The QDevice is not accessible: %s\n' "$QD_ACCESS_PROBLEM" >&2
+  fi
 
   if has_state host-bootstrapped; then
     info "$HOST_ID is already enrolled in Tailscale; reusing the recorded installation state."
@@ -1344,70 +1351,25 @@ resolve_tailscale_ip() {
   write_state tailscale-ip "$ip"
 }
 
-resolve_qdevice_ipv4() {
-  local resolved remote_ip
-  resolved="$(
-    tailscale status --json | jq -er --arg host "$PROXMOX_QDEVICE_HOST" '
-      [
-        .Peer | to_entries[] | .value |
-        select(
-          .HostName == $host or
-          ((.DNSName // "") | rtrimstr(".") |
-            (. == $host or startswith($host + ".")))
-        ) |
-        .TailscaleIPs[]? |
-        select(type == "string" and test("^100\\.[0-9]+\\.[0-9]+\\.[0-9]+$"))
-      ] | unique |
-      if length == 1 then .[0]
-      else error("QDevice hostname did not resolve to exactly one Tailscale IPv4")
-      end
-    '
-  )" || fail "Could not resolve $PROXMOX_QDEVICE_HOST to one stable Tailscale IPv4"
-  [[ "$resolved" =~ ^100\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] ||
-    fail "Resolved QDevice address is not a Tailscale IPv4: $resolved"
-
-  remote_ip="$(
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-      -o ConnectTimeout=10 "root@${PROXMOX_QDEVICE_HOST}" \
-      "tailscale ip -4" |
-      awk '/^100\./ { print; exit }'
-  )" || fail "Could not verify the Tailscale IPv4 on $PROXMOX_QDEVICE_HOST"
-  [[ "$remote_ip" == "$resolved" ]] ||
-    fail "MagicDNS resolved $PROXMOX_QDEVICE_HOST to $resolved, but that host reports $remote_ip"
-  QDEVICE_IPV4="$resolved"
-  write_state qdevice-ipv4 "$QDEVICE_IPV4"
-}
-
 prepare_qdevice() {
-  log "Provisioning and verifying the external QDevice service over Tailscale"
-  ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-    -o ConnectTimeout=10 "root@${PROXMOX_QDEVICE_HOST}" \
-    "flock -w 1800 /run/lock/app-ha-qdevice-provision.lock bash -s -- '$QDEVICE_IPV4'" <<'REMOTE'
-set -Eeuo pipefail
-expected_tailscale_ip="$1"
-actual_tailscale_ip="$(tailscale ip -4 | awk '/^100\./ { print; exit }')"
-[[ "$actual_tailscale_ip" == "$expected_tailscale_ip" ]]
-if ! dpkg-query -W -f='${Status}\n' corosync-qnetd 2>/dev/null |
-     grep -Fxq 'install ok installed'; then
-  if ! apt-get update; then
-    rm -f /var/cache/apt/pkgcache.bin /var/cache/apt/pkgcache.bin.* \
-      /var/cache/apt/srcpkgcache.bin /var/cache/apt/srcpkgcache.bin.*
-    apt-get update
+  if [[ -z "$QD_IPV4" ]]; then
+    cat <<EOF
+
+The QDevice ${PROXMOX_QDEVICE_HOST} is not accessible: ${QD_ACCESS_PROBLEM}
+
+This host can be set up without it only if the cluster has an odd number of
+members afterward, which needs no QDevice. A QDevice that is still registered
+is then removed forcefully, after you remove it from Tailscale. If the cluster
+will need a QDevice, stop now and fix access to it, or replace it with
+qdevice/remove_qdevice.sh, qdevice/QDEVICE_MANUAL_SETUP.md, and
+qdevice/add_qdevice.sh. Setup stops before the join if it would need one.
+EOF
+    require_yes "Continue without an accessible QDevice?"
+    return
   fi
-  DEBIAN_FRONTEND=noninteractive apt-get install -y corosync-qnetd
-fi
-systemctl enable --now corosync-qnetd
-for _ in $(seq 1 10); do
-  systemctl is-active --quiet corosync-qnetd &&
-    ss -lnt | awk '$4 ~ /:5403$/ { found=1 } END { exit !found }' &&
-    exit 0
-  sleep 1
-done
-systemctl --no-pager --full status corosync-qnetd >&2 || true
-printf 'corosync-qnetd did not become active and listen on TCP 5403\n' >&2
-exit 1
-REMOTE
-  write_state qdevice-service-prepared "$QDEVICE_IPV4"
+  log "Provisioning and verifying the external QDevice service over Tailscale"
+  qd_prepare_qnetd
+  write_state qdevice-service-prepared "$QD_IPV4"
 }
 
 ssh_options() {
@@ -1445,6 +1407,12 @@ remote_script() {
   printf -v args '%q ' "$@"
   # shellcheck disable=SC2029 # args is assembled with Bash %q.
   ssh "${options[@]}" "$(remote_target)" "bash -s -- ${args}"
+}
+
+# remote_script with the apt/dpkg lock wait functions defined ahead of the
+# payload read from stdin.
+remote_apt_script() {
+  { printf '%s\n' "$APT_LOCK_WAIT_FUNCTIONS"; cat; } | remote_script "$@"
 }
 
 copy_from_host() {
@@ -1548,7 +1516,7 @@ done
 REMOTE
   else
     wait_for_host
-    remote_script "$PROXMOX_FQDN" "$ADMIN_1_PUBLIC_SSH_KEY" \
+    remote_apt_script "$PROXMOX_FQDN" "$ADMIN_1_PUBLIC_SSH_KEY" \
       "$ADMIN_2_PUBLIC_SSH_KEY" "$NVME_MIRROR_1_SERIAL_1" \
       "$NVME_MIRROR_1_SERIAL_2" <<'REMOTE'
 set -Eeuo pipefail
@@ -1589,8 +1557,9 @@ Suites: trixie
 Components: pve-no-subscription
 Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
 EOF
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y cryptsetup cryptsetup-initramfs \
+apt_wait_for_locks
+apt-get -o DPkg::Lock::Timeout=60 update
+DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y cryptsetup cryptsetup-initramfs \
   keyutils gdisk jq corosync-qdevice psmisc
 systemctl enable --now chrony.service 2>/dev/null || true
 REMOTE
@@ -2478,13 +2447,14 @@ REMOTE
   fi
 
   log "Configuring one-passphrase unlock for all rpool LUKS members"
-  remote_script "$helper" "$marker" "$LUKS_SECRET_FILE" \
+  remote_apt_script "$helper" "$marker" "$LUKS_SECRET_FILE" \
     "${EXPECTED_RPOOL_MAPPERS[@]}" <<'REMOTE'
 set -Eeuo pipefail
 helper="$1"; marker="$2"; key_file="$3"; shift 3
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y cryptsetup cryptsetup-initramfs keyutils
+apt_wait_for_locks
+apt-get -o DPkg::Lock::Timeout=60 update
+apt-get -o DPkg::Lock::Timeout=60 install -y cryptsetup cryptsetup-initramfs keyutils
 [[ -x /usr/lib/cryptsetup/scripts/decrypt_keyctl ]]
 [[ -x "$(command -v keyctl)" ]]
 for mapper in "$@"; do
@@ -2875,16 +2845,6 @@ cluster_control_tty() {
   fi
 }
 
-# corosync.conf, not pvecm status, decides whether a QDevice is configured:
-# corosync can keep a removed QDevice registered until it restarts.
-qdevice_configured() {
-  cluster_control grep -Eq '^[[:space:]]*device[[:space:]]*[{]' /etc/pve/corosync.conf
-}
-
-qdevice_flag_present() {
-  grep -Eq '^Flags:.*(^|[[:space:]])Qdevice([[:space:]]|$)' <<<"$1"
-}
-
 # Run a command on cluster member NODE through the cluster control node.
 cluster_node_control() {
   local node=$1
@@ -2902,85 +2862,40 @@ cluster_node_control() {
     "root@${node}.${PROXMOX_INTERNAL_DOMAIN}" "$@"
 }
 
-# Restart corosync, one member at a time, on each member that still reports a
-# QDevice registration after the QDevice was removed from corosync.conf.
-clear_stale_qdevice_registration() {
-  local members node status deadline
-  ! qdevice_configured || return 0
-  members="$(cluster_member_nodes)" ||
-    fail "Could not list cluster members through $(cluster_control_node)"
-  for node in $members; do
-    status="$(cluster_node_control "$node" pvecm status)" ||
-      fail "Could not read cluster status from $node"
-    qdevice_flag_present "$status" || continue
-    info "Restarting corosync on $node to clear the removed QDevice registration"
-    cluster_node_control "$node" systemctl restart corosync.service ||
-      fail "Could not restart corosync on $node"
-    deadline=$((SECONDS + 120))
-    until status="$(cluster_node_control "$node" pvecm status 2>/dev/null)" &&
-      grep -Eq '^Quorate:[[:space:]]+Yes[[:space:]]*$' <<<"$status" &&
-      ! qdevice_flag_present "$status"; do
-      ((SECONDS < deadline)) ||
-        fail "$node is not quorate without a QDevice registration 120 seconds after restarting corosync"
-      sleep 3
-    done
-    info "$node no longer reports a QDevice registration"
+# lib/qdevice.sh reaches the cluster through the cluster control node.
+qd_coordinator() {
+  cluster_control_node
+}
+
+qd_exec() {
+  local node=$1 payload="set -Eeuo pipefail"$'\n'"exec" argument quoted
+  shift
+  for argument in "$@"; do
+    printf -v quoted '%q' "$argument"
+    payload+=" ${quoted}"
   done
+  printf '%s\n' "$payload" | cluster_node_control "$node" bash -s
 }
 
-qdevice_status_is_healthy() {
-  local status=$1 node_count=$2 expected_votes total_votes qdevice_voters
-  expected_votes="$(awk '/^Expected votes:/ { print $3; exit }' <<<"$status")"
-  total_votes="$(awk '/^Total votes:/ { print $3; exit }' <<<"$status")"
-  [[ "$expected_votes" == "$((node_count + 1))" ]] || return 1
-  [[ "$total_votes" == "$((node_count + 1))" ]] || return 1
-  grep -Eq '^Quorate:[[:space:]]+Yes[[:space:]]*$' <<<"$status" || return 1
-  grep -Eq '^Flags:.*(^|[[:space:]])Qdevice([[:space:]]|$)' <<<"$status" || return 1
-  qdevice_voters="$(
-    awk '
-      $1 ~ /^0x[0-9a-fA-F]+$/ && $1 != "0x00000000" &&
-      $2 == 1 && $3 ~ /^A,V,/ { count++ }
-      END { print count + 0 }
-    ' <<<"$status"
-  )"
-  [[ "$qdevice_voters" == "$node_count" ]] || return 1
-  awk '
-    $1 == "0x00000000" && $2 == 1 && $3 == "Qdevice" { found++ }
-    END { exit !(found == 1) }
-  ' <<<"$status"
+qd_exec_coordinator_tty() {
+  cluster_control_tty "$1"
 }
 
-qdevice_absent_status_is_healthy() {
-  local status=$1 node_count=$2 expected_votes total_votes
-  expected_votes="$(awk '/^Expected votes:/ { print $3; exit }' <<<"$status")"
-  total_votes="$(awk '/^Total votes:/ { print $3; exit }' <<<"$status")"
-  [[ "$expected_votes" == "$node_count" && "$total_votes" == "$node_count" ]] ||
-    return 1
-  grep -Eq '^Quorate:[[:space:]]+Yes[[:space:]]*$' <<<"$status" || return 1
-  ! grep -Eq '^Flags:.*(^|[[:space:]])Qdevice([[:space:]]|$)' <<<"$status"
+qd_member_states() {
+  local nodes_json
+  nodes_json="$(cluster_control pvesh get /nodes --output-format json)" || return 1
+  jq -er --argjson max "$MAX_MOX_HOSTS" '
+    [ .[] |
+      if (.node | type == "string" and test("^mox([1-9]|10)$")) and
+         ((.node | ltrimstr("mox") | tonumber) <= $max)
+      then . else error("unexpected cluster node: \(.node)") end ] |
+    sort_by(.node | ltrimstr("mox") | tonumber) | .[] |
+    "\(.node) \(if .status == "online" then "online" else "offline" end)"
+  ' <<<"$nodes_json"
 }
 
-assert_healthy_qdevice() {
-  local status=$1 node_count=$2 control node node_status members
-  control="$(cluster_control_node)"
-  qdevice_status_is_healthy "$status" "$node_count" ||
-    fail "$control does not report a configured, alive, voting QDevice with expected/total votes $((node_count + 1)) and the Qdevice flag"
-  members="$(cluster_member_nodes)" ||
-    fail "Could not list cluster members through $control"
-  for node in $members; do
-    [[ "$node" != "$control" ]] || continue
-    node_status="$(
-      cluster_control ssh -o BatchMode=yes -o ConnectTimeout=8 \
-        -o StrictHostKeyChecking=yes \
-        -o CheckHostIP=no \
-        -o "HostKeyAlias=${node}" \
-        -o "UserKnownHostsFile=/etc/pve/nodes/${node}/ssh_known_hosts" \
-        -o GlobalKnownHostsFile=none \
-        "root@${node}.${PROXMOX_INTERNAL_DOMAIN}" pvecm status
-    )" || fail "Could not validate QDevice status from ${node}"
-    qdevice_status_is_healthy "$node_status" "$node_count" ||
-      fail "${node} does not report the QDevice alive and voting with expected/total votes $((node_count + 1)) and the Qdevice flag"
-  done
+qd_confirm_removal() {
+  confirm_exact "$1"
 }
 
 assert_all_cluster_nodes_online() {
@@ -3040,21 +2955,15 @@ wait_for_all_cluster_nodes_online() {
 
 remove_qdevice_before_membership_change() {
   local status
-  qdevice_configured || {
+  if ! qd_is_registered; then
     QDEVICE_REMOVED_FOR_JOIN=0
-    clear_stale_qdevice_registration
+    qd_clear_stale
     return
-  }
-  confirm_exact \
-    "Proxmox requires removing the configured QDevice before adding $HOST_ID. Every configured node is online and must remain online until the join and quorum reconciliation complete." \
-    "REMOVE QDEVICE TO ADD ${HOST_ID}"
-  cluster_control pvecm qdevice remove
+  fi
+  qd_remove "Proxmox requires removing the configured QDevice before adding $HOST_ID. Every configured node is online and must remain online until the join and quorum reconciliation complete."
   QDEVICE_REMOVED_FOR_JOIN=1
-  qdevice_configured &&
-    fail "QDevice is still configured after pvecm qdevice remove"
-  clear_stale_qdevice_registration
   status="$(cluster_control pvecm status)"
-  grep -Eq '^Quorate:[[:space:]]+Yes' <<<"$status" ||
+  pvecm_status_is_quorate "$status" ||
     fail "Cluster lost quorum after QDevice removal; do not continue the join"
 }
 
@@ -3114,10 +3023,10 @@ cluster_setup() {
     members="$(cluster_member_nodes)" ||
       fail "Could not list cluster members through ${EXISTING_NODE}"
     if grep -Fxq "$HOST_ID" <<<"$members"; then
-      fail "$HOST_ID is already listed as a cluster member, but it does not report membership itself. If this host was reinstalled, first purge the old $HOST_ID with hosts/purge_host_from_cluster.sh"
+      fail "$HOST_ID is already listed as a cluster member, but it does not report membership itself. If this host was reinstalled, first remove the old $HOST_ID with hosts/remove_proxmox_host.sh"
     fi
     if cluster_control test -e "/etc/pve/nodes/${HOST_ID}"; then
-      fail "/etc/pve/nodes/${HOST_ID} still exists although $HOST_ID is not a member. Finish removing the previous $HOST_ID with hosts/purge_host_from_cluster.sh before reusing the slot."
+      fail "/etc/pve/nodes/${HOST_ID} still exists although $HOST_ID is not a member. Finish removing the previous $HOST_ID with hosts/remove_proxmox_host.sh before reusing the slot."
     fi
     reserve_registry_host_slot
 
@@ -3160,6 +3069,7 @@ REMOTE
     served_fingerprint="${served_fingerprint_output#*=}"
     [[ "$served_fingerprint" == "$cluster_fingerprint" ]] ||
       fail "The certificate served by $existing_fqdn:8006 does not match the fingerprint obtained through trusted SSH"
+    qd_require_access_for "$((expected_count + 1))"
     remove_qdevice_before_membership_change
     printf '\nThe Proxmox join command will use %s at verified private address %s.\n' \
       "$existing_fqdn" "$existing_private"
@@ -3195,8 +3105,7 @@ REMOTE
 }
 
 reconcile_private_cluster_ssh_trust() {
-  local node_count node qdevice_key key_type key_data qdevice_trust
-  local qdevice_trust_b64 members
+  local node_count node members
   local -a member_nodes=()
   node_count="$(assert_all_cluster_nodes_online)"
   members="$(cluster_member_nodes)" ||
@@ -3216,63 +3125,6 @@ reconcile_private_cluster_ssh_trust() {
       -o "ConnectTimeout=${MOX_SSH_CONNECT_TIMEOUT:-8}" \
       "root@${node}" test -s "/etc/pve/nodes/${node}/ssh_known_hosts" ||
       fail "Proxmox did not publish the per-node SSH pin for $node"
-  done
-
-  qdevice_key="$(
-    ssh -o BatchMode=yes -o ClearAllForwardings=yes \
-      -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-      -o "ConnectTimeout=${MOX_SSH_CONNECT_TIMEOUT:-8}" \
-      "root@${PROXMOX_QDEVICE_HOST}" \
-      "cat /etc/ssh/ssh_host_ed25519_key.pub"
-  )" || fail "Could not obtain the QDevice ED25519 host key through its operator-verified workstation SSH connection"
-  read -r key_type key_data _ <<<"$qdevice_key"
-  [[ "$key_type" == ssh-ed25519 &&
-     "$key_data" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] ||
-    fail "QDevice returned an invalid ED25519 host public key"
-  qdevice_trust="${PROXMOX_QDEVICE_HOST},${QDEVICE_IPV4} ${key_type} ${key_data}"
-  info "$(printf '%s %s\n' "$key_type" "$key_data" | ssh-keygen -lf -) [${PROXMOX_QDEVICE_HOST} / $QDEVICE_IPV4]"
-  qdevice_trust_b64="$(printf '%s\n' "$qdevice_trust" | base64 -w0)"
-
-  for node in "${member_nodes[@]}"; do
-    ssh -o BatchMode=yes -o ClearAllForwardings=yes \
-      -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-      -o "ConnectTimeout=${MOX_SSH_CONNECT_TIMEOUT:-8}" \
-      "root@${node}" "TRUST_B64='$qdevice_trust_b64' bash -s" <<'REMOTE'
-set -Eeuo pipefail
-begin='# BEGIN app-ha managed qdevice host key'
-end='# END app-ha managed qdevice host key'
-trust="$(printf '%s' "$TRUST_B64" | base64 -d)"
-[[ -n "$trust" ]]
-install -d -m 0700 /root/.ssh
-touch /root/.ssh/known_hosts
-[[ -f /root/.ssh/known_hosts && ! -L /root/.ssh/known_hosts ]]
-chmod 0600 /root/.ssh/known_hosts
-begin_count="$(grep -Fxc "$begin" /root/.ssh/known_hosts || true)"
-end_count="$(grep -Fxc "$end" /root/.ssh/known_hosts || true)"
-if ! { [[ "$begin_count" == 0 && "$end_count" == 0 ]] ||
-       [[ "$begin_count" == 1 && "$end_count" == 1 ]]; }; then
-  printf 'Managed QDevice host-key markers are unbalanced or duplicated (begin=%s, end=%s).\n' \
-    "$begin_count" "$end_count" >&2
-  exit 1
-fi
-if [[ "$begin_count" == 1 ]]; then
-  begin_line="$(grep -Fn "$begin" /root/.ssh/known_hosts | cut -d: -f1)"
-  end_line="$(grep -Fn "$end" /root/.ssh/known_hosts | cut -d: -f1)"
-  ((begin_line < end_line)) ||
-    { printf 'Managed QDevice host-key markers are out of order.\n' >&2; exit 1; }
-fi
-work="$(mktemp /root/.ssh/known_hosts.app-ha.XXXXXX)"
-awk -v begin="$begin" -v end="$end" '
-  $0 == begin { managed=1; next }
-  $0 == end { managed=0; next }
-  !managed { print }
-' /root/.ssh/known_hosts >"$work"
-{
-  printf '%s\n%s\n%s\n' "$begin" "$trust" "$end"
-} >>"$work"
-install -o root -g root -m 0600 "$work" /root/.ssh/known_hosts
-rm -f "$work"
-REMOTE
   done
 
   for node in "${member_nodes[@]}"; do
@@ -3305,56 +3157,6 @@ REMOTE
     "${node_count}:${MOX_IP_START}:${PROXMOX_INTERNAL_DOMAIN}"
 }
 
-remove_qdevice_setup_key() {
-  cluster_control test -f /root/.ssh/id_rsa.pub || return 0
-  local cluster_key key_b64
-  cluster_key="$(cluster_control cat /root/.ssh/id_rsa.pub)"
-  [[ "$cluster_key" == ssh-rsa\ * ]] ||
-    fail "Could not obtain $(cluster_control_node)'s QDevice setup SSH key for cleanup"
-  key_b64="$(printf '%s' "$cluster_key" | base64 -w0)"
-  ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-    "root@${PROXMOX_QDEVICE_HOST}" "KEY_B64='$key_b64' bash -s" <<'REMOTE'
-set -Eeuo pipefail
-key="$(printf '%s' "$KEY_B64" | base64 -d)"
-work="$(mktemp /root/.ssh/authorized_keys.app-ha.XXXXXX)"
-awk -v key="$key" '$0 != key { print }' /root/.ssh/authorized_keys >"$work"
-install -o root -g root -m 0600 "$work" /root/.ssh/authorized_keys
-rm -f "$work"
-REMOTE
-}
-
-setup_qdevice_vote() {
-  local node_count=$1 status cluster_key key_b64
-  [[ "$QDEVICE_IPV4" =~ ^100\. ]] ||
-    fail "A verified literal Tailscale IPv4 is required for QDevice setup"
-
-  prepare_qdevice
-
-  if ! cluster_control test -f /root/.ssh/id_rsa.pub; then
-    cluster_control ssh-keygen -q -t rsa -b 4096 -N '' -f /root/.ssh/id_rsa
-  fi
-  cluster_key="$(cluster_control cat /root/.ssh/id_rsa.pub)"
-  [[ "$cluster_key" == ssh-rsa\ * ]] ||
-    fail "Could not obtain $(cluster_control_node)'s QDevice setup SSH key"
-  key_b64="$(printf '%s' "$cluster_key" | base64 -w0)"
-  # shellcheck disable=SC2029 # key_b64 is restricted to base64 output.
-  ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o CheckHostIP=yes \
-    "root@${PROXMOX_QDEVICE_HOST}" "KEY_B64='$key_b64' bash -s" <<'REMOTE'
-set -Eeuo pipefail
-install -d -m 0700 /root/.ssh
-touch /root/.ssh/authorized_keys
-chmod 0600 /root/.ssh/authorized_keys
-key="$(printf '%s' "$KEY_B64" | base64 -d)"
-grep -Fxq "$key" /root/.ssh/authorized_keys || printf '%s\n' "$key" >>/root/.ssh/authorized_keys
-REMOTE
-
-  cluster_control_tty "pvecm qdevice setup '${QDEVICE_IPV4}' --force"
-  status="$(cluster_control pvecm status)"
-  assert_healthy_qdevice "$status" "$node_count"
-  remove_qdevice_setup_key
-  printf '%s\n' "$status" | tee "${LOG_DIR}/cluster-with-qdevice.txt"
-}
-
 recover_qdevice_after_failed_join() {
   local expected_count=$1 status node_count
   ((QDEVICE_REMOVED_FOR_JOIN == 1)) || return
@@ -3365,46 +3167,25 @@ recover_qdevice_after_failed_join() {
       "$expected_count" "${node_count:-unknown}" >&2
     return
   fi
+  if [[ "$QD_REMOVAL" == forced ]]; then
+    printf 'The QDevice was removed forcefully, so it cannot be restored. Add a replacement with qdevice/add_qdevice.sh.\n' >&2
+    return
+  fi
   assert_all_cluster_nodes_online "$expected_count" >/dev/null
   log "Restoring QDevice after failed join"
-  setup_qdevice_vote "$expected_count"
+  qd_add "$expected_count"
   QDEVICE_REMOVED_FOR_JOIN=0
 }
 
 reconcile_qdevice() {
-  local status node_count
+  local node_count
   node_count="$(assert_all_cluster_nodes_online)"
-  status="$(cluster_control pvecm status)"
-
+  qd_reconcile "$node_count"
   if ((node_count % 2 == 1)); then
-    if qdevice_configured; then
-      confirm_exact \
-        "The $node_count-node cluster has an unnecessary configured QDevice. Every node is online; remove the external vote to restore the required odd-node quorum layout." \
-        "REMOVE QDEVICE FROM ${node_count} NODE CLUSTER"
-      cluster_control pvecm qdevice remove
-    fi
-    qdevice_configured &&
-      fail "QDevice must be absent for an odd $node_count-node cluster"
-    clear_stale_qdevice_registration
-    status="$(cluster_control pvecm status)"
-    qdevice_absent_status_is_healthy "$status" "$node_count" ||
-      fail "Odd-node cluster vote totals or quorum flags are inconsistent after QDevice reconciliation"
-    info "Cluster has $node_count online voting nodes; QDevice is correctly absent."
     write_state qdevice-configured "absent-for-${node_count}-node-cluster"
     return
   fi
-
-  if qdevice_configured; then
-    assert_healthy_qdevice "$status" "$node_count"
-    remove_qdevice_setup_key
-    info "Cluster has $node_count online voting nodes; QDevice is configured, alive, and voting."
-    write_state qdevice-configured "present-for-${node_count}-node-cluster"
-    return
-  fi
-
-  clear_stale_qdevice_registration
-  log "Preparing the external QDevice and adding its vote"
-  setup_qdevice_vote "$node_count"
+  cluster_control pvecm status | tee "${LOG_DIR}/cluster-with-qdevice.txt"
   write_state qdevice-configured "present-for-${node_count}-node-cluster"
 }
 
@@ -3489,7 +3270,7 @@ reconcile_cluster_control_plane() {
 
 configure_guest_egress() {
   log "Configuring the quorum-aware floating guest egress gateway"
-  remote_script "$HOST_ID" "$MOX_INDEX" "$PROXMOX_SECONDARY_IP" \
+  remote_apt_script "$HOST_ID" "$MOX_INDEX" "$PROXMOX_SECONDARY_IP" \
     "$GUEST_EGRESS_VIP" "$PROXMOX_PRIVATE_BRIDGE" "$PROXMOX_IP" \
     "$PRIVATE_SUBNET_PREFIX" "$MOX_IP_START_OCTET" "$MAX_MOX_HOSTS" "$VRRP_PRIORITY" \
     "$PRODUCTION_IP_START" "$STAGING_IP_END" <<'REMOTE'
@@ -3525,8 +3306,9 @@ public_if="$(ip -4 route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i=="dev") 
 ip -4 -o address show dev "$public_if" |
   awk -v ip="$public_ip" '$4 ~ ("^" ip "/") { found=1 } END { exit !found }'
 
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y keepalived
+apt_wait_for_locks
+apt-get -o DPkg::Lock::Timeout=60 update
+DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y keepalived
 
 cat >/etc/sysctl.d/91-app-ha-guest-egress.conf <<'EOF'
 net.ipv4.ip_forward=1
@@ -3804,7 +3586,7 @@ install_shared_orchestration_tools() {
   copy_to_host "$GUEST_ROLE_HOOK_SOURCE" \
     "${remote_stage}/${GUEST_ROLE_HOOK_NAME}"
 
-  remote_script "$remote_stage" "$CLUSTER_STATE_DIR" "$PRIVATE_SUBNET_CIDR" \
+  remote_apt_script "$remote_stage" "$CLUSTER_STATE_DIR" "$PRIVATE_SUBNET_CIDR" \
     "$GUEST_EGRESS_VIP" "$MAX_MOX_HOSTS" "$PRODUCTION_VM_TAG" \
     "$STAGING_VM_TAG" "$EVICTABLE_VM_TAG" "$PROD_VM_CORES" \
     "$((PROD_VM_MEMORY_GIB * 1024))" "$PROD_VM_DISK_GB" "$PROD_VM_REPLICATION_INTERVAL" \
@@ -3837,8 +3619,9 @@ if ! command -v fuser >/dev/null 2>&1 ||
    ! command -v lsblk >/dev/null 2>&1 ||
    ! command -v curl >/dev/null 2>&1 ||
    ! command -v xorriso >/dev/null 2>&1; then
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  apt_wait_for_locks
+  apt-get -o DPkg::Lock::Timeout=60 update
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y \
     curl psmisc util-linux xorriso
 fi
 for command_name in bash curl findmnt flock fuser jq lsblk pvesh pvesm \
@@ -4059,7 +3842,9 @@ for ((index = 1; index <= max_hosts; index += 1)); do
   scp "${ssh_options[@]}" "$bundle" "root@${destination}:${remote_bundle}"
   printf -v remote_command '%q ' bash -s -- \
     "$remote_bundle" "$install_root" "$hook_name" "$compat_hook_name"
-  ssh "${ssh_options[@]}" "root@${destination}" "$remote_command" <<'NODE'
+  ssh "${ssh_options[@]}" "root@${destination}" "$remote_command" < <(
+    declare -f apt_lock_holder apt_wait_for_locks
+    cat <<'NODE'
 set -Eeuo pipefail
 bundle="$1"; install_root="$2"; hook_name="$3"; compat_hook_name="$4"
 if ! command -v fuser >/dev/null 2>&1 ||
@@ -4068,8 +3853,9 @@ if ! command -v fuser >/dev/null 2>&1 ||
    ! command -v lsblk >/dev/null 2>&1 ||
    ! command -v curl >/dev/null 2>&1 ||
    ! command -v xorriso >/dev/null 2>&1; then
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  apt_wait_for_locks
+  apt-get -o DPkg::Lock::Timeout=60 update
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y \
     curl psmisc util-linux xorriso
 fi
 for command_name in bash curl findmnt flock fuser lsblk pvesh pvesm python3 \
@@ -4209,6 +3995,7 @@ systemctl enable --now app-ha-deferred-cleanup.timer
 systemctl enable app-ha-haproxy-route-sync.timer
 pvesm path "local:snippets/$hook_name" >/dev/null
 NODE
+  )
 done
 
 replication_minutes="${replication_schedule##*/}"
@@ -4255,7 +4042,7 @@ create_haproxy_lxc() {
   has_state haproxy-lxc-generic-ingress-v3-configured && return
   log "Creating fixed HAProxy LXC $HAPROXY_LXC_VMID on $HOST_ID"
   remote systemctl stop app-ha-haproxy-route-sync.timer
-  remote_script "$HAPROXY_LXC_VMID" "$HAPROXY_LXC_HOSTNAME" "$HAPROXY_LXC_IP" \
+  remote_apt_script "$HAPROXY_LXC_VMID" "$HAPROXY_LXC_HOSTNAME" "$HAPROXY_LXC_IP" \
     "$HAPROXY_LXC_GATEWAY" "$PROXMOX_PRIVATE_BRIDGE" "$HAPROXY_LXC_STORAGE" \
     "$HAPROXY_LXC_ROOTFS_GB" "$HAPROXY_LXC_MEMORY_MB" \
     "${HAPROXY_LXC_CORES:-1}" <<'REMOTE'
@@ -4348,7 +4135,9 @@ nft add rule inet app_ha_haproxy_bootstrap forward ip saddr "$lxc_ip" accept
 nft add rule inet app_ha_haproxy_bootstrap forward ct state established,related accept
 nft add rule inet app_ha_haproxy_bootstrap postrouting ip saddr "$lxc_ip" oifname "$public_if" masquerade
 
-pct exec "$vmid" -- bash -s -- "$created_lxc" <<'LXC'
+pct exec "$vmid" -- bash -s -- "$created_lxc" < <(
+  declare -f apt_lock_holder apt_wait_for_locks
+  cat <<'LXC'
 set -Eeuo pipefail
 created_lxc="$1"
 export LANG=C.UTF-8
@@ -4357,8 +4146,9 @@ cat >/etc/default/locale <<'EOF'
 LANG=C.UTF-8
 LC_ALL=C.UTF-8
 EOF
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y diffutils haproxy rsyslog
+apt_wait_for_locks
+apt-get -o DPkg::Lock::Timeout=60 update
+DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y diffutils haproxy rsyslog
 if [[ "$created_lxc" == 1 || ! -s /etc/haproxy/haproxy.cfg ]]; then
 cat >/etc/haproxy/haproxy.cfg <<EOF
 # Temporary reject-only bootstrap. sync_haproxy_routes.sh replaces this with
@@ -4402,6 +4192,7 @@ systemctl enable haproxy rsyslog
 systemctl start rsyslog
 systemctl reload-or-restart haproxy
 LXC
+)
 pct exec "$vmid" -- ip -4 route show default |
   awk -v gateway="$gateway" '$1 == "default" && $3 == gateway { found=1 } END { exit !found }'
 REMOTE

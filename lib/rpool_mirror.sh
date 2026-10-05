@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Root-only rpool mirror operations for one Proxmox host. This is the single
-# copy of the disk, LUKS, and zpool logic used by hosts/setup_proxmox_host.sh,
+# copy of the disk, LUKS, and zpool logic used by hosts/add_proxmox_host.sh,
 # hosts/add_new_disk_vdev.sh, hosts/add_replacement_disk.sh, and
 # hosts/inventory_disks.sh. Those workstation scripts
 # install it on the host as /usr/local/sbin/app-ha-rpool-mirror.

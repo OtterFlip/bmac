@@ -149,7 +149,7 @@ the workstation. `diagnostics/show_proxmox_host_state.sh` uses both.
 ## `rpool_mirror.sh`
 
 The root-only host tool behind every rpool mirror change, installed per run
-as `/usr/local/sbin/app-ha-rpool-mirror` by `hosts/setup_proxmox_host.sh` and
+as `/usr/local/sbin/app-ha-rpool-mirror` by `hosts/add_proxmox_host.sh` and
 the disk workflows. Subcommands select disks by serial and re-prove identity
 before acting: `check-new`, `luks-prepare` (console; key file during setup,
 hidden prompt afterwards; proven against every existing LUKS member),
@@ -211,8 +211,8 @@ workstation must then make the same change.
 
 ## `host_membership.sh`
 
-Workstation library shared by `hosts/remove_host_from_cluster.sh` and
-`hosts/purge_host_from_cluster.sh`:
+Workstation library shared by `hosts/remove_proxmox_host.sh`,
+`qdevice/add_qdevice.sh`, `qdevice/remove_qdevice.sh`, and the diagnostics:
 
 - QDevice access check, add, remove, and vote-parity verification;
 - the control-plane lock that host setup also takes;

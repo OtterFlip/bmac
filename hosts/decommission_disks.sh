@@ -167,7 +167,7 @@ PY
 then
   printf '\nEvery staging VM related to %s must be destroyed first, so no staging clone\n' "$DW_HOST"
   printf 'or base snapshot keeps old blocks allocated. Destroy each staging VM with\n'
-  printf '  guests/staging/destroy_staging_vm.sh stageNprodN\n'
+  printf '  guests/staging/remove_staging_vm.sh stageNprodN\n'
   printf 'which also removes its base snapshot from every node. Wait until its\n'
   printf 'snapshot and cleanup records are gone, then run this script again.\n'
   exit 1
@@ -222,7 +222,7 @@ else
     esac
   done
 
-  printf '\nThe trims run over SSH as `ssh prodN`, using the alias create_prod_vm.sh wrote\n'
+  printf '\nThe trims run over SSH as `ssh prodN`, using the alias add_prod_vm.sh wrote\n'
   printf 'to ~/.ssh/config. Checking that each guest accepts it:\n'
   ssh_failed=0
   for name in "${GUEST_NAMES[@]}"; do

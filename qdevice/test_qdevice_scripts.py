@@ -23,8 +23,9 @@ QDEVICE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = QDEVICE_DIR.parent
 SHOW_SCRIPT = REPO_ROOT / "diagnostics" / "show_qdevice_state.sh"
 ADD_SCRIPT = QDEVICE_DIR / "add_qdevice.sh"
-PURGE_SCRIPT = QDEVICE_DIR / "purge_qdevice.sh"
+REMOVE_SCRIPT = QDEVICE_DIR / "remove_qdevice.sh"
 MEMBERSHIP_LIB = REPO_ROOT / "lib" / "host_membership.sh"
+QDEVICE_LIB = REPO_ROOT / "lib" / "qdevice.sh"
 CONTROL_LIB = REPO_ROOT / "lib" / "cluster_control.sh"
 
 BEGIN = "# BEGIN app-ha managed qdevice host key"
@@ -86,7 +87,7 @@ class QdeviceVerdictTest(unittest.TestCase):
         )
         self.assertIn("alive and voting on all 2 members (3 expected votes)", out)
 
-    def test_inaccessible_qdevice_points_to_purge_then_add(self) -> None:
+    def test_inaccessible_qdevice_points_to_remove_then_add(self) -> None:
         out = self.verdict(
             1,
             MEMBER_COUNT=2,
@@ -96,12 +97,12 @@ class QdeviceVerdictTest(unittest.TestCase):
             QDEVICE_REACHABLE=0,
         )
         self.assertIn("ssh root@qdevice fails", out)
-        purge = out.index("qdevice/purge_qdevice.sh")
+        purge = out.index("qdevice/remove_qdevice.sh")
         manual = out.index("QDEVICE_MANUAL_SETUP.md")
         add = out.index("qdevice/add_qdevice.sh")
         self.assertLess(purge, manual)
         self.assertLess(manual, add)
-        self.assertIn("remove the old", out)
+        self.assertIn("removed the old machine from Tailscale", out)
 
         replaced = self.verdict(
             1,
@@ -138,8 +139,8 @@ class QdeviceHelpersTest(unittest.TestCase):
         encoded = base64.b64encode(trust.encode()).decode()
         run_bash(
             f"""
-            source {shlex.quote(str(MEMBERSHIP_LIB))}
-            bash -c "$HM_QDEVICE_PIN_SCRIPT" bash {shlex.quote(encoded)} {shlex.quote(str(known_hosts))}
+            source {shlex.quote(str(QDEVICE_LIB))}
+            bash -c "$QD_PIN_SCRIPT" bash {shlex.quote(encoded)} {shlex.quote(str(known_hosts))}
             """,
             expected=expected,
         )
@@ -180,10 +181,10 @@ class QdeviceHelpersTest(unittest.TestCase):
         )
         self.assertEqual(conf.stat().st_mode & 0o777, 0o664)
 
-    def test_purge_node_cleanup_filters_qdevice_entries(self) -> None:
-        source = PURGE_SCRIPT.read_text(encoding="utf-8")
+    def test_forget_filters_qdevice_entries(self) -> None:
+        source = QDEVICE_LIB.read_text(encoding="utf-8")
         body = re.search(
-            r"NODE_CLEANUP_BODY=\$\(cat <<'REMOTE'\n(.*?)\nREMOTE\n\)", source, re.S
+            r"QD_FORGET_SCRIPT=\"\$\(\n  cat <<'REMOTE'\n(.*?)\nREMOTE\n\)\"", source, re.S
         ).group(1)
         function = re.search(r"(filter_known_hosts\(\) \{.*?\n\})", body, re.S).group(1)
         known_hosts = self.directory / "known_hosts"
@@ -229,12 +230,12 @@ class AddQdeviceTest(unittest.TestCase):
         )
 
     def test_odd_cluster_or_working_qdevice_stops_without_change(self) -> None:
-        odd = self.need("NODE_COUNT=3\nhm_qdevice_configured() { return 1; }", 0)
+        odd = self.need("NODE_COUNT=3\nqd_check_registered() { return 1; }", 0)
         self.assertIn("does not use a QDevice", odd.stdout)
         self.assertNotIn("CONTINUES", odd.stdout)
         working = self.need(
-            "NODE_COUNT=2\nhm_qdevice_configured() { return 0; }\n"
-            "hm_qdevice_layout_problem() { return 0; }",
+            "NODE_COUNT=2\nqd_check_registered() { return 0; }\n"
+            "qd_layout_problem() { return 0; }",
             0,
         )
         self.assertIn("already has a functional QDevice", working.stdout)
@@ -242,17 +243,17 @@ class AddQdeviceTest(unittest.TestCase):
 
     def test_failed_registered_qdevice_must_be_purged_first(self) -> None:
         failed = self.need(
-            "NODE_COUNT=2\nhm_qdevice_configured() { return 0; }\n"
-            "hm_qdevice_layout_problem() { printf 'mox2 does not report it\\n'; return 1; }",
+            "NODE_COUNT=2\nqd_check_registered() { return 0; }\n"
+            "qd_layout_problem() { printf 'mox2 does not report it\\n'; return 1; }",
             1,
         )
         self.assertIn("not healthy (mox2 does not report it)", failed.stderr)
-        self.assertIn("qdevice/purge_qdevice.sh first", failed.stderr)
-        unreadable = self.need("NODE_COUNT=2\nhm_qdevice_configured() { return 255; }", 1)
+        self.assertIn("qdevice/remove_qdevice.sh first", failed.stderr)
+        unreadable = self.need("NODE_COUNT=2\nqd_check_registered() { return 2; }", 1)
         self.assertIn("Could not read /etc/pve/corosync.conf", unreadable.stderr)
 
     def test_even_cluster_without_qdevice_continues(self) -> None:
-        completed = self.need("NODE_COUNT=2\nhm_qdevice_configured() { return 1; }", 0)
+        completed = self.need("NODE_COUNT=2\nqd_check_registered() { return 1; }", 0)
         self.assertIn("needs a QDevice", completed.stdout)
         self.assertIn("CONTINUES", completed.stdout)
 
@@ -268,19 +269,20 @@ class AddQdeviceTest(unittest.TestCase):
             "hm_confirm_phrase",
             "hm_acquire_control_plane_lock",
             "load_cluster_shape",
-            "hm_add_qdevice",
+            "qd_add",
         ]
         positions = []
         for step in order:
             positions.append(main.index(step, positions[-1] if positions else 0))
         self.assertEqual(positions, sorted(positions))
-        library = MEMBERSHIP_LIB.read_text(encoding="utf-8")
-        add = library[library.index("hm_add_qdevice() {") :]
-        self.assertLess(add.index("hm_pin_qdevice_host_key"), add.index("pvecm qdevice setup"))
+        library = QDEVICE_LIB.read_text(encoding="utf-8")
+        add = library[library.index("qd_add() {") :]
+        self.assertLess(add.index("qd_prepare_qnetd"), add.index("qd_pin_host_key"))
+        self.assertLess(add.index("qd_pin_host_key"), add.index("pvecm qdevice setup"))
 
 
-class PurgeQdeviceTest(unittest.TestCase):
-    def test_hosts_default_to_cluster_conf(self) -> None:
+class RemoveQdeviceTest(unittest.TestCase):
+    def test_host_defaults_to_cluster_conf_and_needs_the_cluster_first(self) -> None:
         root = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(root)], check=False))
         env_dir, bin_dir = root / "env", root / "bin"
@@ -321,7 +323,7 @@ class PurgeQdeviceTest(unittest.TestCase):
         )
         fake_ssh.chmod(0o755)
         completed = subprocess.run(
-            [str(PURGE_SCRIPT)],
+            [str(REMOVE_SCRIPT)],
             input="GO\n\n\n",
             env={
                 "PATH": f"{bin_dir}:/usr/bin:/bin",
@@ -336,26 +338,145 @@ class PurgeQdeviceTest(unittest.TestCase):
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("QDevice host : qdevice2", completed.stdout)
-        self.assertIn("Proxmox host : mox3", completed.stdout)
-        recorded = calls.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(recorded), 1)
-        self.assertTrue(recorded[0].endswith(" mox3 true"), recorded[0])
+        self.assertIn("No reachable cluster member was found", completed.stderr)
+        recorded = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+        self.assertFalse([call for call in recorded if "qdevice2" in call], recorded)
 
-    def test_unreachable_qdevice_is_unregistered_without_contacting_it(self) -> None:
-        source = PURGE_SCRIPT.read_text(encoding="utf-8")
-        start = source.index("unregister_without_qdevice_host() {")
-        end = source.index("\n  exit 0\n}\n", start)
-        function = source[start:end]
-        self.assertNotIn('run_remote_root "$QDEVICE_HOST"', function)
-        self.assertIn('"REMOVED FROM TAILSCALE"', function)
-        self.assertLess(
-            function.index("REMOVED FROM TAILSCALE"),
-            function.index('run_remote_root "$PVE_HOST" "$PVE_REMOVE_PAYLOAD"'),
+    def test_forced_removal_never_touches_the_qdevice_host(self) -> None:
+        source = REMOVE_SCRIPT.read_text(encoding="utf-8")
+        forced = source.index('if [[ "$QD_REMOVAL" == forced ]]; then')
+        forced_exit = source.index("\n  exit 0\n", forced)
+        self.assertNotIn("qd_ssh", source[forced:forced_exit])
+        self.assertIn("ssh-keygen -R $QDEVICE_HOST", source[forced:forced_exit])
+        self.assertLess(forced_exit, source.index("Removing QDevice software and state from"))
+        self.assertLess(source.index("qd_remove "), forced)
+
+    def test_graceful_removal_detaches_the_cluster_before_the_qdevice_host(self) -> None:
+        source = REMOVE_SCRIPT.read_text(encoding="utf-8")
+        graceful = source[source.index("\nhm_acquire_control_plane_lock") :]
+        steps = [
+            "load_cluster_shape",
+            "qd_remove ",
+            "qd_clear_stale",
+            'if [[ "$QD_REMOVAL" == forced ]]; then',
+            "if ((QDEVICE_ACCESSIBLE == 0)); then",
+            'qd_forget "$QDEVICE_HOST" "$QD_IPV4"',
+            "hm_release_control_plane_lock",
+            'printf \'%s\\n\' "$APT_LOCK_WAIT_FUNCTIONS"',
+            "cat <<'REMOTE'",
+            "apt_wait_for_locks || exit 35",
+            "DPkg::Lock::Timeout=60 purge",
+            "__QDEVICE_PURGE_RESULT__:OK",
+            "still enrolled in Tailscale",
+        ]
+        positions = []
+        for step in steps:
+            positions.append(graceful.index(step, positions[-1] if positions else 0))
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("\\$", graceful[graceful.index("cat <<'REMOTE'") :])
+
+
+class SharedQdeviceRemovalTest(unittest.TestCase):
+    """qd_remove against a stubbed two-member cluster with the QDevice at 100.64.0.9."""
+
+    def remove(self, setup: str, stdin: str = "", expected: int = 0):
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(directory)], check=False))
+        registered, calls = directory / "registered", directory / "calls"
+        registered.touch()
+        completed = run_bash(
+            f"""
+            source {shlex.quote(str(QDEVICE_LIB))}
+            log() {{ printf 'LOG %s\\n' "$*"; }}
+            info() {{ printf 'INFO %s\\n' "$*"; }}
+            PROXMOX_QDEVICE_HOST=qdevice
+            REGISTERED={shlex.quote(str(registered))} CALLS={shlex.quote(str(calls))}
+            qd_coordinator() {{ printf 'mox1\\n'; }}
+            qd_member_states() {{ printf 'mox1 online\\nmox2 online\\n'; }}
+            qd_exec() {{
+              local node=$1
+              shift
+              printf 'EXEC %s %s\\n' "$node" "${{1}} ${{2:-}}" >>"$CALLS"
+              case "$1" in
+                grep) [[ -e "$REGISTERED" ]] ;;
+                awk) printf '100.64.0.9\\n' ;;
+                pvecm) if [[ "$2" == qdevice ]]; then rm -f "$REGISTERED"; else printf 'Quorate: Yes\\n'; fi ;;
+                cat) printf 'ssh-rsa AAAA root@mox1\\n' ;;
+              esac
+            }}
+            qd_ssh() {{ printf 'QDSSH %s\\n' "$*" >>"$CALLS"; cat >/dev/null; }}
+            {setup}
+            qd_remove "Testing removal."
+            printf 'REMOVAL=%s\\n' "$QD_REMOVAL"
+            """,
+            expected=expected,
+            stdin=stdin,
         )
-        self.assertIn("must never be able to communicate with the cluster again", function)
-        branch = source.index("if (( QDEVICE_REACHABLE == 0 )); then\n  unregister_without_qdevice_host")
-        self.assertLess(branch, source.index("Purging QDevice software and state from"))
-        self.assertLess(branch, source.index('echo "Checking/removing the QDevice from the Proxmox cluster..."'))
+        recorded = calls.read_text(encoding="utf-8") if calls.exists() else ""
+        return completed, recorded, registered.exists()
+
+    def test_accessible_registered_qdevice_is_removed_gracefully(self) -> None:
+        completed, calls, registered = self.remove(
+            "QD_IPV4=100.64.0.9\nqd_confirm_removal() { printf 'CONFIRM %s\\n' \"$1\"; }"
+        )
+        self.assertIn("CONFIRM Testing removal.", completed.stdout)
+        self.assertIn("REMOVAL=graceful", completed.stdout)
+        self.assertNotIn("TAILSCALE", completed.stdout)
+        self.assertFalse(registered)
+        self.assertIn("EXEC mox1 pvecm qdevice", calls)
+        self.assertIn("QDSSH KEY_B64=", calls)
+        self.assertNotIn("EXEC mox2 bash -c", calls)
+
+    def test_inaccessible_qdevice_needs_agreement_and_tailscale_removal(self) -> None:
+        completed, calls, registered = self.remove(
+            "QD_IPV4=''\nQD_ACCESS_PROBLEM=\"'ssh root@qdevice' failed\"",
+            stdin="y\nREMOVED FROM TAILSCALE\n",
+        )
+        self.assertIn("THE QDEVICE CANNOT BE REMOVED GRACEFULLY", completed.stdout)
+        self.assertIn("'ssh root@qdevice' failed", completed.stdout)
+        self.assertIn("REMOVE THE OLD QDEVICE FROM TAILSCALE NOW", completed.stdout)
+        self.assertIn("by its address 100.64.0.9", completed.stdout)
+        self.assertIn("REMOVAL=forced", completed.stdout)
+        self.assertFalse(registered)
+        self.assertNotIn("QDSSH", calls)
+        self.assertIn("EXEC mox1 bash -c", calls)
+        self.assertIn("EXEC mox2 bash -c", calls)
+        self.assertIn("ssh-keygen -R qdevice", completed.stdout)
+
+    def test_a_different_machine_under_the_name_is_removed_forcefully(self) -> None:
+        completed, calls, _ = self.remove(
+            "QD_IPV4=100.64.0.10", stdin="y\nREMOVED FROM TAILSCALE\n"
+        )
+        self.assertIn("(100.64.0.10) is not the registered one", completed.stdout)
+        self.assertIn("REMOVAL=forced", completed.stdout)
+        self.assertNotIn("QDSSH", calls)
+
+    def test_forced_removal_stops_without_agreement_or_confirmation(self) -> None:
+        for stdin in ("n\n", "y\nremoved\n", ""):
+            completed, calls, registered = self.remove("QD_IPV4=''", stdin=stdin, expected=1)
+            self.assertTrue(registered, stdin)
+            self.assertNotIn("pvecm qdevice", calls)
+            self.assertIn("the QDevice is still registered", completed.stderr)
+
+    def test_inaccessible_qdevice_blocks_only_an_even_result(self) -> None:
+        run_bash(
+            f"""
+            source {shlex.quote(str(QDEVICE_LIB))}
+            PROXMOX_QDEVICE_HOST=qdevice QD_IPV4='' QD_ACCESS_PROBLEM='ssh failed'
+            qd_require_access_for 3
+            qd_require_access_for 2
+            """,
+            expected=1,
+        )
+        completed = run_bash(
+            f"""
+            source {shlex.quote(str(QDEVICE_LIB))}
+            PROXMOX_QDEVICE_HOST=qdevice QD_IPV4='' QD_ACCESS_PROBLEM='ssh failed'
+            qd_require_access_for 2
+            """,
+            expected=1,
+        )
+        self.assertIn("needs a QDevice, but qdevice is not accessible (ssh failed)", completed.stderr)
 
 
 if __name__ == "__main__":

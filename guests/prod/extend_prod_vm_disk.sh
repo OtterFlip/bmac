@@ -1017,7 +1017,7 @@ verify_guest_ssh() {
   CURRENT_PHASE="verifying workstation SSH access to the guest"
   log "Guest SSH access"
   info "This script runs growpart and resize2fs inside $RESOURCE_NAME as root over"
-  info "your workstation SSH alias (create_prod_vm.sh offers to configure one)."
+  info "your workstation SSH alias (add_prod_vm.sh offers to configure one)."
   info "Before continuing, confirm that 'ssh $RESOURCE_NAME' (or your alias) works."
   while true; do
     prompt_with_default GUEST_ALIAS "Workstation SSH alias for $RESOURCE_NAME" \

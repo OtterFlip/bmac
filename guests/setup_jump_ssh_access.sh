@@ -5,7 +5,7 @@
 
 # Set up, or repair, strict jump SSH from this workstation to one registered
 # production or staging guest. Writes the same managed ~/.ssh/config block and
-# QGA-attested known_hosts pin that create_prod_vm.sh and create_staging_vm.sh
+# QGA-attested known_hosts pin that add_prod_vm.sh and add_staging_vm.sh
 # write, replacing whatever this workstation previously had for the alias.
 
 set -Eeuo pipefail

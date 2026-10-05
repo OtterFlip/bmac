@@ -12,7 +12,7 @@ Your production VM's disk is a ZFS zvol on the Proxmox host, and that ZFS zvol i
 
 ## Stage 2
 
-When you use `/guests/staging/create_staging_vm.sh` to create a new staging VM based on a production VM, the script first creates a temporary staging snapshot on the actived host.
+When you use `/guests/staging/add_staging_vm.sh` to create a new staging VM based on a production VM, the script first creates a temporary staging snapshot on the actived host.
 
 <p align="center">
   <img src="media/staging2.png" width="800">
@@ -20,7 +20,7 @@ When you use `/guests/staging/create_staging_vm.sh` to create a new staging VM b
 
 ## Stage 3
 
-After the temporary staging snapshot has been created on the active host, the `/guests/staging/create_staging_vm.sh` script then immediately triggers replication so that this same snapshot will be available on the standby host.
+After the temporary staging snapshot has been created on the active host, the `/guests/staging/add_staging_vm.sh` script then immediately triggers replication so that this same snapshot will be available on the standby host.
 
 <p align="center">
   <img src="media/staging3.png" width="800">

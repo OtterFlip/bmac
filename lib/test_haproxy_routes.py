@@ -27,7 +27,7 @@ LIB_DIR = Path(__file__).resolve().parent
 RENDERER_PATH = LIB_DIR / "haproxy_routes.py"
 REGISTRY_PATH = LIB_DIR / "cluster_registry.py"
 SYNC_PATH = LIB_DIR / "sync_haproxy_routes.sh"
-HOST_SETUP_PATH = LIB_DIR.parent / "hosts" / "setup_proxmox_host.sh"
+HOST_SETUP_PATH = LIB_DIR.parent / "hosts" / "add_proxmox_host.sh"
 
 SPEC = importlib.util.spec_from_file_location("haproxy_routes", RENDERER_PATH)
 assert SPEC is not None and SPEC.loader is not None

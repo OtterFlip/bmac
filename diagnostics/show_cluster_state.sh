@@ -582,7 +582,7 @@ else
 fi
 
 section "Production ISO preparation readiness" \
-  "prove this node has the newly installed URL/cache/build tooling and matching configuration required before create_prod_vm.sh is resumed."
+  "prove this node has the newly installed URL/cache/build tooling and matching configuration required before add_prod_vm.sh is resumed."
 prod_iso_ready=1
 readiness_pass() {
   printf '  [PASS] %s\n' "$1"
@@ -752,7 +752,7 @@ if ((remote_prod_config_loaded)) && command -v curl >/dev/null 2>&1; then
 fi
 
 if ((prod_iso_ready)); then
-  printf '\n  [READY] %s is ready for production ISO download/cache/build and create_prod_vm.sh resume.\n' "$node"
+  printf '\n  [READY] %s is ready for production ISO download/cache/build and add_prod_vm.sh resume.\n' "$node"
 else
   printf '\n  [NOT READY] %s has one or more production ISO preparation failures above.\n' "$node"
 fi

@@ -4,10 +4,10 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Add an external QDevice to a cluster that needs one: an even number of
-# members and no QDevice registered. Use it after qdevice/purge_qdevice.sh
+# members and no QDevice registered. Use it after qdevice/remove_qdevice.sh
 # unregistered a failed QDevice, once a replacement has been prepared with
 # qdevice/QDEVICE_MANUAL_SETUP.md. It configures the QDevice the same way
-# hosts/setup_proxmox_host.sh does.
+# hosts/add_proxmox_host.sh does.
 
 set -Eeuo pipefail
 set +x
@@ -49,9 +49,9 @@ The script then asks for its SSH hostname (default: PROXMOX_QDEVICE_HOST in
 env/cluster.conf), checks 'ssh <hostname>', installs and verifies
 corosync-qnetd there, pins its SSH host key on every member, and runs
 'pvecm qdevice setup' through the cluster control node, as
-hosts/setup_proxmox_host.sh does.
+hosts/add_proxmox_host.sh does.
 
-To replace a registered QDevice that has failed, run qdevice/purge_qdevice.sh
+To replace a registered QDevice that has failed, run qdevice/remove_qdevice.sh
 first. diagnostics/show_qdevice_state.sh reports which case applies.
 
 Options:
@@ -97,19 +97,8 @@ load_cluster_shape() {
       die "$node is offline. Every member must be online to change the QDevice; bring it back or remove it from the cluster first."
   done <<<"$states"
   status="$(hm_cluster_status)" || die "Could not read cluster status"
-  hm_status_is_quorate "$status" || die "The cluster is not quorate"
+  pvecm_status_is_quorate "$status" || die "The cluster is not quorate"
   NODE_COUNT="$count"
-}
-
-# Succeeds when corosync.conf registers a QDevice; dies when it cannot tell.
-qdevice_registered() {
-  local status=0
-  hm_qdevice_configured || status=$?
-  case "$status" in
-    0) return 0 ;;
-    1) return 1 ;;
-    *) die "Could not read /etc/pve/corosync.conf on $HM_COORDINATOR" ;;
-  esac
 }
 
 # Stop unless the cluster needs a QDevice and has none registered.
@@ -118,18 +107,18 @@ require_qdevice_needed() {
   if ((NODE_COUNT % 2 == 1)); then
     log "No QDevice is needed"
     info "The ${NODE_COUNT}-member cluster has an odd number of votes, so it does not use a QDevice."
-    if qdevice_registered; then
-      warn "A QDevice is registered anyway. hosts/setup_proxmox_host.sh removes it on its next run, or run 'pvecm qdevice remove' on a member while every member is online."
+    if qd_is_registered; then
+      warn "A QDevice is registered anyway. hosts/add_proxmox_host.sh removes it on its next run, or run 'pvecm qdevice remove' on a member while every member is online."
     fi
     exit 0
   fi
-  if qdevice_registered; then
-    if problem="$(hm_qdevice_layout_problem "$NODE_COUNT")"; then
+  if qd_is_registered; then
+    if problem="$(qd_layout_problem "$NODE_COUNT")"; then
       log "The cluster already has a functional QDevice"
       info "Every member reports it alive and voting. No change was made."
       exit 0
     fi
-    die "A QDevice is registered but not healthy (${problem}). Run diagnostics/show_qdevice_state.sh; to replace it, run qdevice/purge_qdevice.sh first, then this script."
+    die "A QDevice is registered but not healthy (${problem}). Run diagnostics/show_qdevice_state.sh; to replace it, run qdevice/remove_qdevice.sh first, then this script."
   fi
   log "The ${NODE_COUNT}-member cluster needs a QDevice"
   info "With an even number of members and no QDevice, losing one member loses quorum."
@@ -143,7 +132,7 @@ Prepare the QDevice machine before continuing:
   1. Follow qdevice/QDEVICE_MANUAL_SETUP.md, sections 1 through 15. Section 16
      (corosync-qnetd) is done by this script.
   2. If it replaces a failed QDevice, the old machine must already be removed
-     from the Tailscale admin console (qdevice/purge_qdevice.sh asks for this).
+     from the Tailscale admin console (qdevice/remove_qdevice.sh asks for this).
      Otherwise the Tailscale hostname is ambiguous and this script stops.
   3. Tag the machine tag:proxmox-qdevice. The Tailscale policy must let
      tag:proxmox-host reach it on tcp:5403 and, while this script runs, on
@@ -241,14 +230,15 @@ main() {
   print_setup_instructions
   choose_qdevice_host
   CURRENT_PHASE="verifying QDevice access"
-  hm_verify_qdevice_access
+  hm_verify_qdevice_access ||
+    die "Set up root SSH from this workstation to ${PROXMOX_QDEVICE_HOST} (see qdevice/QDEVICE_MANUAL_SETUP.md) and rerun"
   inspect_qdevice_host
 
   log "QDevice plan"
   info "Cluster: ${PROXMOX_CLUSTER_NAME}, ${NODE_COUNT} members, control node $HM_COORDINATOR"
-  info "QDevice: ${PROXMOX_QDEVICE_HOST} (Tailscale ${HM_QDEVICE_IPV4})"
+  info "QDevice: ${PROXMOX_QDEVICE_HOST} (Tailscale ${QD_IPV4})"
   info "Installs and verifies corosync-qnetd there, pins its SSH host key on every"
-  info "member, runs 'pvecm qdevice setup ${HM_QDEVICE_IPV4} --force' on"
+  info "member, runs 'pvecm qdevice setup ${QD_IPV4} --force' on"
   info "$HM_COORDINATOR, and checks that every member reports $((NODE_COUNT + 1)) votes."
   hm_confirm_phrase "This adds ${PROXMOX_QDEVICE_HOST} as the cluster's QDevice." GO
 
@@ -257,14 +247,14 @@ main() {
   CURRENT_PHASE="revalidating the cluster"
   load_cluster_shape
   ((NODE_COUNT % 2 == 0)) || die "Cluster membership changed to ${NODE_COUNT} members; no change was made"
-  ! qdevice_registered || die "A QDevice was registered meanwhile; no change was made"
+  ! qd_is_registered || die "A QDevice was registered meanwhile; no change was made"
 
   CURRENT_PHASE="adding the QDevice"
-  hm_add_qdevice "$NODE_COUNT"
+  qd_add "$NODE_COUNT"
   hm_release_control_plane_lock
 
   log "QDevice added"
-  info "${PROXMOX_QDEVICE_HOST} (${HM_QDEVICE_IPV4}) is alive and voting on all ${NODE_COUNT} members."
+  info "${PROXMOX_QDEVICE_HOST} (${QD_IPV4}) is alive and voting on all ${NODE_COUNT} members."
   info "Check it any time with diagnostics/show_qdevice_state.sh."
 }
 

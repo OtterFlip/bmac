@@ -6,23 +6,23 @@
 # secondary NIC which is used for private communication within the cluster.
 # Compare this file with mox1_dot_conf to get a feel for how the other
 # values such as the HAPROXY_* values should be set for each proxmos host.
-# The resulting moxN.conf is input only for setup_proxmox_host.sh's initial
+# The resulting moxN.conf is input only for add_proxmox_host.sh's initial
 # execution and retries after an incomplete setup. After setup succeeds, the
 # host itself is authoritative; later scripts neither read nor update this file.
 # REMOVE THIS COMMENT FROM THE TOP OF YOUR env/mox2.conf file
 
-# IDRAC_IP is optional and is required only when setup_proxmox_host.sh is run
+# IDRAC_IP is optional and is required only when add_proxmox_host.sh is run
 # with iDRAC/Redfish inventory (the script prompts for this choice).
 #IDRAC_IP=10.20.30.2
 
 # Mirror 1 *_SERIAL_* values are mandatory; mirror 1 becomes the bootable rpool
 # mirror. Mirrors 2-5 are optional and must be complete; gaps are allowed, so
-# setup_proxmox_host.sh can consume configured extra pairs while establishing
+# add_proxmox_host.sh can consume configured extra pairs while establishing
 # the host. Every
 # configured pair follows the clear or LUKS storage policy selected by the host
 # setup run.
 # Corresponding *_CAPACITY_BYTES_* values are required only when running
-# setup_proxmox_host.sh without iDRAC/Redfish inventory. Without iDRAC, gather
+# add_proxmox_host.sh without iDRAC/Redfish inventory. Without iDRAC, gather
 # serials and capacities by running hosts/cluster_setup_prereq.sh in a Linux
 # Live environment booted on this machine; with iDRAC, read the serials in the
 # iDRAC web UI. The two disks of a pair may differ in capacity by

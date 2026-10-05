@@ -3,7 +3,7 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Mock-friendly tests for host removal, host purge, and their shared library."""
+"""Mock-friendly tests for graceful and forced host removal and their shared library."""
 
 from __future__ import annotations
 
@@ -21,8 +21,7 @@ tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
 HOSTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = HOSTS_DIR.parent
 MEMBERSHIP_LIB = REPO_ROOT / "lib" / "host_membership.sh"
-REMOVE_SCRIPT = HOSTS_DIR / "remove_host_from_cluster.sh"
-PURGE_SCRIPT = HOSTS_DIR / "purge_host_from_cluster.sh"
+REMOVE_SCRIPT = HOSTS_DIR / "remove_proxmox_host.sh"
 
 
 def production(name: str, vmid: int, placement: list[str], owner: str, **extra) -> dict:
@@ -92,7 +91,7 @@ class HostMembershipTest(unittest.TestCase):
         )
         return completed
 
-    def test_qdevice_vote_checks_match_host_setup(self) -> None:
+    def test_shared_qdevice_vote_checks(self) -> None:
         healthy = textwrap.dedent(
             """\
             Quorate:          Yes
@@ -109,12 +108,13 @@ class HostMembershipTest(unittest.TestCase):
         self.run_bash(
             f"""
             source {shlex.quote(str(MEMBERSHIP_LIB))}
-            hm_qdevice_status_is_healthy {shlex.quote(healthy)} 2
-            ! hm_qdevice_status_is_healthy {shlex.quote(healthy.replace("A,V,NMW mox3", "A,NV,NMW mox3"))} 2
-            hm_has_qdevice {shlex.quote(healthy)}
-            hm_qdevice_absent_status_is_healthy {shlex.quote(absent)} 3
-            ! hm_qdevice_absent_status_is_healthy {shlex.quote(healthy)} 3
-            ! hm_qdevice_absent_status_is_healthy {shlex.quote(absent.replace("Yes", "No"))} 3
+            qd_status_is_healthy {shlex.quote(healthy)} 2 || exit 11
+            qd_status_is_healthy {shlex.quote(healthy.replace("A,V,NMW mox3", "A,NV,NMW mox3"))} 2 && exit 12
+            pvecm_status_has_qdevice {shlex.quote(healthy)} || exit 13
+            qd_status_absent_is_healthy {shlex.quote(absent)} 3 || exit 14
+            qd_status_absent_is_healthy {shlex.quote(healthy)} 3 && exit 15
+            qd_status_absent_is_healthy {shlex.quote(absent.replace("Yes", "No"))} 3 && exit 16
+            exit 0
             """
         )
 
@@ -141,7 +141,7 @@ class HostMembershipTest(unittest.TestCase):
         )
         self.assertIn("CHOSEN=mox3", defaulted.stdout)
 
-    def test_remove_blocks_hosts_that_anything_still_uses(self) -> None:
+    def test_graceful_removal_blocks_hosts_that_anything_still_uses(self) -> None:
         vms = [
             {"vmid": 9112, "type": "lxc", "node": "mox2", "name": "haproxy2"},
             {"vmid": 100, "type": "qemu", "node": "mox1", "name": "prod1"},
@@ -150,7 +150,7 @@ class HostMembershipTest(unittest.TestCase):
         rules = [{"rule": "production-prod1-100", "nodes": "mox1:1,mox3:1", "resources": "vm:100"}]
         replication = [{"id": "100-0", "guest": 100, "target": "mox3"}]
         body = f"""
-            REMOVE_HOST_SOURCE_ONLY=1 source {shlex.quote(str(REMOVE_SCRIPT))}
+            REMOVE_PROXMOX_HOST_SOURCE_ONLY=1 source {shlex.quote(str(REMOVE_SCRIPT))}
             LIVE_VMS_JSON={shlex.quote(json.dumps(vms))}
             LIVE_RULES_JSON={shlex.quote(json.dumps(rules))}
             LIVE_REPLICATION_JSON={shlex.quote(json.dumps(replication))}
@@ -174,7 +174,7 @@ class HostMembershipTest(unittest.TestCase):
         ):
             self.assertIn(expected, completed.stdout)
 
-    def build_purge_plan(
+    def build_forced_plan(
         self, resources: list, vms: list, *, cleanup: list | None = None,
         rules: list | None = None, replication: list | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict]:
@@ -194,14 +194,14 @@ class HostMembershipTest(unittest.TestCase):
             (directory / f"{name}.json").write_text(json.dumps(value), encoding="utf-8")
         completed = self.run_bash(
             f"""
-            PURGE_HOST_SOURCE_ONLY=1 source {shlex.quote(str(PURGE_SCRIPT))}
+            REMOVE_PROXMOX_HOST_SOURCE_ONLY=1 source {shlex.quote(str(REMOVE_SCRIPT))}
             build_plan {shlex.quote(str(directory))} mox2 'mox1 mox3'
             """
         )
         plan = json.loads((directory / "plan.json").read_text(encoding="utf-8"))
         return completed, plan
 
-    def test_purge_plan_narrows_production_and_destroys_dependent_staging(self) -> None:
+    def test_forced_plan_narrows_production_and_destroys_dependent_staging(self) -> None:
         resources = [
             production("prod1", 100, ["mox1", "mox2"], "mox2"),
             production("prod2", 101, ["mox1", "mox3"], "mox1"),
@@ -219,7 +219,7 @@ class HostMembershipTest(unittest.TestCase):
             {"id": "c2", "node": "mox2", "state": "completed"},
             {"id": "c3", "node": "mox1", "state": "pending"},
         ]
-        completed, plan = self.build_purge_plan(resources, vms, cleanup=cleanup)
+        completed, plan = self.build_forced_plan(resources, vms, cleanup=cleanup)
         self.assertEqual(completed.stdout, "")
         self.assertEqual([row["name"] for row in plan["productions"]], ["prod1"])
         prod1 = plan["productions"][0]
@@ -233,32 +233,32 @@ class HostMembershipTest(unittest.TestCase):
         self.assertEqual(plan["staging"][0]["source_placement"], ["mox1", "mox2"])
         self.assertEqual(plan["abandoned_cleanup"], 1)
 
-    def test_purge_refuses_unrecovered_production_and_unregistered_guests(self) -> None:
+    def test_forced_removal_refuses_unrecovered_production_and_unregistered_guests(self) -> None:
         resources = [production("prod1", 100, ["mox1", "mox2"], "mox2")]
         vms = [
             {"vmid": 100, "type": "qemu", "node": "mox2", "name": "prod1", "status": "running"},
             {"vmid": 555, "type": "qemu", "node": "mox2", "name": "hand-made"},
         ]
-        completed, plan = self.build_purge_plan(resources, vms)
+        completed, plan = self.build_forced_plan(resources, vms)
         self.assertIn("prod1 is still on mox2; wait for Proxmox HA", completed.stdout)
         self.assertIn("unregistered guests are configured on mox2: 555", completed.stdout)
         self.assertEqual(plan["productions"], [])
 
         only_dead = [production("prod1", 100, ["mox2"], "mox2")]
-        completed, _ = self.build_purge_plan(only_dead, [])
+        completed, _ = self.build_forced_plan(only_dead, [])
         self.assertIn("placed only on mox2", completed.stdout)
 
-    def test_purge_candidates_cover_offline_members_leftovers_and_joining_slots(self) -> None:
+    def test_forced_candidates_cover_offline_members_leftovers_and_joining_slots(self) -> None:
         completed = self.run_bash(
             f"""
-            PURGE_HOST_SOURCE_ONLY=1 source {shlex.quote(str(PURGE_SCRIPT))}
+            REMOVE_PROXMOX_HOST_SOURCE_ONLY=1 source {shlex.quote(str(REMOVE_SCRIPT))}
             MEMBERS=(mox1 mox2 mox3)
             ONLINE_MEMBERS=(mox1 mox3)
             hm_registry() {{
               printf '[{{"node":"mox1","state":"member"}},{{"node":"mox5","state":"joining"}},{{"node":"mox6","state":"member"}}]\\n'
             }}
             hm_exec() {{ printf 'mox1\\nmox2\\nmox3\\nmox4\\n'; }}
-            purge_candidates
+            forced_candidates
             """
         )
         lines = completed.stdout.splitlines()
@@ -272,35 +272,99 @@ class HostMembershipTest(unittest.TestCase):
             ],
         )
 
-    def test_purge_warning_uses_the_required_wording(self) -> None:
-        source = PURGE_SCRIPT.read_text(encoding="utf-8")
+    def test_forced_removal_uses_the_required_wording(self) -> None:
+        source = REMOVE_SCRIPT.read_text(encoding="utf-8")
         for phrase in (
-            "The purpose of this script is to enable the removal of a cluster host that is\n"
+            "The purpose of\n"
+            "a forced removal is to enable the removal of a cluster host that is\n"
             "no longer functioning and has been physically disconnected from the cluster,\n"
             "permanently.",
-            "The purged machine must never be allowed to communicate with the cluster via\n"
-            "the network in any way after it has been purged from the cluster.",
+            "The removed machine must never be allowed to communicate with the cluster via\n"
+            "the network in any way after it has been removed from the cluster.",
+            "In the Tailscale admin console, open Machines and remove ${TARGET_HOST}",
         ):
             self.assertIn(phrase, source)
-        self.assertIn('"PURGE ${TARGET_HOST}"', source)
+        self.assertIn('"${TARGET_HOST} IS PERMANENTLY DISCONNECTED"', source)
+        self.assertIn('"REMOVE ${TARGET_HOST}"', source)
 
-    def test_purge_deletes_the_dead_member_before_removing_the_qdevice(self) -> None:
-        source = PURGE_SCRIPT.read_text(encoding="utf-8")
+    def test_removal_mode_follows_whether_the_host_can_be_contacted(self) -> None:
+        def choose(online: str, reachable: str, answer: str, expected: int = 0):
+            return self.run_bash(
+                f"""
+                REMOVE_PROXMOX_HOST_SOURCE_ONLY=1 source {shlex.quote(str(REMOVE_SCRIPT))}
+                TARGET_HOST=mox2
+                TARGET_ONLINE={online}
+                TARGET_DESCRIPTION="offline cluster member"
+                mox_is_reachable() {{ [[ "$1" == mox2 && {reachable} == true ]]; }}
+                hm_prompt_yes() {{ printf 'ASKED<%s>\\n' "$1"; [[ {answer} == y ]]; }}
+                choose_removal_mode
+                printf 'MODE=%s\\n' "$REMOVAL_MODE"
+                """,
+                expected=expected,
+            )
+
+        graceful = choose("true", "true", "n")
+        self.assertIn("MODE=graceful", graceful.stdout)
+        self.assertNotIn("ASKED", graceful.stdout)
+
+        forced = choose("false", "false", "y")
+        self.assertIn("ASKED<Remove mox2 forcefully?>", forced.stdout)
+        self.assertIn("MODE=forced", forced.stdout)
+
+        declined = choose("false", "false", "n", expected=1)
+        self.assertNotIn("MODE=", declined.stdout)
+        self.assertIn("No change was made", declined.stderr)
+
+        unreachable_online = choose("true", "false", "y", expected=1)
+        self.assertNotIn("ASKED", unreachable_online.stdout)
+        self.assertIn("cannot be removed forcefully", unreachable_online.stderr)
+
+        reachable_offline = choose("false", "true", "y", expected=1)
+        self.assertNotIn("ASKED", reachable_offline.stdout)
+        self.assertIn("answers SSH from this workstation", reachable_offline.stderr)
+
+    def test_forced_removal_deletes_the_dead_member_before_removing_the_qdevice(self) -> None:
+        source = REMOVE_SCRIPT.read_text(encoding="utf-8")
         member = source[source.index("delete_dead_member() {") :]
         member = member[: member.index("\n}\n")]
         self.assertNotIn("qdevice", member.lower())
         self.assertIn('hm_delete_cluster_node "$TARGET_HOST" "$((${#MEMBERS[@]} - 1))"', member)
-        main = source[source.index("main() {") :]
-        self.assertLess(main.index("delete_dead_member"), main.index("finish_cluster_cleanup"))
+        forced = source[source.index("remove_forcefully() {") :]
+        forced = forced[: forced.index("\n}\n")]
+        order = [
+            "validate_plan",
+            "require_qdevice_access_afterward",
+            "choose_control_replacement",
+            "confirm_forced_disconnection",
+            "switch_control_node",
+            'hm_acquire_control_plane_lock "$HM_COORDINATOR"',
+            "destroy_dependent_staging",
+            "narrow_productions",
+            "delete_dead_member",
+            "finish_cluster_cleanup",
+            "release_slot",
+        ]
+        positions = [forced.index(step) for step in order]
+        self.assertEqual(positions, sorted(positions))
         cleanup = source[source.index("finish_cluster_cleanup() {") :]
-        self.assertIn('hm_reconcile_qdevice "${#MEMBERS[@]}"', cleanup[: cleanup.index("\n}\n")])
+        self.assertIn('qd_reconcile "${#MEMBERS[@]}"', cleanup[: cleanup.index("\n}\n")])
 
-    def test_remove_keeps_the_documented_order(self) -> None:
+    def test_graceful_removal_keeps_the_documented_order(self) -> None:
         source = REMOVE_SCRIPT.read_text(encoding="utf-8")
         main = source[source.index("main() {") :]
         order = [
             "hm_verify_qdevice_access",
             "resolve_control_node",
+            "choose_target",
+            "choose_removal_mode",
+            "remove_gracefully",
+        ]
+        positions = [main.index(step) for step in order]
+        self.assertEqual(positions, sorted(positions))
+        main = source[source.index("remove_gracefully() {") :]
+        main = main[: main.index("\n}\n")]
+        order = [
+            "require_qdevice_access_afterward",
             "validate_eligibility",
             "confirm_cloudflare",
             "choose_control_replacement",

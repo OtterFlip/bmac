@@ -10,7 +10,7 @@
 # passphrase, which the operator types at
 # the host console; on an unencrypted host they stay unencrypted. The disk,
 # LUKS, and zpool logic is lib/rpool_mirror.sh, the same code
-# hosts/setup_proxmox_host.sh uses for extra mirrors at install time.
+# hosts/add_proxmox_host.sh uses for extra mirrors at install time.
 
 set -Eeuo pipefail
 set +x

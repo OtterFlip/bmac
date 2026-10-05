@@ -177,11 +177,11 @@ find_cluster() {
     printf '[]\n' >"${RUN_DIR}/config-nodes.json"
 
   local registered_status=0
-  hm_qdevice_configured 2>/dev/null || registered_status=$?
+  qd_check_registered 2>/dev/null || registered_status=$?
   case "$registered_status" in
     0)
       REGISTERED=1
-      REGISTERED_ADDRESS="$(hm_registered_qdevice_address 2>/dev/null)"
+      REGISTERED_ADDRESS="$(qd_registered_address 2>/dev/null)"
       ;;
     1) ;;
     *)
@@ -216,7 +216,7 @@ collect_host() {
   if ((collected && REGISTERED && member_count % 2 == 0)); then
     status="$(json_field "$out" pvecm_status out)"
     voting=no
-    hm_qdevice_status_is_healthy "$status" "$member_count" && voting=yes
+    qd_status_is_healthy "$status" "$member_count" && voting=yes
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$node" "$state" "$access" "$via" "$collected" "$voting" \
     >>"${RUN_DIR}/members.tsv"
