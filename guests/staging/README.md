@@ -188,7 +188,8 @@ strictly verified mox Tailscale `ProxyJump`, just as for production. Record and
 verify the newly generated staging SSH host key before first use. When selected
 during request collection, the creator waits up to 180 seconds for QGA and the
 regenerated Ed25519 key, then installs and validates the strict workstation
-alias automatically.
+alias automatically. Other workstations, or a stale alias whose jump host left
+the cluster, use `guests/setup_jump_ssh_access.sh` instead.
 
 ## Route and start behavior
 

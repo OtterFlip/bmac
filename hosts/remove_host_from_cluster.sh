@@ -441,6 +441,7 @@ main() {
   hm_print_reinstall_follow_ups "$TARGET_HOST"
   printf '  - Wipe or reinstall %s before it is connected to any network again.\n' \
     "$TARGET_HOST"
+  bash "${REPO_ROOT}/lib/report_stale_jump_ssh.sh" "$TARGET_HOST" || true
 }
 
 if [[ "${REMOVE_HOST_SOURCE_ONLY:-0}" != 1 ]]; then

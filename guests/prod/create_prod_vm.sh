@@ -187,6 +187,12 @@ prompt_yes() {
   [[ "${answer,,}" == y || "${answer,,}" == yes ]]
 }
 
+prompt_yes_default_yes() {
+  local answer
+  IFS= read -r -p "$1 [Y/n] " answer || answer=""
+  [[ -z "$answer" || "${answer,,}" == y || "${answer,,}" == yes ]]
+}
+
 prompt_boolean_default() {
   local destination="$1" prompt="$2" default="$3" entered
   IFS= read -r -p "${prompt} [${default}]: " entered
@@ -2926,7 +2932,8 @@ register_routes_and_finalize() {
 }
 
 setup_workstation_jump_ssh() {
-  prompt_yes "Set up permanent jump SSH from this workstation to $RESOURCE_NAME?" ||
+  prompt_yes_default_yes \
+    "Set up permanent jump SSH from this workstation to $RESOURCE_NAME?" ||
     return 0
 
   local command_name

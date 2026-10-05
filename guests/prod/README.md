@@ -194,14 +194,22 @@ Every guest SSH and SCP operation uses the selected mox as a strict
 have Tailscale installed. No sibling `.env` or application-specific
 provisioner is used by this project.
 
-After successful creation, the creator offers to configure a permanent
-workstation SSH alias. It obtains the Ed25519 host key through QGA, displays
+After successful creation, the creator offers (default **yes**) to configure a
+permanent workstation SSH alias. It obtains the Ed25519 host key through QGA, displays
 its fingerprint, detects existing `known_hosts` and SSH-config use, and asks
 before replacing effective values or lets the operator choose another alias.
 It writes an app-ha-delimited strict `ProxyJump` block and pinned host key
 atomically, tests key-only SSH, and restores both workstation files if
 validation fails. Repeating the setup with the same key and effective alias is
 a no-op.
+
+The alias jumps through the mox that coordinated creation, so it stops working
+once that host leaves the cluster. Other administrators, and anyone repairing a
+stale alias, run `guests/setup_jump_ssh_access.sh [prodN | stageNprodN]` from
+their workstation. It lists every registered production and staging guest,
+attests the selected running guest's host key through QGA, defaults the jump
+host to the node currently running the guest, and replaces this workstation's
+settings for the alias with the same managed block.
 
 Inspect a completed production VM across registry, Proxmox, HA, replication,
 storage, QGA, private networking, and strict SSH without changing it:

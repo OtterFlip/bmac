@@ -838,6 +838,7 @@ main() {
     "$TARGET_HOST"
   printf 'network in any way. Wipe its disks or reinstall it before it is connected to\n'
   printf 'any network again.\n'
+  bash "${REPO_ROOT}/lib/report_stale_jump_ssh.sh" "$TARGET_HOST" || true
 }
 
 if [[ "${PURGE_HOST_SOURCE_ONLY:-0}" != 1 ]]; then

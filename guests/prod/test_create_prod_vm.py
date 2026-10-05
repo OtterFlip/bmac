@@ -650,6 +650,7 @@ COORDINATOR=mox1
 OWNER_NODE=mox1
 VMID=100
 prompt_yes() {{ return 0; }}
+prompt_yes_default_yes() {{ return 0; }}
 prompt_with_default() {{ printf -v "$1" '%s' prod1; }}
 node_exec() {{
   printf '%s\\n' '{{"exited":1,"exitcode":0,"out-data":"{host_key} root@prod1\\\\n"}}'
