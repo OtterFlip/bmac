@@ -25,7 +25,7 @@ class DestroyStagingVmTests(unittest.TestCase):
         expected: int | None = 0,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
-        env["APP_HA_DESTROY_STAGING_SOURCE_ONLY"] = "1"
+        env["APP_HA_REMOVE_STAGING_SOURCE_ONLY"] = "1"
         if environment:
             env.update(environment)
         completed = subprocess.run(

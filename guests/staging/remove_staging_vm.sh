@@ -746,6 +746,6 @@ main() {
   info "Removed route, VM disks, linked clone, $SNAPSHOT_NAME and its replicated copies, and registry metadata."
 }
 
-if [[ "${APP_HA_DESTROY_STAGING_SOURCE_ONLY:-0}" != 1 ]]; then
+if [[ "${APP_HA_REMOVE_STAGING_SOURCE_ONLY:-0}" != 1 ]]; then
   main "$@"
 fi

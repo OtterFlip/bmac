@@ -529,6 +529,8 @@ block = [
     "    StrictHostKeyChecking yes",
     "    PasswordAuthentication no",
     "    KbdInteractiveAuthentication no",
+    # Keeps any top-level options that follow in the user's file global.
+    "Host *",
     f"# END app-ha managed {label} {alias}",
     "",
 ]

@@ -59,6 +59,7 @@ REMOTE_ISO_SAFE_TO_DELETE=false
 SOURCE_ISO_CACHE_PATH=""
 SOURCE_ISO_SHA256_PATH=""
 SOURCE_ISO_CACHE_REUSED=false
+SOURCE_ISO_CACHE_REMOVED=false
 PROD_GUEST_OS_INSTALL_MODE=""
 
 declare -a ONLINE_NODES=()
@@ -90,7 +91,7 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: create_prod_vm.sh [--dry-run] [timeout options]
+Usage: add_prod_vm.sh [--dry-run] [timeout options]
 
 Run from an administrator workstation. The script loads cluster.conf and the
 mode-0600 secrets.env through lib/config.sh, chooses the first
@@ -1897,6 +1898,28 @@ detach_and_delete_iso() {
       "$REMOTE_ISO_PATH" "${REMOTE_ISO_PATH}.partial"
   fi
   REMOTE_ISO_UPLOADED=false
+  offer_source_iso_cache_removal
+}
+
+offer_source_iso_cache_removal() {
+  CURRENT_PHASE="offering source ISO cache removal"
+  [[ "$SOURCE_ISO_CACHE_PATH" == "${REMOTE_ISO_CACHE_ROOT}/"*.iso ]] ||
+    die "Source ISO cache path is unsafe"
+  node_exec "$INITIAL_NODE" test -e "$SOURCE_ISO_CACHE_PATH" || return 0
+  printf '\nSOURCE ISO CACHE\n'
+  info "The verified source installer ISO is still cached on ${INITIAL_NODE}: $SOURCE_ISO_CACHE_PATH"
+  info "Keeping it lets later production VM installs on $INITIAL_NODE skip the download. If it is deleted, the next install downloads and verifies it again."
+  prompt_yes_default_yes "Delete the cached source ISO from $INITIAL_NODE now?" ||
+    return 0
+  # The builder holds this lock while it reads the cache, so deletion cannot
+  # pull the source out from under a concurrent production install.
+  if node_exec "$INITIAL_NODE" flock -w 900 "${SOURCE_ISO_CACHE_PATH%.iso}.lock" \
+    rm -f -- "$SOURCE_ISO_CACHE_PATH" "$SOURCE_ISO_SHA256_PATH"; then
+    SOURCE_ISO_CACHE_REMOVED=true
+    info "Deleted the cached source ISO and its checksum from $INITIAL_NODE"
+  else
+    warn "Could not delete the cached source ISO on $INITIAL_NODE; remove $SOURCE_ISO_CACHE_PATH and $SOURCE_ISO_SHA256_PATH manually"
+  fi
 }
 
 install_or_resume_os() {
@@ -3149,6 +3172,8 @@ block = [
     "    StrictHostKeyChecking yes",
     "    PasswordAuthentication no",
     "    KbdInteractiveAuthentication no",
+    # Keeps any top-level options that follow in the user's file global.
+    "Host *",
     end,
     "",
 ]
@@ -3207,7 +3232,9 @@ print_completion() {
   else
     warn "HA requested started but the VM is $VM_LIVE_STATUS; inspect HA status rather than using qm start directly"
   fi
-  if node_exec "$INITIAL_NODE" test -f "$SOURCE_ISO_CACHE_PATH" &&
+  if [[ "$SOURCE_ISO_CACHE_REMOVED" == true ]]; then
+    info "Deleted source ISO cache: ${INITIAL_NODE}:${SOURCE_ISO_CACHE_PATH}"
+  elif node_exec "$INITIAL_NODE" test -f "$SOURCE_ISO_CACHE_PATH" &&
     node_exec "$INITIAL_NODE" test -f "$SOURCE_ISO_SHA256_PATH"; then
     info "Retained source ISO cache: ${INITIAL_NODE}:${SOURCE_ISO_CACHE_PATH}"
     info "Retained source checksum: ${INITIAL_NODE}:${SOURCE_ISO_SHA256_PATH}"

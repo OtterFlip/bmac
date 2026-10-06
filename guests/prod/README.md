@@ -118,9 +118,12 @@ selected node's Proxmox ISO storage. Only the small mode-`0600` build request
 crosses the workstation SSH path. The per-VM ISO remains attached while the
 unattended installer runs. After the operator confirms successful installation
 and poweroff, the creator records that phase, detaches and deletes the per-VM
-ISO, and continues guest verification. The verified vanilla source ISO and its
-checksum sidecar remain cached; completion prints both paths so an operator can
-remove them manually when they are no longer useful.
+ISO, and then asks (default yes) whether to delete the verified vanilla source
+ISO and its checksum sidecar from the node's cache. Deletion waits for the
+cache lock, so it never disturbs a concurrent build; the next install on that
+node downloads and verifies the source again. A kept cache is reused, and
+completion prints both paths so they can be removed manually later. Guest
+verification then continues.
 
 `ubuntu-autoinstall` requires a compatible Ubuntu live-server ISO and embeds
 the generated NoCloud answer data. `manual` attaches a verified byte-for-byte

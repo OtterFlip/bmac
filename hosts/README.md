@@ -307,10 +307,23 @@ The resumable flow:
    serials and exact capacities previously gathered with
    `hosts/cluster_setup_prereq.sh` in a Live Linux environment. It then verifies
    the source ISO and builds host-specific media containing a fresh one-time,
-   non-ephemeral `tag:proxmox-host` Tailscale key.
+   non-ephemeral `tag:proxmox-host` Tailscale key and a fresh SSH Ed25519 host
+   key generated on the workstation. The first-boot payload installs that host
+   key before sshd starts, so every setup SSH connection is pinned to it and no
+   fingerprint is compared by hand. The generated answer file, first-boot
+   script, and private host key are shredded as soon as the ISO is built.
 3. Stops for explicit install-media mapping and destructive install
-   confirmation, then verifies the newly booted host, public NIC, host guard,
-   and Tailscale bootstrap.
+   confirmation. It then asks you to detach the spent ISO (for example, an
+   iDRAC virtual media mapping), shreds it, and offers (default yes) to add a
+   managed `Host` block for the host, under an SSH name you choose (default
+   `moxN`), to the top of `~/.ssh/config`, pinned through `HostKeyAlias moxN`
+   to that host key in `~/.ssh/known_hosts`. The block is verified with a
+   strict login and rolled back if it does not work. The host's Tailscale IP
+   comes from the one online `tag:proxmox-host` peer with that name that
+   enrolled after the ISO was built; stale or untagged peers are ignored and
+   several matches stop the setup. It then verifies the newly booted host,
+   public NIC, host guard, and Tailscale bootstrap, and removes the spent
+   first-boot payload from the host.
 4. Applies the selected clear or LUKS storage policy, adds configured mirror
    vdevs, and, in LUKS mode, installs shared one-passphrase unlock and captures
    every header backup. Selected boot testing then proves both members

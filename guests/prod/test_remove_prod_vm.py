@@ -6,10 +6,10 @@ import subprocess
 import unittest
 
 
-SCRIPT = Path(__file__).with_name("destroy_prod_vm.sh")
+SCRIPT = Path(__file__).with_name("remove_prod_vm.sh")
 
 
-class DestroyProductionVmTest(unittest.TestCase):
+class RemoveProductionVmTest(unittest.TestCase):
     def test_shell_syntax(self) -> None:
         completed = subprocess.run(
             ["bash", "-n", str(SCRIPT)],

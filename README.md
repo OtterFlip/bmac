@@ -229,7 +229,7 @@ Next, navigate to "Access controls" | "Policies" and under "General access rules
 
 Each time you set up a proxmox host, the script will prompt you for a unique Tailscale Auth Key.  You can generate in the Tailscale web UI unser "Settings | "Keys" and on that page under "Auth Keys" use the "Generate auth key..." button and give the key any name (typically something like `mox1`) of the key, make sure Reusable is Off, any expiration day count value is fine (as these will switch to never expiring once they're actually used), and keep Ephemeral Off, and most importantly turn Tags ON and select the tag:proxmox-host tag.  Generate the key and copy it somewhere so that you have it ready for when the `hosts/add_proxmox_host.sh` script prompts for it.  You'll need one key for each proxmox host you setup.
 
-Your SSH access from your dev workstation to your proxmox hosts will be via your Tailscale network.
+Your SSH access from your dev workstation to your proxmox hosts will be via your Tailscale network. After each host is installed, `hosts/add_proxmox_host.sh` offers to add it to your `~/.ssh/config` (for example `ssh mox1`), pinned to an SSH host key the script generated and embedded in that host's installation ISO, so there is no first-use fingerprint prompt to verify.
 
 ### FiberState iDRAC VPN Setup
 

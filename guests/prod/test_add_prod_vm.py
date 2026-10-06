@@ -24,7 +24,7 @@ import unittest
 tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
 
 PROD_DIR = Path(__file__).resolve().parent
-SCRIPT = PROD_DIR / "create_prod_vm.sh"
+SCRIPT = PROD_DIR / "add_prod_vm.sh"
 BUILDER_PATH = PROD_DIR / "build_ubuntu_autoinstall.py"
 PREPARER_PATH = PROD_DIR / "prepare_prod_iso.sh"
 
@@ -634,8 +634,11 @@ cat "$request"
             root = Path(temporary)
             home = root / "home"
             run_dir = root / "run"
-            home.mkdir()
+            (home / ".ssh").mkdir(parents=True)
             run_dir.mkdir()
+            (home / ".ssh" / "config").write_text(
+                "User operator\n", encoding="utf-8"
+            )
             host_key = (
                 "ssh-ed25519 "
                 "AAAAC3NzaC1lZDI1NTE5AAAAIBhE1+iRU5AP8b2hmfLfAHJQ/BVRAR0n4ddx0DFCnkg4"
@@ -676,6 +679,70 @@ setup_workstation_jump_ssh
             self.assertIn("    ProxyJump mox1\n", config)
             self.assertIn("    HostKeyAlias prod1\n", config)
             self.assertIn("    StrictHostKeyChecking yes\n", config)
+            self.assertIn(
+                "Host *\n# END app-ha managed production guest prod1\n", config
+            )
+            effective = subprocess.run(
+                ["ssh", "-F", str(home / ".ssh" / "config"), "-G", "unrelated.example"],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.splitlines()
+            self.assertIn("user operator", effective)
+
+    SOURCE_CACHE_LAYOUT = """
+INITIAL_NODE=mox2
+SOURCE_ISO_CACHE_PATH="$REMOTE_ISO_CACHE_ROOT/abc123.iso"
+SOURCE_ISO_SHA256_PATH="$SOURCE_ISO_CACHE_PATH.sha256"
+node_exec() {
+  printf 'NODE_EXEC %s\\n' "$*"
+  [[ "$2" != test ]] || [[ "${CACHE_PRESENT:-true}" == true ]]
+}
+"""
+
+    def test_source_iso_cache_removal_defaults_to_locked_delete(self) -> None:
+        completed = self.run_sourced(
+            self.SOURCE_CACHE_LAYOUT
+            + """
+offer_source_iso_cache_removal </dev/null
+[[ "$SOURCE_ISO_CACHE_REMOVED" == true ]]
+"""
+        )
+        cache = "/var/lib/app-ha-proxmox/iso-cache/abc123"
+        self.assertIn(f"still cached on mox2: {cache}.iso", completed.stdout)
+        self.assertIn(
+            f"NODE_EXEC mox2 flock -w 900 {cache}.lock rm -f -- {cache}.iso {cache}.iso.sha256",
+            completed.stdout,
+        )
+
+    def test_source_iso_cache_is_kept_when_declined_or_absent(self) -> None:
+        declined = self.run_sourced(
+            self.SOURCE_CACHE_LAYOUT
+            + """
+printf 'n\\n' | offer_source_iso_cache_removal
+[[ "$SOURCE_ISO_CACHE_REMOVED" == false ]]
+"""
+        )
+        self.assertNotIn("rm -f", declined.stdout)
+        absent = self.run_sourced(
+            self.SOURCE_CACHE_LAYOUT
+            + """
+CACHE_PRESENT=false
+offer_source_iso_cache_removal </dev/null
+[[ "$SOURCE_ISO_CACHE_REMOVED" == false ]]
+"""
+        )
+        self.assertNotIn("SOURCE ISO CACHE", absent.stdout)
+        self.assertNotIn("rm -f", absent.stdout)
+
+    def test_source_iso_cache_offer_follows_per_vm_iso_deletion(self) -> None:
+        text = SCRIPT.read_text(encoding="utf-8")
+        detach = text[text.index("detach_and_delete_iso() {") :]
+        detach = detach[: detach.index("\n}\n")]
+        self.assertLess(
+            detach.index('"$REMOTE_ISO_PATH" "${REMOTE_ISO_PATH}.partial"'),
+            detach.index("offer_source_iso_cache_removal"),
+        )
 
     def test_node_exec_preserves_argv_without_evaluation(self) -> None:
         completed = self.run_sourced(

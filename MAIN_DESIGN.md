@@ -1476,8 +1476,9 @@ The host-side preparation flow:
   of URL;
 - creates the customized per-VM ISO directly in Proxmox ISO storage, so only
   the small mode-`0600` request crosses the workstation SSH path;
-- retains the vanilla source cache while detaching and deleting per-VM media
-  only after confirmed installation.
+- detaches and deletes per-VM media only after confirmed installation, then
+  offers (default yes) to delete the vanilla source cache under its cache
+  lock; a kept cache is reused by later installs.
 
 `PROD_GUEST_OS_INSTALL_MODE` defaults to `ubuntu-autoinstall`, which requires
 a compatible Ubuntu live-server source and preserves strict root-password-hash

@@ -27,7 +27,7 @@ def config_value(path: Path, key: str) -> str:
     raise AssertionError(f"{key} is missing from {path}")
 
 
-class SetupProxmoxHostTests(unittest.TestCase):
+class AddProxmoxHostTests(unittest.TestCase):
     def run_bash(self, body: str, expected: int = 0) -> subprocess.CompletedProcess[str]:
         completed = subprocess.run(
             [
@@ -152,6 +152,9 @@ Flags:            Quorate Qdevice
             write_state iso-built
             write_state iso-config-sha256 "$HOST_SETUP_CONFIG_SHA256"
             write_state prepared-iso "$prepared"
+            HOST_KEY_PUB="$STATE_DIR/host.pub"
+            source_iso_is_required
+            printf 'ssh-ed25519 AAAA\\n' >"$HOST_KEY_PUB"
             if source_iso_is_required; then
               exit 9
             fi
@@ -185,14 +188,28 @@ Flags:            Quorate Qdevice
             """
         )
 
+    GATE_LAYOUT = """
+            HOST_ARTIFACTS="$(mktemp -d)"
+            trap 'rm -rf "$HOST_ARTIFACTS"' EXIT
+            STATE_DIR="$HOST_ARTIFACTS/state"
+            GENERATED_DIR="$HOST_ARTIFACTS/generated"
+            SSH_DIR="$HOST_ARTIFACTS/ssh"
+            mkdir -p "$STATE_DIR" "$GENERATED_DIR" "$SSH_DIR"
+            HOST_KEY="$SSH_DIR/mox1_ssh_host_ed25519_key"
+            HOST_KEY_PUB="$HOST_KEY.pub"
+            ssh-keygen -q -t ed25519 -N '' -f "$HOST_KEY"
+            prepared="$HOST_ARTIFACTS/prepared.iso"
+            : >"$prepared"
+            : >"$GENERATED_DIR/answer.toml"
+            : >"$GENERATED_DIR/first-boot.sh"
+            write_state prepared-iso "$prepared"
+            TAILSCALE_TAG=tag:proxmox-host
+            """
+
     def test_installation_gate_warns_before_idrac_steps_and_accepts_go(self) -> None:
         completed = self.run_bash(
-            f"""
-            STATE_DIR="$(mktemp -d)"
-            trap 'rm -rf "$STATE_DIR"' EXIT
-            prepared="$STATE_DIR/prepared.iso"
-            : >"$prepared"
-            write_state prepared-iso "$prepared"
+            self.GATE_LAYOUT
+            + f"""
             HOST_ID=mox1
             PROXMOX_FQDN=mox1.example.com
             PROXMOX_IP={shlex.quote(config_value(MOX1_CONFIG, "PROXMOX_IP"))}
@@ -203,7 +220,12 @@ Flags:            Quorate Qdevice
             PROXMOX_PUBLIC_MAC=00:11:22:33:44:55
             PROXMOX_SECONDARY_MAC=00:11:22:33:44:66
             IDRAC_IP={shlex.quote(TEST_IDRAC_IP)}
-            printf 'GO\\n' | installation_gate
+            fingerprint="$(ssh-keygen -lf "$HOST_KEY_PUB" | awk '{{print $2}}')"
+            printf 'GO\\nGO\\n' | installation_gate
+            has_state installed
+            [[ ! -e "$prepared" && ! -e "$HOST_KEY" && -s "$HOST_KEY_PUB" ]]
+            [[ ! -e "$GENERATED_DIR/answer.toml" && ! -e "$GENERATED_DIR/first-boot.sh" ]]
+            printf 'FINGERPRINT=%s\\n' "$fingerprint"
             """
         )
         self.assertLess(
@@ -215,15 +237,70 @@ Flags:            Quorate Qdevice
             completed.stdout,
         )
         self.assertNotIn("ERASE mox1 AND INSTALL PROXMOX", completed.stdout)
+        fingerprint = completed.stdout.split("FINGERPRINT=", 1)[1].strip()
+        self.assertIn(f"Ed25519 {fingerprint}", completed.stdout)
+        self.assertIn("No SSH fingerprint check is needed", completed.stdout)
+        for removed in ("ssh-keygen -lf", "~/.ssh/config entry using", "100.87.74.124"):
+            self.assertNotIn(removed, completed.stdout)
+        self.assertIn("step 6 is complete", completed.stderr)
+        self.assertLess(
+            completed.stdout.index("REMOVING THE INSTALLATION ISO"),
+            completed.stdout.index("Shredding the spent installation ISO"),
+        )
+        self.assertIn("iDRAC/IPMI virtual media mapping for mox1, detach it now", completed.stdout)
+        self.assertIn("Confirm nothing is using the installation ISO.", completed.stderr)
+
+    def test_iso_is_kept_until_detach_is_confirmed(self) -> None:
+        completed = self.run_bash(
+            self.GATE_LAYOUT
+            + """
+            HOST_ID=mox1
+            write_state installed
+            installation_gate </dev/null
+            """,
+            expected=1,
+        )
+        self.assertIn("detach it now", completed.stdout)
+        self.assertNotIn("Shredding the spent installation ISO", completed.stdout)
+        self.assertIn("Input ended", completed.stderr)
+
+    def test_installed_resume_shreds_leftover_installation_secrets(self) -> None:
+        self.run_bash(
+            self.GATE_LAYOUT
+            + """
+            HOST_ID=mox1
+            write_state installed
+            printf 'GO\\n' | installation_gate
+            [[ ! -e "$prepared" && ! -e "$HOST_KEY" && -s "$HOST_KEY_PUB" ]]
+            [[ ! -e "$GENERATED_DIR/answer.toml" ]]
+            """
+        )
+        no_iso = self.run_bash(
+            self.GATE_LAYOUT
+            + """
+            rm -f "$prepared"
+            write_state installed
+            installation_gate </dev/null
+            [[ ! -e "$HOST_KEY" && ! -e "$GENERATED_DIR/answer.toml" ]]
+            """
+        )
+        self.assertNotIn("detach it now", no_iso.stdout)
+        outside = self.run_bash(
+            self.GATE_LAYOUT
+            + """
+            elsewhere="$(mktemp)"
+            write_state prepared-iso "$elsewhere"
+            write_state installed
+            installation_gate
+            """,
+            expected=1,
+        )
+        self.assertIn("outside", outside.stderr)
 
     def test_manual_installation_gate_uses_generic_console_instructions(self) -> None:
         completed = self.run_bash(
-            """
-            STATE_DIR="$(mktemp -d)"
-            trap 'rm -rf "$STATE_DIR"' EXIT
-            prepared="$STATE_DIR/prepared.iso"
-            : >"$prepared"
-            write_state prepared-iso "$prepared"
+            self.GATE_LAYOUT
+            + """
             HOST_ID=mox1
             PROXMOX_FQDN=mox1.example.com
             PROXMOX_IP=192.0.2.10
@@ -235,7 +312,7 @@ Flags:            Quorate Qdevice
             HARDWARE_INVENTORY_MODE=manual
             PROXMOX_PUBLIC_MAC=00:11:22:33:44:55
             PROXMOX_SECONDARY_MAC=00:11:22:33:44:66
-            printf 'GO\\n' | installation_gate
+            printf 'GO\\nGO\\n' | installation_gate
             """
         )
         self.assertIn("physical or remote console", completed.stdout)
@@ -632,7 +709,7 @@ Flags:            Quorate Qdevice
         self.assertIn('remote_script "${CONFIGURED_NVME_SERIALS[@]}"', source)
         self.assertIn("count_a == 1 && count_b == 1 && a != \"\" && a == b", source)
         self.assertIn("verify_clear_mirrors", source)
-        self.assertIn("Tailscale/SSH steps 6-10 are complete", source)
+        self.assertIn("the login prompt is visible, and step 6 is complete", source)
 
     def test_extra_mirrors_use_the_one_shared_rpool_mirror_tool(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
@@ -836,6 +913,280 @@ Flags:            Quorate Qdevice
         self.assertIn('control-set "$control_node" --expected-node none', source)
         self.assertIn("reserve_registry_host_slot", source)
         self.assertIn("/etc/pve/nodes/${HOST_ID} still exists", source)
+
+    @staticmethod
+    def tailscale_peer(
+        host: str,
+        ip: str,
+        created: str,
+        tags: list[str] | None = None,
+        online: bool = True,
+    ) -> dict[str, object]:
+        peer: dict[str, object] = {
+            "HostName": host,
+            "DNSName": f"{host}.example.ts.net.",
+            "Online": online,
+            "Created": created,
+            "TailscaleIPs": [ip, "fd7a:115c:a1e0::1"],
+        }
+        if tags is not None:
+            peer["Tags"] = tags
+        return peer
+
+    def peer_selection(self, *peers: dict[str, object]) -> str:
+        import json
+
+        status = json.dumps({"Peer": {str(index): peer for index, peer in enumerate(peers)}})
+        since = "$(date -u -d 2026-10-06T16:56:07Z +%s)"
+        completed = self.run_bash(
+            f"""
+            TAILSCALE_HOSTNAME=mox1
+            TAILSCALE_TAG=tag:proxmox-host
+            tailscale_peer_selection "{since}" <<<{shlex.quote(status)}
+            """
+        )
+        return completed.stdout.strip()
+
+    def test_tailscale_peer_selection_requires_one_fresh_tagged_online_peer(self) -> None:
+        tag = ["tag:proxmox-host"]
+        fresh = self.tailscale_peer("mox1", "100.64.0.10", "2026-10-06T17:12:28.407677017Z", tag)
+        stale = self.tailscale_peer("mox1", "100.64.0.9", "2026-10-05T01:00:00.1Z", tag)
+        untagged = self.tailscale_peer("mox1", "100.64.0.8", "2026-10-06T17:13:00Z")
+        other_tag = self.tailscale_peer(
+            "mox1", "100.64.0.7", "2026-10-06T17:13:00Z", ["tag:laptop"]
+        )
+        similar = self.tailscale_peer("mox10", "100.64.0.6", "2026-10-06T17:14:00Z", tag)
+        self.assertEqual(
+            self.peer_selection(stale, untagged, other_tag, similar, fresh),
+            "ip 100.64.0.10",
+        )
+        self.assertEqual(self.peer_selection(stale, untagged, similar), "absent")
+        self.assertEqual(
+            self.peer_selection({**fresh, "Online": False}, stale), "offline"
+        )
+        second = self.tailscale_peer("mox1", "100.64.0.11", "2026-10-06T17:20:00Z", tag)
+        self.assertEqual(self.peer_selection(fresh, second), "ambiguous 2")
+        self.assertEqual(self.run_bash(
+            """
+            TAILSCALE_HOSTNAME=mox1
+            TAILSCALE_TAG=tag:proxmox-host
+            tailscale_peer_selection 0 <<<'{"Peer": null}'
+            """
+        ).stdout.strip(), "absent")
+
+    def test_resolve_tailscale_ip_fails_closed_on_ambiguous_peers(self) -> None:
+        import json
+
+        tag = ["tag:proxmox-host"]
+        peers = {
+            "a": self.tailscale_peer("mox1", "100.64.0.10", "2026-10-06T17:12:28Z", tag),
+            "b": self.tailscale_peer("mox1", "100.64.0.11", "2026-10-06T17:20:00Z", tag),
+        }
+        body = """
+            STATE_DIR="$(mktemp -d)"
+            trap 'rm -rf "$STATE_DIR"' EXIT
+            TAILSCALE_HOSTNAME=mox1
+            TAILSCALE_TAG=tag:proxmox-host
+            write_state iso-built 2026-10-06T16:56:07Z
+            tailscale() {{ printf '%s\\n' {status}; }}
+            resolve_tailscale_ip
+            [[ "$TAILSCALE_IP" == 100.64.0.10 ]]
+            [[ "$(read_state tailscale-ip)" == 100.64.0.10 ]]
+            """
+        self.run_bash(body.format(status=shlex.quote(json.dumps({"Peer": {"a": peers["a"]}}))))
+        ambiguous = self.run_bash(
+            body.format(status=shlex.quote(json.dumps({"Peer": peers}))), expected=1
+        )
+        self.assertIn("expected exactly one", ambiguous.stderr)
+
+    def test_pinned_setup_ssh_rejects_an_unexpected_host_key(self) -> None:
+        completed = self.run_bash(
+            """
+            HOST_ARTIFACTS="$(mktemp -d)"
+            trap 'rm -rf "$HOST_ARTIFACTS"' EXIT
+            STATE_DIR="$HOST_ARTIFACTS"
+            HOST_ID=mox1
+            SSH_KEY="$HOST_ARTIFACTS/setup"
+            KNOWN_HOSTS="$HOST_ARTIFACTS/known_hosts"
+            HOST_KEY="$HOST_ARTIFACTS/host"
+            HOST_KEY_PUB="$HOST_KEY.pub"
+            TAILSCALE_IP=100.64.0.10
+            ssh-keygen -q -t ed25519 -N '' -f "$HOST_KEY"
+            options="$(ssh_options)"
+            grep -Fxq HostKeyAlias=mox1 <<<"$options"
+            grep -Fxq HostKeyAlgorithms=ssh-ed25519 <<<"$options"
+            ssh() { printf 'Host key verification failed.\\n' >&2; return 255; }
+            wait_for_pinned_setup_ssh
+            """,
+            expected=1,
+        )
+        self.assertIn("man-in-the-middle", completed.stderr)
+
+    def test_iso_embeds_a_fresh_pinned_host_key_and_drops_local_secrets(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        build = source[source.index("build_iso() {") : source.index("host_key_fingerprint() {")]
+        self.assertLess(
+            build.index('rm -f -- "$HOST_KEY" "$HOST_KEY_PUB"'),
+            build.index("ssh-keygen -q -t ed25519"),
+        )
+        for value in ('"__HOST_KEY_B64__"', '"__HOST_KEY_PUB_B64__"'):
+            self.assertIn(value, build)
+        first_boot = build[build.index("first_boot = r'''") :]
+        self.assertLess(
+            first_boot.index("/etc/ssh/ssh_host_ed25519_key"),
+            first_boot.index("app-ha-bootstrap.service"),
+        )
+        self.assertIn("systemctl try-restart ssh.service", first_boot)
+        self.assertIn('ordering = "before-network"', build)
+        inspected = build[build.index('inspect-iso "$output"') :]
+        for secret in ('"$answer"', '"$first_boot"', '"$HOST_KEY"'):
+            self.assertIn(f"shred_secret_file {secret}", inspected)
+        self.assertIn("grep -rlZF -- TAILSCALE_AUTH_KEY_B64= /var/lib/proxmox-first-boot", source)
+        self.assertIn('[[ -s "$HOST_KEY_PUB" ]]', source[source.index("installation_media_is_current() {") :])
+        main = source[source.index("main() {") :]
+        self.assertLess(main.index("installation_gate"), main.index("configure_workstation_ssh"))
+        self.assertLess(main.index("configure_workstation_ssh"), main.index("bootstrap_host"))
+
+    WORKSTATION_LAYOUT = r"""
+            work="$(mktemp -d)"
+            trap 'rm -rf "$work"' EXIT
+            HOME="$work/home"
+            ARTIFACTS_DIR="$work"
+            STATE_DIR="$work/state"
+            mkdir -p "$HOME/.ssh" "$STATE_DIR"
+            HOST_ID=mox1
+            TAILSCALE_IP=100.64.0.10
+            HOST_KEY="$work/host"
+            HOST_KEY_PUB="$HOST_KEY.pub"
+            ssh-keygen -q -t ed25519 -N '' -f "$HOST_KEY"
+            ssh-keygen -q -t ed25519 -N '' -f "$work/old"
+            cat >"$HOME/.ssh/config" <<'EOF'
+User operator
+ServerAliveInterval 30
+
+Host mox1
+    HostName 192.0.2.63
+    ProxyJump bastion
+EOF
+            {
+              printf 'mox1 %s\n' "$(awk '{print $1 " " $2}' "$work/old.pub")"
+              printf 'unrelated %s\n' "$(awk '{print $1 " " $2}' "$work/old.pub")"
+            } >"$HOME/.ssh/known_hosts"
+            cp "$HOME/.ssh/config" "$work/config.before"
+            cp "$HOME/.ssh/known_hosts" "$work/known_hosts.before"
+            sleep() { :; }
+            ssh() {
+              if [[ "$1" == -G ]]; then
+                command ssh -F "$HOME/.ssh/config" -G "$2"
+                return
+              fi
+              printf '%s\n' "$*" >>"$work/probes"
+              case "$PROBE" in
+                ok) return 0 ;;
+                denied) printf 'root@100.64.0.10: Permission denied (publickey).\n' >&2; return 255 ;;
+                mismatch) printf 'Host key verification failed.\n' >&2; return 255 ;;
+              esac
+            }
+            """
+
+    def test_workstation_ssh_config_pins_the_embedded_host_key(self) -> None:
+        completed = self.run_bash(
+            self.WORKSTATION_LAYOUT
+            + r"""
+            PROBE=ok
+            write_workstation_ssh_config mox1-test mox1
+            [[ -z "$WORKSTATION_SSH_FAILURE" ]]
+            write_workstation_ssh_config mox1-test mox1
+            [[ -z "$WORKSTATION_SSH_FAILURE" ]]
+            grep -Fq 'ControlMaster=no' "$work/probes"
+            [[ "$(stat -c %a "$HOME/.ssh/config")" == 600 ]]
+            [[ "$(stat -c %a "$HOME/.ssh/known_hosts")" == 600 ]]
+            printf 'PIN=%s\n' "$(awk '{print $1 " " $2}' "$HOST_KEY_PUB")"
+            printf '==CONFIG==\n'; cat "$HOME/.ssh/config"
+            printf '==KNOWN==\n'; cat "$HOME/.ssh/known_hosts"
+            printf '==OTHER==\n'; command ssh -F "$HOME/.ssh/config" -G otherhost
+            printf '==MOX1==\n'; command ssh -F "$HOME/.ssh/config" -G mox1
+            """
+        )
+        out = completed.stdout
+        pin = out.split("PIN=", 1)[1].splitlines()[0]
+        config = out.split("==CONFIG==\n", 1)[1].split("==KNOWN==\n", 1)[0]
+        known = out.split("==KNOWN==\n", 1)[1].split("==OTHER==\n", 1)[0]
+        other = out.split("==OTHER==\n", 1)[1].split("==MOX1==\n", 1)[0]
+        mox1 = out.split("==MOX1==\n", 1)[1]
+        self.assertTrue(config.startswith("# BEGIN app-ha managed proxmox host mox1\nHost mox1-test mox1\n"))
+        self.assertEqual(config.count("# BEGIN app-ha managed proxmox host mox1"), 1)
+        self.assertIn("Host *\n# END app-ha managed proxmox host mox1\n", config)
+        self.assertIn("User operator\nServerAliveInterval 30\n", config)
+        self.assertIn("    HostName 192.0.2.63\n", config)
+        self.assertEqual(known.splitlines().count(f"mox1 {pin}"), 1)
+        self.assertNotIn("mox1 ssh-ed25519", known.replace(f"mox1 {pin}", ""))
+        self.assertIn("unrelated ssh-ed25519", known)
+        self.assertIn("user operator\n", other)
+        self.assertIn("serveraliveinterval 30\n", other)
+        for line in (
+            "hostname 100.64.0.10",
+            "user root",
+            "hostkeyalias mox1",
+            "hostkeyalgorithms ssh-ed25519",
+            "stricthostkeychecking true",
+            "updatehostkeys false",
+        ):
+            self.assertIn(line + "\n", mox1)
+        self.assertNotIn("proxyjump", mox1)
+
+    def test_workstation_ssh_config_restores_files_when_login_fails(self) -> None:
+        denied = self.run_bash(
+            self.WORKSTATION_LAYOUT
+            + r"""
+            PROBE=denied
+            write_workstation_ssh_config mox1
+            [[ "$WORKSTATION_SSH_FAILURE" == *"not authorized for root"* ]]
+            cmp "$HOME/.ssh/config" "$work/config.before"
+            cmp "$HOME/.ssh/known_hosts" "$work/known_hosts.before"
+            ! compgen -G "$STATE_DIR/workstation-ssh.*" >/dev/null
+            """
+        )
+        self.assertEqual(denied.stderr.count("Restoring the previous"), 1)
+        mismatch = self.run_bash(
+            self.WORKSTATION_LAYOUT
+            + r"""
+            PROBE=mismatch
+            trap 'cmp "$HOME/.ssh/config" "$work/config.before" && cmp "$HOME/.ssh/known_hosts" "$work/known_hosts.before" && echo RESTORED; rm -rf "$work"' EXIT
+            write_workstation_ssh_config mox1
+            """,
+            expected=1,
+        )
+        self.assertIn("man-in-the-middle", mismatch.stderr)
+        self.assertIn("RESTORED", mismatch.stdout)
+
+    def test_workstation_ssh_prompt_defaults_to_yes_and_host_name(self) -> None:
+        completed = self.run_bash(
+            self.WORKSTATION_LAYOUT
+            + r"""
+            PROBE=ok
+            HARDWARE_INVENTORY_MODE=idrac
+            resolve_tailscale_ip() { :; }
+            printf '\n\n' | configure_workstation_ssh
+            [[ "$(read_state workstation-ssh-config)" == mox1 ]]
+            head -2 "$HOME/.ssh/config"
+            configure_workstation_ssh </dev/null
+            """
+        )
+        self.assertIn("Host mox1\n", completed.stdout)
+        self.assertIn("Configured and verified pinned workstation SSH: ssh mox1", completed.stdout)
+        declined = self.run_bash(
+            self.WORKSTATION_LAYOUT
+            + r"""
+            HARDWARE_INVENTORY_MODE=manual
+            resolve_tailscale_ip() { :; }
+            printf 'n\n' | configure_workstation_ssh
+            [[ "$(read_state workstation-ssh-config)" == declined ]]
+            cmp "$HOME/.ssh/config" "$work/config.before"
+            """
+        )
+        self.assertIn("HostKeyAlias mox1", declined.stdout)
+        self.assertIn("HostName 100.64.0.10", declined.stdout)
 
 
 

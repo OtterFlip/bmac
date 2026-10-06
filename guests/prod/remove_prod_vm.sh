@@ -39,7 +39,7 @@ info() {
 
 usage() {
   cat <<'EOF'
-Usage: destroy_prod_vm.sh [--dry-run] prodN
+Usage: remove_prod_vm.sh [--dry-run] prodN
 
 Permanently removes one production VM after exact identity validation:
 routes, HA request and node-affinity rule, replication jobs and target copies,

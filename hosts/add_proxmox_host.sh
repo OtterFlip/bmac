@@ -56,6 +56,8 @@ GENERATED_DIR=""
 SSH_DIR=""
 HEADER_DIR=""
 SSH_KEY=""
+HOST_KEY=""
+HOST_KEY_PUB=""
 KNOWN_HOSTS=""
 LUKS_SECRET_FILE="/root/.app-ha-luks-passphrase"
 SETUP_ROLE=""
@@ -64,6 +66,7 @@ GUEST_ROLE_HOOK_SOURCE=""
 GUEST_ROLE_HOOK_NAME=""
 GUEST_ROLE_HOOK_COMPAT_NAME=""
 TAILSCALE_IP=""
+WORKSTATION_SSH_FAILURE=""
 QDEVICE_REMOVED_FOR_JOIN=0
 USE_ADMIN_SSH=0
 CLUSTER_CONTROL_LOCK_HELD=0
@@ -130,6 +133,12 @@ prompt_yes() {
   local prompt=$1 answer
   read -r -p "$prompt [y/N] " answer
   [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]
+}
+
+prompt_yes_default_yes() {
+  local answer
+  read -r -p "$1 [Y/n] " answer || answer=""
+  [[ -z "$answer" || "${answer,,}" == y || "${answer,,}" == yes ]]
 }
 
 choose_hardware_inventory_mode() {
@@ -356,13 +365,22 @@ read_state() {
   printf '%s\n' "$value"
 }
 
+shred_secret_file() {
+  local path=$1
+  [[ -e "$path" || -L "$path" ]] || return 0
+  [[ -f "$path" && ! -L "$path" ]] ||
+    fail "Refusing to shred $path because it is not a regular file"
+  shred -n 1 -u -- "$path"
+}
+
 installation_media_is_current() {
   has_state installed && return 0
   has_state iso-built &&
     has_state iso-config-sha256 &&
     [[ "$(read_state iso-config-sha256)" == "$HOST_SETUP_CONFIG_SHA256" ]] &&
     has_state prepared-iso &&
-    [[ -f "$(read_state prepared-iso)" ]]
+    [[ -f "$(read_state prepared-iso)" ]] &&
+    [[ -s "$HOST_KEY_PUB" ]]
 }
 
 source_iso_is_required() {
@@ -494,6 +512,8 @@ PY
   SSH_DIR="${HOST_ARTIFACTS}/ssh"
   HEADER_DIR="${HOST_ARTIFACTS}/luks-headers"
   SSH_KEY="${SSH_DIR}/${HOST_ID}_setup_ed25519"
+  HOST_KEY="${SSH_DIR}/${HOST_ID}_ssh_host_ed25519_key"
+  HOST_KEY_PUB="${HOST_KEY}.pub"
   KNOWN_HOSTS="${STATE_DIR}/known_hosts"
   mkdir -p "$LOG_DIR" "$STATE_DIR" "$GENERATED_DIR" "$SSH_DIR" "$HEADER_DIR"
   chmod 0700 "$HOST_ARTIFACTS" "$LOG_DIR" "$STATE_DIR" "$GENERATED_DIR" "$SSH_DIR" "$HEADER_DIR"
@@ -543,7 +563,7 @@ PY
 
 preflight() {
   require_command curl jq openssl ssh scp ssh-keygen ssh-keyscan sha256sum python3 \
-    ip tailscale git awk base64 flock
+    ip tailscale git awk base64 flock shred
   if source_iso_is_required; then
     require_command xorriso dpkg-deb
   fi
@@ -1027,6 +1047,12 @@ build_iso() {
   iso_name="$(basename -- "${PROXMOX_ISO_FILE_PATH%.iso}")"
   output="${HOST_ARTIFACTS}/${iso_name}-${HOST_ID}-auto.iso"
   hdsize="$(read_state zfs-hdsize-gib)"
+  # Every image gets a new host key: an earlier image may still exist
+  # somewhere, and its embedded private key must not identify this install.
+  rm -f -- "$HOST_KEY" "$HOST_KEY_PUB"
+  ssh-keygen -q -t ed25519 -N '' -C "root@${PROXMOX_FQDN}" -f "$HOST_KEY"
+  chmod 0600 "$HOST_KEY"
+  chmod 0644 "$HOST_KEY_PUB"
   setup_key_b64="$(base64 -w0 <"$SSH_KEY.pub")"
   auth_key_b64="$(printf '%s' "$TAILSCALE_AUTH_KEY" | base64 -w0)"
   root_password_salt="$(
@@ -1042,6 +1068,8 @@ build_iso() {
 
   ANSWER_OUTPUT="$answer" FIRST_BOOT_OUTPUT="$first_boot" \
   SETUP_KEY="$(<"$SSH_KEY.pub")" SETUP_KEY_B64="$setup_key_b64" \
+  HOST_KEY_B64="$(base64 -w0 <"$HOST_KEY")" \
+  HOST_KEY_PUB_B64="$(base64 -w0 <"$HOST_KEY_PUB")" \
   ADMIN_1_KEY="$ADMIN_1_PUBLIC_SSH_KEY" ADMIN_2_KEY="$ADMIN_2_PUBLIC_SSH_KEY" \
   BOOT_SERIAL_1="$NVME_MIRROR_1_SERIAL_1" \
   BOOT_SERIAL_2="$NVME_MIRROR_1_SERIAL_2" \
@@ -1098,9 +1126,25 @@ TAILSCALE_AUTH_KEY_B64=__AUTH_KEY_B64__
 SETUP_KEY_B64=__SETUP_KEY_B64__
 ADMIN_1_KEY_B64=__ADMIN_1_KEY_B64__
 ADMIN_2_KEY_B64=__ADMIN_2_KEY_B64__
+HOST_KEY_B64=__HOST_KEY_B64__
+HOST_KEY_PUB_B64=__HOST_KEY_PUB_B64__
 
 [[ "${1:-before-network}" == before-network ]]
 command -v nft >/dev/null
+
+# The workstation pinned this pre-generated key before the image was built.
+# Installing it before sshd first starts means no other Ed25519 host key is
+# ever served.
+rm -f /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub
+printf '%s' "$HOST_KEY_B64" | base64 -d >/etc/ssh/ssh_host_ed25519_key
+printf '%s' "$HOST_KEY_PUB_B64" | base64 -d >/etc/ssh/ssh_host_ed25519_key.pub
+chown root:root /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub
+chmod 0600 /etc/ssh/ssh_host_ed25519_key
+chmod 0644 /etc/ssh/ssh_host_ed25519_key.pub
+[[ "$(ssh-keygen -y -f /etc/ssh/ssh_host_ed25519_key | awk '{print $1, $2}')" == \
+   "$(awk '{print $1, $2}' /etc/ssh/ssh_host_ed25519_key.pub)" ]]
+systemctl try-restart ssh.service
+
 install -d -m 0755 /usr/local/sbin /etc/nftables.d
 cat >/usr/local/sbin/app-ha-disk-by-serial <<'EOF'
 #!/usr/bin/env bash
@@ -1246,6 +1290,8 @@ replacements = {
     "__TAILSCALE_HOSTNAME__": q(os.environ["TAILSCALE_HOSTNAME"]),
     "__AUTH_KEY_B64__": q(os.environ["AUTH_KEY_B64"]),
     "__SETUP_KEY_B64__": q(os.environ["SETUP_KEY_B64"]),
+    "__HOST_KEY_B64__": q(os.environ["HOST_KEY_B64"]),
+    "__HOST_KEY_PUB_B64__": q(os.environ["HOST_KEY_PUB_B64"]),
     "__ADMIN_1_KEY_B64__": q(__import__("base64").b64encode(os.environ["ADMIN_1_KEY"].encode()).decode()),
     "__ADMIN_2_KEY_B64__": q(__import__("base64").b64encode(os.environ["ADMIN_2_KEY"].encode()).decode()),
 }
@@ -1264,14 +1310,51 @@ PY
   "$assistant" inspect-iso "$output" >/dev/null
   printf '%s inspect-iso succeeded for %s\n' "$(timestamp)" "$output" \
     >"${LOG_DIR}/prepared-iso-inspection.txt"
+  # The ISO is now the only copy of the auth key, root password hash, and
+  # private host key that it needs.
+  shred_secret_file "$answer"
+  shred_secret_file "$first_boot"
+  shred_secret_file "$HOST_KEY"
   unset TAILSCALE_AUTH_KEY auth_key_b64 root_password_hash root_password_salt
   write_state prepared-iso "$output"
   write_state iso-config-sha256 "$HOST_SETUP_CONFIG_SHA256"
   write_state iso-built
 }
 
+host_key_fingerprint() {
+  ssh-keygen -lf "$HOST_KEY_PUB" | awk '{print $2}'
+}
+
+# Once the host is installed its image is useless: the embedded Tailscale key
+# is single-use. Remove the image and every workstation copy of its secrets.
+scrub_installation_media() {
+  local iso=""
+  has_state prepared-iso && iso="$(read_state prepared-iso)"
+  if [[ -n "$iso" && -e "$iso" ]]; then
+    [[ "$iso" == "${HOST_ARTIFACTS}/"*.iso ]] ||
+      fail "Recorded installation ISO is outside $HOST_ARTIFACTS: $iso"
+    printf '\nREMOVING THE INSTALLATION ISO\n'
+    printf 'The script is about to shred %s.\n' "$iso"
+    if [[ "${HARDWARE_INVENTORY_MODE:-}" == idrac ]]; then
+      printf 'If anything is still using it, such as an iDRAC/IPMI virtual media mapping for %s, detach it now.\n' "$HOST_ID"
+    else
+      printf 'If anything is still using it, such as a remote console virtual media mapping for %s, detach it now.\n' "$HOST_ID"
+    fi
+    printf 'Copies outside this workstation (for example, a USB stick) are not removed. Wipe them too: they still contain the host'"'"'s private SSH key and root password hash.\n'
+    wait_for_exact "Confirm nothing is using the installation ISO."
+    info "Shredding the spent installation ISO $iso"
+    shred_secret_file "$iso"
+  fi
+  shred_secret_file "${GENERATED_DIR}/answer.toml"
+  shred_secret_file "${GENERATED_DIR}/first-boot.sh"
+  shred_secret_file "$HOST_KEY"
+}
+
 installation_gate() {
-  has_state installed && return
+  if has_state installed; then
+    scrub_installation_media
+    return
+  fi
   local output operator_hostname
   output="$(read_state prepared-iso)"
   operator_hostname="${TAILSCALE_HOSTNAME:-$HOST_ID}"
@@ -1308,47 +1391,76 @@ installation_gate() {
   printf '  4. When prompted, select the default "Install Proxmox VE (Automated)" option and watch the unattended install through its reboot.\n'
   printf '  5. Remove or unmap the install media when the installed Proxmox login prompt appears.\n'
   printf '\nBefore reporting INSTALL COMPLETE:\n'
-  printf '  6. Open the Tailscale admin machine list and verify %s appeared.\n' "$operator_hostname"
+  printf '  6. Open the Tailscale admin machine list and verify %s appeared with tag %s.\n' \
+    "$operator_hostname" "$TAILSCALE_TAG"
   printf '     If it is absent, the ISO Tailscale bootstrap failed; do not continue.\n'
-  printf '  7. If needed, use the Tailscale admin UI to assign the intended machine name %s.\n' "$operator_hostname"
-  if [[ "$HARDWARE_INVENTORY_MODE" == idrac ]]; then
-    printf '  8. In the iDRAC Virtual Console, log in as root and record the valid SSH fingerprints with:\n'
-  else
-    printf '  8. At the target host console, log in as root and record the valid SSH fingerprints with:\n'
-  fi
-  # shellcheck disable=SC2016 # Print this command literally for the operator.
-  printf '       for file in /etc/ssh/*; do ssh-keygen -lf "$file"; done\n'
-  if [[ "$HARDWARE_INVENTORY_MODE" == idrac ]]; then
-    printf '  9. The iDRAC/IPMI and Tailscale DNS views use the same hostname. To prevent SSH from reaching the IPMI-side address, add an explicit workstation ~/.ssh/config entry using the Tailscale IPv4 shown in the admin machine list (not the example address):\n\n'
-  else
-    printf '  9. Add an explicit workstation ~/.ssh/config entry using the Tailscale IPv4 shown in the admin machine list (not the example address):\n\n'
-  fi
-  printf '       Host %s\n' "$operator_hostname"
-  printf '           HostName 100.87.74.124\n'
-  printf '           User root\n'
-  printf '\n 10. From the workstation, run: ssh %s. Compare the offered key fingerprint with the console output from step 8 before accepting it. This records the host key now so later operator SSH and cluster steps do not stop unexpectedly.\n' "$operator_hostname"
-  printf ' 11. Later, after cluster formation, this script will retrieve every online mox ED25519 host key through these operator-verified workstation connections, pin each moxN name to its private VLAN address, and verify private host-to-host SSH automatically.\n'
+  printf '     A stale %s left there by an earlier install may be deleted, but it is ignored either way: the script only accepts the one online, %s-tagged %s that enrolled after this ISO was built.\n' \
+    "$operator_hostname" "$TAILSCALE_TAG" "$operator_hostname"
+  printf '\nNo SSH fingerprint check is needed. This ISO installs an SSH host key generated on this workstation, and every SSH connection this script makes to %s is pinned to it:\n' \
+    "$HOST_ID"
+  info "Ed25519 $(host_key_fingerprint)"
+  printf 'After you confirm, the script asks you to detach the ISO, deletes it, and offers to add that pinned host to this workstation'"'"'s ~/.ssh/config.\n'
   wait_for_exact \
-    "Confirm installation is finished, the ISO is unmapped, the login prompt is visible, and Tailscale/SSH steps 6-10 are complete." \
+    "Confirm installation is finished, the login prompt is visible, and step 6 is complete." \
     "INSTALL COMPLETE" true
   write_state installed
+  scrub_installation_media
+}
+
+# Peer HostNames are self-reported, so a name match alone could select a stale
+# node from an earlier install or any tailnet member using this name.
+tailscale_peer_selection() {
+  local since=$1
+  jq -r --arg host "$TAILSCALE_HOSTNAME" --arg tag "$TAILSCALE_TAG" \
+    --argjson since "$since" '
+    def created_epoch:
+      try (.Created | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch -1;
+    [(.Peer // {})[] |
+     select(.HostName == $host or ((.DNSName // "") | startswith($host + "."))) |
+     select(any((.Tags // [])[]; . == $tag)) |
+     select(created_epoch >= $since)] as $candidates |
+    if ($candidates | length) > 1 then
+      "ambiguous \($candidates | length)"
+    elif ($candidates | length) == 0 then
+      "absent"
+    elif ($candidates[0].Online != true) then
+      "offline"
+    else
+      ([$candidates[0].TailscaleIPs[]? | select(test("^100\\."))][0] // null) as $ip |
+      if $ip == null then "absent" else "ip \($ip)" end
+    end
+  '
 }
 
 resolve_tailscale_ip() {
-  local ip=""
-  while [[ -z "$ip" ]]; do
-    ip="$(tailscale status --json | jq -r --arg host "$TAILSCALE_HOSTNAME" '
-      [.Peer | to_entries[] | .value |
-       select(.HostName == $host or (.DNSName // "" | startswith($host + "."))) |
-       .TailscaleIPs[] | select(test("^100\\."))][0] // empty
-    ')"
-    [[ -n "$ip" ]] || {
-      info "Waiting for $TAILSCALE_HOSTNAME to enroll in Tailscale..."
-      sleep 10
-    }
+  local since=0 built selection
+  if has_state iso-built; then
+    built="$(read_state iso-built)"
+    [[ "$built" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] ||
+      fail "Recorded ISO build time is malformed: $built"
+    since="$(date -u -d "$built" +%s)"
+  fi
+  while true; do
+    selection="$(tailscale status --json | tailscale_peer_selection "$since")" ||
+      fail "Could not read this workstation's Tailscale peer list"
+    case "$selection" in
+      "ip "100.*)
+        break
+        ;;
+      "ambiguous "*)
+        fail "${selection#ambiguous } Tailscale peers named $TAILSCALE_HOSTNAME with tag $TAILSCALE_TAG enrolled after this ISO was built (${built:-unknown}); expected exactly one. Remove the unexpected machines in the Tailscale admin console before continuing."
+        ;;
+      offline)
+        info "Waiting for $TAILSCALE_HOSTNAME to come online in Tailscale..."
+        ;;
+      *)
+        info "Waiting for $TAILSCALE_HOSTNAME to enroll in Tailscale with tag $TAILSCALE_TAG (enrolled after ${built:-the ISO build})..."
+        ;;
+    esac
+    sleep 10
   done
-  TAILSCALE_IP="$ip"
-  write_state tailscale-ip "$ip"
+  TAILSCALE_IP="${selection#ip }"
+  write_state tailscale-ip "$TAILSCALE_IP"
 }
 
 prepare_qdevice() {
@@ -1381,6 +1493,14 @@ ssh_options() {
   fi
   printf '%s\n' -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes \
     -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" -o ConnectTimeout=15
+  if [[ -s "$HOST_KEY_PUB" ]]; then
+    printf '%s\n' -o "HostKeyAlias=$HOST_ID" -o HostKeyAlgorithms=ssh-ed25519 \
+      -o GlobalKnownHostsFile=none -o UpdateHostKeys=no
+  fi
+}
+
+pinned_host_key() {
+  awk '{print $1 " " $2}' "$HOST_KEY_PUB"
 }
 
 remote_target() {
@@ -1461,6 +1581,25 @@ REMOTE
   fi
 }
 
+fail_host_key_mismatch() {
+  fail "$1 did not present the SSH host key embedded in the $HOST_ID installation ISO (Ed25519 $(host_key_fingerprint)). It may be a different machine or a man-in-the-middle, or the first-boot payload did not install the key. Do not continue; inspect the host at its console."
+}
+
+wait_for_pinned_setup_ssh() {
+  local -a options
+  local output
+  printf '%s %s\n' "$HOST_ID" "$(pinned_host_key)" >"$KNOWN_HOSTS"
+  chmod 0600 "$KNOWN_HOSTS"
+  mapfile -t options < <(ssh_options)
+  until output="$(ssh "${options[@]}" "root@${TAILSCALE_IP}" true 2>&1 </dev/null)"; do
+    if grep -Eq 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED' <<<"$output"; then
+      fail_host_key_mismatch "Tailscale peer $TAILSCALE_IP"
+    fi
+    info "Waiting for pinned setup-key SSH access to $HOST_ID ($TAILSCALE_IP)..."
+    sleep 10
+  done
+}
+
 wait_for_host() {
   resolve_tailscale_ip
   local -a options
@@ -1482,6 +1621,12 @@ wait_for_host() {
     retire_setup_key_with_admin_identity
     return
   fi
+  if [[ -s "$HOST_KEY_PUB" ]]; then
+    wait_for_pinned_setup_ssh
+    return
+  fi
+  # Hosts installed from images without an embedded host key fall back to
+  # trust on first use over the authenticated Tailscale path.
   rm -f "$KNOWN_HOSTS"
   until ssh-keyscan -T 10 -H "$TAILSCALE_IP" >"$KNOWN_HOSTS" 2>/dev/null; do
     info "Waiting for SSH on $HOST_ID ($TAILSCALE_IP)..."
@@ -1499,6 +1644,224 @@ wait_for_host() {
     info "Waiting for setup-key SSH access..."
     sleep 10
   done
+}
+
+workstation_ssh_settings_match() {
+  local name=$1 effective
+  effective="$(ssh -G "$name" 2>/dev/null)" || return 1
+  grep -Fxq "hostname $TAILSCALE_IP" <<<"$effective" &&
+    grep -Fxq "user root" <<<"$effective" &&
+    grep -Fxq "port 22" <<<"$effective" &&
+    grep -Fxq "hostkeyalias $HOST_ID" <<<"$effective" &&
+    grep -Fxq "hostkeyalgorithms ssh-ed25519" <<<"$effective" &&
+    grep -Fxq "stricthostkeychecking true" <<<"$effective" &&
+    grep -Fxq "userknownhostsfile ${HOME}/.ssh/known_hosts" <<<"$effective" &&
+    ! grep -Eq '^(proxyjump|proxycommand) ' <<<"$effective"
+}
+
+print_manual_workstation_ssh_instructions() {
+  local name=$1
+  printf '\nTo set up "ssh %s" yourself without trusting a first-use prompt, put this entry at the top of ~/.ssh/config:\n\n' "$name"
+  printf '    Host %s\n' "$name"
+  printf '        HostName %s\n' "$TAILSCALE_IP"
+  printf '        User root\n'
+  printf '        HostKeyAlias %s\n' "$HOST_ID"
+  printf '        HostKeyAlgorithms ssh-ed25519\n'
+  printf '        StrictHostKeyChecking yes\n'
+  printf '    Host *\n'
+  printf '\nand add this line to ~/.ssh/known_hosts:\n\n'
+  printf '    %s %s\n' "$HOST_ID" "$(pinned_host_key)"
+  printf '\nLater phases of this script connect with ssh root@%s and need that name to work.\n' "$HOST_ID"
+}
+
+# Writes the managed block and known_hosts pin, then proves them. When the
+# workstation cannot log in, restores the previous files and sets
+# WORKSTATION_SSH_FAILURE instead of returning nonzero, so callers keep errexit.
+write_workstation_ssh_config() {
+  local -a names=("$@")
+  WORKSTATION_SSH_FAILURE=""
+  local ssh_dir="${HOME}/.ssh"
+  local ssh_config="${ssh_dir}/config" known_hosts="${ssh_dir}/known_hosts"
+  local path backup_dir name output="" result=retry attempt lock_fd
+  local config_existed=false known_existed=false
+  [[ "$HOME" == /* && "$HOME" != *[\"$'\n']* ]] ||
+    fail "HOME must be an absolute path without quotes or newlines to manage ~/.ssh/config"
+  for path in "$ssh_dir" "$ssh_config" "$known_hosts"; do
+    [[ ! -L "$path" ]] || fail "Refusing to manage $path because it is a symlink"
+  done
+  # Concurrent host installers share this workstation's SSH files.
+  exec {lock_fd}>"${ARTIFACTS_DIR}/workstation-ssh-config.lock"
+  chmod 0600 "${ARTIFACTS_DIR}/workstation-ssh-config.lock"
+  flock -w 900 "$lock_fd" ||
+    fail "Timed out waiting for another host installer to finish editing ~/.ssh/config"
+  install -d -m 0700 "$ssh_dir"
+  backup_dir="$(mktemp -d "${STATE_DIR}/workstation-ssh.XXXXXX")"
+  if [[ -f "$ssh_config" ]]; then
+    install -m 0600 "$ssh_config" "${backup_dir}/config"
+    config_existed=true
+  fi
+  if [[ -f "$known_hosts" ]]; then
+    install -m 0600 "$known_hosts" "${backup_dir}/known_hosts"
+    known_existed=true
+  fi
+
+  local staged_known_hosts="${backup_dir}/known_hosts.new"
+  if [[ "$known_existed" == true ]]; then
+    install -m 0600 "$known_hosts" "$staged_known_hosts"
+  else
+    : >"$staged_known_hosts"
+    chmod 0600 "$staged_known_hosts"
+  fi
+  for name in "${names[@]}" "$HOST_ID"; do
+    ssh-keygen -R "$name" -f "$staged_known_hosts" >/dev/null 2>&1 || true
+  done
+  rm -f -- "${staged_known_hosts}.old"
+  printf '%s %s\n' "$HOST_ID" "$(pinned_host_key)" >>"$staged_known_hosts"
+
+  local staged_config="${backup_dir}/config.new"
+  python3 - "$ssh_config" "$staged_config" "$HOST_ID" "$TAILSCALE_IP" \
+    "$known_hosts" "${names[@]}" <<'PY'
+from pathlib import Path
+import sys
+
+source, destination, host_id, address, known_hosts, *names = sys.argv[1:]
+begin = f"# BEGIN app-ha managed proxmox host {host_id}"
+end = f"# END app-ha managed proxmox host {host_id}"
+text = ""
+path = Path(source)
+if path.is_file():
+    text = path.read_text(encoding="utf-8")
+kept = []
+inside = False
+for line in text.splitlines():
+    if not inside and line == begin:
+        inside = True
+    elif inside and line == end:
+        inside = False
+    elif not inside:
+        kept.append(line)
+if inside:
+    raise SystemExit("existing managed SSH block for " + host_id + " is unterminated")
+block = [
+    begin,
+    "Host " + " ".join(names),
+    f"    HostName {address}",
+    "    User root",
+    "    Port 22",
+    "    ProxyJump none",
+    f"    HostKeyAlias {host_id}",
+    "    HostKeyAlgorithms ssh-ed25519",
+    "    StrictHostKeyChecking yes",
+    "    UpdateHostKeys no",
+    f'    UserKnownHostsFile "{known_hosts}"',
+    "    PasswordAuthentication no",
+    "    KbdInteractiveAuthentication no",
+    # Keeps any top-level options that follow in the user's file global.
+    "Host *",
+    end,
+    "",
+]
+Path(destination).write_text("\n".join(block + kept).rstrip() + "\n", encoding="utf-8")
+PY
+  chmod 0600 "$staged_config"
+
+  install -m 0600 "$staged_known_hosts" "$known_hosts"
+  # Prepending the managed block lets first-value-wins OpenSSH semantics
+  # override any older stanza for these names without deleting user config.
+  install -m 0600 "$staged_config" "$ssh_config"
+
+  for name in "${names[@]}"; do
+    workstation_ssh_settings_match "$name" || {
+      result="ssh -G $name does not resolve to the managed settings (a Match block or Include may be overriding them)"
+      break
+    }
+  done
+  if [[ "$result" == retry ]]; then
+    for attempt in $(seq 1 30); do
+      if output="$(ssh -o BatchMode=yes -o ConnectTimeout=15 \
+          -o ControlMaster=no -o ControlPath=none "${names[0]}" true 2>&1 </dev/null)"; then
+        result=ok
+        break
+      fi
+      if grep -Eq 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED' <<<"$output"; then
+        result=mismatch
+        break
+      fi
+      if grep -Fq 'Permission denied' <<<"$output"; then
+        result="this workstation's SSH key is not authorized for root on $HOST_ID (it must be ADMIN_1_PUBLIC_SSH_KEY or ADMIN_2_PUBLIC_SSH_KEY)"
+        break
+      fi
+      info "Waiting for SSH on $HOST_ID ($TAILSCALE_IP), attempt $attempt/30..."
+      sleep 10
+    done
+    [[ "$result" != retry ]] ||
+      result="ssh ${names[0]} did not connect within 5 minutes: ${output##*$'\n'}"
+  fi
+
+  if [[ "$result" != ok ]]; then
+    printf 'Restoring the previous ~/.ssh/config and ~/.ssh/known_hosts.\n' >&2
+    if [[ "$known_existed" == true ]]; then
+      install -m 0600 "${backup_dir}/known_hosts" "$known_hosts"
+    else
+      rm -f -- "$known_hosts"
+    fi
+    if [[ "$config_existed" == true ]]; then
+      install -m 0600 "${backup_dir}/config" "$ssh_config"
+    else
+      rm -f -- "$ssh_config"
+    fi
+    rm -rf -- "$backup_dir"
+    [[ "$result" != mismatch ]] || fail_host_key_mismatch "ssh ${names[0]} ($TAILSCALE_IP)"
+    WORKSTATION_SSH_FAILURE="$result"
+  else
+    rm -rf -- "$backup_dir"
+  fi
+  exec {lock_fd}>&-
+}
+
+configure_workstation_ssh() {
+  has_state workstation-ssh-config && return
+  [[ -s "$HOST_KEY_PUB" ]] || return 0
+  local alias=""
+  local -a names=()
+  printf '\nWORKSTATION SSH ACCESS\n'
+  printf 'The script can add a Host entry for %s to the top of this workstation'"'"'s ~/.ssh/config. It connects over Tailscale and accepts only the host key embedded in the installation ISO (Ed25519 %s), with the pin stored in ~/.ssh/known_hosts, so no fingerprint needs to be checked by hand.\n' \
+    "$HOST_ID" "$(host_key_fingerprint)"
+  if [[ "$HARDWARE_INVENTORY_MODE" == idrac ]]; then
+    printf 'The explicit entry also keeps SSH from reaching the iDRAC/IPMI-side address, which uses the same hostname.\n'
+  fi
+  if ! prompt_yes_default_yes "Add $HOST_ID to this workstation's SSH config?"; then
+    resolve_tailscale_ip
+    print_manual_workstation_ssh_instructions "$HOST_ID"
+    write_state workstation-ssh-config declined
+    return
+  fi
+  while true; do
+    read -r -p "SSH name to use for $HOST_ID (ssh NAME) [${HOST_ID}]: " alias || alias=""
+    alias="${alias:-$HOST_ID}"
+    [[ "$alias" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] && break
+    printf 'The SSH name must use 1-64 letters, digits, dots, underscores, or hyphens.\n' >&2
+  done
+  names=("$alias")
+  if [[ "$alias" != "$HOST_ID" ]]; then
+    printf 'This script and the other cluster tools connect with ssh root@%s, so that name needs the same settings.\n' "$HOST_ID"
+    if prompt_yes_default_yes "Also apply these settings to the name $HOST_ID?"; then
+      names+=("$HOST_ID")
+    else
+      printf 'WARNING: Later phases of this script will wait until ssh root@%s works from this workstation.\n' "$HOST_ID" >&2
+    fi
+  fi
+  resolve_tailscale_ip
+  write_workstation_ssh_config "${names[@]}"
+  if [[ -n "$WORKSTATION_SSH_FAILURE" ]]; then
+    printf '\nWARNING: Workstation SSH for %s was not configured because %s.\n' \
+      "$HOST_ID" "$WORKSTATION_SSH_FAILURE" >&2
+    print_manual_workstation_ssh_instructions "$alias"
+    printf 'This prompt is offered again when the script is rerun.\n'
+    return
+  fi
+  write_state workstation-ssh-config "${names[*]}"
+  info "Configured and verified pinned workstation SSH: ssh $alias"
 }
 
 bootstrap_host() {
@@ -1569,12 +1932,20 @@ REMOTE
 
   # The Proxmox first-boot unit retries its entire ISO payload on every boot
   # until this pending marker is removed. Clear it only after Tailscale
-  # enrollment and host bootstrap have both been verified.
+  # enrollment and host bootstrap have both been verified. The retained
+  # payload copy embeds the spent Tailscale key and the host private key.
   remote_script <<'REMOTE'
 set -Eeuo pipefail
 [[ -f /var/lib/app-ha-bootstrap-complete ]]
 rm -f /var/lib/proxmox-first-boot/pending-first-boot-setup
 systemctl reset-failed proxmox-first-boot-network-pre.service 2>/dev/null || true
+if [[ -d /var/lib/proxmox-first-boot ]]; then
+  while IFS= read -r -d '' payload; do
+    [[ -f "$payload" && ! -L "$payload" ]] || continue
+    shred -n 1 -u -- "$payload"
+    printf 'Removed spent first-boot payload %s\n' "$payload"
+  done < <(grep -rlZF -- TAILSCALE_AUTH_KEY_B64= /var/lib/proxmox-first-boot || true)
+fi
 REMOTE
 
   # Reconcile this helper on every resume so canonical device matching does not
@@ -4497,6 +4868,7 @@ EOF
   discover_hardware
   build_iso
   installation_gate
+  configure_workstation_ssh
   bootstrap_host
 
   if [[ "$ENCRYPTION_POLICY" == luks ]]; then

@@ -126,6 +126,43 @@ configure_alias
                 known_hosts, f"mox3 {OLD_KEY}\nprod1 {HOST_KEY}\n"
             )
 
+    def test_prepended_block_keeps_top_level_options_global(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home, run_dir = self.make_home(Path(temporary))
+            config_path = home / ".ssh" / "config"
+            config_path.write_text(
+                "StrictHostKeyChecking yes\nUser operator\n\n" + STALE_CONFIG,
+                encoding="utf-8",
+            )
+            self.run_sourced(self.configure_body(home, run_dir, 0), stdin="\n\n")
+            config = config_path.read_text(encoding="utf-8")
+            self.assertIn(
+                "Host *\n# END app-ha managed production guest prod1\n", config
+            )
+            effective = subprocess.run(
+                ["ssh", "-F", str(config_path), "-G", "unrelated.example"],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.splitlines()
+            self.assertIn("stricthostkeychecking true", effective)
+            self.assertIn("user operator", effective)
+
+    def test_every_managed_block_writer_restores_global_scope(self) -> None:
+        repo = SCRIPT.parent.parent
+        writers = {
+            repo / "guests" / "setup_jump_ssh_access.sh": 'f"# END app-ha managed {label} {alias}",',
+            repo / "guests" / "prod" / "add_prod_vm.sh": "    end,\n",
+            repo / "guests" / "staging" / "add_staging_vm.sh": "    end,\n",
+            repo / "hosts" / "add_proxmox_host.sh": "    end,\n",
+        }
+        for path, end_line in writers.items():
+            text = path.read_text(encoding="utf-8")
+            block = text[text.index("block = [") :]
+            block = block[: block.index("]\n")]
+            self.assertIn('    "Host *",\n', block, path.name)
+            self.assertLess(block.index('"Host *"'), block.index(end_line.strip()), path.name)
+
     def test_failed_validation_restores_prior_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home, run_dir = self.make_home(Path(temporary))
