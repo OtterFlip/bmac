@@ -10,6 +10,14 @@ You're not the only one who noticed that the public clouds aren't really necessa
 
 <br clear="left">
 
+## Releases
+
+BMAC releases represent tested, known-good points in the project's development and are the recommended versions for new installations.
+
+The current source code on the `main` branch may contain changes that have not yet gone through the complete release testing process. For production use, download the latest release from the [GitHub Releases](https://github.com/OtterFlip/bmac/releases) page.
+
+Each release is provided by GitHub as both `.zip` and `.tar.gz` source archives. BMAC does not require a build step - download or extract the release on your x64 Ubuntu administrator workstation and follow the setup instructions below.
+
 ## BMAC's Features
 
 - Grokable.  With moderate reading, BMAC can be understood without spending weeks to ramp up.  The complete design is [here](MAIN_DESIGN.md).
