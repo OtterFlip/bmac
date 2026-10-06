@@ -105,12 +105,10 @@ curl -fsSL https://tailscale.com/install.sh | sh
 
 Join the tailnet using an auth key, which should be a new non-reusable, non-ephemeral key with the tag 'tag:proxmox-qdevice'
 
-Replace TS_AUTHKEY below with the actual auth key value begins with 'tskey-auth-...'
+Replace tskey-auth-xxxxxxx below with the actual auth key value begins with 'tskey-auth-...'
 
 ```bash
-read -s TS_AUTHKEY
-sudo tailscale up --auth-key="$TS_AUTHKEY" --hostname=qdevice
-unset TS_AUTHKEY
+sudo tailscale up --auth-key="tskey-auth-xxxxxxx" --hostname=qdevice
 ```
 
 Verify:
