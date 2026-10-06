@@ -167,10 +167,11 @@ something else, set `BMAC_LIMA_INSTANCE` to another name.
 
 - **`hosts/add_proxmox_host.sh` cannot run here.** It needs Linux with
   `flock` and `ip`, and its install-ISO phase executes Proxmox's amd64-only
-  `proxmox-auto-install-assistant`. Untested options are Rosetta in an arm64
-  Lima VM (`vmOpts.vz.rosetta`), an emulated x86_64 Lima VM (`vmType: qemu`,
-  `arch: x86_64`; slow, but workable for a command-line tool), or an amd64
-  Linux machine. Whichever is used must also reach Tailscale and the
+  `proxmox-auto-install-assistant`. The tested option is a separate x64
+  Ubuntu workstation. Untested options are Rosetta in an arm64 Lima VM
+  (`vmOpts.vz.rosetta`) or an emulated x86_64 Lima VM (`vmType: qemu`,
+  `arch: x86_64`; slow, but workable for a command-line tool). Whichever is
+  used must also reach Tailscale and the
   provider's IPMI VPN and hold `env/secrets.env` and `hosts/artifacts/`
   under the loader's ownership and mode checks. This VM sets up none of that.
 - **The VM has no cluster access.** It has no Tailscale, SSH agent, or

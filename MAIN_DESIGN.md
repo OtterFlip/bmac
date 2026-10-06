@@ -164,6 +164,12 @@ nothing can prompt mid-run. Before the first use from any workstation:
 
 #### Which scripts run from macOS
 
+Every workstation script listed in this section, plus
+`guests/setup_jump_ssh_access.sh` and
+`hosts/simulate_disk_failure_and_replacement.sh`, has been verified from an
+x64 Ubuntu workstation against the live cluster (2026-10-06). The lists below
+cover macOS only.
+
 Verified from macOS against the live cluster (2026-09-21, full
 destroy/create/deploy/stage cycle on the test domain):
 
@@ -189,15 +195,17 @@ Expected to work on macOS, not yet run there against a cluster:
   fake-SSH unit tests only;
 - `hosts/add_new_disk_vdev.sh`, `hosts/add_replacement_disk.sh`,
   `hosts/decommission_disks.sh`, and `hosts/inventory_disks.sh`. Their local work is the
-  config load, `python3`, and SSH; covered by fake-SSH unit tests only, and
-  not yet run against real disks;
+  config load, `python3`, and SSH; covered by fake-SSH unit tests only;
 - `hosts/update_cluster_runtime.sh`. Local commands are portable and its unit
   tests pass on macOS. It rewrites the runtime on every node, so treat the
   first macOS run as a test, not as routine;
 - `diagnostics/show_qdevice_state.sh`. Config load, `python3`, and strict SSH;
-  covered by unit tests only.
+  covered by unit tests only;
 - `diagnostics/show_cluster_health.sh`. Config load, `python3`, and strict SSH;
-  covered by fake-SSH unit tests only.
+  covered by fake-SSH unit tests only;
+- `guests/prod/change_prod_vm_placement.sh` and
+  `guests/prod/change_prod_vm_owner.sh`. Their local work is the config load,
+  `python3`, `mktemp`, and strict SSH, the same as the production creator.
 
 Linux workstation only:
 
@@ -207,11 +215,6 @@ Linux workstation only:
 - `hosts/remove_proxmox_host.sh`, `qdevice/add_qdevice.sh`, and
   `qdevice/remove_qdevice.sh`. They take the
   same workstation `flock` as host setup.
-
-Expected to work on macOS, not yet run anywhere against a cluster:
-`guests/prod/change_prod_vm_placement.sh` and
-`guests/prod/change_prod_vm_owner.sh`. Their local work is the config load,
-`python3`, `mktemp`, and strict SSH, the same as the production creator.
 
 Never run on a workstation, so the workstation OS does not matter. These
 execute on a Proxmox host, inside a guest, or from a live Linux boot, and are
