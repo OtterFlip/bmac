@@ -289,6 +289,7 @@ Flags:            Quorate Qdevice
             self.GATE_LAYOUT
             + """
             elsewhere="$(mktemp)"
+            trap 'rm -rf "$HOST_ARTIFACTS" "$elsewhere"' EXIT
             write_state prepared-iso "$elsewhere"
             write_state installed
             installation_gate
@@ -360,6 +361,7 @@ Flags:            Quorate Qdevice
         completed = self.run_bash(
             """
             STATE_DIR="$(mktemp -d)"
+            trap 'rm -rf "$STATE_DIR"' EXIT
             HARDWARE_INVENTORY_MODE=manual
             HOST_SETUP_CONFIG_SHA256=config-hash
             CONFIGURED_MIRROR_PAIRS=(1)
@@ -394,6 +396,7 @@ Flags:            Quorate Qdevice
         completed = self.run_bash(
             """
             STATE_DIR="$(mktemp -d)"
+            trap 'rm -rf "$STATE_DIR"' EXIT
             write_state test-active-boot-id same-boot
             wait_for_exact() { :; }
             wait_for_host() { :; }

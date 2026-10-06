@@ -254,6 +254,7 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
             [str(SCRIPT), *arguments],
             env=self.environment,
             text=True,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
