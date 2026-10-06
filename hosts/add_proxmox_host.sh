@@ -3093,7 +3093,10 @@ printf 'Resolved private MAC %s to %s at 10 Gbps\n' \
 REMOTE
   printf '\nVerify FiberState provides a shared Layer-2 VLAN, not separate routed segments.\n'
   wait_for_exact \
-    "Confirm the bridge/IP was tested from the provider console or peer." \
+    "Confirm the bridge/IP was tested from the provider console or peer.
+
+If you are running multiple instances of add_proxmox_host.sh concurrently, then it's recommended you only allow one instance at a time to proceed past this point in order to minimize possible issues such as lock-contention issues during host setup.  If one of the concurrent host setups you're executing is for the proxmox host specified by the PROXMOX_CONTROL_NODE value in your cluster.conf file then let that script run to completion first before letting the other scripts proceed one at a time past this point.
+" \
     "PRIVATE VLAN VERIFIED"
   write_state private-network-configured
 }
