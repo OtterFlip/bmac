@@ -14,6 +14,9 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+# shellcheck source=../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
+bmac_ui_bootstrap "$@"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
 APT_LOCK_LIB="${REPO_ROOT}/lib/apt_lock_wait.sh"
 REMOTE_INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
@@ -38,6 +41,7 @@ declare -a CERT_EXTRA_NAMES=()
 
 log() {
   printf '\n==> %s\n' "$*"
+  bmac_ui_step "$*"
 }
 
 info() {
@@ -50,17 +54,27 @@ warn() {
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
   exit 1
 }
 
 prompt_yes() {
   local prompt="$1" answer
+  if bmac_ui_is_json; then
+    bmac_ui_ask "$1"
+    return
+  fi
   read -r -p "$prompt [y/N] " answer
   [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
 
 prompt_path() {
   local variable="$1" prompt="$2" value
+  if bmac_ui_is_json; then
+    bmac_ui_input value --id "${variable,,}" --type file --label "$prompt" --required
+    printf -v "$variable" '%s' "$value"
+    return 0
+  fi
   while :; do
     read -r -e -p "$prompt: " value
     [[ -n "$value" ]] || {
@@ -141,8 +155,25 @@ for row in sorted(rows, key=lambda r: r["name"]):
     print(f"    {row['name']:<10} {domain:<40} state={state:<10} owner={owner}")
 PY
 
+  local -a options=()
+  if bmac_ui_is_json; then
+    mapfile -t options < <(python3 - "$resources_file" <<'PY'
+import json
+import sys
+
+for row in sorted(json.load(open(sys.argv[1], encoding="utf-8")), key=lambda r: r["name"]):
+    print(row["name"])
+    print(f"{row['name']} · {row['domains']['primary']} · {row.get('state') or '-'} · owner {row.get('owner_node') or '-'}")
+PY
+    )
+    ((${#options[@]} > 0)) || die "No production VMs are registered"
+  fi
   while :; do
-    read -r -p "Production VM to deploy to (for example prod1): " RESOURCE_NAME
+    if bmac_ui_is_json; then
+      bmac_ui_choose RESOURCE_NAME "Production VM to deploy to" "" "${options[@]}"
+    else
+      read -r -p "Production VM to deploy to (for example prod1): " RESOURCE_NAME
+    fi
     [[ "$RESOURCE_NAME" =~ ^prod[1-9][0-9]*$ ]] || {
       warn "Enter a production resource name such as prod1."
       continue
@@ -424,6 +455,16 @@ Do not discard the private key after this deployment. Cloudflare Origin CA
 certificates are intended for the Cloudflare-to-origin TLS connection; direct
 browser access to the origin may not trust them.
 EOF2
+  if bmac_ui_is_json; then
+    local names="$PRIMARY_DOMAIN and *.$PRIMARY_DOMAIN"
+    ((${#CERT_EXTRA_NAMES[@]} == 0)) || names+=", plus ${CERT_EXTRA_NAMES[*]}"
+    bmac_ui_manual_action --id origin_certificate --title "Create a Cloudflare Origin CA certificate" \
+      --instruction "In the Cloudflare dashboard for the zone containing $PRIMARY_DOMAIN, open SSL/TLS -> Origin Server and choose Create Certificate under Origin Certificates." \
+      --instruction "Choose \"Generate private key and CSR with Cloudflare\" (ECC or RSA). The certificate hostnames must include $names." \
+      --instruction "Choose the validity period, create the certificate, and choose PEM format." \
+      --instruction "Save BOTH the Origin Certificate PEM and the Private Key PEM on this workstation as permanent backup files; protect the private key with mode 0600." \
+      --ack-label "Both files are saved"
+  fi
 }
 
 # GNU "realpath -e" has no BSD/macOS equivalent flag: there the option is an
@@ -814,6 +855,10 @@ print_completion() {
   info "Staging hostnames configured: stage1${RESOURCE_NAME}.${PRIMARY_DOMAIN} through stage${MAX_STAGE_SUFFIX}${RESOURCE_NAME}.${PRIMARY_DOMAIN}"
   info "Workstation certificate/key backups remain at the paths you supplied."
   printf '\nCloudflare should use Full (strict) origin TLS once this certificate is installed.\n'
+  bmac_ui_result resource "$RESOURCE_NAME" url "https://$PRIMARY_DOMAIN/" \
+    health_url "https://$PRIMARY_DOMAIN/healthz"
+  bmac_ui_next_step "Set Cloudflare SSL/TLS to Full (strict) origin TLS for $PRIMARY_DOMAIN now that the origin certificate is installed."
+  bmac_ui_next_step "Open https://$PRIMARY_DOMAIN/ to see the hello page."
 }
 
 main() {

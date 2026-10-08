@@ -20,6 +20,7 @@ DW_SCRIPT_NAME=decommission_disks.sh
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=../lib/disk_workflows.sh
 source "${SCRIPT_DIR}/../lib/disk_workflows.sh"
+bmac_ui_bootstrap "$@"
 
 RECENT_SECONDS=86400
 MIN_FREE_FLOOR_GIB=50
@@ -211,12 +212,21 @@ else
 
   while true; do
     dw_discard_typeahead
-    IFS= read -r -p $'\nHave you deleted all unwanted files inside each of these guests? [Y/n] ' answer ||
-      dw_die "input ended"
+    if bmac_ui_is_json; then
+      bmac_ui_confirm --id guest_files --question \
+        --title "Have you deleted all unwanted files inside each of these guests?" \
+        --message "Guests: ${GUEST_NAMES[*]}. The trims that follow free only space that was already deleted." \
+        --confirm-label "Yes, continue" --cancel-label "Not yet" && answer=y || answer=n
+    else
+      IFS= read -r -p $'\nHave you deleted all unwanted files inside each of these guests? [Y/n] ' answer ||
+        dw_die "input ended"
+    fi
     case "${answer,,}" in
       "" | y | yes) break ;;
       n | no)
         printf 'Delete the unwanted files inside each guest first, then run this script again.\n'
+        bmac_ui_next_step "Delete the unwanted files inside ${GUEST_NAMES[*]}, then run this workflow again." \
+          --workflow decommission_disks --arg "host=$DW_HOST"
         exit 0
         ;;
     esac
@@ -379,9 +389,20 @@ dw_section "Free space on $DW_HOST"
 printf 'current_zfs_free_space (zfs get available rpool):\n  %s\n' "$(units "$CURRENT_FREE")"
 
 MIN_FREE=""
+FIRST_ASK=true
 while [[ -z "$MIN_FREE" ]]; do
-  IFS= read -r -p $'\nMinimum free space rpool must keep after the removal, in GiB (at least 50): ' answer ||
-    dw_die "input ended"
+  if bmac_ui_is_json && [[ "$FIRST_ASK" == true ]]; then
+    bmac_ui_input answer --id min_free_gib --type number --suffix GiB --required \
+      --min "$MIN_FREE_FLOOR_GIB" --default "$MIN_FREE_FLOOR_GIB" \
+      --label "Minimum free space rpool must keep after the removal" \
+      --help "At least $MIN_FREE_FLOOR_GIB GiB. rpool has $(units "$CURRENT_FREE") free now."
+  elif bmac_ui_is_json; then
+    bmac_ui_reask answer "Enter a number of GiB that is at least $MIN_FREE_FLOOR_GIB."
+  else
+    IFS= read -r -p $'\nMinimum free space rpool must keep after the removal, in GiB (at least 50): ' answer ||
+      dw_die "input ended"
+  fi
+  FIRST_ASK=false
   MIN_FREE="$(python3 - "$answer" "$MIN_FREE_FLOOR_GIB" <<'PY'
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import sys
@@ -401,6 +422,7 @@ printf 'min_free_space:\n  %s\n' "$(units "$MIN_FREE")"
 if ((MIN_FREE >= CURRENT_FREE)); then
   printf '\nThe minimum free space you set exceeds what rpool can offer even before any\n'
   printf 'disk is removed, so no vdev can be decommissioned while keeping it.\n'
+  bmac_ui_warning "The minimum free space exceeds what rpool offers before any removal, so no vdev can be decommissioned."
   exit 0
 fi
 REMOVABLE=$((CURRENT_FREE - MIN_FREE))
@@ -427,21 +449,27 @@ for vdev in layout["vdevs"]:
     print(f"{vdev['name']}\t{vdev['size'] or 0}\t{status}\t{serials}")
 PY
 )
-declare -a ELIGIBLE=()
+declare -a ELIGIBLE=() ELIGIBLE_LABELS=()
 for row in "${VDEV_ROWS[@]}"; do
   IFS=$'\t' read -r vdev size status serials <<<"$row"
   if [[ "$status" == eligible ]]; then
     ELIGIBLE+=("$vdev")
     printf '  %d) %-9s %16s bytes  disks %s\n' "${#ELIGIBLE[@]}" "$vdev" "$size" "$serials"
+    ELIGIBLE_LABELS+=("$vdev  ·  $size bytes  ·  disks $serials")
   else
     printf '     %-9s %16s bytes  disks %s  (%s)\n' "$vdev" "$size" "$serials" "$status"
   fi
 done
 if ((${#ELIGIBLE[@]} == 0)); then
   printf '\nNo vdev fits within removable_space; nothing can be decommissioned.\n'
+  bmac_ui_warning "No vdev fits within the removable space; nothing can be decommissioned."
   exit 0
 fi
 while true; do
+  if bmac_ui_is_json; then
+    bmac_ui_number_choice choice "Vdev to remove from rpool" "${ELIGIBLE_LABELS[@]}"
+    break
+  fi
   IFS= read -r -p $'\nNumber of the vdev to remove (q to stop without removing anything): ' choice ||
     dw_die "input ended"
   if [[ "$choice" == q ]]; then
@@ -512,7 +540,7 @@ for member in json.loads(sys.argv[1])["members"]:
             mapper=f" (LUKS mapping {member['mapper'].rsplit('/', 1)[-1]})" if member["mapper"] else "",
         ))
 PY
-confirm_exact "Start removing $VDEV from rpool on $DW_HOST? ZFS copies its data onto the other vdevs in the background. You must then run hosts/inventory_disks.sh; it finalizes completed retirement and identifies disks that are safe to remove physically."
+confirm_exact "Start removing $VDEV from rpool on $DW_HOST? ZFS copies its data onto the other vdevs in the background. You must then run hosts/inventory_disks.sh; it finalizes completed retirement and identifies disks that are safe to remove physically." "" destructive
 
 REMOVAL_ID="$(dw_state record-removal --request "$REQUEST")" ||
   dw_die "could not record the removal on $DW_HOST; nothing was removed"
@@ -534,6 +562,8 @@ if ! REMOVE_OUTPUT="$(dw_on_host zpool remove rpool "$VDEV" 2>&1)"; then
     "${REMOVE_OUTPUT//$'\n'/ }" "$DW_HOST" >&2
   printf 'The removal record stays requested. Run\n  hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
   printf 'to see whether the removal is running; it marks the record failed if not.\n'
+  bmac_ui_next_step "See whether the removal of $VDEV is running; the inventory marks the record failed if not." \
+    --command "hosts/inventory_disks.sh --host $DW_HOST" --workflow inventory_disks --arg "host=$DW_HOST"
   exit 1
 fi
 
@@ -544,6 +574,9 @@ printf '\n%s has been marked for removal from rpool on %s. ZFS is copying its da
 printf 'onto the other vdevs. You must run\n  hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
 printf 'to finalize retirement after evacuation and determine which disks are safe to pull. To remove another vdev, run this\n'
 printf 'script again after this removal completes.\n'
+bmac_ui_result host "$DW_HOST" vdev "$VDEV" removal_id "$REMOVAL_ID"
+bmac_ui_next_step "Once the evacuation of $VDEV finishes, finalize its retirement and find the disks that are safe to pull." \
+  --command "hosts/inventory_disks.sh --host $DW_HOST" --workflow inventory_disks --arg "host=$DW_HOST"
 
 [[ "$VDEV_STATE" != ONLINE ]] || exit 0
 

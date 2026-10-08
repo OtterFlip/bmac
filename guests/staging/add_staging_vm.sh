@@ -13,6 +13,8 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
 PATCH_HELPER="${SCRIPT_DIR}/patch_staging_clone.sh"
 GUEST_TREE_HELPER="${SCRIPT_DIR}/patch_staging_guest_tree.py"
@@ -88,6 +90,7 @@ declare -a DNS_SERVERS=()
 
 log() {
   printf '\n==> %s\n' "$*"
+  bmac_ui_step "$*"
 }
 
 info() {
@@ -100,6 +103,7 @@ warn() {
 
 die() {
   printf '\nERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
   exit 1
 }
 
@@ -226,24 +230,45 @@ validate_safe_id() {
 
 prompt_with_default() {
   local destination="$1" prompt="$2" default="$3" entered
+  if bmac_ui_is_json; then
+    bmac_ui_text entered "$prompt" "$default"
+    printf -v "$destination" '%s' "${entered:-$default}"
+    return 0
+  fi
   IFS= read -r -p "${prompt} [${default}]: " entered
   printf -v "$destination" '%s' "${entered:-$default}"
 }
 
 prompt_optional() {
   local destination="$1" prompt="$2" entered
+  if bmac_ui_is_json; then
+    bmac_ui_text entered "$prompt"
+    printf -v "$destination" '%s' "$entered"
+    return 0
+  fi
   IFS= read -r -p "${prompt}: " entered
   printf -v "$destination" '%s' "$entered"
 }
 
 prompt_yes() {
   local answer
+  if bmac_ui_is_json; then
+    bmac_ui_ask "$1"
+    return
+  fi
   IFS= read -r -p "$1 [y/N] " answer
   [[ "${answer,,}" == y || "${answer,,}" == yes ]]
 }
 
 prompt_boolean_default() {
   local destination="$1" prompt="$2" default="$3" answer suffix
+  if bmac_ui_is_json; then
+    local _value
+    bmac_ui_input _value --id "${destination,,}" --type boolean --label "$prompt" \
+      --default "$([[ "${default,,}" =~ ^(true|y|yes)$ ]] && echo true || echo false)"
+    printf -v "$destination" '%s' "$([[ "$_value" == true ]] && echo true || echo false)"
+    return 0
+  fi
   if [[ "$default" == true ]]; then
     suffix="[Y/n]"
   else
@@ -268,6 +293,10 @@ prompt_boolean_default() {
 
 confirm_exact_local() {
   local prompt="$1" _legacy_phrase="${2:-}" entered
+  if bmac_ui_is_json; then
+    bmac_ui_confirm_go "$1" || die "Confirmation did not match GO; no mutation was made"
+    return 0
+  fi
   printf '%s\nType GO to continue.\n> ' "$prompt"
   IFS= read -r entered
   [[ "$entered" == GO ]] ||
@@ -855,7 +884,16 @@ PY
     STAGING_NODE="${candidates[0]}"
   else
     info "Eligible staging standbys: ${candidates[*]}"
-    prompt_with_default STAGING_NODE "Staging standby" "${candidates[0]}"
+    if bmac_ui_is_json; then
+      local -a options=()
+      local node
+      for node in "${candidates[@]}"; do
+        options+=("$node" "$node")
+      done
+      bmac_ui_choose STAGING_NODE "Staging standby for $SOURCE_NAME" "${candidates[0]}" "${options[@]}"
+    else
+      prompt_with_default STAGING_NODE "Staging standby" "${candidates[0]}"
+    fi
     local candidate valid=false
     for candidate in "${candidates[@]}"; do
       [[ "$STAGING_NODE" == "$candidate" ]] && valid=true
@@ -1101,7 +1139,26 @@ if rows:
 PY
   )"
   [[ -n "$source_default" ]] || die "No production source is available"
-  prompt_with_default SOURCE_NAME "Production source" "$source_default"
+  if bmac_ui_is_json; then
+    local -a options=()
+    mapfile -t options < <(python3 - "${RUN_DIR}/resources.json" <<'PY'
+import json
+import sys
+rows = [
+    row
+    for row in json.load(open(sys.argv[1], encoding="utf-8"))
+    if row.get("kind") == "production" and row.get("state") == "active"
+]
+rows.sort(key=lambda row: row.get("index", 0))
+for row in rows:
+    print(row["name"])
+    print(f"{row['name']} · {row.get('domains', {}).get('primary', '-')} · owner {row.get('owner_node') or '-'}")
+PY
+    )
+    bmac_ui_choose SOURCE_NAME "Production source to clone" "$source_default" "${options[@]}"
+  else
+    prompt_with_default SOURCE_NAME "Production source" "$source_default"
+  fi
   parse_selected_source "$SOURCE_NAME" ||
     die "Invalid production source selection"
   validate_live_source_and_ha
@@ -1111,7 +1168,9 @@ PY
 
   local default_memory_gib requested_memory_gib
   default_memory_gib="$STAGING_VM_MEMORY_GIB"
-  if [[ -n "$CORES_OVERRIDE" ]]; then
+  if bmac_ui_is_json; then
+    collect_options_json
+  elif [[ -n "$CORES_OVERRIDE" ]]; then
     STAGING_VM_CORES="$CORES_OVERRIDE"
   else
     prompt_with_default STAGING_VM_CORES \
@@ -1127,6 +1186,7 @@ PY
   fi
   STAGING_VM_MEMORY_MB=$((requested_memory_gib * 1024))
 
+  if ! bmac_ui_is_json; then
   prompt_boolean_default START_AFTER_CREATION \
     "Start VM automatically after it has been created?" true
   prompt_boolean_default SETUP_WORKSTATION_JUMP_SSH \
@@ -1149,6 +1209,7 @@ PY
       "Optional absolute path to an idempotent root startup.sh (blank for none)"
     [[ -z "$SANITIZER_FILE" ]] || validate_sanitizer_file
   fi
+  fi
 
   warn "This uses a direct ZFS clone pinned to a replicated production snapshot."
   warn "Proxmox does not officially track or support this cross-replica dependency."
@@ -1159,6 +1220,64 @@ PY
       "Identity and network cleanup is not application-secret sanitization." \
       "ALLOW UNSANITIZED STAGING NETWORK"
   fi
+}
+
+# The JSON-mode form of the option prompts in collect_request: one form,
+# validated as a whole. Sets the same globals the terminal prompts do.
+collect_options_json() {
+  local cores memory start jump domain link_down sanitizer normalized
+  local sanitizer_supplied="$SANITIZER_FILE"
+  bmac_ui_group_begin staging_options "Staging VM options" \
+    "Clone of $SOURCE_NAME on $STAGING_NODE. Leave the FQDN blank to use the lowest free number (currently stage${STAGING_CANDIDATE_INDEX}${SOURCE_NAME}.${SOURCE_PRIMARY_DOMAIN})."
+  [[ -n "$CORES_OVERRIDE" ]] ||
+    bmac_ui_group_add cores --id cores --type integer --label "vCPU cores" \
+      --default "$STAGING_VM_CORES" --min 1 --required
+  [[ -n "$MEMORY_GIB_OVERRIDE" ]] ||
+    bmac_ui_group_add memory --id memory_gib --type integer --label "RAM" --suffix GiB \
+      --default "$default_memory_gib" --min 1 --required
+  bmac_ui_group_add start --id start_after_creation --type boolean \
+    --label "Start the VM automatically after it has been created" --default true
+  bmac_ui_group_add jump --id setup_jump_ssh --type boolean \
+    --label "Set up permanent jump SSH after the VM has started" --default true
+  bmac_ui_group_add domain --id domain_override \
+    --label "Exact staging FQDN override" \
+    --placeholder "stage${STAGING_CANDIDATE_INDEX}${SOURCE_NAME}.${SOURCE_PRIMARY_DOMAIN}"
+  bmac_ui_group_add link_down --id link_down --type boolean \
+    --label "Create the staging NIC initially link-down" --default false
+  [[ -n "$sanitizer_supplied" ]] ||
+    bmac_ui_group_add sanitizer --id sanitizer --type file \
+      --label "Application sanitizer (optional)" \
+      --help "An idempotent root startup.sh with a Bash shebang, at most 1 MiB. Without one the clone keeps production credentials, jobs, and data."
+  while true; do
+    bmac_ui_group_request
+    if [[ -z "$CORES_OVERRIDE" && ! "$cores" =~ ^[1-9][0-9]*$ ]]; then
+      bmac_ui_field_error cores "Enter a positive whole number"
+    fi
+    if [[ -z "$MEMORY_GIB_OVERRIDE" && ! "$memory" =~ ^[1-9][0-9]*$ ]]; then
+      bmac_ui_field_error memory_gib "Enter a positive whole number of GiB"
+    fi
+    normalized=""
+    if [[ -n "$domain" ]] && ! normalized="$(normalize_domain "$domain" 2>/dev/null)"; then
+      bmac_ui_field_error domain_override "Not a valid staging domain"
+    fi
+    if [[ -z "$sanitizer_supplied" && -n "$sanitizer" ]]; then
+      SANITIZER_FILE="$sanitizer"
+      if ! (
+        die() { printf '%s\n' "$*" >&2; exit 1; }
+        validate_sanitizer_file
+      ) 2>"${RUN_DIR}/sanitizer.err" >/dev/null; then
+        bmac_ui_field_error sanitizer "$(tail -n 1 "${RUN_DIR}/sanitizer.err")"
+      fi
+    fi
+    bmac_ui_group_check && break
+  done
+  STAGING_VM_CORES="${CORES_OVERRIDE:-$cores}"
+  requested_memory_gib="${MEMORY_GIB_OVERRIDE:-$memory}"
+  START_AFTER_CREATION="$([[ "$start" == true ]] && echo true || echo false)"
+  SETUP_WORKSTATION_JUMP_SSH="$([[ "$jump" == true ]] && echo true || echo false)"
+  DOMAIN_OVERRIDE="$normalized"
+  NETWORK_LINK_DOWN="$([[ "$link_down" == true ]] && echo true || echo false)"
+  [[ -n "$sanitizer_supplied" ]] || SANITIZER_FILE="$sanitizer"
 }
 
 dry_run_summary() {
@@ -1208,6 +1327,11 @@ PY
   else
     info "Optional pre-network sanitizer: NOT supplied"
   fi
+  bmac_ui_step_done
+  bmac_ui_result name "$STAGING_NAME" ip "$STAGING_IP" vmid "$STAGING_VMID" \
+    domain "$STAGING_DOMAIN" source "$SOURCE_NAME" standby "$STAGING_NODE" reserved:bool false
+  bmac_ui_next_step "Create $STAGING_NAME for real; the identity is reserved only then." \
+    --workflow add_staging_vm --arg dry_run=false
 }
 
 parse_staging_resource() {
@@ -2046,7 +2170,7 @@ PY
         done <<<"$existing_keys"
         printf 'QGA-attested fingerprint:\n  %s\n' "$guest_fingerprint" >&2
       fi
-      if prompt_yes "Use $ssh_alias anyway and replace its effective app-ha values and host-key pin?"; then
+      if prompt_yes "Alias already in use for SSH. Use $ssh_alias anyway and replace its effective app-ha values and host-key pin?"; then
         :
       else
         info "Jump SSH setup skipped because alias $ssh_alias is already in use"
@@ -2638,6 +2762,17 @@ print_completion() {
     warn "No application sanitizer was injected; review production-derived data, credentials, and jobs before use."
   fi
   setup_workstation_jump_ssh
+  bmac_ui_step_done
+  bmac_ui_result name "$STAGING_NAME" vmid "$STAGING_VMID" ip "$STAGING_IP" \
+    url "https://${STAGING_DOMAIN}" source "$SOURCE_NAME" node "$STAGING_NODE" \
+    status "${status#status: }"
+  [[ -n "$SANITIZER_FILE" ]] ||
+    bmac_ui_next_step "Review production-derived data, credentials, and jobs in $STAGING_NAME before using it; no sanitizer was injected."
+  [[ "${status#status: }" == running ]] ||
+    bmac_ui_next_step "$STAGING_NAME is stopped; start it when ready with qm start $STAGING_VMID on $STAGING_NODE."
+  bmac_ui_next_step "Open https://${STAGING_DOMAIN} to check the staging copy."
+  bmac_ui_next_step "Destroy $STAGING_NAME when you are done with it." \
+    --workflow remove_staging_vm --arg "resource=$STAGING_NAME"
 }
 
 main() {
@@ -2669,5 +2804,6 @@ main() {
 }
 
 if [[ "${APP_HA_STAGING_VM_SOURCE_ONLY:-0}" != 1 ]]; then
+  bmac_ui_bootstrap "$@"
   main "$@"
 fi

@@ -28,6 +28,9 @@ QDEVICE_HOST="qdevice"
 PROXMOX_HOSTS=(mox{1..10})
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+# shellcheck source=../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
+bmac_ui_bootstrap "$@"
 SSH_OPTS=(
   -o BatchMode=yes
   -o ConnectTimeout=5
@@ -96,13 +99,22 @@ banner() {
   hr
   printf '%s\n' "$1"
   hr
+  local label host
+  case "$1" in
+    "DISCOVERY - SSH REACHABILITY") label="Discovery - SSH reachability" ;;
+    "QDEVICE - SKIPPED") label="QDevice - skipped" ;;
+    "QDEVICE - "*) label="QDevice - ${1#QDEVICE - }" ;;
+    "PROXMOX HOST - "*) host="${1#PROXMOX HOST - }"; label="Proxmox host - ${host,,}" ;;
+    *) label="${1,,}"; label="${label^}" ;;
+  esac
+  bmac_ui_step "$label"
 }
 
 note() {
   printf '  %s\n' "$*"
 }
 
-if [[ ! -t 0 ]]; then
+if [[ ! -t 0 ]] && ! bmac_ui_is_json; then
   cat >&2 <<'MSG'
 show_cluster_state.sh is intentionally interactive and must be started from a terminal.
 No checks were run.
@@ -135,8 +147,15 @@ NOTE: although the checks are read-only, SSH connections and commands can natura
 create authentication/audit/journal log entries on the systems being inspected.
 INTRO
 
-printf '\nPress ENTER to continue, or Ctrl-C to abort: '
-IFS= read -r _
+if bmac_ui_is_json; then
+  bmac_ui_manual_action --id ssh_ready --title "Run the full read-only cluster report?" \
+    --instruction "This workstation needs non-interactive (BatchMode) SSH access as root to qdevice and to each existing mox host; unknown host keys are not accepted." \
+    --instruction "Unreachable hosts are reported and skipped. The checks are read-only, but SSH sessions create normal authentication and audit log entries on the inspected systems." \
+    --ack-label "Run the report"
+else
+  printf '\nPress ENTER to continue, or Ctrl-C to abort: '
+  IFS= read -r _
+fi
 
 STARTED_AT="$(date +%Y-%m-%dT%H:%M:%S%z)"
 banner "DISCOVERY - SSH REACHABILITY"
@@ -952,3 +971,8 @@ else
   note "QDevice skipped as unreachable: $QDEVICE_HOST"
 fi
 note "No configuration-changing commands are intentionally used by this script."
+bmac_ui_step_done
+bmac_ui_result started_at "$STARTED_AT" finished_at "$FINISHED_AT" \
+  inspected_hosts:raw "$(bmac_ui_json_array "${reachable_mox[@]}")" \
+  unreachable_hosts:raw "$(bmac_ui_json_array "${unreachable_mox[@]}")" \
+  qdevice_inspected:bool "$( ((qdevice_reachable)) && echo true || echo false)"

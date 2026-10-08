@@ -13,6 +13,8 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
 CONFIG_LIB="${SCRIPT_DIR}/../lib/config.sh"
 CLUSTER_REGISTRY_SOURCE="${SCRIPT_DIR}/../lib/cluster_registry.py"
 HAPROXY_RENDERER_SOURCE="${SCRIPT_DIR}/../lib/haproxy_routes.py"
@@ -86,15 +88,23 @@ declare -a CONFIGURED_NVME_SERIALS=()
 declare -a EXPECTED_RPOOL_MAPPERS=()
 
 timestamp() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
-log() { printf '\n[%s] %s\n' "$(timestamp)" "$*"; }
+log() {
+  printf '\n[%s] %s\n' "$(timestamp)" "$*"
+  bmac_ui_step "$*"
+}
 info() { printf '    %s\n' "$*"; }
-fail() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+fail() {
+  printf '\nERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
+  exit 1
+}
 
 on_error() {
   local code=$?
   printf '\nERROR: host setup failed near line %s (exit %s).\n' "${BASH_LINENO[0]}" "$code" >&2
   printf 'Fix the reported condition and re-run this script; completed phases are recorded under %s.\n' \
     "${STATE_DIR:-${HOST_ARTIFACTS:-$ARTIFACTS_DIR}/state}" >&2
+  bmac_ui_error failed "Host setup failed near line ${BASH_LINENO[0]} (exit $code). Fix the reported condition and rerun; completed phases are kept."
   exit "$code"
 }
 trap on_error ERR
@@ -131,12 +141,20 @@ require_var() {
 
 prompt_yes() {
   local prompt=$1 answer
+  if bmac_ui_is_json; then
+    bmac_ui_ask "$1"
+    return
+  fi
   read -r -p "$prompt [y/N] " answer
   [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]
 }
 
 prompt_yes_default_yes() {
   local answer
+  if bmac_ui_is_json; then
+    bmac_ui_ask "$1"
+    return
+  fi
   read -r -p "$1 [Y/n] " answer || answer=""
   [[ -z "$answer" || "${answer,,}" == y || "${answer,,}" == yes ]]
 }
@@ -145,7 +163,11 @@ choose_hardware_inventory_mode() {
   printf '\nDISK INVENTORY METHOD\n'
   printf 'iDRAC mode queries Redfish to verify configured disk serials, capacities, and health.\n'
   printf 'Manual mode uses serials and exact byte capacities gathered beforehand by copying hosts/cluster_setup_prereq.sh to a Linux Live environment booted on the host and running it there.\n'
-  if prompt_yes "Use iDRAC/Redfish for disk inventory on this run?"; then
+  if bmac_ui_is_json; then
+    bmac_ui_choose HARDWARE_INVENTORY_MODE "Disk inventory method" idrac \
+      idrac "iDRAC/Redfish: verify disk serials, capacities, and health" \
+      manual "Manual: serials and byte capacities from hosts/cluster_setup_prereq.sh"
+  elif prompt_yes "Use iDRAC/Redfish for disk inventory on this run?"; then
     HARDWARE_INVENTORY_MODE=idrac
   else
     HARDWARE_INVENTORY_MODE=manual
@@ -158,6 +180,10 @@ require_yes() {
 
 confirm_exact() {
   local description=$1 _legacy_expected=${2:-} actual
+  if bmac_ui_is_json; then
+    bmac_ui_confirm_go "$1" || fail "Confirmation did not match GO; no action was taken."
+    return 0
+  fi
   printf '\n!!!!!!!!!!!!!!!! DESTRUCTIVE / DISRUPTIVE ACTION !!!!!!!!!!!!!!!!\n' >&2
   printf '%s\n\nType GO to continue.\n> ' "$description" >&2
   read -r actual
@@ -166,6 +192,12 @@ confirm_exact() {
 
 wait_for_exact() {
   local prompt=$1 _legacy_expected=${2:-} _legacy_case_insensitive=${3:-false} actual
+  if bmac_ui_is_json; then
+    bmac_ui_manual_action --id wait --title "$prompt" \
+      --instruction "Complete the steps in the script output above, then continue." \
+      --ack-label Done
+    return
+  fi
   while true; do
     printf '%s Type GO to continue: ' "$prompt" >&2
     read -r actual ||
@@ -182,6 +214,14 @@ wait_for_helper_success() {
   printf 'Helper script: %s\n' "$helper"
   printf 'Expected result: %s\n' "$purpose"
   printf 'Do not continue until you have run this helper on the target host and it has completed successfully.\n'
+  if bmac_ui_is_json; then
+    bmac_ui_manual_action --id helper --title "Run $helper on $HOST_ID" \
+      --instruction "At the console of $HOST_ID, run $helper as shown in the script output above." \
+      --instruction "Expected result: $purpose" \
+      --instruction "Continue only after the helper has completed successfully." \
+      --ack-label "The helper succeeded"
+    return
+  fi
   wait_for_exact "SCRIPT WORKED?" "GO"
 }
 
@@ -277,7 +317,27 @@ for row in json.loads(sys.argv[1]):
     printf 'Create env/%s.conf with that host'"'"'s values before continuing with it.\n' \
       "$recommended"
   printf 'To resume an interrupted setup, enter that host instead.\n'
-  read -r -p "Host to configure [${recommended}]: " SELECTED_HOST
+  if bmac_ui_is_json; then
+    local -a options=()
+    for ((index = 1; index <= MAX_MOX_HOSTS; index += 1)); do
+      node="mox${index}"
+      [[ -f "${SCRIPT_DIR}/../env/${node}.conf" ]] || continue
+      state="free"
+      if control_list_contains "$node" "${CONTROL_MEMBER_NODES[@]}"; then
+        state="cluster member"
+      elif [[ -n "${slot_state[$node]:-}" ]]; then
+        state="${slot_state[$node]}"
+      fi
+      ! host_artifacts_present "$node" || state+="; resume setup"
+      options+=("$node" "$node · $state")
+    done
+    ((${#options[@]} > 0)) || fail "Create env/${recommended}.conf with that host's values first"
+    bmac_ui_choose SELECTED_HOST "Host to configure (recommended: $recommended)" \
+      "$([[ -f "${SCRIPT_DIR}/../env/${recommended}.conf" ]] && printf '%s' "$recommended")" \
+      "${options[@]}"
+  else
+    read -r -p "Host to configure [${recommended}]: " SELECTED_HOST
+  fi
   SELECTED_HOST="${SELECTED_HOST:-$recommended}"
 }
 
@@ -339,7 +399,15 @@ reset_or_resume_existing_state() {
   info "Host: $HOST_ID"
   info "Artifacts: $HOST_ARTIFACTS"
   printf 'Resuming preserves completed phases, generated media, setup SSH material, logs, and any LUKS recovery headers.\n'
-  if prompt_yes "Delete every host artifact (including the custom ISO and Tailscale setup state) and start this destructive installer from the beginning? Answer no to resume"; then
+  local restart=no
+  if bmac_ui_is_json; then
+    bmac_ui_choose restart "Existing setup artifacts for $HOST_ID" no \
+      no "Resume the recorded setup" \
+      yes "Delete every host artifact and start from the beginning"
+  elif prompt_yes "Delete every host artifact (including the custom ISO and Tailscale setup state) and start this destructive installer from the beginning? Answer no to resume"; then
+    restart=yes
+  fi
+  if [[ "$restart" == yes ]]; then
     confirm_exact \
       "This permanently deletes the complete local artifact tree for $HOST_ID. If this host was already installed, continuing afterward can reinstall it and erase its configured mirror disks. The global record of exposed Tailscale auth-key digests is intentionally retained so a used key cannot be reused." \
       "DELETE ${HOST_ID} SETUP ARTIFACTS"
@@ -761,7 +829,11 @@ choose_encryption_policy() {
   else
     printf '\nRPOOL ENCRYPTION CHOICE\n'
     printf 'LUKS2 protects data at rest, but every Proxmox host boot requires the shared rpool passphrase to be entered through the target host console. The host cannot complete an unattended reboot.\n'
-    if prompt_yes "Encrypt every configured rpool mirror member with LUKS2"; then
+    if bmac_ui_is_json; then
+      bmac_ui_choose ENCRYPTION_POLICY "rpool encryption" luks \
+        luks "LUKS2: every boot needs the passphrase at the host console" \
+        clear "Unencrypted: unattended reboots"
+    elif prompt_yes "Encrypt every configured rpool mirror member with LUKS2"; then
       ENCRYPTION_POLICY=luks
     else
       ENCRYPTION_POLICY=clear
@@ -805,6 +877,11 @@ choose_boot_test_policy() {
     fi
   elif [[ -n "$REQUESTED_BOOT_TEST_POLICY" ]]; then
     BOOT_TEST_POLICY="$REQUESTED_BOOT_TEST_POLICY"
+    write_state boot-test-policy "$BOOT_TEST_POLICY"
+  elif bmac_ui_is_json; then
+    bmac_ui_choose BOOT_TEST_POLICY "Boot tests" run \
+      run "Test each mirror member alone, then the healthy mirror (three reboots)" \
+      skip "Skip the boot tests"
     write_state boot-test-policy "$BOOT_TEST_POLICY"
   elif prompt_yes "Test each mirror member independently and then reboot once more with the restored healthy mirror? This requires three reboots"; then
     BOOT_TEST_POLICY=run
@@ -1837,7 +1914,12 @@ configure_workstation_ssh() {
     return
   fi
   while true; do
-    read -r -p "SSH name to use for $HOST_ID (ssh NAME) [${HOST_ID}]: " alias || alias=""
+    if bmac_ui_is_json; then
+      bmac_ui_input alias --id ssh_alias --label "SSH name for $HOST_ID (ssh NAME)" \
+        --default "$HOST_ID" --required --pattern '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'
+    else
+      read -r -p "SSH name to use for $HOST_ID (ssh NAME) [${HOST_ID}]: " alias || alias=""
+    fi
     alias="${alias:-$HOST_ID}"
     [[ "$alias" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] && break
     printf 'The SSH name must use 1-64 letters, digits, dots, underscores, or hyphens.\n' >&2
@@ -3451,8 +3533,23 @@ REMOTE
     printf 'The command will prompt only for root@pam credentials.\n'
     local -a options
     mapfile -t options < <(ssh_options)
-    ssh -tt "${options[@]}" "root@${TAILSCALE_IP}" \
-      "pvecm add '${existing_fqdn}' --fingerprint '${cluster_fingerprint}' --link0 'address=${private_ip},priority=100' --link1 'address=${ts_ip},priority=10'" ||
+    local join_command="pvecm add '${existing_fqdn}' --fingerprint '${cluster_fingerprint}' --link0 'address=${private_ip},priority=100' --link1 'address=${ts_ip},priority=10'"
+    local join_ok=true
+    if bmac_ui_is_json; then
+      # pvecm reads the password as one stdin line when stdin is not a TTY.
+      local root_password=""
+      bmac_ui_input root_password --title "Join ${HOST_ID} to the cluster" \
+        --description "pvecm add on ${HOST_ID} logs in to ${existing_fqdn} with root@pam. The password is piped to pvecm once and never stored." \
+        --id root_password --label "root@pam password for ${existing_fqdn}" \
+        --type password --required
+      printf '%s\n' "$root_password" |
+        ssh -T "${options[@]}" "root@${TAILSCALE_IP}" "$join_command" || join_ok=false
+      root_password=""
+      unset root_password 'BMAC_UI_RESPONSE[root_password]'
+    else
+      ssh -tt "${options[@]}" "root@${TAILSCALE_IP}" "$join_command" || join_ok=false
+    fi
+    [[ "$join_ok" == true ]] ||
       {
         recover_qdevice_after_failed_join "$expected_count"
         fail "pvecm add failed for $HOST_ID"
@@ -4857,7 +4954,15 @@ up as a QDevice. Before continuing, it is recommended that you run
 reboot it, so it is up to date and ready for those installations.
 
 EOF
-  read -r -p "Press ENTER to continue: "
+  if bmac_ui_is_json; then
+    bmac_ui_manual_action --id before_start --title "Before adding a Proxmox host" \
+      --instruction "cryptsetup messages such as \"Couldn't resolve device rpool/ROOT/pve-1\" during storage setup are expected and may be ignored." \
+      --instruction "When building a new cluster with several hosts at once, let the control node's run pass the PRIVATE VLAN VERIFIED step and finish first, then continue the others." \
+      --instruction "Run sudo apt update && sudo apt upgrade on the QDevice host (and likely reboot it) first; this script may install packages there." \
+      --ack-label Continue
+  else
+    read -r -p "Press ENTER to continue: "
+  fi
 
   parse_args "$@"
   reset_or_resume_existing_state
@@ -4930,8 +5035,18 @@ EOF
   info "Production VMs require tag ${PRODUCTION_VM_TAG}; disposable staging VMs require tags ${STAGING_VM_TAG} and ${EVICTABLE_VM_TAG}."
   info "HAProxy exact Host/TLS-SNI routes are synchronized from the shared app-ha registry."
   info "Production VMs, ZFS replication jobs, and HA resources remain intentionally out of scope."
+  bmac_ui_step_done
+  bmac_ui_result host "$HOST_ID" role "$SETUP_ROLE" encryption "$ENCRYPTION_POLICY" \
+    artifacts "$HOST_ARTIFACTS"
+  if [[ "$ENCRYPTION_POLICY" == luks ]]; then
+    bmac_ui_next_step "Every boot of $HOST_ID needs the rpool passphrase typed at its $([[ "$HARDWARE_INVENTORY_MODE" == idrac ]] && echo "iDRAC console" || echo "physical or remote console")."
+  fi
+  bmac_ui_next_step "Attach local:snippets/${GUEST_ROLE_HOOK_NAME} to every production and staging VM."
+  bmac_ui_next_step "Check the new host." --workflow show_proxmox_host_state --arg "host=$HOST_ID"
+  bmac_ui_next_step "Check cluster health." --workflow show_cluster_health
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  bmac_ui_bootstrap "$@"
   main "$@"
 fi

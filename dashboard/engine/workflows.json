@@ -1,0 +1,421 @@
+{
+  "schema_version": 1,
+  "workflows": [
+    {
+      "id": "list_hosts",
+      "title": "List hosts",
+      "summary": "Hosts, quorum, votes, control node, and QDevice registration.",
+      "description": "Reads cluster membership, quorum, and registry host slots through one reachable member, then checks SSH from this workstation to every host. Takes seconds.",
+      "category": "diagnostics",
+      "script": "diagnostics/list_hosts.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "no_ssh_check", "label": "Skip the SSH check from this workstation", "type": "flag", "flag": "--no-ssh-check", "advanced": true }
+      ]
+    },
+    {
+      "id": "list_guests",
+      "title": "List guests",
+      "summary": "Production and staging VMs with live state, HA, replication, and routes.",
+      "description": "Reads the BMAC registry and live Proxmox VM, HA, and replication state through one reachable member.",
+      "category": "diagnostics",
+      "script": "diagnostics/list_guests.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "kind", "label": "Only show", "type": "choice", "flag": "--kind", "choices": [
+          { "value": "production", "label": "Production VMs" },
+          { "value": "staging", "label": "Staging VMs" }
+        ] }
+      ]
+    },
+    {
+      "id": "list_replication",
+      "title": "List replication jobs",
+      "summary": "Every replication job's last sync, next sync, and failures.",
+      "description": "Reads every online host's Proxmox replication status through one reachable member.",
+      "category": "diagnostics",
+      "script": "diagnostics/list_replication.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "guest", "label": "Production VM", "type": "production", "flag": "--guest", "help": "Only show the jobs of this production VM." }
+      ]
+    },
+    {
+      "id": "list_storage",
+      "title": "List storage",
+      "summary": "Every host's ZFS pool health and capacity and Proxmox storage.",
+      "description": "Reads every online host's ZFS pools and Proxmox storage through one reachable member. Flags pools with less than 10% free.",
+      "category": "diagnostics",
+      "script": "diagnostics/list_storage.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "host", "label": "Host", "type": "host", "flag": "--host", "help": "Only show this host." }
+      ]
+    },
+    {
+      "id": "show_cluster_health",
+      "title": "Cluster health check",
+      "summary": "Hosts, corosync links, QDevice, every ZFS member, free space, and SMART.",
+      "description": "Inspects every host directly (or through another member), every corosync link between hosts, the QDevice, every ZFS pool and vdev member with disk serials, rpool free space, and each drive's SMART health. Guests are not inspected. Takes a minute or more.",
+      "category": "diagnostics",
+      "script": "diagnostics/show_cluster_health.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": []
+    },
+    {
+      "id": "show_cluster_state",
+      "title": "Full cluster state",
+      "summary": "Exhaustive read-only report of every host, the QDevice, and the registry.",
+      "description": "Runs the complete read-only diagnostic snapshot on every reachable host and the QDevice: identity, networking, SSH trust, quorum, services, ISO readiness, HA, replication, ZFS, LUKS, SMART, boot, nftables, HAProxy, and the shared registry. Produces a very long report and takes several minutes.",
+      "category": "diagnostics",
+      "script": "diagnostics/show_cluster_state.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": []
+    },
+    {
+      "id": "show_proxmox_host_state",
+      "title": "Inspect a host",
+      "summary": "One host's configuration, guests, replicas, and rpool layout with disk serials.",
+      "description": "Shows one Proxmox host's configuration, the guests it runs and the replicas it stores, and its rpool layout: every vdev resolved to physical disk serials, the boot/ESP vdev, device-removal progress, unused disks, and per-zvol usage.",
+      "category": "diagnostics",
+      "script": "diagnostics/show_proxmox_host_state.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "host", "label": "Host", "type": "host", "flag": "--host", "required": true }
+      ]
+    },
+    {
+      "id": "show_prod_vm_state",
+      "title": "Inspect a production VM",
+      "summary": "One production VM across HA, replication, routing, storage, QGA, and SSH.",
+      "description": "Checks one registered production VM without changing guest, Proxmox, HA, replication, route, or registry configuration.",
+      "category": "diagnostics",
+      "script": "diagnostics/show_prod_vm_state.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "resource", "label": "Production VM", "type": "production", "required": true }
+      ]
+    },
+    {
+      "id": "show_qdevice_state",
+      "title": "Inspect the QDevice",
+      "summary": "Whether a QDevice is needed, registered, alive, and voting on every host.",
+      "description": "Reports whether the cluster needs an external QDevice, whether one is registered, and whether every member sees it alive and voting, and explains how to repair or replace it.",
+      "category": "diagnostics",
+      "script": "diagnostics/show_qdevice_state.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": []
+    },
+    {
+      "id": "inventory_disks",
+      "title": "Inventory disks",
+      "summary": "Every physical disk, pool vdev, and disk that is safe to pull.",
+      "description": "Inventories every physical disk on a host with serial and exact capacity, every pool vdev and member, and disks that are safe to remove. When a decommission has finished evacuating, it asks before finalizing the retirement of those disks.",
+      "category": "storage",
+      "script": "hosts/inventory_disks.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "notes": "Normally read-only. It changes the host only if you approve finalizing a completed decommission.",
+      "params": [
+        { "id": "host", "label": "Host", "type": "host", "flag": "--host", "required": true }
+      ]
+    },
+    {
+      "id": "add_prod_vm",
+      "title": "Add production VM",
+      "summary": "Allocate the next prodN, install its OS, replicate it, and enable HA.",
+      "description": "Allocates the next prodN, installs its OS, verifies guest identity and SSH, creates replication to every selected placement host, configures HA, and publishes its routes. It can resume its own incomplete allocation after a failure. Start with a dry run.",
+      "category": "production",
+      "script": "guests/prod/add_prod_vm.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "supports_dry_run": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "dry_run", "label": "Dry run (validate and preview only)", "type": "flag", "flag": "--dry-run", "default": true },
+        { "id": "install_timeout", "label": "Install timeout (seconds)", "type": "integer", "flag": "--install-timeout-seconds", "advanced": true, "placeholder": "10800" },
+        { "id": "qga_timeout", "label": "Guest agent timeout (seconds)", "type": "integer", "flag": "--qga-timeout-seconds", "advanced": true, "placeholder": "900" },
+        { "id": "replication_timeout", "label": "Replication timeout (seconds)", "type": "integer", "flag": "--replication-timeout-seconds", "advanced": true, "placeholder": "14400" }
+      ]
+    },
+    {
+      "id": "remove_prod_vm",
+      "title": "Remove production VM",
+      "summary": "Permanently destroy a production VM and everything BMAC owns for it.",
+      "description": "Permanently removes one production VM after exact identity validation: routes, HA resource and rule, replication jobs and target copies, the VM and its volumes, orchestration metadata, and its registry allocation. Staging VMs derived from it must be removed first.",
+      "category": "production",
+      "script": "guests/prod/remove_prod_vm.sh",
+      "mode": "mutating",
+      "destructive": true,
+      "supports_dry_run": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "dry_run", "label": "Dry run (show the destruction plan only)", "type": "flag", "flag": "--dry-run", "default": true },
+        { "id": "resource", "label": "Production VM", "type": "production", "required": true }
+      ]
+    },
+    {
+      "id": "change_prod_vm_owner",
+      "title": "Move production VM",
+      "summary": "Relocate a production VM to another of its placement hosts.",
+      "description": "Determines the VM's real HA owner, replicates the latest changes to the chosen placement host, and relocates the VM there. The application is briefly unavailable while the VM restarts. Staging VMs on the new owner are evicted.",
+      "category": "production",
+      "script": "guests/prod/change_prod_vm_owner.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "replication_timeout", "label": "Replication timeout (seconds)", "type": "integer", "flag": "--replication-timeout-seconds", "advanced": true, "placeholder": "3600" }
+      ]
+    },
+    {
+      "id": "change_prod_vm_placement",
+      "title": "Change placement",
+      "summary": "Add or remove the hosts a production VM replicates to and may run on.",
+      "description": "Adds placement hosts (replicating the VM there before HA may use them) or removes them (never the live owner, keeping at least two). Detects and finishes a partial earlier change.",
+      "category": "production",
+      "script": "guests/prod/change_prod_vm_placement.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "replication_timeout", "label": "Replication timeout (seconds)", "type": "integer", "flag": "--replication-timeout-seconds", "advanced": true, "placeholder": "3600" }
+      ]
+    },
+    {
+      "id": "extend_prod_vm_disk",
+      "title": "Grow production disk",
+      "summary": "Grow a production VM's root disk online.",
+      "description": "Calculates how much the VM's root zvol may grow while every placement pool keeps 10% free, grows it on the live owner, replicates the new size, and grows the guest's filesystem online.",
+      "category": "production",
+      "script": "guests/prod/extend_prod_vm_disk.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "supports_dry_run": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "dry_run", "label": "Dry run (show the growth limit only)", "type": "flag", "flag": "--dry-run", "default": true },
+        { "id": "replication_timeout", "label": "Replication timeout (seconds)", "type": "integer", "flag": "--replication-timeout-seconds", "advanced": true, "placeholder": "3600" }
+      ]
+    },
+    {
+      "id": "setup_jump_ssh_access",
+      "title": "Set up SSH access",
+      "summary": "Pin a guest's host key and configure ssh <alias> through a jump host.",
+      "description": "Reads the guest's SSH host key through the guest agent, picks a jump host, writes a strict managed block to ~/.ssh/config and known_hosts, and proves ssh works.",
+      "category": "production",
+      "script": "guests/setup_jump_ssh_access.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "resource", "label": "Guest", "type": "guest" }
+      ]
+    },
+    {
+      "id": "deploy_hello_app_to_prod",
+      "title": "Deploy example app",
+      "summary": "Install the example NGINX hello app on a production VM.",
+      "description": "Checks SSH to a production VM, installs or updates NGINX, and configures the production and staging hostnames with your Cloudflare origin certificate. An example deployment, not a general deployer.",
+      "category": "production",
+      "script": "app/deploy_hello_app_to_prod.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": []
+    },
+    {
+      "id": "add_staging_vm",
+      "title": "Add staging VM",
+      "summary": "Create a production-derived linked-clone staging VM.",
+      "description": "Snapshots a production VM, waits for the snapshot to replicate to a standby host, and creates a stopped stageNprodN linked clone there with a new machine identity. Optionally starts it and sets up SSH. Start with a dry run.",
+      "category": "staging",
+      "script": "guests/staging/add_staging_vm.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "supports_dry_run": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "dry_run", "label": "Dry run (validate and preview only)", "type": "flag", "flag": "--dry-run", "default": true },
+        { "id": "sanitizer", "label": "Sanitizer script", "type": "path", "flag": "--sanitizer", "help": "Optional local Bash script run as root inside the clone before its networking starts." },
+        { "id": "cores", "label": "vCPU cores", "type": "integer", "flag": "--cores", "advanced": true },
+        { "id": "memory_gib", "label": "Memory (GiB)", "type": "integer", "flag": "--memory-gib", "advanced": true },
+        { "id": "replication_timeout", "label": "Replication timeout (seconds)", "type": "integer", "flag": "--replication-timeout-seconds", "advanced": true, "placeholder": "14400" },
+        { "id": "start_timeout", "label": "Start timeout (seconds)", "type": "integer", "flag": "--start-timeout-seconds", "advanced": true, "placeholder": "300" }
+      ]
+    },
+    {
+      "id": "remove_staging_vm",
+      "title": "Remove staging VM",
+      "summary": "Destroy a staging VM, its clone, and its source snapshot.",
+      "description": "Permanently removes a staging VM's route, VM and disks, linked clone, and the one source snapshot created for it. Production itself is never touched.",
+      "category": "staging",
+      "script": "guests/staging/remove_staging_vm.sh",
+      "mode": "mutating",
+      "destructive": true,
+      "supports_dry_run": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "dry_run", "label": "Dry run (show the destruction plan only)", "type": "flag", "flag": "--dry-run", "default": true },
+        { "id": "resource", "label": "Staging VM", "type": "staging" }
+      ]
+    },
+    {
+      "id": "add_proxmox_host",
+      "title": "Add Proxmox host",
+      "summary": "Install and join a new Proxmox host using a customized installer ISO.",
+      "description": "Builds a customized Proxmox installer ISO, guides the installation, converts storage, joins the host to the cluster through the control node, and reconciles the QDevice. Long-running and interactive.",
+      "category": "hosts",
+      "script": "hosts/add_proxmox_host.sh",
+      "mode": "mutating",
+      "destructive": true,
+      "platforms": ["linux"],
+      "requires": { "arch": "x86_64", "os_family": "debian" },
+      "platform_note": "Requires a Debian-based Linux x86_64 workstation, because BMAC must build a customized Proxmox installer ISO with Proxmox's amd64-only Debian tool.",
+      "params": [
+        { "id": "host", "label": "Host slot", "type": "host", "flag": "--host", "suggest": "free_host_slots" },
+        { "id": "encryption", "label": "Storage encryption", "type": "flag_choice", "choices": [
+          { "value": "encrypt", "label": "Encrypt with LUKS2", "flag": "--encrypt" },
+          { "value": "no-encrypt", "label": "Keep unencrypted", "flag": "--no-encrypt" }
+        ] },
+        { "id": "boot_tests", "label": "Boot tests", "type": "flag_choice", "choices": [
+          { "value": "run", "label": "Run mirror-member and final boot tests", "flag": "--run-boot-tests" },
+          { "value": "skip", "label": "Skip boot tests", "flag": "--skip-boot-tests" }
+        ] }
+      ]
+    },
+    {
+      "id": "remove_proxmox_host",
+      "title": "Remove Proxmox host",
+      "summary": "Remove a host gracefully, or forcefully when it is permanently dead.",
+      "description": "Removes a host gracefully when it can be contacted and nothing depends on it, or forcefully when it cannot be contacted and has been permanently disconnected. Forced removal narrows affected production placement and destroys related staging VMs.",
+      "category": "hosts",
+      "script": "hosts/remove_proxmox_host.sh",
+      "mode": "mutating",
+      "destructive": true,
+      "platforms": ["linux"],
+      "platform_note": "Takes the same workstation flock as host setup, so it runs on Linux workstations only.",
+      "params": [
+        { "id": "host", "label": "Host", "type": "host", "flag": "--host" }
+      ]
+    },
+    {
+      "id": "update_cluster_runtime",
+      "title": "Update cluster runtime",
+      "summary": "Deploy this checkout's BMAC runtime helpers and hooks to every host.",
+      "description": "Stages and validates the BMAC runtime bundle on every online host, installs it atomically, verifies it cluster-wide, and rolls back on failure. Updates BMAC code only, not Proxmox packages.",
+      "category": "hosts",
+      "script": "hosts/update_cluster_runtime.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "supports_dry_run": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "dry_run", "label": "Dry run (show hash drift only)", "type": "flag", "flag": "--dry-run", "default": true }
+      ]
+    },
+    {
+      "id": "add_new_disk_vdev",
+      "title": "Add mirrored vdev",
+      "summary": "Add two new disks to a host's rpool as one mirror.",
+      "description": "Lists unused disks, asks for two of matching capacity, prepares them (with LUKS at the host console on encrypted hosts), updates crypttab and initramfs, and adds them to rpool. Erases the chosen disks.",
+      "category": "storage",
+      "script": "hosts/add_new_disk_vdev.sh",
+      "mode": "mutating",
+      "destructive": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "host", "label": "Host", "type": "host", "flag": "--host", "required": true }
+      ]
+    },
+    {
+      "id": "add_replacement_disk",
+      "title": "Replace mirror member",
+      "summary": "Put a replacement disk into a degraded rpool mirror.",
+      "description": "Copies the surviving member's partition layout to a replacement disk (and its ESP for the boot mirror), encrypts it on encrypted hosts, and starts resilvering. The failed disk must already be pulled.",
+      "category": "storage",
+      "script": "hosts/add_replacement_disk.sh",
+      "mode": "mutating",
+      "destructive": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "host", "label": "Host", "type": "host", "flag": "--host", "required": true }
+      ]
+    },
+    {
+      "id": "decommission_disks",
+      "title": "Decommission a vdev",
+      "summary": "Trim, replicate, scrub, then evacuate one non-boot vdev from rpool.",
+      "description": "Requires that no related staging VM exists, trims affected production guests, forces their replication, scrubs rpool, and starts removing one eligible non-boot vdev. Finish with Inventory disks.",
+      "category": "storage",
+      "script": "hosts/decommission_disks.sh",
+      "mode": "mutating",
+      "destructive": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "host", "label": "Host", "type": "host", "flag": "--host", "required": true }
+      ]
+    },
+    {
+      "id": "simulate_disk_failure_and_replacement",
+      "title": "Simulate disk failure",
+      "summary": "TEST AID: fail and erase one rpool mirror member.",
+      "description": "Takes one member of a healthy two-way mirror offline and, after a second confirmation, erases its disk so the replacement workflow can be tested. Destroys the data on that disk.",
+      "category": "storage",
+      "script": "hosts/simulate_disk_failure_and_replacement.sh",
+      "mode": "mutating",
+      "destructive": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "host", "label": "Host", "type": "host", "flag": "--host", "required": true }
+      ]
+    },
+    {
+      "id": "add_qdevice",
+      "title": "Add QDevice",
+      "summary": "Add an external tie-breaking vote to an even-sized cluster.",
+      "description": "Checks that the cluster needs a QDevice, verifies SSH to the prepared QDevice machine, installs corosync-qnetd there, pins its host key on every host, and runs pvecm qdevice setup.",
+      "category": "qdevice",
+      "script": "qdevice/add_qdevice.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux"],
+      "platform_note": "Takes the same workstation flock as host setup, so it runs on Linux workstations only.",
+      "params": []
+    },
+    {
+      "id": "remove_qdevice",
+      "title": "Remove QDevice",
+      "summary": "Remove the QDevice gracefully, or evict a failed one forcefully.",
+      "description": "Removes a reachable QDevice gracefully and uninstalls its software. When it is inaccessible, offers to evict it forcefully without contacting it, after you confirm it was removed from Tailscale.",
+      "category": "qdevice",
+      "script": "qdevice/remove_qdevice.sh",
+      "mode": "mutating",
+      "destructive": true,
+      "platforms": ["linux"],
+      "platform_note": "Takes the same workstation flock as host setup, so it runs on Linux workstations only.",
+      "params": [
+        { "id": "qdevice_host", "label": "QDevice SSH host", "type": "hostname", "help": "Defaults to PROXMOX_QDEVICE_HOST from env/cluster.conf." }
+      ]
+    }
+  ]
+}

@@ -12,6 +12,8 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+# shellcheck source=../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
 REGISTRY_SOURCE="${REPO_ROOT}/lib/cluster_registry.py"
 RENDERER_SOURCE="${REPO_ROOT}/lib/haproxy_routes.py"
@@ -37,6 +39,7 @@ declare -a COMMITTED_NODES=()
 
 log() {
   printf '\n==> %s\n' "$*"
+  bmac_ui_step "$*"
 }
 
 info() {
@@ -49,6 +52,7 @@ warn() {
 
 die() {
   printf '\nERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
   exit 1
 }
 
@@ -407,6 +411,13 @@ confirm_update() {
   local entered
   printf '\nThis will atomically replace the app-ha runtime on: %s\n' \
     "${CLUSTER_NODES[*]}"
+  if bmac_ui_is_json; then
+    bmac_ui_confirm --id go --severity warning --title "Update the cluster runtime?" \
+      --message "This atomically replaces the app-ha runtime on: ${CLUSTER_NODES[*]}. A failure rolls back the nodes already committed." \
+      --confirm-label "Update the runtime" --text GO ||
+      die "Confirmation did not match GO; no changes were made"
+    return 0
+  fi
   printf 'Type GO to continue.\n> '
   IFS= read -r entered
   [[ "$entered" == GO ]] || die "Confirmation did not match GO; no changes were made"
@@ -424,6 +435,9 @@ main() {
   show_hash_status
   if [[ "$DRY_RUN" == true ]]; then
     log "Dry run complete; no cluster files were changed"
+    bmac_ui_step_done
+    bmac_ui_next_step "Review the hash drift above, then update the runtime for real." \
+      --command "hosts/update_cluster_runtime.sh" --workflow update_cluster_runtime --arg dry_run=false
     return 0
   fi
 
@@ -464,8 +478,11 @@ main() {
   log "Cluster runtime update complete"
   info "Updated nodes: ${CLUSTER_NODES[*]}"
   info "No VM restart or hook reattachment is required"
+  bmac_ui_step_done
+  bmac_ui_result updated_nodes:raw "$(bmac_ui_json_array "${CLUSTER_NODES[@]}")"
 }
 
 if [[ "${APP_HA_RUNTIME_UPDATE_SOURCE_ONLY:-0}" != 1 ]]; then
+  bmac_ui_bootstrap "$@"
   main "$@"
 fi

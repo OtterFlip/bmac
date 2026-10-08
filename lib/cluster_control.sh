@@ -13,6 +13,10 @@
 # Callers read the CONTROL_* globals.
 # shellcheck disable=SC2034
 
+# shellcheck source=./ui_protocol.sh
+declare -F bmac_ui_is_json >/dev/null ||
+  source "$(dirname -- "${BASH_SOURCE[0]}")/ui_protocol.sh"
+
 CONTROL_REMOTE_REGISTRY="/usr/local/lib/app-ha-proxmox/lib/cluster_registry.py"
 
 # The resolved control node.
@@ -182,8 +186,14 @@ resolve_control_node() {
     else
       printf 'No reachable cluster member was found; the control node will create the cluster.\n'
     fi
-    IFS= read -r -p "Cluster control node [${default}]: " answer ||
-      config_die "Input ended before the control node was chosen" || return 1
+    if bmac_ui_is_json; then
+      bmac_ui_input answer --id control_node --label "Cluster control node" \
+        --default "$default" --required --pattern '^mox([1-9]|10)$' \
+        --help "PROXMOX_CONTROL_NODE is not set in env/cluster.conf. The control node coordinates cluster changes."
+    else
+      IFS= read -r -p "Cluster control node [${default}]: " answer ||
+        config_die "Input ended before the control node was chosen" || return 1
+    fi
     answer="${answer:-$default}"
   fi
   control_valid_node "$answer" ||
@@ -279,8 +289,13 @@ control_offer_cluster_conf_update() {
   fi
   printf 'Every workstation that runs the host scripts must set PROXMOX_CONTROL_NODE=%s in env/cluster.conf.\n' \
     "$node"
-  IFS= read -r -p "Update PROXMOX_CONTROL_NODE in ${PROXMOX_CLUSTER_CONFIG} now? [Y/n] " answer ||
-    answer=n
+  if bmac_ui_is_json; then
+    bmac_ui_ask "Update PROXMOX_CONTROL_NODE in ${PROXMOX_CLUSTER_CONFIG} to ${node} now?" \
+      "Update it" "Leave it" && answer=y || answer=n
+  else
+    IFS= read -r -p "Update PROXMOX_CONTROL_NODE in ${PROXMOX_CLUSTER_CONFIG} now? [Y/n] " answer ||
+      answer=n
+  fi
   if [[ -z "$answer" || "${answer,,}" == y || "${answer,,}" == yes ]]; then
     if control_rewrite_cluster_conf "$PROXMOX_CLUSTER_CONFIG" "$node"; then
       PROXMOX_CONTROL_NODE="$node"

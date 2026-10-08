@@ -12,6 +12,9 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
+bmac_ui_bootstrap "$@"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
 REMOTE_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_ROOT}/lib/cluster_registry.py"
@@ -26,11 +29,13 @@ LEASE_ACQUIRED=false
 
 die() {
   printf '\nERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
   exit 1
 }
 
 log() {
   printf '\n==> %s\n' "$*"
+  bmac_ui_step "$*"
 }
 
 info() {
@@ -427,16 +432,35 @@ info "HA state/rules: ${HA_STATE:-none} / ${HA_RULES[*]:-none}"
 info "Replication jobs: ${REPLICATION_JOBS[*]:-none}"
 info "Routes enabled: $ROUTES_ENABLED"
 info "Shared source cache: $CACHE_ISO ($cache_state; retained)"
+bmac_ui_plan_begin "Destroy $RESOURCE_NAME" "Validated against the live cluster; nothing has changed yet."
+bmac_ui_plan_item remove "$RESOURCE_NAME" "VMID $VMID, state $RESOURCE_STATE, owner $OWNER_NODE, placement ${PLACEMENT_NODES[*]}"
+bmac_ui_plan_item remove "disks" "Root ${ROOT_VOLUME:-none}, EFI ${EFI_VOLUME:-none}, and every replica"
+bmac_ui_plan_item remove "HA" "State ${HA_STATE:-none}; rules ${HA_RULES[*]:-none}"
+bmac_ui_plan_item remove "replication" "${REPLICATION_JOBS[*]:-none}"
+bmac_ui_plan_item remove "routes" "Enabled: $ROUTES_ENABLED"
+bmac_ui_plan_item remove "registry" "Resource $RESOURCE_ID metadata is archived and the allocation released"
+bmac_ui_plan_item keep "source ISO cache" "$CACHE_ISO ($cache_state)"
+BMAC_UI_DRY_RUN="$DRY_RUN" bmac_ui_plan_end
 
 if [[ "$DRY_RUN" == true ]]; then
   log "Dry run complete; no state was changed"
+  bmac_ui_step_done
+  bmac_ui_next_step "Review the plan, then destroy $RESOURCE_NAME for real." \
+    --workflow remove_prod_vm --arg "resource=$RESOURCE_NAME" --arg dry_run=false
   exit 0
 fi
 
 printf '\nTHIS PERMANENTLY DESTROYS %s, ALL OWNED VM DISKS/REPLICAS, HA/RULES, ROUTES, AND REGISTRY METADATA.\n' \
   "$RESOURCE_NAME"
-printf 'Type exactly: DESTROY %s\n> ' "$RESOURCE_NAME"
-IFS= read -r confirmation
+if bmac_ui_is_json; then
+  bmac_ui_confirm --id destroy --severity critical --title "Destroy $RESOURCE_NAME?" \
+    --message "This permanently destroys $RESOURCE_NAME, all owned VM disks and replicas, HA resources and rules, routes, and registry metadata." \
+    --confirm-label "Destroy $RESOURCE_NAME" --text "DESTROY ${RESOURCE_NAME}" &&
+    confirmation="DESTROY ${RESOURCE_NAME}" || confirmation=""
+else
+  printf 'Type exactly: DESTROY %s\n> ' "$RESOURCE_NAME"
+  IFS= read -r confirmation
+fi
 [[ "$confirmation" == "DESTROY ${RESOURCE_NAME}" ]] ||
   die "Destruction confirmation did not match"
 
@@ -658,3 +682,5 @@ log "Production VM destruction complete"
 info "Destroyed resource: $RESOURCE_NAME (former VMID $VMID)"
 info "Removed routes, HA resource/rules, replication, owner and replica volumes, and registry metadata."
 info "Retained shared source cache: $CACHE_ISO"
+bmac_ui_step_done
+bmac_ui_result destroyed "$RESOURCE_NAME" former_vmid "$VMID"

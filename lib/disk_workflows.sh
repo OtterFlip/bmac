@@ -28,8 +28,12 @@ fi
 DW_HOST=""
 DW_RUN_DIR=""
 
+# shellcheck source=./ui_protocol.sh
+declare -F bmac_ui_is_json >/dev/null || source "${DW_LIB_DIR}/ui_protocol.sh"
+
 dw_die() {
   printf '\nERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
   exit 1
 }
 
@@ -39,6 +43,7 @@ dw_info() {
 
 dw_section() {
   printf '\n==== %s ====\n' "$*"
+  bmac_ui_step "$*"
 }
 
 dw_init() {
@@ -119,7 +124,11 @@ dw_sha256() {
 # to mox1.
 dw_select_host() {
   local requested="$1"
-  if [[ -z "$requested" ]]; then
+  if [[ -z "$requested" ]] && bmac_ui_is_json; then
+    bmac_ui_input requested --id host --label "Target Proxmox host" \
+      --default mox1 --required --pattern '^mox([1-9]|10)$' \
+      --help "The cluster host whose disks this workflow inspects or changes."
+  elif [[ -z "$requested" ]]; then
     IFS= read -r -p "Target Proxmox host [mox1]: " requested ||
       dw_die "input ended"
     requested="${requested:-mox1}"
@@ -148,6 +157,12 @@ dw_ready() {
   printf '\nNEXT: %s\n' "$what"
   printf 'This can take %s and blocks until it finishes.\n' "$duration"
   dw_discard_typeahead
+  if bmac_ui_is_json; then
+    bmac_ui_confirm --id ready --title "Start: $what" \
+      --message "This can take $duration and blocks until it finishes." \
+      --confirm-label "Start now" --cancel-label "Not now"
+    return
+  fi
   prompt_yes "Ready to start it now?"
 }
 

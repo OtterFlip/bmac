@@ -35,6 +35,7 @@ SIMULATE = HOSTS_DIR / "simulate_disk_failure_and_replacement.sh"
 MARKER = "/fake/root/app-ha-simulated-disk-failure"
 sys.path.insert(0, str(LIB_DIR))
 import test_host_storage as fixtures  # noqa: E402
+from ui_test_driver import run_json, scripted  # noqa: E402
 
 REMOTE_TOOL = "/fake/sbin/app-ha-rpool-mirror"
 # What the fake tool reports a replacement needs to hold a survivor's
@@ -1552,6 +1553,84 @@ def fixtures_cluster_conf() -> str:
             "",
         )
     )
+
+
+class DiskWorkflowJsonTest(DiskWorkflowTest):
+    """The same workflows driven through JSON mode, as the dashboard does."""
+
+    def run_json(self, script: Path, *replies):
+        run = run_json([str(script), "--host", "mox1"], scripted(*replies), env=self.environment, timeout=40)
+        self.assertEqual(run.malformed, [], msg=run.describe())
+        return run
+
+    def test_json_add_luks_mirror(self) -> None:
+        self.update_fake(console_ran=True)
+        run = self.run_json(
+            ADD,
+            {"values": {"first": "1", "second": "2"}},
+            {"confirmed": True},
+            {"acknowledged": True},
+            {"confirmed": True},
+        )
+        self.assertEqual(run.completed["status"], "success", msg=run.describe())
+        group, erase, console, ready = run.requests
+        self.assertEqual(group["type"], "input_group")
+        self.assertEqual([f["type"] for f in group["fields"]], ["select", "select"])
+        self.assertEqual(erase["confirmation_text"], "GO")
+        self.assertEqual(erase["severity"], "destructive")
+        self.assertEqual(console["type"], "manual_action")
+        self.assertIn("/fake/root/app-ha-add-mirror-4", " ".join(console["instructions"]))
+        self.assertTrue(ready["title"].startswith("Start: record the new disks"))
+        self.assertIn(["tool", "luks-add", "--pair", "4", "S6BLANK", "S7USED"], self.actions("tool"))
+        result = run.of("result")[-1]["data"]
+        self.assertEqual(result["serial_2"], "S7USED")
+        self.assertTrue(any("reboot of mox1" in step["text"] for step in run.of("next_step")))
+        self.assertIn("Choose the disks", " ".join(p["label"] for p in run.of("phase")) + group["title"])
+
+    def test_json_add_rejects_mismatched_pair_inline(self) -> None:
+        layout = self.fake()["layout"]
+        layout["unassigned_disks"][1]["size"] = 4000787030016 * 98 // 100
+        self.update_fake(layout=layout)
+        run = self.run_json(
+            ADD,
+            {"values": {"first": "1", "second": "1"}},
+            lambda request: (
+                self.assertIn("different disks", request["validation_error"]["field_errors"]["second"]),
+                {"values": {"first": "1", "second": "2"}},
+            )[1],
+            lambda request: (
+                self.assertIn("more than 1%", request["validation_error"]["field_errors"]["second"]),
+                None,
+            )[1],
+        )
+        self.assertEqual(run.completed["status"], "cancelled", msg=run.describe())
+        self.assertEqual(run.returncode, 3)
+        self.assertEqual(self.actions("tool"), [])
+
+    def test_json_declining_the_erase_cancels_the_run(self) -> None:
+        run = self.run_json(ADD, {"values": {"first": "1", "second": "2"}}, {"confirmed": False})
+        self.assertEqual(run.completed["status"], "cancelled", msg=run.describe())
+        self.assertEqual([row[1] for row in self.actions("tool")], ["check-new"])
+
+    def test_json_decommission_asks_for_free_space_and_vdev(self) -> None:
+        run = self.run_json(
+            DECOMMISSION,
+            *([{"confirmed": True}] * 4),
+            {"values": {"min_free_gib": "10"}},
+            lambda request: (
+                self.assertIn("at least 50", request["validation_error"]["field_errors"]["min_free_gib"]),
+                {"values": {"min_free_gib": "50"}},
+            )[1],
+            lambda request: (self.assertEqual(request["field"]["type"], "select"), None)[1],
+        )
+        self.assertEqual(run.completed["status"], "cancelled", msg=run.describe())
+        self.assertFalse(any(row[1] == "remove" for row in self.actions("zpool")))
+
+
+# The JSON tests reuse the fixtures, not the terminal-mode tests.
+for _name in dir(DiskWorkflowTest):
+    if _name.startswith("test_") and not _name.startswith("test_json"):
+        setattr(DiskWorkflowJsonTest, _name, None)
 
 
 if __name__ == "__main__":

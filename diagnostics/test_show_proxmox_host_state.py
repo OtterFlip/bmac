@@ -22,6 +22,7 @@ LIB_DIR = DIAGNOSTICS_DIR.parent / "lib"
 SCRIPT = DIAGNOSTICS_DIR / "show_proxmox_host_state.sh"
 sys.path.insert(0, str(LIB_DIR))
 import test_host_storage as storage_fixtures  # noqa: E402
+from ui_test_driver import run_json, scripted  # noqa: E402
 
 # Every remote command the report may run. Anything else, such as qm, zpool
 # remove, or a registry mutation, fails the fake and the test.
@@ -335,6 +336,19 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
         self.run_script("mox1", "mox2", expected=2)
         self.assertIn("Usage:", self.run_script("--help", expected=0).stdout)
         self.assertFalse(self.calls.exists())
+
+    def test_json_mode_asks_for_the_host_and_reports_the_verdict(self) -> None:
+        def host(request):
+            self.assertEqual(request["field"]["default"], "mox1")
+            return {"values": {"host": ""}}
+
+        run = run_json([str(SCRIPT)], scripted(host), env=self.environment, timeout=60)
+        self.assertEqual(run.malformed, [], run.describe())
+        self.assertEqual(run.completed["status"], "success", run.describe())
+        self.assertIn("Host:        mox1", run.log_text)
+        self.assertEqual(run.of("result")[-1]["data"], {"host": "mox1", "verdict": "ok"})
+        self.assertIn("Proxmox host diagnostic verdict",
+                      [e["label"] for e in run.of("phase")])
 
     def test_host_prompt_defaults_to_mox1(self) -> None:
         completed = subprocess.run(

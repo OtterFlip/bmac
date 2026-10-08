@@ -15,6 +15,7 @@ DW_SCRIPT_NAME=inventory_disks.sh
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=../lib/disk_workflows.sh
 source "${SCRIPT_DIR}/../lib/disk_workflows.sh"
+bmac_ui_bootstrap "$@"
 
 usage() {
   cat <<'EOF'
@@ -125,6 +126,18 @@ for member in record["members"]:
 PY
 }
 
+# ask_permission VDEV: 0 when the operator lets this run finalize VDEV.
+ask_permission() {
+  if bmac_ui_is_json; then
+    bmac_ui_confirm --id "finalize_$1" --question --severity warning \
+      --title "Finalize the retirement of $1 now?" \
+      --message "This releases its disks, erasing their metadata so they show as blank. The data area is not overwritten." \
+      --confirm-label "Finalize" --cancel-label "Not now"
+    return
+  fi
+  prompt_yes "Do you give permission to finalize these disks now?"
+}
+
 CHANGED=false
 for row in "${PENDING[@]}"; do
   IFS=$'\t' read -r removal_id vdev status serials mappers <<<"$row"
@@ -134,6 +147,8 @@ for row in "${PENDING[@]}"; do
       printf 'ZFS is still copying data off %s:\n%s\n' "$vdev" \
         "$(dw_json "$LAYOUT" 'd["pool"]["remove"]')"
       printf 'Its disks are not safe to pull yet. Run this inventory again later.\n'
+      bmac_ui_next_step "ZFS is still evacuating $vdev; its disks are not safe to pull yet. Run this inventory again later." \
+        --workflow inventory_disks --arg "host=$DW_HOST"
       continue
       ;;
     still-in-pool)
@@ -142,6 +157,8 @@ for row in "${PENDING[@]}"; do
         --note "disks still in rpool with no removal running" >/dev/null ||
         dw_die "could not update the removal record on $DW_HOST"
       printf 'The removal record is marked failed; rerun hosts/decommission_disks.sh.\n'
+      bmac_ui_next_step "The removal of $vdev is marked failed; decommission it again." \
+        --command "hosts/decommission_disks.sh --host $DW_HOST" --workflow decommission_disks --arg "host=$DW_HOST"
       continue
       ;;
     needs-retire)
@@ -153,7 +170,7 @@ for row in "${PENDING[@]}"; do
       printf 'disks, delete their off-host LUKS header backups, and mark their host-side\n'
       printf 'removal record retired.\n'
       print_release_note
-      if ! prompt_yes "Do you give permission to finalize these disks now?"; then
+      if ! ask_permission "$vdev"; then
         printf 'Permission was not given. No retirement changes were made for %s.\n' "$vdev"
         continue
       fi
@@ -170,7 +187,7 @@ for row in "${PENDING[@]}"; do
       printf 'host-side removal record changed to retired so they can be reported as\n'
       printf 'removable.\n'
       print_release_note
-      if ! prompt_yes "Do you give permission to finalize these disks now?"; then
+      if ! ask_permission "$vdev"; then
         printf 'Permission was not given. No retirement changes were made for %s.\n' "$vdev"
         continue
       fi
@@ -194,6 +211,7 @@ for row in "${PENDING[@]}"; do
     --note "removal complete; LUKS closed, crypttab and initramfs updated, disks released" >/dev/null ||
     dw_die "could not mark the disks retired on $DW_HOST"
   printf 'Retirement of %s is finalized.\n' "$vdev"
+  bmac_ui_next_step "The disks of $vdev (${serials//,/, }) on $DW_HOST are retired and safe to pull physically."
 done
 
 # Recollect only after a finalization changed host state. With no change, the

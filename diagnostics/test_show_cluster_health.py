@@ -12,12 +12,15 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 DIAGNOSTICS_DIR = Path(__file__).resolve().parent
 SCRIPT = DIAGNOSTICS_DIR / "show_cluster_health.sh"
+sys.path.insert(0, str(DIAGNOSTICS_DIR.parent / "lib"))
+from ui_test_driver import run_json, scripted  # noqa: E402
 
 # The workstation's ssh. It answers the cluster discovery and QDevice
 # commands itself and runs the real health collector locally against the fake
@@ -326,6 +329,29 @@ class ShowClusterHealthTest(unittest.TestCase):
         self.assertNotIn("zd0", output)
         self.assertRegex(output, r"mox1\s+400\.0 GiB\s+1\.37 TiB\s+1\.76 TiB\s+77\.8%\s+ok")
         self.assertIn("OK: all 2 hosts", output)
+
+    def test_json_mode_reports_phases_verdict_and_next_steps(self) -> None:
+        self.scenario["hosts"]["mox2"] = {"rpool_space": [1700 * 2**30, 100 * 2**30]}
+        self.scenario_path.write_text(json.dumps(self.scenario), encoding="utf-8")
+        run = run_json([str(SCRIPT)], scripted(), env=self.environment, timeout=60)
+        self.assertEqual(run.malformed, [], run.describe())
+        self.assertEqual(run.completed["status"], "failed", run.describe())
+        labels = [event["label"] for event in run.of("phase") if event["status"] == "running"]
+        self.assertEqual(labels[0], "Find the cluster")
+        self.assertIn("Collect health from mox2", labels)
+        self.assertIn("Drive SMART health", labels)
+        self.assertEqual(labels[-1], "Verdict")
+        running = {e["id"] for e in run.of("phase") if e["status"] == "running"}
+        complete = {e["id"] for e in run.of("phase") if e["status"] == "complete"}
+        self.assertEqual(running, complete)
+        result = run.of("result")[-1]["data"]
+        self.assertEqual(result["verdict"], "attention")
+        self.assertIn("mox2 needs more storage added", result["problems"][0])
+        steps = run.of("next_step")
+        self.assertIn({"host": "mox2"}, [step.get("args") for step in steps
+                                         if step.get("workflow") == "add_new_disk_vdev"])
+        self.assertEqual(steps[-1]["workflow"], "show_cluster_state")
+        self.assertIn("ATTENTION: 1 problem found:", run.log_text)
 
     def test_low_rpool_free_space_asks_for_storage(self) -> None:
         self.scenario["hosts"]["mox2"] = {"rpool_space": [1700 * 2**30, 100 * 2**30]}

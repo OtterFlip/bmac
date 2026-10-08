@@ -1,0 +1,5 @@
+node_modules/
+dist/
+target/
+src-tauri/gen/
+*.tsbuildinfo

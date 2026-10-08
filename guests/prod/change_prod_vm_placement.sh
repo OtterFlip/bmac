@@ -15,6 +15,8 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
 PROD_HA_LIB="${REPO_ROOT}/lib/prod_ha.sh"
 
@@ -431,8 +433,13 @@ repair_partial_change() {
   prod_require_unchanged
   if ((${#missing[@]} > 0)); then
     while true; do
-      prompt_with_default choice \
-        "Finish adding (a) or finish removing (r) ${missing[*]}" a
+      if bmac_ui_is_json; then
+        bmac_ui_choose choice "Finish the earlier change for ${missing[*]}" a \
+          a "Finish adding ${missing[*]}" r "Finish removing ${missing[*]}"
+      else
+        prompt_with_default choice \
+          "Finish adding (a) or finish removing (r) ${missing[*]}" a
+      fi
       case "${choice,,}" in
         a | add) add_hosts "${missing[@]}"; break ;;
         r | remove)
@@ -483,13 +490,27 @@ choose_add_hosts() {
     fi
   done
   ((${#eligible[@]} > 0)) || die "No cluster member can receive $RESOURCE_NAME"
+  local -a options=()
+  for node in "${eligible[@]}"; do
+    options+=(--option "$node" "$node")
+  done
+  if bmac_ui_is_json; then
+    bmac_ui_input input --id add_hosts --type multiselect --label "Hosts to add" \
+      --help "Each new host receives a replica of $REPLICA_BYTES bytes in pool $POOL_NAME." \
+      --default "${eligible[0]}" --required --min-selected 1 "${options[@]}"
+  fi
   while true; do
-    prompt_with_default input "Hosts to add (comma-separated)" "${eligible[0]}"
+    bmac_ui_is_json ||
+      prompt_with_default input "Hosts to add (comma-separated)" "${eligible[0]}"
     if parsed="$(parse_node_list "$input" "${eligible[@]}" 2>"${RUN_DIR}/parse.err")"; then
       mapfile -t REQUESTED_NODES <<<"$parsed"
       break
     fi
-    warn "$(<"${RUN_DIR}/parse.err")"
+    if bmac_ui_is_json; then
+      bmac_ui_reask input "$(<"${RUN_DIR}/parse.err")"
+    else
+      warn "$(<"${RUN_DIR}/parse.err")"
+    fi
   done
 }
 
@@ -505,8 +526,20 @@ choose_remove_hosts() {
   printf '\n%s runs on %s, which cannot be removed (move it first with change_prod_vm_owner.sh).\n' \
     "$RESOURCE_NAME" "$OWNER_NODE"
   printf 'Hosts that can be removed: %s\n' "${candidates[*]}"
+  local -a options=()
+  for node in "${candidates[@]}"; do
+    options+=(--option "$node" "$node")
+  done
+  if bmac_ui_is_json; then
+    bmac_ui_input input --id remove_hosts --type multiselect --label "Hosts to remove" \
+      --help "$OWNER_NODE runs $RESOURCE_NAME and cannot be removed; at least $MIN_PLACEMENT_HOSTS placement hosts must remain." \
+      --required --min-selected 1 \
+      --max-selected "$((${#PLACEMENT_NODES[@]} - MIN_PLACEMENT_HOSTS))" "${options[@]}"
+  fi
+  local message
   while true; do
-    IFS= read -r -p "Hosts to remove (comma-separated): " input ||
+    bmac_ui_is_json ||
+      IFS= read -r -p "Hosts to remove (comma-separated): " input ||
       die "Input ended; no change was made"
     if parsed="$(parse_node_list "$input" "${candidates[@]}" 2>"${RUN_DIR}/parse.err")"; then
       mapfile -t REQUESTED_NODES <<<"$parsed"
@@ -514,10 +547,15 @@ choose_remove_hosts() {
       if ((${#remaining[@]} >= MIN_PLACEMENT_HOSTS)); then
         break
       fi
-      warn "At least $MIN_PLACEMENT_HOSTS placement hosts must remain"
-      continue
+      message="At least $MIN_PLACEMENT_HOSTS placement hosts must remain"
+    else
+      message="$(<"${RUN_DIR}/parse.err")"
     fi
-    warn "$(<"${RUN_DIR}/parse.err")"
+    if bmac_ui_is_json; then
+      bmac_ui_reask input "$message"
+    else
+      warn "$message"
+    fi
   done
 }
 
@@ -540,7 +578,12 @@ main() {
   local action
   while true; do
     printf '\n'
-    prompt_with_default action "Add or remove placement hosts? (a/r, q to quit)" a
+    if bmac_ui_is_json; then
+      bmac_ui_choose action "Change the placement of $RESOURCE_NAME" a \
+        a "Add placement hosts" r "Remove placement hosts"
+    else
+      prompt_with_default action "Add or remove placement hosts? (a/r, q to quit)" a
+    fi
     case "${action,,}" in
       a | add) action=add; break ;;
       r | remove) action=remove; break ;;
@@ -570,6 +613,17 @@ main() {
   else
     info "HA stops using ${REQUESTED_NODES[*]} first; their replication jobs and replicas are then deleted."
   fi
+  bmac_ui_plan_begin "Change the placement of $RESOURCE_NAME" "Placement: ${PLACEMENT_NODES[*]} -> ${final[*]}"
+  local requested
+  for requested in "${REQUESTED_NODES[@]}"; do
+    if [[ "$action" == add ]]; then
+      bmac_ui_plan_item create "$requested" "Replicate $RESOURCE_NAME here, then let HA use it after a successful replication"
+    else
+      bmac_ui_plan_item remove "$requested" "HA stops using it; its replication job and replica are deleted"
+    fi
+  done
+  bmac_ui_plan_item keep "$OWNER_NODE" "$RESOURCE_NAME keeps running here"
+  bmac_ui_plan_end
   confirm_go "This changes the placement of $RESOURCE_NAME."
 
   prod_acquire_lease
@@ -594,8 +648,12 @@ main() {
   for job in "${REPLICATION_JOBS[@]}"; do
     info "Replication $job -> ${REPLICATION_TARGET[$job]}"
   done
+  bmac_ui_result resource "$RESOURCE_NAME" owner "$OWNER_NODE" \
+    placement "${PLACEMENT_NODES[*]}" ha_rule "$HA_RULE_ID"
+  bmac_ui_next_step "Check the production VM state and replication health." --workflow show_prod_vm_state --arg "resource=$RESOURCE_NAME"
 }
 
 if [[ "${CHANGE_PROD_PLACEMENT_SOURCE_ONLY:-0}" != 1 ]]; then
+  bmac_ui_bootstrap "$@"
   main "$@"
 fi

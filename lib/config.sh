@@ -19,6 +19,17 @@ fi
 
 PROXMOX_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROXMOX_DEPLOY_DIR="$(cd -- "${PROXMOX_LIB_DIR}/.." && pwd -P)"
+# The prompt helpers below ask through the dashboard in JSON mode. The host
+# runtime installs this file without ui_protocol.sh; hosts never run in JSON
+# mode.
+if ! declare -F bmac_ui_is_json >/dev/null; then
+  if [[ -f "${PROXMOX_LIB_DIR}/ui_protocol.sh" ]]; then
+    # shellcheck source=./ui_protocol.sh
+    source "${PROXMOX_LIB_DIR}/ui_protocol.sh"
+  else
+    bmac_ui_is_json() { return 1; }
+  fi
+fi
 # This tree is the git root. Older checkouts nested it under deploy/proxmox/.
 PROXMOX_REPO_ROOT="$PROXMOX_DEPLOY_DIR"
 
@@ -178,16 +189,32 @@ require_root() {
 
 prompt_yes() {
   local prompt="${1:?prompt is required}" answer
+  if bmac_ui_is_json; then
+    bmac_ui_ask "$prompt"
+    return
+  fi
   IFS= read -r -p "${prompt} [y/N] " answer
   [[ "${answer,,}" == y || "${answer,,}" == yes ]]
 }
 
 require_yes() {
+  if bmac_ui_is_json; then
+    bmac_ui_manual_action --id prerequisite --title "Confirm a prerequisite" \
+      --instruction "$1" --ack-label "Yes, this is done"
+    return
+  fi
   prompt_yes "$1" || config_die "Prerequisite was not confirmed."
 }
 
+# confirm_exact PROMPT [LEGACY] [SEVERITY]: in JSON mode SEVERITY styles the
+# dashboard request, which requires typing GO (see bmac_ui_confirm_go).
 confirm_exact() {
   local prompt="${1:?prompt is required}" _legacy_phrase="${2:-}" entered
+  if bmac_ui_is_json; then
+    bmac_ui_confirm_go "$prompt" "${3:-}" ||
+      config_die "Confirmation did not match GO; no action was taken."
+    return
+  fi
   printf '%s\nType GO to continue.\n> ' "$prompt"
   IFS= read -r entered
   [[ "$entered" == GO ]] ||
@@ -200,7 +227,11 @@ prompt_required() {
   local value
   [[ "$destination" =~ ^[A-Z][A-Z0-9_]*$ ]] ||
     config_die "Unsafe prompt destination: ${destination}" || return
-  IFS= read -r -p "${prompt}: " value
+  if bmac_ui_is_json; then
+    bmac_ui_input value --id "${destination,,}" --label "$prompt" --required
+  else
+    IFS= read -r -p "${prompt}: " value
+  fi
   [[ -n "$value" ]] || config_die "${destination} may not be empty" || return
   printf -v "$destination" '%s' "$value"
   export "${destination?}"
@@ -214,8 +245,13 @@ prompt_secret() {
     config_die "Unsafe secret destination: ${destination}" || return
   unset "$destination" 2>/dev/null ||
     config_die "Secret destination ${destination} is readonly and cannot be reset" || return
-  IFS= read -r -s -p "${prompt}: " value
-  printf '\n'
+  if bmac_ui_is_json; then
+    bmac_ui_input value --id "${destination,,}" --type password \
+      --label "$prompt" --required
+  else
+    IFS= read -r -s -p "${prompt}: " value
+    printf '\n'
+  fi
   [[ -n "$value" ]] || config_die "${destination} may not be empty" || return
   printf -v "$destination" '%s' "$value"
   export -n "${destination?}"
@@ -226,8 +262,15 @@ prompt_tailscale_auth_key() {
   local value
   unset TAILSCALE_AUTH_KEY 2>/dev/null ||
     config_die "TAILSCALE_AUTH_KEY is readonly and cannot be reset" || return
-  IFS= read -r -s -p "Fresh one-time Tailscale auth key: " value
-  printf '\n'
+  if bmac_ui_is_json; then
+    bmac_ui_input value --id tailscale_auth_key --type password \
+      --label "Fresh one-time Tailscale auth key" --required \
+      --placeholder tskey-auth-... \
+      --help "Create a one-time key in the Tailscale admin console. It is passed to the script only."
+  else
+    IFS= read -r -s -p "Fresh one-time Tailscale auth key: " value
+    printf '\n'
+  fi
   [[ "$value" == tskey-auth-* ]] || {
     unset value
     config_die "The supplied value does not look like a Tailscale auth key"

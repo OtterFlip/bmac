@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // Build tooling and tests run under Node; @types/node tracks the .nvmrc major.
+    "types": ["vite/client", "node"],
+    "allowJs": true,
+    "checkJs": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo"
+  },
+  "include": ["vite.config.ts", "scripts", "src/**/*.test.ts", "src/**/*.test.tsx", "src/test"]
+}

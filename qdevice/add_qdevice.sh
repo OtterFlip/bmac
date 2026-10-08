@@ -141,6 +141,15 @@ Prepare the QDevice machine before continuing:
      (ssh-keygen -R <hostname>), then run 'ssh <hostname>' once and verify and
      accept the new host key.
 EOF
+  if bmac_ui_is_json; then
+    bmac_ui_manual_action --id qdevice_ready --title "Prepare the QDevice machine" \
+      --instruction "Follow qdevice/QDEVICE_MANUAL_SETUP.md, sections 1 through 15. Section 16 (corosync-qnetd) is done by this workflow." \
+      --instruction "If it replaces a failed QDevice, the old machine must already be removed from the Tailscale admin console." \
+      --instruction "Tag the machine tag:proxmox-qdevice. The Tailscale policy must let tag:proxmox-host reach it on tcp:5403 and, while this runs, on tcp:22." \
+      --instruction "On this workstation, remove any host key recorded for the old machine (ssh-keygen -R <hostname>), then run 'ssh <hostname>' once and verify and accept the new host key." \
+      --ack-label "The QDevice machine is ready"
+    return
+  fi
   IFS= read -r -p $'\nPress ENTER when the QDevice machine is ready, or Ctrl-C to stop: ' _ ||
     die "Input ended; no change was made"
 }
@@ -256,8 +265,12 @@ main() {
   log "QDevice added"
   info "${PROXMOX_QDEVICE_HOST} (${QD_IPV4}) is alive and voting on all ${NODE_COUNT} members."
   info "Check it any time with diagnostics/show_qdevice_state.sh."
+  bmac_ui_result qdevice_host "$PROXMOX_QDEVICE_HOST" qdevice_ip "$QD_IPV4" members:int "$NODE_COUNT"
+  bmac_ui_next_step "Check the QDevice any time." --command "diagnostics/show_qdevice_state.sh" \
+    --workflow show_qdevice_state
 }
 
 if [[ "${ADD_QDEVICE_SOURCE_ONLY:-0}" != 1 ]]; then
+  bmac_ui_bootstrap "$@"
   main "$@"
 fi

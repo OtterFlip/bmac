@@ -18,6 +18,7 @@ DW_SCRIPT_NAME=simulate_disk_failure_and_replacement.sh
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=../lib/disk_workflows.sh
 source "${SCRIPT_DIR}/../lib/disk_workflows.sh"
+bmac_ui_bootstrap "$@"
 SIMULATOR="${DW_LIB_DIR}/simulated_disk_failure.sh"
 
 usage() {
@@ -106,6 +107,10 @@ restore_member() {
     printf '  cryptsetup open %s %s && zpool online rpool %s\n' "$target" "$mapper" "$leaf"
     printf 'It asks for the shared rpool LUKS passphrase. Then rerun this script, which\n'
     printf 'sees the member back ONLINE and clears its record of the simulation.\n'
+    bmac_ui_next_step "At the $DW_HOST console, log in as root and bring the member back; it asks for the shared rpool LUKS passphrase." \
+      --command "cryptsetup open $target $mapper && zpool online rpool $leaf"
+    bmac_ui_next_step "Then run this workflow again; it sees the member back ONLINE and clears its record of the simulation." \
+      --workflow simulate_disk_failure_and_replacement --arg "host=$DW_HOST"
     return 0
   fi
   printf '%s\n' "$output"
@@ -124,8 +129,16 @@ confirm_wipe() {
   local serial="$1" vdev="$2" answer
   printf '\nNEXT (IRREVERSIBLE): erase disk %s so it looks like a blank replacement disk.\n' "$serial"
   printf 'Its member of %s cannot be brought back after this.\n' "$vdev"
-  printf 'Type GO to erase disk %s, or anything else to stop before erasing it.\n> ' "$serial"
-  IFS= read -r answer || answer=""
+  if bmac_ui_is_json; then
+    bmac_ui_confirm --id wipe --question --severity critical \
+      --title "Erase disk $serial?" \
+      --message "This is irreversible: disk $serial is erased so it looks like a blank replacement disk, and its member of $vdev cannot be brought back." \
+      --confirm-label "Erase disk $serial" --cancel-label "Stop before erasing" \
+      --text GO && answer=GO || answer=""
+  else
+    printf 'Type GO to erase disk %s, or anything else to stop before erasing it.\n> ' "$serial"
+    IFS= read -r answer || answer=""
+  fi
   [[ "$answer" == GO ]] && return 0
   printf '\nDisk %s was not erased.\n' "$serial"
   if prompt_yes "Bring its member back into $vdev now?"; then
@@ -133,6 +146,8 @@ confirm_wipe() {
   else
     printf 'Its member stays OFFLINE and %s has no redundancy. Rerun this script to\n' "$vdev"
     printf 'erase the disk or to bring the member back.\n'
+    bmac_ui_next_step "$vdev has no redundancy while its member stays OFFLINE. Run this workflow again to erase the disk or to bring the member back." \
+      --workflow simulate_disk_failure_and_replacement --arg "host=$DW_HOST"
   fi
   return 1
 }
@@ -161,6 +176,10 @@ print_next_steps() {
     printf '    forgets the old one. Until then only the surviving disk can boot.\n'
   fi
   printf '  - %s has no redundancy until the replacement finishes resilvering.\n' "$vdev"
+  bmac_ui_next_step "Add a replacement: choose $vdev and disk $serial." \
+    --command "./hosts/add_replacement_disk.sh --host $DW_HOST" \
+    --workflow add_replacement_disk --arg "host=$DW_HOST"
+  bmac_ui_next_step "Do not reboot $DW_HOST until the replacement has finished; $vdev has no redundancy until it finishes resilvering."
 }
 
 # A simulation that stopped between taking the member offline and erasing
@@ -189,7 +208,12 @@ if [[ -n "$PENDING" ]]; then
         printf 'The disk has not been erased yet.\n'
         printf '  1) erase disk %s now (irreversible)\n' "$P_SERIAL"
         printf '  2) bring its member back into %s\n' "$P_VDEV"
-        IFS= read -r -p "Choose 1 or 2 (q to quit): " CHOICE || dw_die "input ended"
+        if bmac_ui_is_json; then
+          bmac_ui_number_choice CHOICE "What should happen to the simulation in progress?" \
+            "Erase disk $P_SERIAL now (irreversible)" "Bring its member back into $P_VDEV"
+        else
+          IFS= read -r -p "Choose 1 or 2 (q to quit): " CHOICE || dw_die "input ended"
+        fi
         case "$CHOICE" in
           1)
             confirm_wipe "$P_SERIAL" "$P_VDEV" || exit 0
@@ -264,6 +288,7 @@ PY
 
 dw_section "Healthy rpool mirrors on $DW_HOST"
 MIRRORS=()
+MIRROR_LABELS=()
 while IFS= read -r row; do
   [[ -n "$row" ]] || continue
   case "$row" in
@@ -282,8 +307,13 @@ for index in "${!MIRRORS[@]}"; do
   [[ "$luks" != luks ]] || encryption="LUKS"
   printf '  %d) %-10s %-12s %-12s disks %s and %s\n' \
     "$((index + 1))" "$vdev" "$label" "$encryption" "$serial_1" "$serial_2"
+  MIRROR_LABELS+=("$vdev  ·  $label  ·  $encryption  ·  disks $serial_1 and $serial_2")
 done
 while true; do
+  if bmac_ui_is_json; then
+    bmac_ui_number_choice CHOICE "Mirror to simulate a failure in" "${MIRROR_LABELS[@]}"
+    break
+  fi
   IFS= read -r -p "Number of the mirror to simulate a failure in (q to quit): " CHOICE ||
     dw_die "input ended"
   [[ "$CHOICE" != q ]] || { printf 'Nothing was changed.\n'; exit 0; }
@@ -301,6 +331,12 @@ printf '  1) serial %-22s %-14s %16s bytes  %-20s %s\n' \
 printf '  2) serial %-22s %-14s %16s bytes  %-20s %s\n' \
   "$SERIAL_2" "$DISK_2" "$SIZE_2" "$MODEL_2" "$PATH_2"
 while true; do
+  if bmac_ui_is_json; then
+    bmac_ui_number_choice CHOICE "Member whose disk fails" \
+      "serial $SERIAL_1  ·  $DISK_1  ·  $SIZE_1 bytes  ·  $MODEL_1" \
+      "serial $SERIAL_2  ·  $DISK_2  ·  $SIZE_2 bytes  ·  $MODEL_2"
+    break
+  fi
   IFS= read -r -p "Number of the member whose disk fails (q to quit): " CHOICE ||
     dw_die "input ended"
   [[ "$CHOICE" != q ]] || { printf 'Nothing was changed.\n'; exit 0; }
@@ -328,7 +364,7 @@ fi
 printf '\nNEXT (reversible): take %s offline' "$LEAF"
 [[ "$LUKS" != luks ]] || printf ' and close its LUKS mapping'
 printf '.\n%s has no redundancy from here until the replacement finishes resilvering.\n' "$VDEV"
-confirm_exact "Take disk $SERIAL's member of $VDEV on $DW_HOST offline."
+confirm_exact "Take disk $SERIAL's member of $VDEV on $DW_HOST offline." "" destructive
 
 dw_section "Taking disk $SERIAL's member of $VDEV offline"
 on_host_simulator offline "$MARKER" "$VDEV" "$SERIAL" ||

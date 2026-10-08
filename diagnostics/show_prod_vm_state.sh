@@ -12,6 +12,9 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+# shellcheck source=../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
+bmac_ui_bootstrap "$@"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
 REMOTE_REGISTRY="/usr/local/lib/app-ha-proxmox/lib/cluster_registry.py"
 
@@ -63,6 +66,7 @@ section() {
   printf '%s\n' "$1"
   printf 'Why: %s\n' "$2"
   hr
+  bmac_ui_step "$1"
 }
 
 run() {
@@ -475,7 +479,12 @@ fi
 section "Hello application deployment (optional)" \
   "report whether app/deploy_hello_app_to_prod.sh has deployed the hello app inside the guest; informational only."
 hello_answer=""
-if [[ -t 0 ]]; then
+if bmac_ui_is_json; then
+  bmac_ui_confirm --id hello_app --question \
+    --title "Check whether the hello app is deployed inside $RESOURCE_NAME?" \
+    --message "This check runs from this workstation using exactly: ssh $RESOURCE_NAME" \
+    --confirm-label "Check it" --cancel-label "Skip" && hello_answer=y
+elif [[ -t 0 ]]; then
   printf 'This check runs from this workstation using exactly: ssh %s\n' "$RESOURCE_NAME"
   read -r -p "Check whether the hello app is deployed inside $RESOURCE_NAME? [y/N] " \
     hello_answer || hello_answer=""
@@ -534,5 +543,11 @@ then
 else
   printf '  [NOT DEPLOYED] The hello app is missing or incomplete on %s; see app/deploy_hello_app_to_prod.sh.\n' \
     "$RESOURCE_NAME"
+  bmac_ui_next_step "The hello app is missing or incomplete on $RESOURCE_NAME." \
+    --command "app/deploy_hello_app_to_prod.sh" --workflow deploy_hello_app_to_prod
 fi
+bmac_ui_step_done
+bmac_ui_result resource "$RESOURCE_NAME" verdict "$( ((verdict_rc == 0)) && echo healthy || echo unhealthy)"
+((verdict_rc == 0)) ||
+  bmac_ui_warning "$RESOURCE_NAME has one or more failed checks; they are marked [FAIL] in the output."
 exit "$verdict_rc"

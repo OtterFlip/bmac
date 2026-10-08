@@ -27,6 +27,10 @@
 # forced: the operator must agree, remove the machine from Tailscale, and
 # confirm that, because the machine keeps this cluster's QDevice certificates.
 
+# shellcheck source=./ui_protocol.sh
+declare -F bmac_ui_is_json >/dev/null ||
+  source "$(dirname -- "${BASH_SOURCE[0]}")/ui_protocol.sh"
+
 # shellcheck source=apt_lock_wait.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/apt_lock_wait.sh"
 
@@ -506,7 +510,14 @@ Proxmox host. The machine keeps this cluster's QDevice certificates, so you
 must remove it from Tailscale first.
 
 EOF
-  read -r -p "Forcefully remove the QDevice from the cluster? [y/N] " answer || answer=""
+  if bmac_ui_is_json; then
+    bmac_ui_confirm --id forced_removal --severity destructive \
+      --title "Forcefully remove the QDevice from the cluster?" \
+      --message "Forced removal does not contact the QDevice machine. You must remove it from Tailscale before continuing." \
+      --confirm-label "Force removal" --cancel-label "Keep it" && answer=yes || answer=""
+  else
+    read -r -p "Forcefully remove the QDevice from the cluster? [y/N] " answer || answer=""
+  fi
   [[ "${answer,,}" == y || "${answer,,}" == yes ]] ||
     qd_fail "Forced QDevice removal was declined; the QDevice is still registered"
   cat <<EOF
@@ -529,8 +540,18 @@ again. Before continuing:
 
 Type exactly, in all-caps, once it has been removed: REMOVED FROM TAILSCALE
 EOF
-  printf '> '
-  read -r confirmation || confirmation=""
+  if bmac_ui_is_json; then
+    bmac_ui_confirm --id removed_from_tailscale --severity critical \
+      --title "Remove the old QDevice from Tailscale now" \
+      --message "The old QDevice machine must never communicate with the cluster again. Remove it from the tailnet in the Tailscale admin console and revoke any auth key that could re-register it." \
+      --detail "Its name may be '${PROXMOX_QDEVICE_HOST}' or a variant such as '${PROXMOX_QDEVICE_HOST}-1'${address:+ (address $address)}; do not remove a replacement." \
+      --detail "If the machine is ever recovered, wipe or reinstall it before it joins any network." \
+      --confirm-label "It has been removed" --text "REMOVED FROM TAILSCALE" &&
+      confirmation="REMOVED FROM TAILSCALE" || confirmation=""
+  else
+    printf '> '
+    read -r confirmation || confirmation=""
+  fi
   [[ "$confirmation" == "REMOVED FROM TAILSCALE" ]] ||
     qd_fail "Confirmation did not match; the QDevice is still registered"
 }

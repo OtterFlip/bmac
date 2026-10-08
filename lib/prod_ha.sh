@@ -12,6 +12,10 @@
 # Callers read and set many of these globals.
 # shellcheck disable=SC2034
 
+# shellcheck source=./ui_protocol.sh
+declare -F bmac_ui_is_json >/dev/null ||
+  source "$(dirname -- "${BASH_SOURCE[0]}")/ui_protocol.sh"
+
 PROD_REMOTE_ROOT="/usr/local/lib/app-ha-proxmox"
 PROD_REMOTE_REGISTRY="${PROD_REMOTE_ROOT}/lib/cluster_registry.py"
 
@@ -44,6 +48,7 @@ REPLICATION_SCHEDULE=""
 
 log() {
   printf '\n==> %s\n' "$*"
+  bmac_ui_step "$*"
 }
 
 info() {
@@ -56,24 +61,39 @@ warn() {
 
 die() {
   printf '\nERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
   exit 1
 }
 
 prompt_with_default() {
   local destination="$1" prompt="$2" default="$3" entered
-  IFS= read -r -p "${prompt} [${default}]: " entered ||
-    die "Input ended before a value was entered"
+  if bmac_ui_is_json; then
+    bmac_ui_text entered "$prompt" "$default"
+  else
+    IFS= read -r -p "${prompt} [${default}]: " entered ||
+      die "Input ended before a value was entered"
+  fi
   printf -v "$destination" '%s' "${entered:-$default}"
 }
 
 prompt_yes() {
   local answer
+  if bmac_ui_is_json; then
+    bmac_ui_ask "$1"
+    return
+  fi
   IFS= read -r -p "$1 [y/N] " answer || return 1
   [[ "${answer,,}" == y || "${answer,,}" == yes ]]
 }
 
 confirm_go() {
   local entered
+  if bmac_ui_is_json; then
+    bmac_ui_confirm --id go --title "Ready to proceed?" --message "$1" \
+      --severity warning --confirm-label Continue --text GO &&
+      return 0
+    die "The change was not confirmed; no change was made"
+  fi
   printf '%s\nType GO to continue.\n> ' "$1"
   IFS= read -r entered || entered=""
   [[ "$entered" == GO ]] ||
@@ -387,7 +407,26 @@ if rows:
 PY
   )"
   [[ -n "$default" ]] || die "No active production VM is registered"
-  prompt_with_default selection "$prompt" "$default"
+  if bmac_ui_is_json; then
+    local -a options=()
+    mapfile -t options < <(python3 - "${RUN_DIR}/resources.json" <<'PY'
+import json
+import sys
+rows = [
+    row
+    for row in json.load(open(sys.argv[1], encoding="utf-8"))
+    if row.get("kind") == "production" and row.get("state") == "active"
+]
+rows.sort(key=lambda row: row.get("index", 0))
+for row in rows:
+    print(row["name"])
+    print(f"{row['name']} · {row.get('domains', {}).get('primary', '-')} · owner {row.get('owner_node') or '-'}")
+PY
+    )
+    bmac_ui_choose selection "$prompt" "$default" "${options[@]}"
+  else
+    prompt_with_default selection "$prompt" "$default"
+  fi
   parse_selected_production "$selection" ||
     die "Invalid production VM selection"
 }

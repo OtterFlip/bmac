@@ -17,6 +17,9 @@ fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+# shellcheck source=../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
+bmac_ui_bootstrap "$@"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
 STORAGE_LIB="${REPO_ROOT}/lib/host_storage.py"
 REMOTE_REGISTRY="/usr/local/lib/app-ha-proxmox/lib/cluster_registry.py"
@@ -58,7 +61,11 @@ while (($#)); do
       ;;
   esac
 done
-if [[ -z "$HOST" ]]; then
+if [[ -z "$HOST" ]] && bmac_ui_is_json; then
+  bmac_ui_input HOST --id host --label "Target Proxmox host" --default mox1 \
+    --required --pattern '^mox([1-9]|10)$'
+  HOST="${HOST:-mox1}"
+elif [[ -z "$HOST" ]]; then
   IFS= read -r -p "Target Proxmox host [mox1]: " HOST || {
     printf 'ERROR: input ended\n' >&2
     exit 2
@@ -110,6 +117,7 @@ section() {
   printf '%s\n' "$1"
   printf 'Why: %s\n' "$2"
   hr
+  bmac_ui_step "$1"
 }
 
 run() {
@@ -400,9 +408,13 @@ run "Mounted filesystem capacity" on_host df -hT -x tmpfs -x devtmpfs
 
 section "Proxmox host diagnostic verdict" \
   "summarize whether anything above needs an operator's attention."
+bmac_ui_step_done
 if ((ATTENTION == 0)); then
   printf '  [OK] %s has no attention items.\n' "$HOST"
+  bmac_ui_result host "$HOST" verdict ok
   exit 0
 fi
 printf '  [ATTENTION] %s has one or more attention items above.\n' "$HOST"
+bmac_ui_result host "$HOST" verdict attention
+bmac_ui_warning "$HOST has one or more attention items; they are marked [ATTENTION] in the output."
 exit 1

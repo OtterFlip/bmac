@@ -13,6 +13,8 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
 PROD_HA_LIB="${REPO_ROOT}/lib/prod_ha.sh"
 
@@ -173,12 +175,21 @@ choose_target() {
   ((${#candidates[@]} > 0)) ||
     die "$RESOURCE_NAME has no other placement host; add one with guests/prod/change_prod_vm_placement.sh"
   printf '\n%s runs on %s. It can be relocated to:\n' "$RESOURCE_NAME" "$OWNER_NODE"
-  local staging
+  local staging memory
+  local -a options=()
   for node in "${candidates[@]}"; do
     staging="$(staging_on_node "$node" | awk '{print $1}' | paste -sd, -)"
-    printf '  %-6s %s; staging VMs: %s\n' "$node" "$(node_memory_line "$node")" \
-      "${staging:-none}"
+    memory="$(node_memory_line "$node")"
+    printf '  %-6s %s; staging VMs: %s\n' "$node" "$memory" "${staging:-none}"
+    options+=("$node" "$node · $memory; staging VMs: ${staging:-none}")
   done
+  if bmac_ui_is_json; then
+    bmac_ui_choose TARGET_NODE "New owner for $RESOURCE_NAME (now on $OWNER_NODE)" \
+      "${candidates[0]}" "${options[@]}"
+    list_contains "$TARGET_NODE" "${candidates[@]}" ||
+      die "$TARGET_NODE is not a placement host of $RESOURCE_NAME"
+    return 0
+  fi
   while true; do
     prompt_with_default TARGET_NODE "New owner for $RESOURCE_NAME (q to quit)" \
       "${candidates[0]}"
@@ -329,8 +340,12 @@ main() {
   info "$RESOURCE_NAME (VMID $VMID) moved from $previous to $OWNER_NODE"
   info "Replication: $(for job in "${REPLICATION_JOBS[@]}"; do printf '%s->%s ' "$job" "${REPLICATION_TARGET[$job]}"; done)"
   info "Verify the application, for example with: ssh $RESOURCE_NAME"
+  bmac_ui_result resource "$RESOURCE_NAME" vmid "$VMID" previous_owner "$previous" owner "$OWNER_NODE"
+  bmac_ui_next_step "Verify the application on its new owner." --command "ssh $RESOURCE_NAME"
+  bmac_ui_next_step "Check the production VM state." --workflow show_prod_vm_state --arg "resource=$RESOURCE_NAME"
 }
 
 if [[ "${CHANGE_PROD_OWNER_SOURCE_ONLY:-0}" != 1 ]]; then
+  bmac_ui_bootstrap "$@"
   main "$@"
 fi

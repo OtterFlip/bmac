@@ -1,0 +1,391 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bmac.invalid/protocol/bmac-ui-v1.schema.json",
+  "title": "bmac-ui protocol, version 1",
+  "description": "NDJSON exchanged between a BMAC operator script started with --json (through lib/ui_json_run.sh) and the controlling program, normally the BMAC dashboard. Each line of the script's stdout is one Event; each line written to its stdin is one Message. Unknown keys are ignored by readers. The dashboard engine (dashboard/engine/src/protocol.rs) additionally enforces the length and count limits noted here.",
+  "oneOf": [
+    { "$ref": "#/$defs/Event" },
+    { "$ref": "#/$defs/Message" }
+  ],
+  "$defs": {
+    "Identifier": {
+      "description": "Request, field, phase, and workflow ids: at most 128 ASCII letters, digits, and _ - . :",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+    },
+    "Text": {
+      "description": "Free text. The engine truncates text longer than 64 KiB.",
+      "type": "string"
+    },
+    "Severity": { "enum": ["normal", "warning", "destructive", "critical"] },
+    "FieldType": {
+      "enum": [
+        "string", "multiline", "integer", "number", "boolean", "password",
+        "select", "multiselect", "hostname", "ip_address", "cidr",
+        "mac_address", "path", "file", "directory", "ssh_public_key",
+        "duration", "bytes"
+      ]
+    },
+    "FieldOption": {
+      "type": "object",
+      "required": ["value", "label"],
+      "properties": {
+        "value": { "type": "string" },
+        "label": { "type": "string" },
+        "help": { "type": "string" }
+      }
+    },
+    "Field": {
+      "description": "One input. A password field is always sensitive; sensitive fields never carry a default and their values are redacted from history and logs.",
+      "type": "object",
+      "required": ["id", "type", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Identifier" },
+        "type": { "$ref": "#/$defs/FieldType" },
+        "label": { "$ref": "#/$defs/Text" },
+        "help": { "$ref": "#/$defs/Text" },
+        "required": { "type": "boolean", "default": false },
+        "default": { "description": "Typed default: string, number, boolean, or a list of strings for multiselect." },
+        "placeholder": { "type": "string" },
+        "suffix": { "type": "string", "description": "Unit shown after the input, such as GiB." },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "min_selected": { "type": "integer", "minimum": 0 },
+        "max_selected": { "type": "integer", "minimum": 0 },
+        "pattern": { "type": "string", "description": "A regular expression the whole value must match." },
+        "sensitive": { "type": "boolean", "default": false },
+        "disabled": { "type": "boolean", "default": false },
+        "options": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/FieldOption" } },
+        "filters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "extensions"],
+            "properties": {
+              "name": { "type": "string" },
+              "extensions": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "enum": ["select", "multiselect"] } } },
+          "then": { "required": ["options"], "properties": { "options": { "minItems": 1 } } }
+        },
+        {
+          "if": { "anyOf": [
+            { "properties": { "type": { "const": "password" } } },
+            { "properties": { "sensitive": { "const": true } }, "required": ["sensitive"] }
+          ] },
+          "then": { "not": { "required": ["default"] } }
+        }
+      ]
+    },
+    "PlanItem": {
+      "type": "object",
+      "required": ["kind", "target", "description"],
+      "properties": {
+        "kind": { "enum": ["create", "update", "remove", "keep", "check"] },
+        "target": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+
+    "Event": {
+      "description": "One line of script output.",
+      "type": "object",
+      "required": ["type"],
+      "oneOf": [
+        { "$ref": "#/$defs/ProtocolEvent" },
+        { "$ref": "#/$defs/WorkflowStartedEvent" },
+        { "$ref": "#/$defs/WorkflowMetadataEvent" },
+        { "$ref": "#/$defs/InputEvent" },
+        { "$ref": "#/$defs/InputGroupEvent" },
+        { "$ref": "#/$defs/ConfirmEvent" },
+        { "$ref": "#/$defs/ManualActionEvent" },
+        { "$ref": "#/$defs/ProgressEvent" },
+        { "$ref": "#/$defs/PhaseEvent" },
+        { "$ref": "#/$defs/PlanEvent" },
+        { "$ref": "#/$defs/InfoEvent" },
+        { "$ref": "#/$defs/WarningEvent" },
+        { "$ref": "#/$defs/ErrorEvent" },
+        { "$ref": "#/$defs/ValidationErrorEvent" },
+        { "$ref": "#/$defs/LogEvent" },
+        { "$ref": "#/$defs/ResultEvent" },
+        { "$ref": "#/$defs/NextStepEvent" },
+        { "$ref": "#/$defs/CompletedEvent" }
+      ]
+    },
+    "ProtocolEvent": {
+      "description": "Always the first line.",
+      "type": "object",
+      "required": ["type", "protocol", "version"],
+      "properties": {
+        "type": { "const": "protocol" },
+        "protocol": { "const": "bmac-ui" },
+        "version": { "const": 1 },
+        "bmac_version": { "type": "string" }
+      }
+    },
+    "WorkflowStartedEvent": {
+      "type": "object",
+      "required": ["type", "workflow", "run_id"],
+      "properties": {
+        "type": { "const": "workflow_started" },
+        "workflow": { "type": "string", "description": "The script's basename without .sh; equal to its dashboard workflow id." },
+        "run_id": { "$ref": "#/$defs/Identifier" },
+        "script": { "type": "string", "description": "Path relative to the repository root." },
+        "argv": { "type": "array", "items": { "type": "string" }, "description": "Arguments after --json was removed." },
+        "pid": { "type": "integer" },
+        "started_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "WorkflowMetadataEvent": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "workflow_metadata" },
+        "workflow": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "destructive": { "type": "boolean" },
+        "supports_dry_run": { "type": "boolean" },
+        "supports_cancel": { "type": "boolean" }
+      }
+    },
+    "InputEvent": {
+      "description": "A request for one value. Answer with a ValuesResponse keyed by the field id.",
+      "type": "object",
+      "required": ["type", "request_id", "field"],
+      "properties": {
+        "type": { "const": "input" },
+        "request_id": { "$ref": "#/$defs/Identifier" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "context": { "type": "string", "description": "Text the script showed a terminal user just before asking, such as a menu or table." },
+        "field": { "$ref": "#/$defs/Field" }
+      }
+    },
+    "InputGroupEvent": {
+      "description": "A form of related fields, answered together with one ValuesResponse.",
+      "type": "object",
+      "required": ["type", "request_id", "title", "fields"],
+      "properties": {
+        "type": { "const": "input_group" },
+        "request_id": { "$ref": "#/$defs/Identifier" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "context": { "type": "string" },
+        "layout": { "type": "string" },
+        "fields": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/Field" } }
+      }
+    },
+    "ConfirmEvent": {
+      "description": "A yes/no confirmation. With confirmation_text the operator must type that exact phrase before confirming.",
+      "type": "object",
+      "required": ["type", "request_id", "title"],
+      "properties": {
+        "type": { "const": "confirm" },
+        "request_id": { "$ref": "#/$defs/Identifier" },
+        "title": { "type": "string" },
+        "message": { "type": "string", "default": "" },
+        "severity": { "$ref": "#/$defs/Severity", "default": "normal" },
+        "confirm_label": { "type": "string" },
+        "cancel_label": { "type": "string" },
+        "confirmation_text": { "type": "string" },
+        "context": { "type": "string" },
+        "details": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "ManualActionEvent": {
+      "description": "Something the operator does outside the dashboard, such as typing a LUKS passphrase at a host console. Nothing secret passes through the protocol; answer with an AcknowledgeResponse.",
+      "type": "object",
+      "required": ["type", "request_id", "title", "instructions"],
+      "properties": {
+        "type": { "const": "manual_action" },
+        "request_id": { "$ref": "#/$defs/Identifier" },
+        "title": { "type": "string" },
+        "instructions": { "type": "array", "items": { "type": "string" } },
+        "acknowledge_label": { "type": "string" },
+        "context": { "type": "string" }
+      }
+    },
+    "ProgressEvent": {
+      "type": "object",
+      "required": ["type", "message"],
+      "properties": {
+        "type": { "const": "progress" },
+        "message": { "type": "string" },
+        "current": { "type": "number" },
+        "total": { "type": "number" },
+        "unit": { "type": "string" },
+        "phase": { "$ref": "#/$defs/Identifier" }
+      }
+    },
+    "PhaseEvent": {
+      "description": "A named step. cancel_allowed:false marks a phase that must not be interrupted; the dashboard then refuses to send SIGINT.",
+      "type": "object",
+      "required": ["type", "id", "label", "status"],
+      "properties": {
+        "type": { "const": "phase" },
+        "id": { "$ref": "#/$defs/Identifier" },
+        "label": { "type": "string" },
+        "status": { "enum": ["pending", "running", "complete", "failed", "skipped"] },
+        "cancel_allowed": { "type": "boolean" }
+      }
+    },
+    "PlanEvent": {
+      "description": "What the workflow is about to change (or, with dry_run, would change).",
+      "type": "object",
+      "required": ["type", "title", "items"],
+      "properties": {
+        "type": { "const": "plan" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/PlanItem" } },
+        "dry_run": { "type": "boolean", "default": false }
+      }
+    },
+    "InfoEvent": {
+      "type": "object",
+      "required": ["type", "message"],
+      "properties": { "type": { "const": "info" }, "message": { "type": "string" } }
+    },
+    "WarningEvent": {
+      "type": "object",
+      "required": ["type", "message"],
+      "properties": { "type": { "const": "warning" }, "message": { "type": "string" } }
+    },
+    "ErrorEvent": {
+      "description": "A failure, or with code malformed_response a rejected response after which the script waits again.",
+      "type": "object",
+      "required": ["type", "message"],
+      "properties": {
+        "type": { "const": "error" },
+        "code": { "type": "string", "examples": ["failed", "malformed_response", "input_closed", "python_missing"] },
+        "message": { "type": "string" },
+        "details": { "type": "string" },
+        "recoverable": { "type": "boolean", "default": false }
+      }
+    },
+    "ValidationErrorEvent": {
+      "description": "The script rejected the values for an outstanding input or input group; the same request is open again.",
+      "type": "object",
+      "required": ["type", "request_id"],
+      "properties": {
+        "type": { "const": "validation_error" },
+        "request_id": { "$ref": "#/$defs/Identifier" },
+        "field_errors": { "type": "object", "additionalProperties": { "type": "string" } },
+        "message": { "type": "string" }
+      }
+    },
+    "LogEvent": {
+      "description": "A line the script printed. The runner wraps all plain stdout and stderr output this way, so printed JSON can never pose as an event.",
+      "type": "object",
+      "required": ["type", "text"],
+      "properties": {
+        "type": { "const": "log" },
+        "stream": { "enum": ["stdout", "stderr"] },
+        "level": { "enum": ["debug", "info", "warning", "error"], "default": "info" },
+        "text": { "$ref": "#/$defs/Text" },
+        "source": { "type": "string" }
+      }
+    },
+    "ResultEvent": {
+      "description": "Structured outcome data. The shape is specific to each workflow; the last result of a run is the one shown.",
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": { "type": { "const": "result" }, "data": {} }
+    },
+    "NextStepEvent": {
+      "description": "A suggested follow-up. command is what a terminal user would run; workflow and args let the dashboard offer to launch it with those parameter values.",
+      "type": "object",
+      "required": ["type", "text"],
+      "properties": {
+        "type": { "const": "next_step" },
+        "text": { "type": "string" },
+        "command": { "type": "string" },
+        "workflow": { "$ref": "#/$defs/Identifier" },
+        "args": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "CompletedEvent": {
+      "description": "Always the last line, written by the runner. success means exit status 0; cancelled means the operator cancelled or declined (or exit status 3, or a signal); anything else is failed.",
+      "type": "object",
+      "required": ["type", "status"],
+      "properties": {
+        "type": { "const": "completed" },
+        "status": { "enum": ["success", "failed", "cancelled"] },
+        "message": { "type": "string" },
+        "exit_code": { "type": "integer" },
+        "finished_at": { "type": "string", "format": "date-time" }
+      }
+    },
+
+    "Message": {
+      "description": "One line written to the script's stdin.",
+      "oneOf": [
+        { "$ref": "#/$defs/ValuesResponse" },
+        { "$ref": "#/$defs/ConfirmResponse" },
+        { "$ref": "#/$defs/AcknowledgeResponse" },
+        { "$ref": "#/$defs/CancelledResponse" },
+        { "$ref": "#/$defs/CancelMessage" }
+      ]
+    },
+    "ValuesResponse": {
+      "description": "Answers an input or input_group. Values are strings, numbers, booleans, null, or lists of those (multiselect); keys are field ids.",
+      "type": "object",
+      "required": ["type", "request_id", "values"],
+      "properties": {
+        "type": { "const": "response" },
+        "request_id": { "$ref": "#/$defs/Identifier" },
+        "values": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z0-9_.-]+$" },
+          "additionalProperties": {
+            "anyOf": [
+              { "type": ["string", "number", "boolean", "null"] },
+              { "type": "array", "items": { "type": ["string", "number", "boolean", "null"] } }
+            ]
+          }
+        }
+      }
+    },
+    "ConfirmResponse": {
+      "type": "object",
+      "required": ["type", "request_id", "confirmed"],
+      "properties": {
+        "type": { "const": "response" },
+        "request_id": { "$ref": "#/$defs/Identifier" },
+        "confirmed": { "type": "boolean" }
+      }
+    },
+    "AcknowledgeResponse": {
+      "type": "object",
+      "required": ["type", "request_id", "acknowledged"],
+      "properties": {
+        "type": { "const": "response" },
+        "request_id": { "$ref": "#/$defs/Identifier" },
+        "acknowledged": { "const": true }
+      }
+    },
+    "CancelledResponse": {
+      "description": "Cancels the run from an open request; the script exits with status 3.",
+      "type": "object",
+      "required": ["type", "request_id", "cancelled"],
+      "properties": {
+        "type": { "const": "response" },
+        "request_id": { "$ref": "#/$defs/Identifier" },
+        "cancelled": { "const": true }
+      }
+    },
+    "CancelMessage": {
+      "description": "Cancels the run at its next request; the script exits with status 3. Between requests the dashboard cancels with SIGINT instead.",
+      "type": "object",
+      "required": ["type"],
+      "properties": { "type": { "const": "cancel" } }
+    }
+  }
+}

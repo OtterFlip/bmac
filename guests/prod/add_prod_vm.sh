@@ -14,6 +14,8 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
 REMOTE_INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_INSTALL_ROOT}/lib/cluster_registry.py"
@@ -42,6 +44,8 @@ ROOT_PASSWORD_HASH=""
 INSTALL_PHASE="unknown"
 FINAL_NETWORK_ENABLED=true
 STORED_FINAL_NETWORK_ENABLED=""
+CONTINUE_AFTER_INSTALL=false
+DELETE_SOURCE_ISO_CACHE=""
 STARTUP_SCRIPT_PATH=""
 STARTUP_SCRIPT_CONTENT=""
 STARTUP_SHA256="none"
@@ -70,6 +74,7 @@ declare -a REPLICATION_TARGETS=()
 
 log() {
   printf '\n==> %s\n' "$*"
+  bmac_ui_step "$*"
 }
 
 info() {
@@ -86,6 +91,7 @@ die() {
     printf 'Registry allocation %s was preserved for a safe rerun.\n' \
       "$RESOURCE_NAME" >&2
   fi
+  bmac_ui_error failed "$*"
   exit 1
 }
 
@@ -172,30 +178,55 @@ parse_args() {
 
 prompt_with_default() {
   local destination="$1" prompt="$2" default="$3" entered
+  if bmac_ui_is_json; then
+    bmac_ui_text entered "$prompt" "$default"
+    printf -v "$destination" '%s' "${entered:-$default}"
+    return 0
+  fi
   IFS= read -r -p "${prompt} [${default}]: " entered
   printf -v "$destination" '%s' "${entered:-$default}"
 }
 
 prompt_optional() {
   local destination="$1" prompt="$2" entered
+  if bmac_ui_is_json; then
+    bmac_ui_text entered "$prompt"
+    printf -v "$destination" '%s' "$entered"
+    return 0
+  fi
   IFS= read -r -p "${prompt}: " entered
   printf -v "$destination" '%s' "$entered"
 }
 
 prompt_yes() {
   local answer
+  if bmac_ui_is_json; then
+    bmac_ui_ask "$1"
+    return
+  fi
   IFS= read -r -p "$1 [y/N] " answer
   [[ "${answer,,}" == y || "${answer,,}" == yes ]]
 }
 
 prompt_yes_default_yes() {
   local answer
+  if bmac_ui_is_json; then
+    bmac_ui_ask "$1"
+    return
+  fi
   IFS= read -r -p "$1 [Y/n] " answer || answer=""
   [[ -z "$answer" || "${answer,,}" == y || "${answer,,}" == yes ]]
 }
 
 prompt_boolean_default() {
   local destination="$1" prompt="$2" default="$3" entered
+  if bmac_ui_is_json; then
+    local _value
+    bmac_ui_input _value --id "${destination,,}" --type boolean --label "$prompt" \
+      --default "$([[ "${default,,}" =~ ^(true|y|yes)$ ]] && echo true || echo false)"
+    printf -v "$destination" '%s' "$([[ "$_value" == true ]] && echo true || echo false)"
+    return 0
+  fi
   IFS= read -r -p "${prompt} [${default}]: " entered
   entered="${entered:-$default}"
   case "${entered,,}" in
@@ -207,6 +238,10 @@ prompt_boolean_default() {
 
 confirm_exact_local() {
   local prompt="$1" _legacy_phrase="${2:-}" entered
+  if bmac_ui_is_json; then
+    bmac_ui_confirm_go "$1" || die "Confirmation did not match GO; no further action was taken"
+    return 0
+  fi
   printf '%s\nType GO to continue.\n> ' "$prompt"
   IFS= read -r entered
   [[ "$entered" == GO ]] ||
@@ -866,8 +901,14 @@ select_startup_script() {
     return
   fi
 
-  prompt_optional startup_path_input \
-    "Optional local startup.sh path (blank for none; must be idempotent)"
+  if bmac_ui_is_json; then
+    bmac_ui_input startup_path_input --id startup_script --type file \
+      --label "startup.sh to run once in the guest (optional)" \
+      --help "A UTF-8 file named startup.sh with a shebang, at most 256 KiB. It retries after failure, so it must be idempotent."
+  else
+    prompt_optional startup_path_input \
+      "Optional local startup.sh path (blank for none; must be idempotent)"
+  fi
   if [[ -z "$startup_path_input" ]]; then
     [[ -z "$required_hash" ]] ||
       die "Resume requires the previously selected startup.sh"
@@ -928,10 +969,120 @@ collect_install_options() {
     "$FINAL_NETWORK_ENABLED" != "$STORED_FINAL_NETWORK_ENABLED" ]]; then
     die "Networking choice differs from the durable resume contract"
   fi
+  collect_post_install_options
+}
+
+# The unattended installer powers the VM off only after a complete install, so
+# an observed poweroff can stand in for the console confirmation. Asking now
+# keeps the run from stalling on prompts after the long installer wait. Manual
+# installs keep the console confirmation: the operator is already there.
+collect_post_install_options() {
+  CONTINUE_AFTER_INSTALL=false
+  DELETE_SOURCE_ISO_CACHE=""
+  [[ "$PROD_GUEST_OS_INSTALL_MODE" != manual ]] || return 0
+  info "When the unattended installer powers the VM off, the script can start it and continue"
+  info "on its own instead of waiting for you to confirm the install from the Proxmox console."
+  prompt_boolean_default CONTINUE_AFTER_INSTALL \
+    "Start the VM automatically after the OS install?" yes
+  [[ "$CONTINUE_AFTER_INSTALL" == true ]] || return 0
+  info "Keeping the verified source ISO cached lets later installs on the same node skip the download."
+  prompt_boolean_default DELETE_SOURCE_ISO_CACHE \
+    "Delete the cached source ISO after the install?" yes
+}
+
+# The JSON-mode form of collect_new_request: one form, validated as a whole
+# with the same rules. Sets the same globals the terminal prompts do.
+collect_new_request_json() {
+  local placement_csv="" aliases_raw="" allocation_choice="" message node
+  local -a node_options=()
+  [[ "$PROD_VM_MEMORY_GIB" =~ ^[1-9][0-9]*$ ]] ||
+    die "PROD_VM_MEMORY_GIB must be a positive integer"
+  for node in "${ONLINE_NODES[@]}"; do
+    node_options+=(--option "$node" "$node")
+  done
+  bmac_ui_group_begin new_production "New production VM ($PURPOSE_SLUG)" \
+    "Sparse allocation lets an fstrim inside the guest return freed space to rpool; with full allocation the disks of this VM's hosts cannot later be decommissioned by any BMAC script."
+  bmac_ui_group_add placement_csv --id placement --type multiselect \
+    --label "Placement nodes (minimum two)" --required --min-selected 2 \
+    --default "$(IFS=,; printf '%s' "${ONLINE_NODES[*]}")" "${node_options[@]}"
+  bmac_ui_group_add INITIAL_NODE --id initial_node --type select \
+    --label "Initial installation node" --required --default "${ONLINE_NODES[0]}" \
+    "${node_options[@]}"
+  bmac_ui_group_add PRIMARY_DOMAIN --id primary_domain --label "Primary production FQDN" \
+    --placeholder example.com --required
+  bmac_ui_group_add aliases_raw --id aliases --label "Alias domains (comma-separated, optional)" \
+    --placeholder "www.example.com"
+  bmac_ui_group_add VM_CORES --id cores --type integer --label "CPU cores" \
+    --default "$PROD_VM_CORES" --min 1 --required
+  bmac_ui_group_add VM_MEMORY_GIB --id memory_gib --type integer --label "RAM" --suffix GiB \
+    --default "$PROD_VM_MEMORY_GIB" --min 1 --required
+  bmac_ui_group_add VM_DISK_GIB --id disk_gib --type integer --label "Root disk" --suffix GiB \
+    --default "$PROD_VM_DISK_GB" --min 1 --required
+  bmac_ui_group_add allocation_choice --id allocation --type select --label "Disk allocation" \
+    --default sparse --required --option sparse "Sparse (recommended)" \
+    --option full "Full (refreservation)"
+  bmac_ui_group_add REPLICATION_MINUTES --id replication_minutes --type integer \
+    --label "Replication interval" --suffix minutes \
+    --default "$DEFAULT_REPLICATION_MINUTES" --min 1 --required
+  while true; do
+    bmac_ui_group_request
+    if ! message="$(validate_placement_csv "$placement_csv" 2>&1 >/dev/null)"; then
+      bmac_ui_field_error placement "${message:-Invalid placement selection}"
+    elif [[ ",$placement_csv," != *",$INITIAL_NODE,"* ]]; then
+      bmac_ui_field_error initial_node "The initial node must be one of the placement nodes"
+    fi
+    # shellcheck disable=SC2030,SC2031 # A dry run in a subshell; applied below.
+    if ! message="$( (
+      die() { printf '%s\n' "$*" >&2; exit 1; }
+      PRIMARY_DOMAIN="$(normalize_domain "$PRIMARY_DOMAIN" 2>&1)" || die "$PRIMARY_DOMAIN"
+      split_and_normalize_aliases "$aliases_raw"
+      [[ "staging.${PRIMARY_DOMAIN}" != "$PRIMARY_DOMAIN" ]] ||
+        die "Staging DNS base must differ from the primary domain"
+      for alias in "${ALIAS_DOMAINS[@]}"; do
+        [[ "staging.${PRIMARY_DOMAIN}" != "$alias" ]] ||
+          die "Staging DNS base must differ from every alias"
+      done
+    ) 2>&1 >/dev/null)"; then
+      if [[ "$message" == *alias* || "$message" == *Alias* ]]; then
+        bmac_ui_field_error aliases "$(tail -n 1 <<<"$message")"
+      else
+        bmac_ui_field_error primary_domain "$(tail -n 1 <<<"$message")"
+      fi
+    fi
+    local field name
+    for field in VM_CORES:cores VM_MEMORY_GIB:memory_gib VM_DISK_GIB:disk_gib \
+      REPLICATION_MINUTES:replication_minutes; do
+      name="${field%%:*}"
+      [[ "${!name}" =~ ^[1-9][0-9]*$ ]] ||
+        bmac_ui_field_error "${field#*:}" "Enter a positive whole number"
+    done
+    bmac_ui_group_check && break
+  done
+  placement_csv="$(validate_placement_csv "$placement_csv")" ||
+    die "Invalid placement selection"
+  IFS=',' read -r -a PLACEMENT_NODES <<<"$placement_csv"
+  # shellcheck disable=SC2031
+  PRIMARY_DOMAIN="$(normalize_domain "$PRIMARY_DOMAIN")" ||
+    die "Invalid primary domain"
+  split_and_normalize_aliases "$aliases_raw"
+  STAGING_DNS_BASE="$(normalize_domain "staging.${PRIMARY_DOMAIN}")" ||
+    die "Invalid staging DNS base"
+  VM_MEMORY_MB=$((VM_MEMORY_GIB * 1024))
+  if [[ "$allocation_choice" == full ]]; then
+    DISK_ALLOCATION="reserved"
+    warn "Full allocation keeps freed space reserved to this VM; hosts/decommission_disks.sh cannot reclaim it"
+  else
+    DISK_ALLOCATION="sparse"
+  fi
+  collect_install_options
 }
 
 collect_new_request() {
   local default_placement placement_csv aliases_raw
+  if bmac_ui_is_json; then
+    collect_new_request_json
+    return
+  fi
   default_placement="$(IFS=,; printf '%s' "${ONLINE_NODES[*]}")"
   prompt_with_default placement_csv \
     "Eligible placement nodes (comma-separated; minimum two)" \
@@ -1008,8 +1159,14 @@ reserve_or_resume_resource() {
 
   info "The purpose slug is an arbitrary application/workload label and resume key;"
   info "it does not select the production or staging role."
-  prompt_with_default purpose \
-    "Application/workload purpose slug to create or resume" "production"
+  if bmac_ui_is_json; then
+    bmac_ui_input purpose --id purpose --label "Application/workload purpose slug" \
+      --help "An arbitrary label and resume key, such as production; it does not select the production or staging role. An existing purpose resumes its allocation." \
+      --default production --required --pattern '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'
+  else
+    prompt_with_default purpose \
+      "Application/workload purpose slug to create or resume" "production"
+  fi
   [[ "$purpose" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ && ${#purpose} -le 63 ]] ||
     die "Purpose must be a lowercase slug of at most 63 characters"
   existing="$(find_existing_purpose "$purpose")" ||
@@ -1079,6 +1236,7 @@ PY
       info "Allocation: $DISK_ALLOCATION; replication: */$REPLICATION_MINUTES"
       info "Guest OS install mode: $PROD_GUEST_OS_INSTALL_MODE"
       info "Final networking: $FINAL_NETWORK_ENABLED"
+      info "Start automatically after the OS install: $CONTINUE_AFTER_INSTALL"
       info "startup.sh: ${STARTUP_SCRIPT_PATH:-none}"
       return 10
     fi
@@ -1909,8 +2067,17 @@ offer_source_iso_cache_removal() {
   printf '\nSOURCE ISO CACHE\n'
   info "The verified source installer ISO is still cached on ${INITIAL_NODE}: $SOURCE_ISO_CACHE_PATH"
   info "Keeping it lets later production VM installs on $INITIAL_NODE skip the download. If it is deleted, the next install downloads and verifies it again."
-  prompt_yes_default_yes "Delete the cached source ISO from $INITIAL_NODE now?" ||
-    return 0
+  case "$DELETE_SOURCE_ISO_CACHE" in
+    true) info "Deleting it, as chosen before the install." ;;
+    false)
+      info "Keeping it, as chosen before the install."
+      return 0
+      ;;
+    *)
+      prompt_yes_default_yes "Delete the cached source ISO from $INITIAL_NODE now?" ||
+        return 0
+      ;;
+  esac
   # The builder holds this lock while it reads the cache, so deletion cannot
   # pull the source out from under a concurrent production install.
   if node_exec "$INITIAL_NODE" flock -w 900 "${SOURCE_ISO_CACHE_PATH%.iso}.lock" \
@@ -2007,16 +2174,30 @@ install_or_resume_os() {
   if [[ "$INSTALL_PHASE" == installer-started ]]; then
     [[ -n "$ATTACHED_ISO_VOLUME" ]] ||
       die "Installer-started sentinel has no attached installer; refusing to guess"
+    local result="" watched_poweroff=false
     if [[ "$VM_LIVE_STATUS" == running ]]; then
       info "Installer is already running on $OWNER_NODE"
       wait_for_vm_stopped
+      watched_poweroff=true
     elif [[ "$VM_LIVE_STATUS" != stopped ]]; then
       die "Installer VM entered unexpected status: $VM_LIVE_STATUS"
     fi
-    local result
-    printf '%s\nType GO to preserve the installed disk, or WIPE to rerun the installer.\n> ' \
-      "Inspect the Proxmox console before choosing."
-    IFS= read -r result
+    if [[ "$watched_poweroff" == true && "$CONTINUE_AFTER_INSTALL" == true ]]; then
+      info "VM $VMID powered off after the unattended install; continuing automatically as chosen."
+      result=GO
+    elif bmac_ui_is_json; then
+      bmac_ui_choose result "The installer stopped: inspect the Proxmox console of VM $VMID on $OWNER_NODE before choosing." "" \
+        GO "Preserve the installed disk" WIPE "Rerun the installer (erases the root disk)"
+      if [[ "$result" == WIPE ]]; then
+        bmac_ui_confirm --id wipe --severity destructive --title "Rerun the installer for $RESOURCE_NAME?" \
+          --message "Rerunning the installer erases the root disk of VM $VMID." \
+          --confirm-label "Rerun installer" --text WIPE || result=""
+      fi
+    else
+      printf '%s\nType GO to preserve the installed disk, or WIPE to rerun the installer.\n> ' \
+        "Inspect the Proxmox console before choosing."
+      IFS= read -r result
+    fi
     if [[ "$result" == GO ]]; then
       set_install_phase installed-confirmed
       detach_and_delete_iso
@@ -2042,19 +2223,34 @@ install_or_resume_os() {
   else
     info "The unattended installer must finish by powering the VM off."
   fi
+  if bmac_ui_is_json && [[ "$PROD_GUEST_OS_INSTALL_MODE" == manual ]]; then
+    bmac_ui_manual_action --id manual_install --title "Prepare the manual install of $RESOURCE_NAME" \
+      --instruction "Open the Proxmox console of VM $VMID on $OWNER_NODE (https://${OWNER_NODE}:8006/)." \
+      --instruction "Install a 64-bit systemd Linux with Python 3: hostname ${RESOURCE_NAME}, NIC lan0 (MAC ${VM_MAC}) at ${PROD_PRIVATE_IP}/24 via ${GUEST_GATEWAY}, DNS $(IFS=,; printf '%s' "${DNS_SERVERS[*]}")." \
+      --instruction "Enable qemu-guest-agent and ssh, key-only root SSH with both admin keys, and the root console password from PROD_GUEST_VM_ROOT_PASSWORD. Do not install Tailscale." \
+      --instruction "Power the guest off when finished. The full contract is in the script output." \
+      --ack-label "I have read the contract"
+  fi
   confirm_exact_local "Start the guest OS installation now?" \
     "INSTALL ${RESOURCE_NAME}"
   log "Starting guest OS installation"
   info "Starting $RESOURCE_NAME (VMID $VMID) from its attached installer ISO."
   info "Monitor the console at https://${OWNER_NODE}:8006/ (select VM $VMID)."
   info "Waiting up to ${INSTALL_TIMEOUT_SECONDS} seconds for the installer to power the VM off."
+  if [[ "$CONTINUE_AFTER_INSTALL" == true ]]; then
+    info "After the poweroff, the script starts the VM and continues without further prompts."
+  fi
   set_install_phase installer-started
   node_exec "$OWNER_NODE" qm start "$VMID"
   wait_for_vm_stopped
-  info "VM $VMID powered off; inspect the console before confirming success."
-  confirm_exact_local \
-    "Confirm the Proxmox console reports a successful Ubuntu install and poweroff." \
-    "INSTALL ${RESOURCE_NAME} COMPLETE"
+  if [[ "$CONTINUE_AFTER_INSTALL" == true ]]; then
+    info "VM $VMID powered off after the unattended install; continuing automatically as chosen."
+  else
+    info "VM $VMID powered off; inspect the console before confirming success."
+    confirm_exact_local \
+      "Confirm the Proxmox console reports a successful Ubuntu install and poweroff." \
+      "INSTALL ${RESOURCE_NAME} COMPLETE"
+  fi
   set_install_phase installed-confirmed
   detach_and_delete_iso
 }
@@ -3102,7 +3298,7 @@ PY
         done <<<"$existing_keys"
         printf 'QGA-attested fingerprint:\n  %s\n' "$guest_fingerprint" >&2
       fi
-      if prompt_yes "Use $ssh_alias anyway and replace its effective app-ha values and host-key pin?"; then
+      if prompt_yes "Alias already in use for SSH. Use $ssh_alias anyway and replace its effective app-ha values and host-key pin?"; then
         :
       else
         info "Choose a different SSH alias"
@@ -3279,6 +3475,16 @@ External load balancer/DNS work:
      by this script.
 EOF
   setup_workstation_jump_ssh
+  bmac_ui_step_done
+  bmac_ui_result name "$RESOURCE_NAME" vmid "$VMID" ip "$PROD_PRIVATE_IP" \
+    primary_domain "$PRIMARY_DOMAIN" placement "${PLACEMENT_NODES[*]}" \
+    power_state "$VM_LIVE_STATUS"
+  bmac_ui_next_step "In your external load balancer, create or confirm an origin on TCP 443 for each placement node's public IP, with ${PRIMARY_DOMAIN} as the monitor Host header."
+  bmac_ui_next_step "Point ${PRIMARY_DOMAIN}${ALIAS_DOMAINS[*]:+ and ${ALIAS_DOMAINS[*]}} at that pool."
+  bmac_ui_next_step "Deploy the hello app (or your application) to $RESOURCE_NAME." \
+    --workflow deploy_hello_app_to_prod
+  bmac_ui_next_step "Check $RESOURCE_NAME's HA and replication state." \
+    --workflow show_prod_vm_state --arg "resource=$RESOURCE_NAME"
 }
 
 main() {
@@ -3298,6 +3504,8 @@ main() {
     local status=$?
     if ((status == 10)); then
       log "Dry run complete"
+      bmac_ui_step_done
+      bmac_ui_next_step "Create the production VM for real." --workflow add_prod_vm --arg dry_run=false
       return 0
     fi
     return "$status"
@@ -3322,5 +3530,6 @@ main() {
 }
 
 if [[ "${PRODUCTION_VM_SOURCE_ONLY:-0}" != 1 ]]; then
+  bmac_ui_bootstrap "$@"
   main "$@"
 fi

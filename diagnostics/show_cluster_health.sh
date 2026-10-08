@@ -251,7 +251,7 @@ REMOTE
 
 render_report() {
   python3 - "$RUN_DIR" "$PROXMOX_CLUSTER_NAME" "$PROBE" "$REGISTERED" \
-    "$REGISTERED_ADDRESS" "$PROXMOX_QDEVICE_HOST" <<'PY'
+    "$REGISTERED_ADDRESS" "$PROXMOX_QDEVICE_HOST" "$BMAC_UI_LIB_DIR" <<'PY'
 import json
 from pathlib import Path
 import re
@@ -259,6 +259,27 @@ import sys
 
 run_dir = Path(sys.argv[1])
 cluster, probe, registered, registered_address, qdevice_host = sys.argv[2:7]
+sys.path.insert(0, sys.argv[7])
+from ui_protocol import emit_event, emit_next_step  # noqa: E402
+
+current_phase = None
+
+
+def phase(title):
+    global current_phase
+    if current_phase:
+        emit_event({"type": "phase", "id": current_phase[0], "label": current_phase[1], "status": "complete"})
+    if title is None:
+        current_phase = None
+        return
+    if title.startswith("QDEVICE "):
+        label = "QDevice " + title.removeprefix("QDEVICE ")
+    else:
+        label = title[:1] + title[1:].lower()
+        for word in ("ZFS", "SMART", "SSH", "HA", "rpool"):
+            label = re.sub(rf"\b{word}\b", word, label, flags=re.IGNORECASE)
+    current_phase = (re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") or "section", label)
+    emit_event({"type": "phase", "id": current_phase[0], "label": label, "status": "running"})
 registered = registered == "1"
 LINK_NAMES = {0: "private VLAN", 1: "Tailscale"}
 RPOOL_MIN_FREE_FRACTION = 0.10
@@ -277,6 +298,7 @@ def section(title, why):
     print(title)
     print(f"Why: {why}")
     hr()
+    phase(title)
 
 
 def table(headers, rows, indent="  "):
@@ -819,6 +841,11 @@ for node in member_names:
 
 # Verdict ----------------------------------------------------------------------
 section("VERDICT", "whether any host, link, QDevice, pool, or drive needs attention.")
+phase(None)
+emit_event({"type": "result", "data": {
+    "cluster": cluster, "members": member_count, "qdevice_registered": registered,
+    "verdict": "attention" if problems else "ok", "problems": problems,
+}})
 if not problems:
     print(f"OK: all {member_count} hosts, their corosync links, "
           f"{'the QDevice, ' if registered else ''}every ZFS pool and vdev member, "
@@ -831,13 +858,25 @@ print("\nNext steps:")
 for node in sorted(disk_problem_hosts, key=lambda name: int(name.removeprefix("mox"))):
     print(f"  - {node}: diagnostics/show_proxmox_host_state.sh --host {node} shows every rpool")
     print("    member's disk serial; hosts/add_replacement_disk.sh replaces a pulled mirror member.")
+    emit_next_step(f"{node}: see every rpool member's disk serial.",
+                   f"diagnostics/show_proxmox_host_state.sh --host {node}",
+                   "show_proxmox_host_state", {"host": node})
+    emit_next_step(f"{node}: replace a pulled mirror member.",
+                   f"hosts/add_replacement_disk.sh --host {node}",
+                   "add_replacement_disk", {"host": node})
 for node in sorted(storage_hosts, key=lambda name: int(name.removeprefix("mox"))):
     print(f"  - {node}: add storage to rpool by installing two same-capacity disks and running")
     print(f"    hosts/add_new_disk_vdev.sh --host {node}.")
+    emit_next_step(f"{node}: add storage to rpool by installing two same-capacity disks.",
+                   f"hosts/add_new_disk_vdev.sh --host {node}", "add_new_disk_vdev", {"host": node})
 if any("QDevice" in problem or "qnetd" in problem or qdevice_host in problem
        for problem in problems):
     print("  - QDevice: diagnostics/show_qdevice_state.sh explains how to repair or replace it.")
+    emit_next_step("QDevice: see how to repair or replace it.",
+                   "diagnostics/show_qdevice_state.sh", "show_qdevice_state")
 print("  - For full cluster detail, run diagnostics/show_cluster_state.sh.")
+emit_next_step("For full cluster detail, run the full cluster report.",
+               "diagnostics/show_cluster_state.sh", "show_cluster_state")
 raise SystemExit(1)
 PY
 }
@@ -871,15 +910,20 @@ main() {
   printf 'show_cluster_health.sh - read-only hardware and network health for cluster %s\n' \
     "$PROXMOX_CLUSTER_NAME"
   printf 'Started: %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)"
+  bmac_ui_step "Find the cluster"
   find_cluster
   local node
   for node in "${CONTROL_MEMBER_NODES[@]}"; do
+    bmac_ui_step "Collect health from $node"
     collect_host "$node"
   done
+  bmac_ui_step "Probe the QDevice"
   probe_qdevice
+  bmac_ui_step_done
   render_report
 }
 
 if [[ "${SHOW_CLUSTER_HEALTH_SOURCE_ONLY:-0}" != 1 ]]; then
+  bmac_ui_bootstrap "$@"
   main "$@"
 fi

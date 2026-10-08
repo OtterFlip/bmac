@@ -24,6 +24,7 @@ DW_SCRIPT_NAME=add_replacement_disk.sh
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=../lib/disk_workflows.sh
 source "${SCRIPT_DIR}/../lib/disk_workflows.sh"
+bmac_ui_bootstrap "$@"
 
 usage() {
   cat <<'EOF'
@@ -231,6 +232,7 @@ if ((${#ENTRIES[@]} == 0)); then
   printf 'No rpool mirror on %s is missing a member whose disk was pulled; nothing to replace.\n' "$DW_HOST"
   exit 0
 fi
+declare -a MIRROR_LABELS=()
 for index in "${!ENTRIES[@]}"; do
   IFS=$'\t' read -r KIND VDEV ROLE SURVIVOR SURVIVOR_SIZE MISSING MEMBER PAIR \
     CONF_MEMBER RESUME <<<"${ENTRIES[index]}"
@@ -243,9 +245,12 @@ for index in "${!ENTRIES[@]}"; do
   [[ "$ROLE" != boot ]] || label="boot mirror"
   printf '  %d) %s (%s): %s; surviving disk %s has %s bytes\n' \
     "$((index + 1))" "$VDEV" "$label" "$what" "$SURVIVOR" "$SURVIVOR_SIZE"
+  MIRROR_LABELS+=("$VDEV ($label): $what; surviving disk $SURVIVOR has $SURVIVOR_SIZE bytes")
 done
 CHOICE=1
-if ((${#ENTRIES[@]} > 1)); then
+if ((${#ENTRIES[@]} > 1)) && bmac_ui_is_json; then
+  bmac_ui_number_choice CHOICE "Which mirror gets a replacement disk this run?" "${MIRROR_LABELS[@]}"
+elif ((${#ENTRIES[@]} > 1)); then
   IFS= read -r -p "Which mirror gets a replacement disk this run [1-${#ENTRIES[@]}]? " CHOICE ||
     dw_die "input ended"
   [[ "$CHOICE" =~ ^[1-9][0-9]*$ ]] && ((CHOICE <= ${#ENTRIES[@]})) ||
@@ -302,12 +307,18 @@ PY
   if ((${#CANDIDATES[@]} == 0)); then
     dw_die "no unused, unmounted disk on $DW_HOST has the $REQUIRED_BYTES bytes needed to hold the partitions of surviving disk $SURVIVOR; install a large enough disk first"
   fi
+  declare -a DISK_LABELS=()
   for index in "${!CANDIDATES[@]}"; do
     IFS=$'\t' read -r disk serial size model contents <<<"${CANDIDATES[index]}"
     printf '  %d) %-14s serial %-22s %16s bytes  %-20s %s\n' \
       "$((index + 1))" "$disk" "$serial" "$size" "$model" "$contents"
+    DISK_LABELS+=("$disk  ·  $serial  ·  $size bytes  ·  $model  ·  $contents")
   done
   while true; do
+    if bmac_ui_is_json; then
+      bmac_ui_number_choice CHOICE "Disk to add to $VDEV" "${DISK_LABELS[@]}"
+      break
+    fi
     IFS= read -r -p "Number of the disk to add to $VDEV (q to quit): " CHOICE ||
       dw_die "input ended"
     [[ "$CHOICE" != q ]] || dw_die "no disks were changed"
@@ -336,7 +347,7 @@ PY
   if [[ "$ENCRYPTED" == true ]]; then
     action="${action}, encrypted with the shared rpool LUKS passphrase (typed at the host console)"
   fi
-  confirm_exact "ERASE disk $NEW_SERIAL and ${action}."
+  confirm_exact "ERASE disk $NEW_SERIAL and ${action}." "" destructive
 fi
 
 dw_state record-replacement --survivor "$SURVIVOR" --serial "$NEW_SERIAL" --vdev "$VDEV" ||
@@ -394,11 +405,19 @@ chmod 0700 "$helper"
     printf 'before it encrypts the new disk. The passphrase is only ever typed at the\n'
     printf 'console; it never passes through this workstation or SSH.\n'
     while true; do
-      printf '\nType GO once the console helper printed "LUKS member %s prepared successfully" (q to stop): ' \
-        "$MEMBER"
-      IFS= read -r answer || dw_die "input ended"
-      [[ "$answer" != q ]] || dw_die "stopped; rerun this script to resume the replacement"
-      [[ "$answer" == GO ]] || continue
+      if bmac_ui_is_json; then
+        bmac_ui_manual_action --id luks_console --title "Prepare LUKS member $MEMBER at the $DW_HOST console" \
+          --instruction "At the $DW_HOST console (iDRAC or physical), log in as root and run: $HELPER" \
+          --instruction "It asks you to type GO, then for the shared rpool LUKS passphrase. The passphrase is only ever typed at the console; it never passes through this workstation." \
+          --instruction "Continue once it printed \"LUKS member $MEMBER prepared successfully\". Cancel to stop; rerunning this workflow resumes the replacement." \
+          --ack-label "The helper finished"
+      else
+        printf '\nType GO once the console helper printed "LUKS member %s prepared successfully" (q to stop): ' \
+          "$MEMBER"
+        IFS= read -r answer || dw_die "input ended"
+        [[ "$answer" != q ]] || dw_die "stopped; rerun this script to resume the replacement"
+        [[ "$answer" == GO ]] || continue
+      fi
       if dw_tool luks-check-member --member "$MEMBER" "$NEW_SERIAL"; then
         break
       fi
@@ -455,6 +474,12 @@ if [[ "$ROLE" == boot ]]; then
   printf 'Both boot-mirror disks hold a registered ESP with the same boot loader, kernels,\n'
   printf 'and initramfs images; once the resilver finishes, either disk can boot %s alone.\n' "$DW_HOST"
 fi
+bmac_ui_result host "$DW_HOST" vdev "$VDEV" serial "$NEW_SERIAL" capacity "$NEW_SIZE" \
+  "header_backup?" "$LOCAL_HEADER"
+bmac_ui_next_step "Follow the resilver of $VDEV until it finishes." \
+  --command "diagnostics/show_proxmox_host_state.sh $DW_HOST" \
+  --workflow show_proxmox_host_state --arg "host=$DW_HOST"
+bmac_ui_next_step "Once the resilver finishes, test a reboot of $DW_HOST by hand: migrate every production guest off it, then reboot it gracefully$([[ "$ENCRYPTED" == true ]] && printf ' and enter the shared passphrase once at its console')."
 printf '\nOnce the resilver finishes, test a reboot of %s by hand: first gracefully\n' "$DW_HOST"
 printf 'migrate every production guest off it, then gracefully reboot it'
 if [[ "$ENCRYPTED" == true ]]; then

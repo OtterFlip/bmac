@@ -12,6 +12,8 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
 REMOTE_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_ROOT}/lib/cluster_registry.py"
@@ -42,11 +44,13 @@ declare -a CLUSTER_NODES=()
 
 die() {
   printf '\nERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
   exit 1
 }
 
 log() {
   printf '\n==> %s\n' "$*"
+  bmac_ui_step "$*"
 }
 
 info() {
@@ -184,6 +188,16 @@ print(*[row["name"] for row in rows], sep="\n")
 PY
   )"
   default="$(printf '%s\n' "$names" | awk 'NF {print; exit}')"
+  if bmac_ui_is_json; then
+    local -a options=()
+    local name
+    while IFS= read -r name; do
+      [[ -z "$name" ]] || options+=("$name" "$name")
+    done <<<"$names"
+    bmac_ui_choose RESOURCE_NAME "Staging guest to destroy" "$default" "${options[@]}"
+    RESOURCE_NAME="${RESOURCE_NAME:-$default}"
+    return 0
+  fi
   IFS= read -r -p "Staging guest to destroy [${default}]: " RESOURCE_NAME
   RESOURCE_NAME="${RESOURCE_NAME:-$default}"
 }
@@ -698,20 +712,44 @@ main() {
   info "Snapshot: $SNAPSHOT_NAME on ${SOURCE_PLACEMENT[*]}"
   info "Domain/route enabled: $STAGING_DOMAIN / $ROUTES_ENABLED"
   info "Live VM present: $LIVE_PRESENT"
+  bmac_ui_plan_begin "Destroy $RESOURCE_NAME" "Validated against the live cluster; nothing has changed yet."
+  bmac_ui_plan_item remove "$RESOURCE_NAME" "VMID $VMID, state $RESOURCE_STATE, on $STAGING_NODE"
+  bmac_ui_plan_item remove "linked clone" "$STAGING_VOLUME"
+  bmac_ui_plan_item remove "source snapshot" "$SNAPSHOT_NAME of $SOURCE_NAME on ${SOURCE_PLACEMENT[*]}"
+  bmac_ui_plan_item remove "route" "$STAGING_DOMAIN (enabled: $ROUTES_ENABLED)"
+  bmac_ui_plan_item keep "$SOURCE_NAME" "The production source VM (VMID $SOURCE_VMID) is not changed"
+  BMAC_UI_DRY_RUN="$DRY_RUN" bmac_ui_plan_end
   if [[ "$DRY_RUN" == true ]]; then
     log "Dry run complete; no state was changed"
+    bmac_ui_step_done
+    bmac_ui_next_step "Review the plan, then destroy $RESOURCE_NAME for real." \
+      --workflow remove_staging_vm --arg "resource=$RESOURCE_NAME" --arg dry_run=false
     return 0
   fi
 
   printf '\nTHIS PERMANENTLY DESTROYS %s, ITS LINKED CLONE, AND ITS ONE EXACT SOURCE SNAPSHOT.\n' \
     "$RESOURCE_NAME"
-  printf 'Type exactly: DESTROY %s\n> ' "$RESOURCE_NAME"
   local confirmation
-  IFS= read -r confirmation
+  if bmac_ui_is_json; then
+    bmac_ui_group_begin destroy "Destroy $RESOURCE_NAME?" \
+      "This permanently destroys $RESOURCE_NAME, its linked clone, and its one exact source snapshot."
+    bmac_ui_group_add SSH_ALIAS --id ssh_alias --label "Workstation SSH alias to remove after success" \
+      --default "$RESOURCE_NAME" --required --pattern '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'
+    bmac_ui_group_request
+    SSH_ALIAS="${SSH_ALIAS:-$RESOURCE_NAME}"
+    bmac_ui_confirm --id destroy --severity critical --title "Destroy $RESOURCE_NAME?" \
+      --message "This permanently destroys $RESOURCE_NAME, its linked clone, and its one exact source snapshot. Afterward the SSH alias $SSH_ALIAS is removed from this workstation." \
+      --confirm-label "Destroy $RESOURCE_NAME" --text "DESTROY ${RESOURCE_NAME}" &&
+      confirmation="DESTROY ${RESOURCE_NAME}" || confirmation=""
+  else
+    printf 'Type exactly: DESTROY %s\n> ' "$RESOURCE_NAME"
+    IFS= read -r confirmation
+  fi
   [[ "$confirmation" == "DESTROY ${RESOURCE_NAME}" ]] ||
     die "Destruction confirmation did not match"
 
-  IFS= read -r -p \
+  bmac_ui_is_json ||
+    IFS= read -r -p \
     "Workstation SSH alias to remove after success [${RESOURCE_NAME}]: " SSH_ALIAS
   SSH_ALIAS="${SSH_ALIAS:-$RESOURCE_NAME}"
   [[ "$SSH_ALIAS" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] ||
@@ -744,8 +782,11 @@ main() {
   log "Staging VM destruction complete"
   info "Destroyed resource: $RESOURCE_NAME (former VMID $VMID)"
   info "Removed route, VM disks, linked clone, $SNAPSHOT_NAME and its replicated copies, and registry metadata."
+  bmac_ui_step_done
+  bmac_ui_result destroyed "$RESOURCE_NAME" former_vmid "$VMID" source "$SOURCE_NAME"
 }
 
 if [[ "${APP_HA_REMOVE_STAGING_SOURCE_ONLY:-0}" != 1 ]]; then
+  bmac_ui_bootstrap "$@"
   main "$@"
 fi

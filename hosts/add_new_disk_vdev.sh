@@ -20,6 +20,7 @@ DW_SCRIPT_NAME=add_new_disk_vdev.sh
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=../lib/disk_workflows.sh
 source "${SCRIPT_DIR}/../lib/disk_workflows.sh"
+bmac_ui_bootstrap "$@"
 
 MAX_MIRRORS=5
 
@@ -111,6 +112,7 @@ if ((${#ADDED[@]} > 0)); then
     record_new_pair "$added_pair" "$added_1" "$added_2" "$added_capacity_1" "$added_capacity_2"
   done
   printf '\nRun this script again to add another mirror.\n'
+  bmac_ui_next_step "Run this workflow again to add another mirror." --workflow add_new_disk_vdev --arg "host=$DW_HOST"
   exit 0
 fi
 
@@ -233,7 +235,39 @@ PY
       fi
     done
   }
+  # JSON mode: both disks are chosen together in one form.
+  choose_disks_json() {
+    local -a options=()
+    local index disk serial size model contents first second
+    for index in "${!CANDIDATES[@]}"; do
+      IFS=$'\t' read -r disk serial size model contents <<<"${CANDIDATES[index]}"
+      [[ "$serial" != - && "$contents" != mounted ]] || continue
+      options+=(--option "$((index + 1))" "$disk  ·  $serial  ·  $size bytes  ·  $model" --option-help "$contents")
+    done
+    ((${#options[@]} >= 10)) ||
+      dw_die "fewer than two disks outside rpool can be selected safely on $DW_HOST"
+    bmac_ui_group_begin disks "Choose the disks for extra mirror $PAIR" \
+      "Their byte capacities must differ by at most 1%. Disks without a serial number or with a mounted filesystem are not offered."
+    bmac_ui_group_add first --id first --type select --label "First disk" --required "${options[@]}"
+    bmac_ui_group_add second --id second --type select --label "Second disk" --required "${options[@]}"
+    while true; do
+      bmac_ui_group_request
+      IFS=$'\t' read -r disk SERIAL_1 CAPACITY_1 model contents <<<"${CANDIDATES[first - 1]}"
+      IFS=$'\t' read -r disk SERIAL_2 CAPACITY_2 model contents <<<"${CANDIDATES[second - 1]}"
+      if [[ "$SERIAL_1" == "$SERIAL_2" ]]; then
+        bmac_ui_field_error second "Choose two different disks."
+      elif (((CAPACITY_1 > CAPACITY_2 ? CAPACITY_1 - CAPACITY_2 : CAPACITY_2 - CAPACITY_1) * 100 >
+        (CAPACITY_1 > CAPACITY_2 ? CAPACITY_1 : CAPACITY_2))); then
+        bmac_ui_field_error second "These disks differ in capacity by more than 1% ($CAPACITY_1 vs $CAPACITY_2 bytes)."
+      fi
+      bmac_ui_group_check && break
+    done
+  }
   while true; do
+    if bmac_ui_is_json; then
+      choose_disks_json
+      break
+    fi
     choose_disk first
     SERIAL_1="$CHOSEN_SERIAL"
     CAPACITY_1="$CHOSEN_SIZE"
@@ -262,9 +296,9 @@ PY
   fi
 
   if [[ "$ENCRYPTION" == luks ]]; then
-    confirm_exact "ERASE disks $SERIAL_1 and $SERIAL_2 on $DW_HOST, encrypt both with the shared rpool LUKS passphrase (typed at the host console), and add them to rpool as a new mirror."
+    confirm_exact "ERASE disks $SERIAL_1 and $SERIAL_2 on $DW_HOST, encrypt both with the shared rpool LUKS passphrase (typed at the host console), and add them to rpool as a new mirror." "" destructive
   else
-    confirm_exact "ERASE disks $SERIAL_1 and $SERIAL_2 on $DW_HOST and add them to its unencrypted rpool as a new mirror."
+    confirm_exact "ERASE disks $SERIAL_1 and $SERIAL_2 on $DW_HOST and add them to its unencrypted rpool as a new mirror." "" destructive
   fi
 fi
 
@@ -300,10 +334,18 @@ chmod 0700 "$helper"
     printf 'ever typed at the console; it never passes through this workstation or SSH.\n'
   fi
   while true; do
-    printf '\nType GO once the console helper printed "LUKS members prepared successfully" (q to stop): '
-    IFS= read -r answer || dw_die "input ended"
-    [[ "$answer" != q ]] || dw_die "stopped; rerun this script to resume extra mirror $PAIR"
-    [[ "$answer" == GO ]] || continue
+    if bmac_ui_is_json; then
+      bmac_ui_manual_action --id luks_console --title "Prepare the LUKS members at the $DW_HOST console" \
+        --instruction "At the $DW_HOST console (iDRAC or physical), log in as root and run: $HELPER" \
+        --instruction "It asks you to type GO, then for the shared rpool LUKS passphrase. The passphrase is only ever typed at the console; it never passes through this workstation." \
+        --instruction "Continue once it printed \"LUKS members prepared successfully\". Cancel to stop; rerunning this workflow resumes extra mirror $PAIR." \
+        --ack-label "The helper finished"
+    else
+      printf '\nType GO once the console helper printed "LUKS members prepared successfully" (q to stop): '
+      IFS= read -r answer || dw_die "input ended"
+      [[ "$answer" != q ]] || dw_die "stopped; rerun this script to resume extra mirror $PAIR"
+      [[ "$answer" == GO ]] || continue
+    fi
     if dw_tool luks-check-prepared --pair "$PAIR" "$SERIAL_1" "$SERIAL_2"; then
       break
     fi
@@ -356,7 +398,10 @@ dw_collect_layout "$LAYOUT"
 dw_section "rpool on $DW_HOST after the change"
 dw_render_layout "$LAYOUT"
 
+bmac_ui_result host "$DW_HOST" mirror_slot "$PAIR" serial_1 "$SERIAL_1" \
+  serial_2 "$SERIAL_2" capacity_1 "$CAPACITY_1" capacity_2 "$CAPACITY_2"
 if [[ "$ENCRYPTION" == luks ]]; then
+  bmac_ui_next_step "Test a reboot of $DW_HOST by hand: migrate every production guest off it, reboot it gracefully, and enter the shared passphrase once at its console."
   printf '\nNEXT: test a reboot of %s by hand.\n' "$DW_HOST"
   printf 'The initramfs check above proved the next boot will try to unlock the new disks\n'
   printf 'with the one shared passphrase, but only a real reboot proves it end to end.\n'

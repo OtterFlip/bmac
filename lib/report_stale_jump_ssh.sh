@@ -34,11 +34,18 @@ command -v python3 >/dev/null 2>&1 || {
   exit 0
 }
 
-python3 - "$ssh_config" "$removed_host" <<'PY' || true
+repairs=""
+if [[ "${BMAC_UI_JSON:-}" == 1 ]]; then
+  # shellcheck source=ui_protocol.sh
+  source "$(dirname -- "${BASH_SOURCE[0]}")/ui_protocol.sh"
+  repairs="$(mktemp)" || repairs=""
+fi
+
+python3 - "$ssh_config" "$removed_host" "$repairs" <<'PY' || true
 import re
 import sys
 
-path, removed = sys.argv[1:]
+path, removed, repairs = sys.argv[1:]
 begin = re.compile(r"# BEGIN app-ha managed (production|staging) guest (\S+)$")
 option = re.compile(r"^\s*([A-Za-z]+)\s*(?:=\s*|\s+)(.*?)\s*$")
 guest_name = re.compile(r"(prod|stage[1-9][0-9]*prod)[1-9][0-9]*")
@@ -146,5 +153,25 @@ for alias in sorted(stale):
             f"(pick the guest at {address}, enter alias {alias})"
         )
 print("    Other administrators' workstations need the same repair.")
+if repairs:
+    with open(repairs, "w", encoding="utf-8") as out:
+        for alias in sorted(stale):
+            registered = 1 if guest_name.fullmatch(alias) else 0
+            address = stale[alias].get("address", "its private IP")
+            out.write(f"{alias}\t{registered}\t{address}\n")
 PY
+
+if [[ -n "$repairs" ]]; then
+  while IFS=$'\t' read -r alias registered address; do
+    if [[ "$registered" == 1 ]]; then
+      bmac_ui_next_step "Repair the jump SSH alias $alias; it still jumps through $removed_host." \
+        --command "guests/setup_jump_ssh_access.sh $alias" \
+        --workflow setup_jump_ssh_access --arg "resource=$alias"
+    else
+      bmac_ui_next_step "Repair the hand-written jump SSH alias $alias: pick the guest at $address and enter alias $alias." \
+        --command "guests/setup_jump_ssh_access.sh" --workflow setup_jump_ssh_access
+    fi
+  done <"$repairs"
+  rm -f -- "$repairs"
+fi
 exit 0

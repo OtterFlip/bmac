@@ -14,6 +14,8 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+# shellcheck source=../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
 REMOTE_REGISTRY="/usr/local/lib/app-ha-proxmox/lib/cluster_registry.py"
 
@@ -35,6 +37,7 @@ declare -a REACHABLE_NODES=()
 
 log() {
   printf '\n==> %s\n' "$*"
+  bmac_ui_step "$*"
 }
 
 info() {
@@ -47,6 +50,7 @@ warn() {
 
 die() {
   printf '\nERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
   exit 1
 }
 
@@ -96,12 +100,21 @@ parse_args() {
 
 prompt_with_default() {
   local destination="$1" prompt="$2" default="$3" entered
+  if bmac_ui_is_json; then
+    bmac_ui_text entered "$prompt" "$default"
+    printf -v "$destination" '%s' "${entered:-$default}"
+    return 0
+  fi
   IFS= read -r -p "${prompt} [${default}]: " entered || entered=""
   printf -v "$destination" '%s' "${entered:-$default}"
 }
 
 prompt_yes_default_yes() {
   local answer
+  if bmac_ui_is_json; then
+    bmac_ui_ask "$1"
+    return
+  fi
   IFS= read -r -p "$1 [Y/n] " answer || answer=""
   [[ -z "$answer" || "${answer,,}" == y || "${answer,,}" == yes ]]
 }
@@ -252,6 +265,7 @@ select_guest() {
   ((${#rows[@]} > 0)) || die "No production or staging guests are registered"
 
   local row name kind state vmid ip node status default=""
+  local -a options=()
   printf '\nRegistered guests:\n'
   printf '  %-20s %-10s %-16s %-6s %-15s %-6s %s\n' \
     NAME KIND REGISTRY-STATE VMID PRIVATE-IP NODE STATUS
@@ -260,10 +274,14 @@ select_guest() {
     printf '  %-20s %-10s %-16s %-6s %-15s %-6s %s\n' \
       "$name" "$kind" "$state" "$vmid" "$ip" "$node" "$status"
     [[ -n "$default" || "$status" != running ]] || default="$name"
+    [[ "$status" != running ]] ||
+      options+=("$name" "$name · $kind · VMID $vmid · $ip · on $node")
   done
   [[ -n "$default" ]] || die "None of the registered guests is running"
 
-  if [[ -z "$RESOURCE_NAME" ]]; then
+  if [[ -z "$RESOURCE_NAME" ]] && bmac_ui_is_json; then
+    bmac_ui_choose RESOURCE_NAME "Guest to set up jump SSH for" "$default" "${options[@]}"
+  elif [[ -z "$RESOURCE_NAME" ]]; then
     printf '\n'
     prompt_with_default RESOURCE_NAME "Guest to set up jump SSH for" "$default"
   fi
@@ -309,8 +327,16 @@ select_jump_host() {
   for node in "${REACHABLE_NODES[@]}"; do
     [[ "$node" != "$GUEST_NODE" ]] || default="$GUEST_NODE"
   done
+  local -a options=()
+  for node in "${REACHABLE_NODES[@]}"; do
+    options+=("$node" "$node$([[ "$node" != "$GUEST_NODE" ]] || printf ' (runs %s)' "$RESOURCE_NAME")")
+  done
   while true; do
-    prompt_with_default JUMP_HOST "Jump host" "$default"
+    if bmac_ui_is_json; then
+      bmac_ui_choose JUMP_HOST "Jump host" "$default" "${options[@]}"
+    else
+      prompt_with_default JUMP_HOST "Jump host" "$default"
+    fi
     for node in "${REACHABLE_NODES[@]}"; do
       [[ "$node" != "$JUMP_HOST" ]] || break 2
     done
@@ -568,6 +594,10 @@ PY
   log "Configured and validated strict jump SSH alias: $SSH_ALIAS"
   info "Jumps through $JUMP_HOST; rerun this script if $JUMP_HOST leaves the cluster."
   info "Connect with: ssh $SSH_ALIAS"
+  bmac_ui_result alias "$SSH_ALIAS" guest "$RESOURCE_NAME" jump_host "$JUMP_HOST"
+  bmac_ui_next_step "Connect to $RESOURCE_NAME from a terminal." --command "ssh $SSH_ALIAS"
+  bmac_ui_next_step "Run this workflow again if $JUMP_HOST leaves the cluster." \
+    --workflow setup_jump_ssh_access --arg "resource=$RESOURCE_NAME"
 }
 
 main() {
@@ -592,5 +622,6 @@ main() {
 }
 
 if [[ "${SETUP_JUMP_SSH_SOURCE_ONLY:-0}" != 1 ]]; then
+  bmac_ui_bootstrap "$@"
   main "$@"
 fi

@@ -77,7 +77,26 @@ section() {
   printf '%s\n' "$1"
   printf 'Why: %s\n' "$2"
   hr
+  local label
+  case "$1" in
+    "QDEVICE HOST "*) label="QDevice host ${1#QDEVICE HOST }" ;;
+    "MEMBER VIEW OF THE QDEVICE") label="Member view of the QDevice" ;;
+    *) label="${1,,}"; label="${label^}" ;;
+  esac
+  bmac_ui_step "$label"
 }
+
+# qdevice_result VERDICT SUMMARY: the verdict for the dashboard.
+qdevice_result() {
+  bmac_ui_step_done
+  bmac_ui_result verdict "$1" summary "$2" members:int "$MEMBER_COUNT" \
+    registered:bool "$( ((REGISTERED)) && echo true || echo false)" \
+    "registered_address?" "$REGISTERED_ADDRESS" qdevice_host "$PROXMOX_QDEVICE_HOST" \
+    problems:raw "$(bmac_ui_json_array "${PROBLEMS[@]}")"
+}
+
+ADD_STEPS=(--command "qdevice/add_qdevice.sh" --workflow add_qdevice)
+REMOVE_STEPS=(--command "qdevice/remove_qdevice.sh" --workflow remove_qdevice)
 
 indent() {
   sed 's/^/    /'
@@ -103,12 +122,16 @@ qdevice_verdict() {
     if ((REGISTERED == 0)); then
       printf 'OK: the %s-member cluster has an odd number of votes and correctly has no QDevice.\n' \
         "$MEMBER_COUNT"
+      qdevice_result ok "The ${MEMBER_COUNT}-member cluster has an odd number of votes and correctly has no QDevice."
       return 0
     fi
     printf 'ATTENTION: a QDevice (%s) is registered, but the %s-member cluster has an odd\n' \
       "${REGISTERED_ADDRESS:-unknown address}" "$MEMBER_COUNT"
     printf 'number of votes and must not use one. hosts/add_proxmox_host.sh removes it on its\n'
     printf 'next run, or run "pvecm qdevice remove" on a member while every member is online.\n'
+    qdevice_result attention "A QDevice is registered, but the ${MEMBER_COUNT}-member cluster has an odd number of votes and must not use one."
+    bmac_ui_next_step "Remove the QDevice: the next host setup run removes it, or remove it now while every member is online." \
+      "${REMOVE_STEPS[@]}"
     return 1
   fi
 
@@ -125,12 +148,18 @@ qdevice_verdict() {
     fi
     ((${#OFFLINE_MEMBERS[@]} == 0)) ||
       printf 'Offline members (%s) must be online first.\n' "${OFFLINE_MEMBERS[*]}"
+    qdevice_result attention "The ${MEMBER_COUNT}-member cluster needs a QDevice and has none registered; losing any one member loses quorum."
+    ((${#OFFLINE_MEMBERS[@]} == 0)) ||
+      bmac_ui_next_step "Bring the offline members (${OFFLINE_MEMBERS[*]}) online first."
+    bmac_ui_next_step "Prepare the QDevice machine with qdevice/QDEVICE_MANUAL_SETUP.md, then add it to the cluster." \
+      "${ADD_STEPS[@]}"
     return 1
   fi
 
   if ((MEMBERS_HEALTHY && ${#OFFLINE_MEMBERS[@]} == 0 && inaccessible == 0)); then
     printf 'OK: the QDevice at %s is alive and voting on all %s members (%s expected votes).\n' \
       "$REGISTERED_ADDRESS" "$MEMBER_COUNT" "$((MEMBER_COUNT + 1))"
+    qdevice_result ok "The QDevice at $REGISTERED_ADDRESS is alive and voting on all $MEMBER_COUNT members."
     return 0
   fi
   if ((MEMBERS_HEALTHY && ${#OFFLINE_MEMBERS[@]} == 0)); then
@@ -140,6 +169,8 @@ qdevice_verdict() {
       "$([[ "$QDEVICE_REACHABLE" == 1 ]] && printf yes || printf no)" \
       "${QDEVICE_TAILSCALE_IP:-unknown}"
     printf 'PROXMOX_QDEVICE_HOST in env/cluster.conf; correct it or your SSH configuration.\n'
+    qdevice_result attention "The QDevice at $REGISTERED_ADDRESS is alive and voting, but $PROXMOX_QDEVICE_HOST is not that machine."
+    bmac_ui_next_step "Correct PROXMOX_QDEVICE_HOST in env/cluster.conf or this workstation's SSH configuration so it names the registered QDevice."
     return 1
   fi
 
@@ -180,6 +211,21 @@ qdevice_verdict() {
   fi
   ((${#OFFLINE_MEMBERS[@]} == 0)) ||
     printf '\nEvery member must be online before the QDevice can be removed or added.\n'
+  if ((inaccessible)); then
+    qdevice_result attention "The cluster's registered QDevice at $REGISTERED_ADDRESS is not accessible from this workstation."
+    bmac_ui_next_step "If the QDevice is only temporarily unreachable, restore access and check again." \
+      --command "ssh root@$PROXMOX_QDEVICE_HOST" --workflow show_qdevice_state
+    bmac_ui_next_step "If it has failed, remove it; the removal is forced and asks you to remove the old machine from Tailscale." \
+      "${REMOVE_STEPS[@]}"
+    bmac_ui_next_step "Then prepare the new machine with qdevice/QDEVICE_MANUAL_SETUP.md and add it." "${ADD_STEPS[@]}"
+  else
+    qdevice_result attention "The QDevice at $REGISTERED_ADDRESS is registered, but not every member sees it alive and voting."
+    bmac_ui_next_step "Repair the problems found, for example restart corosync-qnetd on the QDevice or corosync-qdevice on a member."
+    bmac_ui_next_step "If it cannot be repaired, replace it: remove it, prepare a new machine, then add it." \
+      "${REMOVE_STEPS[@]}"
+  fi
+  ((${#OFFLINE_MEMBERS[@]} == 0)) ||
+    bmac_ui_next_step "Bring the offline members (${OFFLINE_MEMBERS[*]}) online before removing or adding the QDevice."
   return 1
 }
 
@@ -370,5 +416,6 @@ main() {
 }
 
 if [[ "${SHOW_QDEVICE_STATE_SOURCE_ONLY:-0}" != 1 ]]; then
+  bmac_ui_bootstrap "$@"
   main "$@"
 fi

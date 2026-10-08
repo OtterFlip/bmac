@@ -51,6 +51,7 @@ source "$CONFIG_LIB"
 source "$CONTROL_LIB"
 # shellcheck source=../lib/host_membership.sh
 source "$MEMBERSHIP_LIB"
+bmac_ui_bootstrap "$@"
 
 load_proxmox_config --no-secrets || {
   printf 'ERROR: Could not load cluster configuration from %s\n' "$PROXMOX_CLUSTER_CONFIG" >&2
@@ -159,10 +160,21 @@ WARNING: DESTRUCTIVE QDEVICE REMOVAL
 ==============================================================================
 EOF
 
-printf '\nConfirmation: '
-read -r CONFIRMATION || CONFIRMATION=""
+if bmac_ui_is_json; then
+  bmac_ui_confirm --id remove_qdevice --severity destructive \
+    --title "Remove the QDevice from the cluster?" \
+    --message "Graceful removal runs 'pvecm qdevice remove' through the control node and then purges QNetd/Corosync software and state from the QDevice host. Forced removal, when the QDevice cannot be reached, never contacts it and requires you to remove it from Tailscale." \
+    --detail "Every cluster member must be online and the cluster must be quorate." \
+    --detail "With an even number of members the cluster has no tie-breaking vote afterward until a QDevice is added again." \
+    --detail "apt autoremove is not run and system logs are not erased." \
+    --confirm-label "Remove the QDevice" --text GO && CONFIRMATION=GO || CONFIRMATION=""
+else
+  printf '\nConfirmation: '
+  read -r CONFIRMATION || CONFIRMATION=""
+fi
 if [[ "$CONFIRMATION" != "GO" ]]; then
   echo "Aborted. No changes were made."
+  ! bmac_ui_is_json || exit "$BMAC_UI_EXIT_CANCELLED"
   exit 0
 fi
 echo
@@ -170,7 +182,11 @@ echo "Confirmed."
 echo
 
 QDEVICE_HOST="${1:-}"
-if [[ -z "$QDEVICE_HOST" ]]; then
+if [[ -z "$QDEVICE_HOST" ]] && bmac_ui_is_json; then
+  bmac_ui_input QDEVICE_HOST --id qdevice_host --label "QDevice hostname" \
+    --default "$DEFAULT_QDEVICE_HOST" --required --pattern '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+  QDEVICE_HOST="${QDEVICE_HOST:-$DEFAULT_QDEVICE_HOST}"
+elif [[ -z "$QDEVICE_HOST" ]]; then
   read -r -p "QDevice hostname [${DEFAULT_QDEVICE_HOST}]: " QDEVICE_HOST || QDEVICE_HOST=""
   QDEVICE_HOST="${QDEVICE_HOST:-$DEFAULT_QDEVICE_HOST}"
 fi
@@ -203,6 +219,9 @@ print_even_count_warning() {
   ((NODE_COUNT % 2 == 0)) || return 0
   echo "- The ${NODE_COUNT}-member cluster now has no tie-breaking vote: losing any one"
   echo "  member loses quorum. Add a QDevice promptly with qdevice/add_qdevice.sh."
+  bmac_ui_warning "The ${NODE_COUNT}-member cluster has no tie-breaking vote: losing any one member loses quorum."
+  bmac_ui_next_step "Add a QDevice promptly; the cluster has no tie-breaking vote." \
+    --command "qdevice/add_qdevice.sh" --workflow add_qdevice
 }
 
 echo "Resolving the cluster control node..."
@@ -263,6 +282,12 @@ if [[ "$QD_REMOVAL" == forced ]]; then
   print_even_count_warning
   echo "- Check the cluster with diagnostics/show_qdevice_state.sh. To add a"
   echo "  replacement, follow qdevice/QDEVICE_MANUAL_SETUP.md, then run qdevice/add_qdevice.sh."
+  bmac_ui_result removal forced qdevice_host "$QDEVICE_HOST"
+  bmac_ui_next_step "Keep the old QDevice machine removed from Tailscale, and wipe it before it is ever reconnected to any network."
+  bmac_ui_next_step "On this workstation, remove the old QDevice's host key before preparing a replacement." \
+    --command "ssh-keygen -R $QDEVICE_HOST"
+  bmac_ui_next_step "Check the cluster's QDevice state." --command "diagnostics/show_qdevice_state.sh" \
+    --workflow show_qdevice_state
   exit 0
 fi
 
@@ -272,6 +297,8 @@ if ((QDEVICE_ACCESSIBLE == 0)); then
   echo "No QDevice is registered in the cluster, and $QDEVICE_HOST is not accessible,"
   echo "so there is nothing to remove. Fix 'ssh root@$QDEVICE_HOST' and rerun to remove"
   echo "QDevice software from it."
+  bmac_ui_next_step "Nothing was removed. Fix 'ssh root@$QDEVICE_HOST' and run this workflow again to remove QDevice software from it." \
+    --command "ssh root@$QDEVICE_HOST" --workflow remove_qdevice --arg "qdevice_host=$QDEVICE_HOST"
   exit 0
 fi
 
@@ -475,4 +502,7 @@ echo "- The coroqnetd system account/group is gone."
 echo "- apt autoremove was NOT run; generic/shared dependency packages were intentionally retained."
 echo "- General system journal/history was intentionally retained."
 echo "- $QDEVICE_HOST is still enrolled in Tailscale. qdevice/add_qdevice.sh can add it again."
+bmac_ui_result removal "${QD_REMOVAL:-detached}" qdevice_host "$QDEVICE_HOST"
 print_even_count_warning
+bmac_ui_next_step "$QDEVICE_HOST is still enrolled in Tailscale; the add QDevice workflow can add it again." \
+  --workflow add_qdevice

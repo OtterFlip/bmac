@@ -735,6 +735,69 @@ offer_source_iso_cache_removal </dev/null
         self.assertNotIn("SOURCE ISO CACHE", absent.stdout)
         self.assertNotIn("rm -f", absent.stdout)
 
+    def test_source_iso_cache_choice_made_before_install_is_not_reasked(self) -> None:
+        kept = self.run_sourced(
+            self.SOURCE_CACHE_LAYOUT
+            + """
+DELETE_SOURCE_ISO_CACHE=false
+offer_source_iso_cache_removal </dev/null
+[[ "$SOURCE_ISO_CACHE_REMOVED" == false ]]
+"""
+        )
+        self.assertIn("Keeping it, as chosen before the install.", kept.stdout)
+        self.assertNotIn("rm -f", kept.stdout)
+        deleted = self.run_sourced(
+            self.SOURCE_CACHE_LAYOUT
+            + """
+DELETE_SOURCE_ISO_CACHE=true
+offer_source_iso_cache_removal <<<n
+[[ "$SOURCE_ISO_CACHE_REMOVED" == true ]]
+"""
+        )
+        self.assertIn("Deleting it, as chosen before the install.", deleted.stdout)
+
+    def test_post_install_choices_are_asked_up_front(self) -> None:
+        defaults = self.run_sourced(
+            """
+PROD_GUEST_OS_INSTALL_MODE=ubuntu-autoinstall
+collect_post_install_options < <(printf '\\n\\n')
+printf 'RESULT %s %s\\n' "$CONTINUE_AFTER_INSTALL" "$DELETE_SOURCE_ISO_CACHE"
+"""
+        )
+        self.assertIn("RESULT true true", defaults.stdout)
+        declined = self.run_sourced(
+            """
+PROD_GUEST_OS_INSTALL_MODE=ubuntu-autoinstall
+collect_post_install_options <<<no
+printf 'RESULT %s [%s]\\n' "$CONTINUE_AFTER_INSTALL" "$DELETE_SOURCE_ISO_CACHE"
+"""
+        )
+        self.assertIn("RESULT false []", declined.stdout)
+        manual = self.run_sourced(
+            """
+PROD_GUEST_OS_INSTALL_MODE=manual
+collect_post_install_options </dev/null
+printf 'RESULT %s [%s]\\n' "$CONTINUE_AFTER_INSTALL" "$DELETE_SOURCE_ISO_CACHE"
+"""
+        )
+        self.assertNotIn("start it and continue", manual.stdout)
+        self.assertIn("RESULT false []", manual.stdout)
+
+    def test_install_confirmation_is_skipped_only_when_chosen(self) -> None:
+        text = SCRIPT.read_text(encoding="utf-8")
+        install = text[text.index("install_or_resume_os() {") :]
+        install = install[: install.index("\n}\n")]
+        fresh = install[install.index('set_install_phase installer-started\n  node_exec'):]
+        self.assertIn('if [[ "$CONTINUE_AFTER_INSTALL" == true ]]; then', fresh)
+        self.assertLess(
+            fresh.index('if [[ "$CONTINUE_AFTER_INSTALL" == true ]]'),
+            fresh.index("Confirm the Proxmox console reports a successful Ubuntu install"),
+        )
+        self.assertIn(
+            '[[ "$watched_poweroff" == true && "$CONTINUE_AFTER_INSTALL" == true ]]',
+            install,
+        )
+
     def test_source_iso_cache_offer_follows_per_vm_iso_deletion(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")
         detach = text[text.index("detach_and_delete_iso() {") :]

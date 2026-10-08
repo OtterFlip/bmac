@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The dashboard window may listen for events and use window basics. It gets no plugin permissions: links, notifications, and everything else go through the narrow Rust commands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

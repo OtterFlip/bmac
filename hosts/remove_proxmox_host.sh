@@ -40,6 +40,7 @@ source "$CONFIG_LIB"
 source "$CONTROL_LIB"
 # shellcheck source=../lib/host_membership.sh
 source "$MEMBERSHIP_LIB"
+bmac_ui_bootstrap "$@"
 
 SHUTDOWN_TIMEOUT_SECONDS=600
 STAGING_CLEANUP_TIMEOUT_SECONDS=1200
@@ -287,10 +288,33 @@ show_hosts() {
   done <<<"$candidates"
 }
 
+# JSON mode: offer the hosts show_hosts listed.
+choose_target_json() {
+  local node blockers candidates description
+  local -a options=()
+  candidates="$(forced_candidates)"
+  for node in "${ONLINE_MEMBERS[@]}"; do
+    blockers="$(removal_blockers "$node")"
+    if [[ -n "$blockers" ]]; then
+      options+=(--option "$node" "$node · online · in use" --option-help "$(head -n 1 <<<"$blockers")")
+    else
+      options+=(--option "$node" "$node · online · removable gracefully$([[ "$node" != "$CONTROL_NODE" ]] || printf ' (control node)')")
+    fi
+  done
+  while read -r node description; do
+    [[ -n "$node" ]] || continue
+    options+=(--option "$node" "$node · OFFLINE · removable only forcefully" --option-help "$description")
+  done <<<"$candidates"
+  ((${#options[@]} > 0)) || die "No host can be removed"
+  bmac_ui_input TARGET_HOST --id host --type select --label "Host to remove" --required "${options[@]}"
+}
+
 choose_target() {
   CURRENT_PHASE="choosing the host to remove"
   show_hosts
-  if [[ -z "$TARGET_HOST" ]]; then
+  if [[ -z "$TARGET_HOST" ]] && bmac_ui_is_json; then
+    choose_target_json
+  elif [[ -z "$TARGET_HOST" ]]; then
     IFS= read -r -p "Host to remove: " TARGET_HOST ||
       die "Input ended before a host was chosen"
   fi
@@ -351,6 +375,15 @@ the network in any way after it has been removed from the cluster. Before it
 is ever connected to any network again, wipe its disks or reinstall it.
 =============================================================================
 EOF
+  if bmac_ui_is_json; then
+    bmac_ui_confirm --id forced --severity critical \
+      --title "Remove ${TARGET_HOST} forcefully?" \
+      --message "${TARGET_HOST}: ${TARGET_DESCRIPTION}. It does not answer SSH, so it cannot be removed gracefully. If it is only temporarily unreachable, choose No, bring it back online, and run this workflow again." \
+      --detail "A forced removal is for a host that no longer functions and is physically disconnected from the cluster for good." \
+      --detail "The removed machine must never communicate with the cluster again. Wipe its disks or reinstall it before it joins any network." \
+      --confirm-label "Remove forcefully" --cancel-label "No" || die "No change was made"
+    return 0
+  fi
   hm_prompt_yes "Remove ${TARGET_HOST} forcefully?" ||
     die "No change was made"
 }
@@ -698,6 +731,19 @@ show_graceful_plan() {
   info "Cluster: ${MEMBERS[*]} -> $remaining members"
   show_qdevice_plan "$remaining"
   show_control_plan
+  bmac_ui_plan_begin "Graceful removal of $TARGET_HOST" \
+    "The script checks the cluster again after taking the control-plane lock."
+  bmac_ui_plan_item remove "$TARGET_HOST" "Power off and permanently remove it from cluster $PROXMOX_CLUSTER_NAME"
+  bmac_ui_plan_item update cluster "${#MEMBERS[@]} -> $remaining members"
+  if ((remaining % 2 == 0)); then
+    bmac_ui_plan_item keep QDevice "Present afterward ($remaining nodes + 1 QDevice vote)"
+  else
+    bmac_ui_plan_item remove QDevice "Absent afterward ($remaining votes)"
+  fi
+  [[ -z "$NEW_CONTROL_NODE" ]] ||
+    bmac_ui_plan_item update "control node" "$TARGET_HOST -> $NEW_CONTROL_NODE"
+  bmac_ui_plan_item update "registry slot" "Free the $TARGET_HOST slot for a future host"
+  bmac_ui_plan_end
   info "The host is powered off and must be wiped or reinstalled before it joins any cluster again."
 }
 
@@ -723,6 +769,18 @@ show_forced_plan() {
   ((${#PRODUCTION_NAMES[@]} > 0)) || info "Production VMs changed: none"
   info "Pending cleanup abandoned on $TARGET_HOST: $(plan_field abandoned)"
   show_control_plan
+  bmac_ui_plan_begin "Forced removal of $TARGET_HOST" "$TARGET_HOST is not contacted."
+  bmac_ui_plan_item remove "$TARGET_HOST" "Remove it from cluster $PROXMOX_CLUSTER_NAME without contacting it (${TARGET_DESCRIPTION})"
+  for name in "${STAGING_NAMES[@]}"; do
+    bmac_ui_plan_item remove "$name" "Destroy this staging VM"
+  done
+  for name in "${PRODUCTION_NAMES[@]}"; do
+    bmac_ui_plan_item update "$name" "Placement -> $(plan_field productions "$name" placement) (running on $(plan_field productions "$name" owner))"
+  done
+  [[ -z "$NEW_CONTROL_NODE" ]] ||
+    bmac_ui_plan_item update "control node" "$TARGET_HOST -> $NEW_CONTROL_NODE"
+  bmac_ui_plan_item update "registry slot" "Free the $TARGET_HOST slot for a future host"
+  bmac_ui_plan_end
 }
 
 # The final confirmation of a forced removal is the operator's statement that
@@ -745,6 +803,13 @@ continuing:
      Wipe its disks or reinstall it before it is connected to any network.
 =============================================================================
 EOF
+  if bmac_ui_is_json; then
+    bmac_ui_manual_action --id disconnect --title "Permanently disconnect ${TARGET_HOST}" \
+      --instruction "Physically disconnect ${TARGET_HOST} from every network: its public, private VLAN, and management connections." \
+      --instruction "In the Tailscale admin console, open Machines and remove ${TARGET_HOST}, so it cannot reach the cluster over Tailscale if it ever starts again." \
+      --instruction "Make sure it will never be connected to any network again in its old role. Wipe its disks or reinstall it before it is connected to any network." \
+      --ack-label "Done"
+  fi
   hm_confirm_phrase \
     "Type the phrase below only when ${TARGET_HOST} is permanently disconnected and removed from Tailscale." \
     "${TARGET_HOST} IS PERMANENTLY DISCONNECTED"
@@ -1093,6 +1158,8 @@ remove_gracefully() {
   hm_print_reinstall_follow_ups "$TARGET_HOST"
   printf '  - Wipe or reinstall %s before it is connected to any network again.\n' \
     "$TARGET_HOST"
+  bmac_ui_result host "$TARGET_HOST" removal graceful members:raw "$(bmac_ui_json_array "${MEMBERS[@]}")"
+  bmac_ui_next_step "Wipe or reinstall $TARGET_HOST before it is connected to any network again."
 }
 
 remove_forcefully() {
@@ -1128,6 +1195,10 @@ remove_forcefully() {
   done
   ((${#PRODUCTION_NAMES[@]} == 0)) ||
     info "Restore redundancy with guests/prod/change_prod_vm_placement.sh"
+  ((${#PRODUCTION_NAMES[@]} == 0)) ||
+    bmac_ui_next_step "Restore the redundancy of ${PRODUCTION_NAMES[*]}." \
+      --command "guests/prod/change_prod_vm_placement.sh" --workflow change_prod_vm_placement
+  bmac_ui_result host "$TARGET_HOST" removal forced members:raw "$(bmac_ui_json_array "${MEMBERS[@]}")"
   if [[ "$CONTROL_CHANGED" == true ]]; then
     control_offer_cluster_conf_update "$NEW_CONTROL_NODE"
   fi
@@ -1136,6 +1207,7 @@ remove_forcefully() {
     "$TARGET_HOST"
   printf 'network in any way. Wipe its disks or reinstall it before it is connected to\n'
   printf 'any network again.\n'
+  bmac_ui_next_step "$TARGET_HOST must never communicate with the cluster via the network in any way. Wipe its disks or reinstall it before it is connected to any network again."
 }
 
 main() {

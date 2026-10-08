@@ -10,3 +10,4 @@ artifacts/
 hosts/artifacts/*
 hosts/artifacts/used-tailscale-auth-key-sha256
 hosts/artifacts/used-tailscale-auth-key-sha256.lock
+log/*

@@ -8,7 +8,13 @@ Sick of paying out-the-nose for hyperscaler cloud hosting? Trying to find your w
 
 You're not the only one who noticed that the public clouds aren't really necessary for many webapps, even at scale.  Now that a single x64 server can host 1024 concurrent threads with a dual-socket AMD EPYC 9996 machine, all sharing the same RAM, the vertical-scaling ceiling is very high, which means that horizontal-scaling often isn't necessary.  That's a cloud-in-a-box.  For most apps you'll never need more, but you don't want to start with such an expensive box.  What you need is the ability to start with affordable hardware, suitable for your initial workload, with an easy way to migrate to better hardware as you grow, with minimal downtime, and with data-redundancy and high-availablity-failover baked-in so your data's safe.  You also need a system for testing upcoming changes to production without actually affecting production.  That's what BMAC delivers.
 
+BMAC, at its heart, is a library of user-callable scripts.  However these scripts can also be called by a machine with the --json parameter, which changes how the scripts' inputs and outputs operate.  BMAC therefore now includes a GUI dashboard which wraps this script library and exposes all of their functionality.
+
 <br clear="left">
+
+## Screenshots
+
+Screenshots of the BMAC Dashboard are [here](./dashboard/DASHBOARD_SCREENSHOTS.md).
 
 ## Releases
 
@@ -16,7 +22,7 @@ BMAC releases represent tested, known-good points in the project's development a
 
 The current source code on the `main` branch may contain changes that have not yet gone through the complete release testing process. For production use, download the latest release from the [GitHub Releases](https://github.com/OtterFlip/bmac/releases) page.
 
-Each release is provided by GitHub as both `.zip` and `.tar.gz` source archives. BMAC does not require a build step - download or extract the release on your x64 Ubuntu administrator workstation and follow the setup instructions below.
+Each release is provided by GitHub as both `.zip` and `.tar.gz` source archives. BMAC's scripts don't not require a build step - download or extract the release on your x64 Ubuntu administrator workstation and follow the setup instructions below.  However if you want to use the BMAC Dashboard then you'll need to build it following [its instructions](./dashboard/README.md#running-it).
 
 ## BMAC's Features
 
@@ -278,6 +284,14 @@ Scripts that target a Proxmox host prompt for its `moxN` name and default to
 `mox1`; pass `--host moxN` to select it non-interactively. Read every plan and
 confirmation before allowing a destructive operation.
 
+### Using the Dashboard Instead of a Terminal
+
+The [BMAC Dashboard](dashboard/README.md) is a desktop control panel for the
+same tasks. It runs these scripts in their `--json` mode and shows their
+prompts, plans, progress, results, and suggested next steps as forms and
+dialogs, with the exact command it runs and its live output always one click
+away. Every script also accepts `--json` directly, for use by other tools.
+
 ### Checking Cluster, Host, Guest, and Disk State
 
 Use the read-only diagnostics before and after maintenance:
@@ -289,6 +303,16 @@ Use the read-only diagnostics before and after maintenance:
 ./diagnostics/show_prod_vm_state.sh prod1
 ./diagnostics/show_qdevice_state.sh
 ./hosts/inventory_disks.sh --host mox1
+```
+
+For a quick look at one area, the `list_*` scripts read everything through
+one reachable host and finish in seconds:
+
+```bash
+./diagnostics/list_hosts.sh                    # hosts, quorum, votes, QDevice registration
+./diagnostics/list_guests.sh --kind production # registered VMs with HA, replication, and routes
+./diagnostics/list_replication.sh --guest prod1
+./diagnostics/list_storage.sh --host mox1      # ZFS pools and Proxmox storage
 ```
 
 Start with `show_cluster_health.sh` for a quick check of the cluster's

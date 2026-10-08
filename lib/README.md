@@ -236,6 +236,74 @@ Workstation library shared by `guests/prod/change_prod_vm_placement.sh` and
 - replication health checks and waits;
 - HA node-affinity rule updates.
 
+## `ui_protocol.sh`
+
+Every operator script supports `--json`, which makes it speak the bmac-ui v1
+NDJSON protocol ([`protocol/bmac-ui-v1.schema.json`](../protocol/bmac-ui-v1.schema.json))
+instead of drawing a terminal UI. The BMAC dashboard uses it; anything else
+may too. Without `--json` nothing changes: every helper below is silent and
+scripts keep their own terminal prompts.
+
+```bash
+source "${REPO_ROOT}/lib/ui_protocol.sh"
+...
+bmac_ui_bootstrap "$@"   # just before main; re-executes under ui_json_run.sh with --json
+main "$@"
+```
+
+Converting a prompt:
+
+```bash
+if bmac_ui_is_json; then
+  bmac_ui_choose HOST "Host to inspect" mox1 mox1 "mox1" mox2 "mox2"
+else
+  read -r -p "Host to inspect [mox1]: " HOST
+fi
+```
+
+Events: `bmac_ui_step`/`bmac_ui_step_done` (phases), `bmac_ui_progress`,
+`bmac_ui_info`, `bmac_ui_warning`, `bmac_ui_error`, `bmac_ui_plan_begin` /
+`bmac_ui_plan_item` / `bmac_ui_plan_end`, `bmac_ui_result KEY VALUE...` (or
+`bmac_ui_result_json`), and `bmac_ui_next_step TEXT [--command C] [--workflow ID]
+[--arg K=V]...`.
+
+Requests, which block until the controller answers:
+
+- `bmac_ui_input VAR FIELD-OPTIONS...` for one field, and `bmac_ui_text`,
+  `bmac_ui_choose`, `bmac_ui_number_choice`, and `bmac_ui_yes_no` shorthands.
+  `bmac_ui_reask VAR MESSAGE` rejects the last answer and waits again.
+- `bmac_ui_group_begin` / `bmac_ui_group_add` / `bmac_ui_group_request` for a
+  form, validated with `bmac_ui_field_error` and `bmac_ui_group_check`.
+- `bmac_ui_confirm` (with `--severity` and `--text PHRASE` for typed
+  confirmations), `bmac_ui_ask` for a yes/no question, and
+  `bmac_ui_confirm_go`, the JSON form of "Type GO to continue".
+- `bmac_ui_manual_action` for work done outside the controller, such as a
+  LUKS passphrase typed at a host console. Secrets never travel this way.
+
+A declined confirmation followed by a non-zero exit reports the run as
+cancelled rather than failed; answering a later request clears that.
+Cancelling from the controller exits with status 3. `config.sh`, `prod_ha.sh`,
+`host_membership.sh`, `disk_workflows.sh`, `qdevice.sh`, and
+`cluster_control.sh` route their prompt helpers through this library, so
+scripts that use them get JSON mode for those prompts automatically.
+
+`ui_json_run.sh` is the runner `bmac_ui_bootstrap` starts. It writes the
+`protocol`, `workflow_started`, and final `completed` events, wraps every plain
+output line as a `log` event so printed JSON cannot pose as protocol, and maps
+the exit status to success, cancelled, or failed. `ui_protocol.py` is its
+Python half, and also lets Python helpers emit events (`emit_event`,
+`emit_next_step`). `ui_test_driver.py` drives a script's JSON mode in tests.
+
+## `quick_state.sh` and `quick_state.py`
+
+The engine behind `diagnostics/list_hosts.sh`, `list_guests.sh`,
+`list_replication.sh`, and `list_storage.sh`: fast, read-only state for one
+area, read through one reachable member over a single SSH connection. The
+collector (`quick_state.py collect KIND`) runs on that host and uses only
+`pvesh get`, `pvecm status`, and registry reads. The renderer runs on the
+workstation, prints a terminal report, and in JSON mode emits the same state
+as one `result` event plus next steps.
+
 ## Tests
 
 ```bash
@@ -243,4 +311,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
   deploy.proxmox.lib.test_shared_libs \
   deploy.proxmox.lib.test_haproxy_routes \
   deploy.proxmox.lib.test_process_deferred_cleanup
+```
+
+The JSON-mode library, forms, and quick-state tests:
+
+```bash
+python3 -m unittest lib/test_ui_protocol.py lib/test_ui_json_forms.py lib/test_quick_state.py
 ```

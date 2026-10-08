@@ -119,7 +119,17 @@ crosses the workstation SSH path. The per-VM ISO remains attached while the
 unattended installer runs. After the operator confirms successful installation
 and poweroff, the creator records that phase, detaches and deletes the per-VM
 ISO, and then asks (default yes) whether to delete the verified vanilla source
-ISO and its checksum sidecar from the node's cache. Deletion waits for the
+ISO and its checksum sidecar from the node's cache.
+
+Before the install starts, unattended mode asks "Start the VM automatically
+after the OS install?" (default yes) and, if so, whether to delete that cached
+source ISO afterward. With automatic start, the poweroff the creator observes
+stands in for the console confirmation. The unattended installer powers off
+only after a complete install, and a failed install stops at the installer's
+error screen until the install timeout. The run then continues without
+further prompts until the optional jump SSH setup at the end. QGA, shadow
+digest, host key, and root SSH verification still run afterward. Manual
+mode always asks for the console confirmation. Deletion waits for the
 cache lock, so it never disturbs a concurrent build; the next install on that
 node downloads and verifies the source again. A kept cache is reused, and
 completion prints both paths so they can be removed manually later. Guest

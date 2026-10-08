@@ -12,6 +12,10 @@
 # load_proxmox_config, and lib/cluster_control.sh. Callers set HM_COORDINATOR
 # to an online member that survives the change.
 
+# shellcheck source=./ui_protocol.sh
+declare -F bmac_ui_is_json >/dev/null ||
+  source "$(dirname -- "${BASH_SOURCE[0]}")/ui_protocol.sh"
+
 # shellcheck source=qdevice.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/qdevice.sh"
 
@@ -29,6 +33,7 @@ HM_LOCK_WRITE_FD=""
 
 log() {
   printf '\n==> %s\n' "$*"
+  bmac_ui_step "$*"
 }
 
 info() {
@@ -41,18 +46,27 @@ warn() {
 
 die() {
   printf '\nERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
   exit 1
 }
 
 prompt_with_default() {
   local destination="$1" prompt="$2" default="$3" entered
-  IFS= read -r -p "${prompt} [${default}]: " entered ||
-    die "Input ended before a value was entered"
+  if bmac_ui_is_json; then
+    bmac_ui_text entered "$prompt" "$default"
+  else
+    IFS= read -r -p "${prompt} [${default}]: " entered ||
+      die "Input ended before a value was entered"
+  fi
   printf -v "$destination" '%s' "${entered:-$default}"
 }
 
 hm_prompt_yes() {
   local answer
+  if bmac_ui_is_json; then
+    bmac_ui_ask "$1"
+    return
+  fi
   IFS= read -r -p "$1 [y/N] " answer || return 1
   [[ "${answer,,}" == y || "${answer,,}" == yes ]]
 }
@@ -60,6 +74,14 @@ hm_prompt_yes() {
 # Require the operator to type one exact phrase.
 hm_confirm_phrase() {
   local message="$1" phrase="$2" entered
+  if bmac_ui_is_json; then
+    local severity=destructive
+    [[ "$phrase" == GO ]] && severity=warning
+    bmac_ui_confirm --id confirm_phrase --title "Confirm this change" \
+      --message "$message" --severity "$severity" --text "$phrase" &&
+      return 0
+    die "The change was not confirmed; no change was made"
+  fi
   printf '\n%s\nType exactly: %s\n> ' "$message" "$phrase"
   IFS= read -r entered || entered=""
   [[ "$entered" == "$phrase" ]] ||
@@ -426,7 +448,16 @@ hm_choose_new_control_node() {
   printf 'the cluster control-plane lock. Choose the member that replaces it.\n'
   printf 'Online members that remain: %s\n' "${candidates[*]}"
   while true; do
-    prompt_with_default answer "New cluster control node" "$default"
+    if bmac_ui_is_json; then
+      local -a options=()
+      local candidate
+      for candidate in "${candidates[@]}"; do
+        options+=("$candidate" "$candidate")
+      done
+      bmac_ui_choose answer "New cluster control node (replaces $departing)" "$default" "${options[@]}"
+    else
+      prompt_with_default answer "New cluster control node" "$default"
+    fi
     if control_list_contains "$answer" "${candidates[@]}"; then
       printf -v "$destination" '%s' "$answer"
       return 0
@@ -445,4 +476,8 @@ hm_print_reinstall_follow_ups() {
   printf '    hosts/add_proxmox_host.sh recommends the lowest free slot.\n'
   printf '  - In Cloudflare Load Balancing, remove the %s pool and monitor from every\n' "$node"
   printf '    load balancer if you have not already done so.\n'
+  bmac_ui_next_step "Remove the $node device from the Tailscale admin console (Machines) so a future host in this slot can register the same Tailscale hostname."
+  bmac_ui_next_step "On this workstation, forget $node's SSH host key." --command "ssh-keygen -R $node"
+  bmac_ui_next_step "Remove or update env/$node.conf. A future host may reuse the $node slot; host setup recommends the lowest free slot."
+  bmac_ui_next_step "In Cloudflare Load Balancing, remove the $node pool and monitor from every load balancer if you have not already done so."
 }

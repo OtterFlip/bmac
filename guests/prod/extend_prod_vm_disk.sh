@@ -14,6 +14,8 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/lib/ui_protocol.sh"
 CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
 REMOTE_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_ROOT}/lib/cluster_registry.py"
@@ -73,6 +75,7 @@ declare -A NODE_REFRESERVATION=()
 
 log() {
   printf '\n==> %s\n' "$*"
+  bmac_ui_step "$*"
 }
 
 info() {
@@ -85,6 +88,7 @@ warn() {
 
 die() {
   printf '\nERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
   exit 1
 }
 
@@ -139,6 +143,11 @@ parse_args() {
 
 prompt_with_default() {
   local destination="$1" prompt="$2" default="$3" entered
+  if bmac_ui_is_json; then
+    bmac_ui_text entered "$prompt" "$default"
+    printf -v "$destination" '%s' "${entered:-$default}"
+    return 0
+  fi
   IFS= read -r -p "${prompt} [${default}]: " entered ||
     die "Input ended before a value was entered"
   printf -v "$destination" '%s' "${entered:-$default}"
@@ -146,12 +155,20 @@ prompt_with_default() {
 
 prompt_yes() {
   local answer
+  if bmac_ui_is_json; then
+    bmac_ui_ask "$1"
+    return
+  fi
   IFS= read -r -p "$1 [y/N] " answer || return 1
   [[ "${answer,,}" == y || "${answer,,}" == yes ]]
 }
 
 confirm_go() {
   local entered
+  if bmac_ui_is_json; then
+    bmac_ui_confirm_go "$1" || die "Confirmation did not match GO; no change was made"
+    return 0
+  fi
   printf '%s\nType GO to continue.\n> ' "$1"
   IFS= read -r entered || entered=""
   [[ "$entered" == GO ]] ||
@@ -580,7 +597,26 @@ if rows:
 PY
   )"
   [[ -n "$default" ]] || die "No active production VM is registered"
-  prompt_with_default selection "Production VM to grow" "$default"
+  if bmac_ui_is_json; then
+    local -a options=()
+    mapfile -t options < <(python3 - "${RUN_DIR}/resources.json" <<'PY'
+import json
+import sys
+rows = [
+    row
+    for row in json.load(open(sys.argv[1], encoding="utf-8"))
+    if row.get("kind") == "production" and row.get("state") == "active"
+]
+rows.sort(key=lambda row: row.get("index", 0))
+for row in rows:
+    print(row["name"])
+    print(f"{row['name']} · {row.get('domains', {}).get('primary', '-')} · owner {row.get('owner_node') or '-'}")
+PY
+    )
+    bmac_ui_choose selection "Production VM to grow" "$default" "${options[@]}"
+  else
+    prompt_with_default selection "Production VM to grow" "$default"
+  fi
   parse_selected_production "$selection" ||
     die "Invalid production VM selection"
 }
@@ -1197,11 +1233,54 @@ grow_guest() {
   info "Root ext4 filesystem after growth: $(format_size "$GUEST_FS_BYTES")"
 }
 
+unit_maximum() {
+  case "$1" in
+    bytes) printf '%s\n' "$ALLOWED_BYTES" ;;
+    MiB) printf '%s\n' "$((ALLOWED_BYTES / MIB))" ;;
+    GiB)
+      python3 -c 'import sys; v = int(sys.argv[1]); print(f"{v // 2**30}.{v % 2**30 * 1000 // 2**30:03d}")' \
+        "$ALLOWED_BYTES"
+      ;;
+  esac
+}
+
+prompt_increase_json() {
+  local unit amount result
+  local -a parsed=()
+  bmac_ui_group_begin increase "Grow the root disk of $RESOURCE_NAME" \
+    "Currently $(format_size "$CURRENT_DISK_BYTES"); up to $(format_size "$ALLOWED_BYTES") more is allowed without breaching the ${POOL_RESERVE_PERCENT}% pool reserve. Growth cannot be undone."
+  bmac_ui_group_add unit --id unit --type select --label "Unit" --default GiB --required \
+    --option bytes bytes --option MiB MiB --option GiB GiB
+  bmac_ui_group_add amount --id amount --label "Increase" --required \
+    --help "Maximum: $(unit_maximum GiB) GiB, $(unit_maximum MiB) MiB, or $ALLOWED_BYTES bytes. Rounded up to a whole MiB." \
+    --pattern '^[0-9]+([.][0-9]+)?$'
+  while true; do
+    bmac_ui_group_request
+    case "$unit" in
+      bytes | MiB | GiB) ;;
+      *) bmac_ui_field_error unit "Choose bytes, MiB, or GiB" ;;
+    esac
+    if [[ -z "${BMAC_UI__FIELD_ERRORS[unit]-}" ]]; then
+      if result="$(parse_increase "$unit" "$amount" "$ALLOWED_BYTES" 2>"${RUN_DIR}/parse.err")"; then
+        read -r -a parsed <<<"$result"
+      else
+        bmac_ui_field_error amount "$(<"${RUN_DIR}/parse.err") (maximum $(unit_maximum "$unit") $unit)"
+      fi
+    fi
+    bmac_ui_group_check && break
+  done
+  INCREASE_BYTES="${parsed[1]}"
+  if [[ "${parsed[0]}" != "${parsed[1]}" ]]; then
+    info "Requested $(format_size "${parsed[0]}"), rounded up to a whole MiB"
+  fi
+}
+
 prompt_increase() {
   CURRENT_PHASE="choosing the increase"
   local choice unit amount result maximum
   local -a parsed=()
-  while true; do
+  bmac_ui_is_json && prompt_increase_json
+  while ! bmac_ui_is_json; do
     printf '\nEnter the increase in which unit?\n'
     printf '  1) bytes\n  2) MiB\n  3) GiB\n  q) quit without changes\n'
     IFS= read -r -p "Unit [3]: " choice || die "Input ended; no change was made"
@@ -1476,10 +1555,20 @@ main() {
 
   if [[ "$DRY_RUN" == true ]]; then
     log "Dry run complete; no state was changed"
+    bmac_ui_step_done
+    bmac_ui_result resource "$RESOURCE_NAME" disk_bytes:int "$CURRENT_DISK_BYTES" \
+      allowed_growth_bytes:int "$ALLOWED_BYTES"
+    ((ALLOWED_BYTES == 0)) ||
+      bmac_ui_next_step "Grow $RESOURCE_NAME by up to $(format_size "$ALLOWED_BYTES")." \
+        --workflow extend_prod_vm_disk --arg dry_run=false
     return 0
   fi
   if ((ALLOWED_BYTES == 0)); then
     log "No growth is allowed without breaching the ${POOL_RESERVE_PERCENT}% pool reserve"
+    bmac_ui_step_done
+    bmac_ui_result resource "$RESOURCE_NAME" disk_bytes:int "$CURRENT_DISK_BYTES" allowed_growth_bytes:int 0
+    bmac_ui_next_step "Free space in the placement pools or add a disk vdev before growing $RESOURCE_NAME." \
+      --workflow add_new_disk_vdev
     return 0
   fi
 
@@ -1510,8 +1599,13 @@ main() {
     --nonce "$LEASE_NONCE" >/dev/null ||
     die "Could not release the orchestration lease"
   LEASE_ACQUIRED=false
+  bmac_ui_step_done
+  bmac_ui_result resource "$RESOURCE_NAME" vmid "$VMID" increase_bytes:int "$INCREASE_BYTES" \
+    disk_bytes:int "$NEW_DISK_BYTES" root_fs_bytes:int "$GUEST_FS_BYTES"
+  bmac_ui_next_step "Check the application on $RESOURCE_NAME." --command "ssh $GUEST_ALIAS df -h /"
 }
 
 if [[ "${EXTEND_PROD_DISK_SOURCE_ONLY:-0}" != 1 ]]; then
+  bmac_ui_bootstrap "$@"
   main "$@"
 fi
