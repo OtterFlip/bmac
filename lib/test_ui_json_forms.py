@@ -141,6 +141,49 @@ class JsonFormTest(unittest.TestCase):
         )
         self.assertFalse(run.of("error"), run.describe())
 
+    def test_staging_request_asks_for_memory_only_in_the_options_form(self) -> None:
+        (self.root / "resources.json").write_text(
+            '[{"kind": "production", "state": "active", "index": 1, "name": "prod1"}]'
+        )
+        argv = self.harness(
+            "APP_HA_STAGING_VM_SOURCE_ONLY",
+            "guests/staging/add_staging_vm.sh",
+            """
+            bmac_ui_choose() { printf -v "$1" '%s' "$3"; }
+            parse_selected_source() { SOURCE_PRIMARY_DOMAIN=example.com; }
+            validate_live_source_and_ha() { :; }
+            load_replication_jobs_and_choose_standby() { STAGING_NODE=mox2; }
+            verify_source_vm_contract() { :; }
+            query_next_vmid() { STAGING_VMID=200; }
+            confirm_exact_local() { :; }
+            STAGING_CANDIDATE_INDEX=1
+            CORES_OVERRIDE=""
+            MEMORY_GIB_OVERRIDE=""
+            SANITIZER_FILE=""
+            STAGING_VM_CORES=2
+            STAGING_VM_MEMORY_GIB=4
+            collect_request
+            bmac_ui_result cores "$STAGING_VM_CORES" memory_mb "$STAGING_VM_MEMORY_MB"
+            """,
+        )
+        run = self.run_form(
+            argv,
+            {
+                "values": {
+                    "cores": 10,
+                    "memory_gib": 16,
+                    "start_after_creation": True,
+                    "setup_jump_ssh": True,
+                    "domain_override": "stage.example.com",
+                    "link_down": True,
+                    "sanitizer": "",
+                }
+            },
+        )
+        self.assertEqual(
+            run.of("result")[-1]["data"], {"cores": "10", "memory_mb": str(16 * 1024)}
+        )
+
     def test_new_production_form_checks_placement_and_domains(self) -> None:
         argv = self.harness(
             "PRODUCTION_VM_SOURCE_ONLY",

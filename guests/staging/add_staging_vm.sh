@@ -1170,19 +1170,21 @@ PY
   default_memory_gib="$STAGING_VM_MEMORY_GIB"
   if bmac_ui_is_json; then
     collect_options_json
-  elif [[ -n "$CORES_OVERRIDE" ]]; then
-    STAGING_VM_CORES="$CORES_OVERRIDE"
   else
-    prompt_with_default STAGING_VM_CORES \
-      "Staging vCPU cores" "$STAGING_VM_CORES"
-    validate_positive_integer "Staging vCPU cores" "$STAGING_VM_CORES"
-  fi
-  if [[ -n "$MEMORY_GIB_OVERRIDE" ]]; then
-    requested_memory_gib="$MEMORY_GIB_OVERRIDE"
-  else
-    prompt_with_default requested_memory_gib \
-      "Staging RAM in GiB" "$default_memory_gib"
-    validate_positive_integer "Staging RAM in GiB" "$requested_memory_gib"
+    if [[ -n "$CORES_OVERRIDE" ]]; then
+      STAGING_VM_CORES="$CORES_OVERRIDE"
+    else
+      prompt_with_default STAGING_VM_CORES \
+        "Staging vCPU cores" "$STAGING_VM_CORES"
+      validate_positive_integer "Staging vCPU cores" "$STAGING_VM_CORES"
+    fi
+    if [[ -n "$MEMORY_GIB_OVERRIDE" ]]; then
+      requested_memory_gib="$MEMORY_GIB_OVERRIDE"
+    else
+      prompt_with_default requested_memory_gib \
+        "Staging RAM in GiB" "$default_memory_gib"
+      validate_positive_integer "Staging RAM in GiB" "$requested_memory_gib"
+    fi
   fi
   STAGING_VM_MEMORY_MB=$((requested_memory_gib * 1024))
 
