@@ -1,16 +1,12 @@
-# BMAC - Build My App Cloud
+# <img src="dashboard/src-tauri/icons/32x32.png" alt="BMAC"> BMAC - Build My App Cloud
 
 ## Intro
-
-<img src="dashboard/src-tauri/icons/icon.png" align="left" width="260" hspace="10" vspace="10" alt="BMAC">
 
 Sick of paying out-the-nose for hyperscaler cloud hosting? Trying to find your way out of their pricing labyrinth? Disillusioned with the complexity and the proprietary cloud APIs needed to glue-together a serverless architecture and their lock-in effect?
 
 You're not the only one who noticed that the public clouds aren't really necessary for many webapps, even at scale.  Now that a single x64 server can host 1024 concurrent threads with a dual-socket AMD EPYC 9996 machine, all sharing the same RAM, the vertical-scaling ceiling is very high, which means that horizontal-scaling often isn't necessary.  That's a cloud-in-a-box.  For most apps you'll never need more, but you don't want to start with such an expensive box.  What you need is the ability to start with affordable hardware, suitable for your initial workload, with an easy way to migrate to better hardware as you grow, with minimal downtime, and with data-redundancy and high-availablity-failover baked-in so your data's safe.  You also need a system for testing upcoming changes to production without actually affecting production.  That's what BMAC delivers.
 
 BMAC, at its heart, is a library of user-callable scripts.  However these scripts can also be called by a machine with the --json parameter, which changes how the scripts' inputs and outputs operate.  BMAC therefore now includes a GUI dashboard which wraps this script library and exposes all of their functionality.
-
-<br clear="left">
 
 ## Screenshots
 
