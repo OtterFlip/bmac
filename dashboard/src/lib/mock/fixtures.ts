@@ -1,7 +1,7 @@
 // Sample cluster state for the in-browser mock backend (development and
 // screenshots only; the desktop app always talks to real scripts).
 
-import type { GuestsState, HostsState, ReplicationState, StorageState } from "@/protocol/state";
+import type { DiskRow, DisksState, GuestsState, HostsState, ReplicationState, StorageState, VdevMember, VdevRow } from "@/protocol/state";
 
 const now = () => Math.floor(Date.now() / 1000);
 const GiB = 1024 ** 3;
@@ -212,5 +212,105 @@ export function storageState(): StorageState {
       { node: "mox3", online: true, pools: [pool(7.0, 6.4)], storages: storages(6.6, 6.4) },
     ],
     problems: ["mox3: pool rpool has only 9% free"],
+  };
+}
+
+export function disksState(): DisksState {
+  const MODEL = "INTEL SSDPE2KX020T8";
+  const SIZE = 2000398934016;
+  const member = (disk: string | null, serial: string | null, mapper: string | null, state = "ONLINE"): VdevMember => ({
+    path: mapper ? `/dev/mapper/${mapper}` : disk ? `${disk}p3` : "/dev/disk/by-id/nvme-missing-part3",
+    state,
+    disk,
+    serial,
+    model: disk ? MODEL : null,
+    size: disk ? SIZE : null,
+    luks: mapper !== null,
+    mapper,
+    missing: disk === null,
+  });
+  const vdev = (name: string, members: VdevMember[], extra: Partial<VdevRow> = {}): VdevRow => ({
+    pool: "rpool",
+    name,
+    type: "mirror",
+    state: "ONLINE",
+    status: "online",
+    encryption: members.some((m) => m.luks) ? "luks" : "none",
+    holds_esp: false,
+    size: 1.81 * TiB,
+    allocated: 0.6 * TiB,
+    free: 1.21 * TiB,
+    members,
+    ...extra,
+  });
+  const disk = (path: string, serial: string, status: DiskRow["status"], label: string, detail: string, extra: Partial<DiskRow> = {}): DiskRow => ({
+    disk: path,
+    serial,
+    model: MODEL,
+    size: SIZE,
+    tran: "nvme",
+    contents: "blank",
+    status,
+    label,
+    detail,
+    in_use_reasons: [],
+    removable: status === "available",
+    ...extra,
+  });
+  const pools = (scan: string | null = null) => [
+    { name: "rpool", state: "ONLINE", health: "ONLINE", scan, remove: null, errors: "No known data errors" },
+  ];
+  return {
+    collected_at: now(),
+    hosts: [
+      {
+        node: "mox1",
+        online: true,
+        readable: true,
+        error: null,
+        pools: pools(),
+        vdevs: [vdev("mirror-0", [member("/dev/nvme0n1", "PHLJ9145007A2P0BGN", null), member("/dev/nvme1n1", "PHLJ916500LB2P0BGN", null)], { holds_esp: true })],
+        disks: [
+          disk("/dev/nvme2n1", "PHLJ9191004C2P0BGN", "available", "Available", "Blank. Safe to pull, or to use in a new vdev or replacement."),
+          disk("/dev/nvme3n1", "PHLJ043100AD2P0BGN", "available", "Available", "Has old partitions or signatures; they are erased when the disk is used. Safe to pull, or to use in a new vdev or replacement.", { contents: "partitions or signatures", size: 2000000000512 }),
+        ],
+        removals: [],
+      },
+      {
+        node: "mox2",
+        online: true,
+        readable: true,
+        error: null,
+        pools: pools(),
+        vdevs: [vdev("mirror-0", [member("/dev/nvme0n1", "PHLJ9145007E2P0BGN", null), member("/dev/nvme1n1", "PHLJ916500LF2P0BGN", null)], { holds_esp: true })],
+        disks: [],
+        removals: [],
+      },
+      {
+        node: "mox3",
+        online: true,
+        readable: true,
+        error: null,
+        pools: pools("resilver in progress since Wed Oct  7 17:20:31 2026 412G / 1.21T scanned, 98.1G issued, 33.21% done, 00:02:41 to go"),
+        vdevs: [
+          vdev(
+            "mirror-0",
+            [member(null, null, "crypt-rpool-a", "OFFLINE"), member("/dev/nvme0n1", "PHLJ9145007W2P0BGN", "crypt-rpool-b"), member("/dev/nvme4n1", "PHLJ916500LF2P0BGN", "crypt-rpool-a")],
+            { holds_esp: true, state: "DEGRADED", status: "resilvering" },
+          ),
+          vdev("mirror-2", [member("/dev/nvme5n1", "PHLJ9191004N2P0BGN", "crypt-rpool-mirror3-1"), member("/dev/nvme6n1", "PHLJ043100A12P0BGN", "crypt-rpool-mirror3-2")]),
+        ],
+        disks: [
+          disk("/dev/nvme2n1", "BTLN8401002P2P0B", "awaiting_finalization", "Awaiting finalization", "Decommissioned from mirror-1; not safe to pull yet. Run Inventory disks to finalize: it closes LUKS mappings crypt-rpool-mirror2-1, crypt-rpool-mirror2-2 and releases the disks.", { in_use_reasons: ["active crypt holder", "configured in /etc/crypttab"], removable: false, contents: "partitions or signatures" }),
+          disk("/dev/nvme3n1", "BTLN8401003Q2P0B", "awaiting_finalization", "Awaiting finalization", "Decommissioned from mirror-1; not safe to pull yet. Run Inventory disks to finalize: it closes LUKS mappings crypt-rpool-mirror2-1, crypt-rpool-mirror2-2 and releases the disks.", { in_use_reasons: ["active crypt holder", "configured in /etc/crypttab"], removable: false, contents: "partitions or signatures" }),
+          disk("/dev/nvme7n1", "PHLJ9145010X2P0BGN", "available", "Available", "Retired from mirror-3. Blank. Safe to pull, or to use in a new vdev or replacement."),
+        ],
+        removals: [{ vdev: "mirror-1", status: "needs-retire", serials: ["BTLN8401002P2P0B", "BTLN8401003Q2P0B"], requested_at: now() - 3600 }],
+      },
+    ],
+    problems: [
+      "mox3: rpool mirror-0 is DEGRADED",
+      "mox3: disks BTLN8401002P2P0B, BTLN8401003Q2P0B finished evacuating and await retirement finalization",
+    ],
   };
 }

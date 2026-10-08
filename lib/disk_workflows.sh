@@ -15,6 +15,7 @@ DW_CONFIG_LIB="${DW_LIB_DIR}/config.sh"
 DW_HOST_STORAGE="${DW_LIB_DIR}/host_storage.py"
 DW_STORAGE_STATE="${DW_LIB_DIR}/storage_state.py"
 DW_RPOOL_MIRROR="${DW_LIB_DIR}/rpool_mirror.sh"
+DW_DISK_INVENTORY="${DW_LIB_DIR}/disk_inventory.py"
 DW_REMOTE_REGISTRY=/usr/local/lib/app-ha-proxmox/lib/cluster_registry.py
 if [[ "${APP_HA_DISK_TEST_MODE:-0}" == 1 ]]; then
   DW_REMOTE_TOOL="${APP_HA_REMOTE_RPOOL_MIRROR:?APP_HA_REMOTE_RPOOL_MIRROR is required in test mode}"
@@ -55,7 +56,7 @@ dw_init() {
   command -v python3 >/dev/null 2>&1 || dw_die "python3 is required on this workstation"
   local library
   for library in "$DW_CONFIG_LIB" "$DW_HOST_STORAGE" "$DW_STORAGE_STATE" \
-    "$DW_RPOOL_MIRROR"; do
+    "$DW_RPOOL_MIRROR" "$DW_DISK_INVENTORY"; do
     [[ -f "$library" && ! -L "$library" ]] || dw_die "required library is unavailable: $library"
   done
   # shellcheck source=./config.sh

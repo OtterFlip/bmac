@@ -311,6 +311,17 @@ one reachable host and finish in seconds:
 ./diagnostics/list_storage.sh --host mox1      # ZFS pools and Proxmox storage
 ```
 
+`list_disks.sh` reads each host directly instead, so it takes a little longer.
+It lists every pool vdev with its state, whether it uses LUKS, and its member
+disks' serials and sizes. It also lists every disk outside a pool: whether it
+is available, awaiting retirement finalization after a decommission, or part
+of an interrupted add or replace. It never finalizes anything; that is
+`hosts/inventory_disks.sh`'s job.
+
+```bash
+./diagnostics/list_disks.sh --host mox3        # vdevs, LUKS, and disks outside a pool
+```
+
 Start with `show_cluster_health.sh` for a quick check of the cluster's
 hardware and networking. It ignores guests. It reports whether every host and
 the QDevice is up and reachable, whether each host's corosync links (private

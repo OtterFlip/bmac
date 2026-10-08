@@ -18,7 +18,7 @@ import type {
   WorkflowEvent,
   WorkflowInfo,
 } from "@/protocol/types";
-import { guestsState, hostsState, replicationState, storageState } from "./fixtures";
+import { disksState, guestsState, hostsState, replicationState, storageState } from "./fixtures";
 
 const workflows = (registry as { workflows: Workflow[] }).workflows;
 
@@ -208,7 +208,7 @@ export function createMockBackend(): Backend {
       await sleep(run, 300);
       await log(run, [`Reading cluster state through mox1 ...`], 400);
       await log(run, tableLines[id] ?? ["", "(table output)", ""], 12);
-      const data = { list_hosts: hostsState, list_guests: guestsState, list_replication: replicationState, list_storage: storageState }[
+      const data = { list_hosts: hostsState, list_guests: guestsState, list_replication: replicationState, list_storage: storageState, list_disks: disksState }[
         id as "list_hosts"
       ]();
       emit(run, { type: "result", data });
@@ -217,6 +217,9 @@ export function createMockBackend(): Backend {
       }
       if (id === "list_storage") {
         emit(run, { type: "next_step", text: "Inspect mox3's pool members and disk serials.", command: "diagnostics/show_proxmox_host_state.sh --host mox3", workflow: "show_proxmox_host_state", args: { host: "mox3" } });
+      }
+      if (id === "list_disks") {
+        emit(run, { type: "next_step", text: "Finalize the retirement of the decommissioned disks on mox3.", command: "hosts/inventory_disks.sh --host mox3", workflow: "inventory_disks", args: { host: "mox3" } });
       }
       return;
     }

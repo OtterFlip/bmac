@@ -44,7 +44,8 @@ function useAttention() {
       const hostProblems = hosts ? hosts.hosts.filter((h) => !h.online || h.ssh_from_here === false).length + (hosts.cluster.quorate === false ? 1 : 0) : 0;
       const prodProblems = guests ? guests.problems.filter((p) => !p.startsWith("staging")).length : 0;
       const stageProblems = guests ? guests.staging.filter((g) => ["cleanup_pending", "failed"].includes(g.registry_state ?? "")).length : 0;
-      const storageProblems = storage ? storage.problems.length : 0;
+      const disks = s.sources.list_disks.data;
+      const storageProblems = (storage ? storage.problems.length : 0) + (disks ? disks.problems.length : 0);
       const qd = hosts?.qdevice;
       const qdProblem = qd ? (qd.needed && !qd.registered) || (qd.registered && qd.needed === false) || (qd.registered && qd.voting === false) : false;
       return {

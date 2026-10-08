@@ -141,12 +141,84 @@ export interface StorageState {
   problems: string[];
 }
 
+export interface VdevMember {
+  path: string;
+  state: string | null;
+  disk: string | null;
+  serial: string | null;
+  model: string | null;
+  size: number | null;
+  luks: boolean;
+  mapper: string | null;
+  /** The member no longer resolves to an installed disk. */
+  missing: boolean;
+}
+
+export type VdevStatus = "online" | "degraded" | "faulted" | "evacuating" | "resilvering";
+
+export interface VdevRow {
+  pool: string;
+  name: string;
+  type: string;
+  state: string | null;
+  status: VdevStatus;
+  encryption: "luks" | "none" | "mixed" | "unknown";
+  holds_esp: boolean;
+  size: number | null;
+  allocated: number | null;
+  free: number | null;
+  members: VdevMember[];
+}
+
+export type DiskStatus =
+  | "available"
+  | "awaiting_finalization"
+  | "evacuating"
+  | "pending_replacement"
+  | "pending_addition"
+  | "in_use"
+  | "no_serial";
+
+export interface DiskRow {
+  disk: string;
+  serial: string | null;
+  model: string | null;
+  size: number | null;
+  tran: string | null;
+  contents: "blank" | "partitions or signatures" | "mounted";
+  status: DiskStatus;
+  label: string;
+  detail: string;
+  in_use_reasons: string[];
+  /** Nothing holds the disk; it can be pulled physically. */
+  removable: boolean;
+}
+
+export interface DiskHost {
+  node: string;
+  online: boolean;
+  readable: boolean;
+  error: string | null;
+  pools: { name: string; state: string | null; health: string | null; scan: string | null; remove: string | null; errors: string | null }[];
+  vdevs: VdevRow[];
+  /** Physical disks that are not in any pool. */
+  disks: DiskRow[];
+  removals: { vdev: string; status: string; serials: string[]; requested_at: number | null }[];
+}
+
+export interface DisksState {
+  collected_at: number;
+  hosts: DiskHost[];
+  problems: string[];
+}
+
 export interface StateSources {
   list_hosts: HostsState;
   list_guests: GuestsState;
   list_replication: ReplicationState;
   list_storage: StorageState;
+  list_disks: DisksState;
 }
 
 export type SourceId = keyof StateSources;
-export const SOURCE_IDS: SourceId[] = ["list_hosts", "list_guests", "list_replication", "list_storage"];
+export const SOURCE_IDS: SourceId[] = ["list_hosts", "list_guests", "list_replication", "list_storage", "list_disks"];

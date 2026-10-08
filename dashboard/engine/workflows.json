@@ -61,6 +61,20 @@
       ]
     },
     {
+      "id": "list_disks",
+      "title": "List disks",
+      "summary": "Every host's pool vdevs with LUKS state, and every disk outside a pool with its status.",
+      "description": "Reads every online host directly over SSH: each pool vdev's state, encryption, and member disks with serial and size, and every disk outside a pool, whether it is available, awaiting retirement finalization, or part of an interrupted add or replace. Never finalizes anything; use Inventory disks for that.",
+      "category": "diagnostics",
+      "script": "diagnostics/list_disks.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "host", "label": "Host", "type": "host", "flag": "--host", "help": "Only show this host." }
+      ]
+    },
+    {
       "id": "show_cluster_health",
       "title": "Cluster health check",
       "summary": "Hosts, corosync links, QDevice, every ZFS member, free space, and SMART.",

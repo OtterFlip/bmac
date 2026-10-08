@@ -62,38 +62,12 @@ STATE="${DW_RUN_DIR}/state.json"
 dw_inventory "$LAYOUT" --allow-missing-pool
 dw_state show >"$STATE" || dw_die "could not read the storage state on $DW_HOST"
 
-# Finalize every completed vdev removal. The host-side record is authoritative
-# after ZFS forgets the member serials of an evacuated vdev.
-mapfile -t PENDING < <(python3 - "$LAYOUT" "$STATE" <<'PY'
-import json
-import re
-import sys
-
-layout = json.load(open(sys.argv[1]))
-state = json.load(open(sys.argv[2]))
-pool = layout["pool"]
-in_pool = {m["serial"] for v in layout["vdevs"] for m in v["members"] if m["serial"]}
-evacuating = re.search(r"Evacuation of (\S+) in progress", pool["remove"] or "")
-for row in state["removals"]:
-    if row["state"] != "requested":
-        continue
-    # A member whose disk was already gone at removal has no serial.
-    serials = [m["serial"] for m in row["members"] if m["serial"]]
-    mappers = [
-        m["mapper"].rsplit("/", 1)[-1]
-        for m in row["members"] if m["luks"] and m["mapper"]
-    ]
-    if pool["removal_in_progress"] and evacuating and evacuating.group(1) == row["vdev"]:
-        status = "evacuating"
-    elif set(serials) & in_pool:
-        status = "still-in-pool"
-    elif mappers:
-        status = "needs-retire"
-    else:
-        status = "complete"
-    print("\t".join([row["id"], row["vdev"], status, ",".join(serials), ",".join(mappers)]))
-PY
-)
+# Finalize every completed vdev removal. diagnostics/list_disks.sh reports
+# disks as awaiting finalization from the same classification.
+PENDING_TEXT="$(python3 "$DW_DISK_INVENTORY" pending-removals "$LAYOUT" "$STATE")" ||
+  dw_die "could not classify the recorded vdev removals on $DW_HOST"
+PENDING=()
+[[ -z "$PENDING_TEXT" ]] || mapfile -t PENDING <<<"$PENDING_TEXT"
 
 print_release_note() {
   printf 'Releasing a disk erases only its metadata (LUKS key slots, ZFS labels,\n'

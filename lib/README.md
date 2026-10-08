@@ -308,6 +308,18 @@ collector (`quick_state.py collect KIND`) runs on that host and uses only
 workstation, prints a terminal report, and in JSON mode emits the same state
 as one `result` event plus next steps.
 
+## `disk_inventory.py`
+
+The workstation half of `diagnostics/list_disks.sh`. That script runs
+`host_storage.py collect` and `storage_state.py show` on every online host in
+parallel. `disk_inventory.py render` then turns the results into every pool
+vdev (state, LUKS, member serials and sizes) and every disk outside a pool,
+with a status: available, awaiting finalization, evacuating, part of an
+interrupted replacement or new mirror, or in use. `disk_inventory.py
+pending-removals` is the classification of requested vdev removals that
+`hosts/inventory_disks.sh` acts on, so both scripts agree on which disks
+await finalization.
+
 ## Tests
 
 ```bash
@@ -320,5 +332,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
 The JSON-mode library, forms, and quick-state tests:
 
 ```bash
-python3 -m unittest lib/test_ui_protocol.py lib/test_ui_json_forms.py lib/test_quick_state.py
+python3 -m unittest lib/test_ui_protocol.py lib/test_ui_json_forms.py lib/test_quick_state.py \
+  lib/test_disk_inventory.py
 ```

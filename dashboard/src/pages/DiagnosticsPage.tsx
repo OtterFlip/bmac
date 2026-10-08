@@ -7,7 +7,7 @@ import { PageBody, PageHeader } from "@/components/layout/Page";
 import { WorkflowTiles } from "./common";
 import { ago, elapsed } from "@/lib/format";
 
-const FAST = ["list_hosts", "list_guests", "list_replication", "list_storage"];
+const FAST = ["list_hosts", "list_guests", "list_replication", "list_storage", "list_disks"];
 const FULL = ["show_cluster_health", "show_cluster_state", "show_proxmox_host_state", "show_prod_vm_state", "show_qdevice_state"];
 
 export function DiagnosticsPage() {
