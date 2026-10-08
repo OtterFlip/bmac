@@ -2,7 +2,7 @@
 
 ## Intro
 
-<img src="media/BMAC.png" align="left" width="260" hspace="20" vspace="10" alt="BMAC">
+<img src="dashboard/src-tauri/icons/icon.png" align="left" width="260" hspace="10" vspace="10" alt="BMAC">
 
 Sick of paying out-the-nose for hyperscaler cloud hosting? Trying to find your way out of their pricing labyrinth? Disillusioned with the complexity and the proprietary cloud APIs needed to glue-together a serverless architecture and their lock-in effect?
 
