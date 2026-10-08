@@ -18,7 +18,7 @@ Here you can view your host status as well as add/remove Proxmox hosts to/from y
 
 # Storage
 
-This page shows the current storage configureation of each Proxmox host in your cluster and gives you the ability add additional disks, in sets of 2 as a new vdev, to a Proxmox host's existing ZFS pool of storage, which can in turn be passed on to any of your production guests through the Production guest extend storage features.  On this page you can also decommission a vdev that's no longer needed, which will perform a TRIM within any affected guests in order for the underlying ZFS pool to be able to optimally evacuate any remaining in-use blocks on the disks you're evacuating and decommissioning.  If you experience a mirror-memeber failure (which you can simulate as well) you can use this page to replace the failed member.
+This page shows the current storage configureation of each Proxmox host in your cluster and gives you the ability add additional disks, in sets of 2 as a new vdev with or without LUKS encryption (it this option is enabled then you must enter the encryption password when booting the host), to a Proxmox host's existing ZFS pool of storage, which can in turn be passed on to any of your production guests through the Production guest extend storage features.  On this page you can also decommission a vdev that's no longer needed, which will perform a TRIM within any affected guests in order for the underlying ZFS pool to be able to optimally evacuate any remaining in-use blocks on the disks you're evacuating and decommissioning.  If you experience a mirror-memeber failure (which you can simulate as well) you can use this page to replace the failed member.
 
 <p align="center">
   <img src="../media/BMAC_Dashboard_Storage.png" width="800">
