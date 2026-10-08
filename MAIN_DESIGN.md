@@ -539,16 +539,36 @@ Routes are generated from quorate pmxcfs by the lowest-numbered online mox:
    SHA-256 generation.
 4. Stage and run `haproxy -c` for every online target before changing desired
    state. A staging failure leaves the previous generation desired and live.
-5. Recheck coordinator identity, node membership, and quorum. Disable stale
-   public DNAT on nodes that need a new generation.
-6. Publish the desired generation and per-node state in pmxcfs, then commit,
-   reload, and mark each target independently.
-7. Re-enable public DNAT only where pmxcfs status, local generation marker,
-   live HAProxy config, and quorum all agree.
+5. Recheck coordinator identity, node membership, and quorum. Classify each
+   node that needs the new generation. It is compatible when its ingress is
+   enabled, it provably serves a generation pmxcfs authorizes and records as
+   applied, and `haproxy_routes.py compare` proves that generation cannot
+   route any request differently from the candidate. Disable stale public
+   DNAT on every other node that needs the new generation.
+6. Publish the desired generation, per-node state, and bounded allowances for
+   compatible nodes in pmxcfs, then commit, gracefully reload, and mark each
+   target independently.
+7. Re-enable public DNAT only where pmxcfs status or an unexpired allowance,
+   local generation marker, live HAProxy config, and quorum all agree. A node
+   whose DNAT is already loaded only updates its marker.
+8. Withdraw the allowances once every allowed node applied.
 
-A failure after desired-state publication leaves affected nodes
-`reject-only` or disabled until periodic reconciliation; it does not serve a
-known-stale route and does not globally roll already-current nodes back.
+`compare` reconstructs the previous generation's routes and requires the
+current renderer to reproduce its files byte-for-byte. Any template, schema,
+or hand-edit difference therefore takes the fail-closed path. A transition
+is compatible only when no domain, resource, or backend IP resolves to a
+different target. That covers adding and removing routes, which is every
+staging create/remove; changing a route's backend or reusing an IP for
+another resource is not. Serving a removed route during the window is safe
+because a backend IP is released only after a successful synchronization,
+and success requires every online node to apply the new generation.
+
+A failure after desired-state publication leaves strict nodes `reject-only`
+or disabled until periodic reconciliation. A compatible node whose commit or
+reload fails restores its previous configuration and keeps serving it until
+its allowance expires, while periodic reconciliation retries; after expiry it
+fails closed. No node serves a known-stale incompatible route, and the
+synchronizer does not globally roll already-current nodes back.
 Host-local generation bundles retain at most four directories, protecting the
 desired and active generations. pmxcfs retains eight generation metadata
 records.
@@ -2084,9 +2104,16 @@ VM/storage state.
 - `ingress/nodes/moxN.json`,
   `record_type: "haproxy-node-status"`, stores desired/applied generations,
   `pending`, `staged`, `applied`, or `reject-only`, timestamps, and revision.
+- `ingress/transition.json`, `record_type: "haproxy-transition"`, present only
+  during a compatible rollout. It names the new generation and, per node, the
+  previous generation that node has durably applied and may keep serving
+  until `expires_at` (at most 600 seconds after the rollout first published;
+  retries keep the original deadline). It is written before `desired.json`,
+  is inert unless its generation equals the desired generation, and is
+  removed by `ingress-finalize` once every allowed node applied.
 
-Writer: the quorum-gated route coordinator through `ingress-begin` and
-`ingress-mark`. Readers: `ingress-status`, every local route-reconcile timer,
+Writer: the quorum-gated route coordinator through `ingress-begin`,
+`ingress-mark`, and `ingress-finalize`. Readers: `ingress-status`, every local route-reconcile timer,
 the ingress service's current-generation preflight, and operators.
 
 Each node retains a timer so the lowest-numbered online node can take over as
@@ -2520,8 +2547,9 @@ make an unsafe non-idempotent script rerun.
 
 Before desired publication, all targets retain the prior desired generation.
 After publication, a target that cannot commit or prove current is disabled
-or `reject-only`; periodic local reconciliation retries through the current
-lowest online coordinator.
+or `reject-only`, unless it holds an unexpired compatible-rollout allowance
+and provably serves its allowed previous generation; periodic local
+reconciliation retries through the current lowest online coordinator.
 
 Treat a node that changes liveness during target selection or cannot disable
 stale DNAT as an incident. Restore quorum/connectivity, inspect

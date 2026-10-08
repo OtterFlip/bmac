@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from typing import Sequence
 import unittest
 from unittest import mock
 import uuid
@@ -290,6 +291,8 @@ class RegistryCliTest(unittest.TestCase):
         *,
         bundle_sha256: str = "b" * 64,
         route_count: int = 1,
+        compatible: Sequence[str] = (),
+        expected: int = 0,
     ) -> dict:
         arguments = [
             "ingress-begin",
@@ -302,9 +305,24 @@ class RegistryCliTest(unittest.TestCase):
         ]
         for index in range(1, 11):
             arguments.extend(["--node", f"mox{index}"])
-        result, _ = self.run_registry(*arguments)
+        for allowance in compatible:
+            arguments.extend(["--compatible", allowance])
+        result, completed = self.run_registry(*arguments, expected=expected)
+        if expected:
+            return {"stderr": completed.stderr}
         assert isinstance(result, dict)
         return result
+
+    def mark_ingress(self, generation: str, node: str, state: str) -> None:
+        self.run_registry(
+            "ingress-mark",
+            "--generation",
+            generation,
+            "--node",
+            node,
+            "--state",
+            state,
+        )
 
     def test_deterministic_allocations_release_and_reuse(self) -> None:
         first = self.allocate_prod(staging_base="preview.myapp.com")
@@ -1509,6 +1527,89 @@ class RegistryCliTest(unittest.TestCase):
         self.assertEqual(by_node["mox1"]["state"], "applied")
         self.assertEqual(by_node["mox2"]["state"], "reject-only")
         self.assertEqual(by_node["mox2"]["applied_generation"], old_generation)
+
+    def test_compatible_rollout_allowance_survives_retry_until_finalized(
+        self,
+    ) -> None:
+        previous = "1" * 64
+        generation = "2" * 64
+        self.begin_ingress(previous)
+        for node in ("mox1", "mox2"):
+            self.mark_ingress(previous, node, "applied")
+
+        plan = self.begin_ingress(
+            generation,
+            bundle_sha256="c" * 64,
+            compatible=(f"mox2={previous}", f"mox1={previous}"),
+        )
+        allowances = plan["transition"]["allowances"]
+        self.assertEqual([item["node"] for item in allowances], ["mox1", "mox2"])
+        status, _ = self.run_registry("ingress-status")
+        self.assertEqual(
+            {(item["node"], item["generation"]) for item in status["active_allowances"]},
+            {("mox1", previous), ("mox2", previous)},
+        )
+
+        # A coordinator crash followed by a retry must not extend the window.
+        self.mark_ingress(generation, "mox1", "applied")
+        retried = self.begin_ingress(
+            generation, bundle_sha256="c" * 64, compatible=(f"mox2={previous}",)
+        )
+        self.assertEqual(
+            retried["transition"]["allowances"][0]["expires_at"],
+            allowances[1]["expires_at"],
+        )
+
+        _, refused = self.run_registry(
+            "ingress-finalize", "--generation", generation, expected=1
+        )
+        self.assertIn("unapplied nodes: mox2", refused.stderr)
+        self.mark_ingress(generation, "mox2", "applied")
+        finalized, _ = self.run_registry(
+            "ingress-finalize", "--generation", generation
+        )
+        self.assertTrue(finalized["finalized"])
+        status, _ = self.run_registry("ingress-status")
+        self.assertIsNone(status["transition"])
+        self.assertEqual(status["active_allowances"], [])
+
+    def test_compatible_allowance_requires_durably_applied_previous(self) -> None:
+        previous = "1" * 64
+        generation = "2" * 64
+        self.begin_ingress(previous)
+        self.mark_ingress(previous, "mox1", "applied")
+        self.mark_ingress(previous, "mox2", "reject-only")
+        for allowance in (f"mox3={previous}", f"mox2={previous}", f"mox1={'3' * 64}"):
+            with self.subTest(allowance=allowance):
+                refused = self.begin_ingress(
+                    generation,
+                    bundle_sha256="c" * 64,
+                    compatible=(allowance,),
+                    expected=1,
+                )
+                self.assertIn("cannot keep serving it", refused["stderr"])
+        status, _ = self.run_registry("ingress-status")
+        self.assertEqual(status["desired"]["generation"], previous)
+        self.assertIsNone(status["transition"])
+
+    def test_allowance_is_inert_once_expired_or_superseded(self) -> None:
+        previous = "1" * 64
+        generation = "2" * 64
+        self.begin_ingress(previous)
+        self.mark_ingress(previous, "mox1", "applied")
+        self.begin_ingress(
+            generation, bundle_sha256="c" * 64, compatible=(f"mox1={previous}",)
+        )
+        path = self.state / "ingress" / "transition.json"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["allowances"][0]["expires_at"] = "2000-01-01T00:00:00+00:00"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        status, _ = self.run_registry("ingress-status")
+        self.assertEqual(status["active_allowances"], [])
+
+        # A strict publication of a different generation removes the record.
+        self.begin_ingress("3" * 64, bundle_sha256="d" * 64)
+        self.assertFalse(path.exists())
 
     def test_ingress_generation_metadata_retention_is_bounded(self) -> None:
         registry = cluster_registry.Registry(

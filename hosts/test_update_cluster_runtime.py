@@ -57,6 +57,9 @@ class UpdateClusterRuntimeTests(unittest.TestCase):
         self.assertIn('mv -f "${registry}.rollback" "$registry"', text)
         self.assertIn('mv -f "${cleanup}.new" "$cleanup"', text)
         self.assertIn('mv -f "${cleanup}.rollback" "$cleanup"', text)
+        self.assertIn('mv -f "${route_sync}.new" "$route_sync"', text)
+        self.assertIn('mv -f "${route_sync}.rollback" "$route_sync"', text)
+        self.assertIn('"$REMOTE_ROUTE_SYNC")" == "$expected_route_sync"', text)
 
 
 if __name__ == "__main__":

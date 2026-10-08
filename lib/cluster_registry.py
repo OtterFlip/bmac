@@ -73,6 +73,18 @@ INGRESS_NODE_STATUS_KEYS = {
     "updated_at",
     "revision",
 }
+INGRESS_TRANSITION_KEYS = {
+    "schema_version",
+    "record_type",
+    "generation",
+    "allowances",
+    "created_at",
+    "updated_at",
+    "revision",
+}
+INGRESS_ALLOWANCE_KEYS = {"node", "generation", "expires_at"}
+MIN_INGRESS_COMPATIBLE_WINDOW_SECONDS = 60
+MAX_INGRESS_COMPATIBLE_WINDOW_SECONDS = 3600
 INSTALL_PHASES = {
     "unknown",
     "unstarted",
@@ -594,6 +606,44 @@ def validate_ingress_node_status(
         raise RegistryError("ingress node status updated_at predates created_at")
 
 
+def validate_ingress_transition_record(
+    value: Any, policy: dict[str, Any]
+) -> None:
+    if not isinstance(value, dict):
+        raise RegistryError("ingress transition record must be an object")
+    require_exact_keys(
+        value, INGRESS_TRANSITION_KEYS, "ingress transition record"
+    )
+    if value["schema_version"] != SCHEMA_VERSION:
+        raise RegistryError("ingress transition schema version is unsupported")
+    if value["record_type"] != "haproxy-transition":
+        raise RegistryError("ingress transition has the wrong record_type")
+    validate_sha256(value["generation"], "ingress transition generation")
+    allowances = value["allowances"]
+    if not isinstance(allowances, list) or not allowances:
+        raise RegistryError("ingress transition allowances must be a non-empty list")
+    nodes: list[str] = []
+    for allowance in allowances:
+        if not isinstance(allowance, dict):
+            raise RegistryError("ingress transition allowance must be an object")
+        require_exact_keys(
+            allowance, INGRESS_ALLOWANCE_KEYS, "ingress transition allowance"
+        )
+        nodes.extend(validate_nodes([allowance["node"]], policy, exactly_one=True))
+        validate_sha256(allowance["generation"], "allowed previous generation")
+        if allowance["generation"] == value["generation"]:
+            raise RegistryError("an allowance must name a previous generation")
+        parse_timestamp(allowance["expires_at"])
+    if nodes != sorted(set(nodes), key=lambda node: int(node[3:])):
+        raise RegistryError("ingress transition allowances must be unique and ordered")
+    if not isinstance(value["revision"], int) or value["revision"] < 1:
+        raise RegistryError("ingress transition revision must be positive")
+    created = parse_timestamp(value["created_at"])
+    updated = parse_timestamp(value["updated_at"])
+    if updated < created:
+        raise RegistryError("ingress transition updated_at predates created_at")
+
+
 def validate_orchestration_record(value: Any) -> None:
     if not isinstance(value, dict):
         raise RegistryError("orchestration record must be an object")
@@ -949,6 +999,7 @@ class Registry:
         self.ingress_generations_dir = self.ingress_dir / "generations"
         self.ingress_nodes_dir = self.ingress_dir / "nodes"
         self.ingress_desired_path = self.ingress_dir / "desired.json"
+        self.ingress_transition_path = self.ingress_dir / "transition.json"
         self.hosts_dir = root / "hosts"
         self.control_path = root / "cluster-control.json"
         self.lock_timeout = lock_timeout
@@ -1052,6 +1103,16 @@ class Registry:
                 "desired ingress pointer differs from generation metadata"
             )
         return desired
+
+    def ingress_transition(self) -> dict[str, Any] | None:
+        if not self.ingress_transition_path.exists():
+            return None
+        policy = self.policy()
+        transition = read_json_file(
+            self.ingress_transition_path, "ingress transition"
+        )
+        validate_ingress_transition_record(transition, policy)
+        return transition
 
     def ingress_node_statuses(self) -> list[dict[str, Any]]:
         policy = self.policy()
@@ -3493,6 +3554,25 @@ def command_ingress_begin(registry: Registry, args: argparse.Namespace) -> Any:
             validate_ingress_generation_record(generation_record)
             atomic_write_json(generation_path, generation_record)
 
+        statuses_by_node = {
+            record["node"]: record for record in registry.ingress_node_statuses()
+        }
+        transition = build_ingress_transition(
+            registry,
+            policy,
+            generation,
+            parse_compatible_allowances(getattr(args, "compatible", None), nodes),
+            statuses_by_node,
+            getattr(args, "compatible_window_seconds", 600),
+            now,
+        )
+        # The allowance names the new generation, so it is inert until the
+        # desired pointer below commits that generation.
+        if transition is None:
+            registry.ingress_transition_path.unlink(missing_ok=True)
+        else:
+            atomic_write_json(registry.ingress_transition_path, transition)
+
         existing_desired = registry.ingress_desired()
         desired_unchanged = (
             existing_desired is not None
@@ -3526,9 +3606,6 @@ def command_ingress_begin(registry: Registry, args: argparse.Namespace) -> Any:
             validate_ingress_desired_record(desired, policy)
             atomic_write_json(registry.ingress_desired_path, desired)
 
-        statuses_by_node = {
-            record["node"]: record for record in registry.ingress_node_statuses()
-        }
         statuses: list[dict[str, Any]] = []
         for node in nodes:
             existing = statuses_by_node.get(node)
@@ -3569,7 +3646,150 @@ def command_ingress_begin(registry: Registry, args: argparse.Namespace) -> Any:
         registry.prune_ingress_generations(
             generation, MAX_INGRESS_GENERATIONS
         )
-        return {"desired": desired, "nodes": statuses}
+        return {"desired": desired, "nodes": statuses, "transition": transition}
+
+
+def parse_compatible_allowances(
+    values: Sequence[str] | None, nodes: Sequence[str]
+) -> dict[str, str]:
+    allowances: dict[str, str] = {}
+    for value in values or ():
+        node, separator, previous = value.partition("=")
+        if not separator or node not in nodes:
+            raise RegistryError(
+                f"--compatible must be NODE=GENERATION for a configured mox: {value!r}"
+            )
+        if node in allowances:
+            raise RegistryError(f"--compatible repeats {node}")
+        allowances[node] = validate_sha256(previous, "allowed previous generation")
+    return allowances
+
+
+def build_ingress_transition(
+    registry: Registry,
+    policy: dict[str, Any],
+    generation: str,
+    requested: dict[str, str],
+    statuses_by_node: dict[str, dict[str, Any]],
+    window_seconds: int,
+    now: str,
+) -> dict[str, Any] | None:
+    """Authorize named nodes to keep serving a compatible previous generation.
+
+    Each allowance is bounded in time. A retry of the same rollout keeps the
+    original deadline so repeated coordinator runs cannot extend it.
+    """
+
+    if not requested:
+        return None
+    if not (
+        MIN_INGRESS_COMPATIBLE_WINDOW_SECONDS
+        <= window_seconds
+        <= MAX_INGRESS_COMPATIBLE_WINDOW_SECONDS
+    ):
+        raise RegistryError(
+            "compatible rollout window must be between "
+            f"{MIN_INGRESS_COMPATIBLE_WINDOW_SECONDS} and "
+            f"{MAX_INGRESS_COMPATIBLE_WINDOW_SECONDS} seconds"
+        )
+    existing = registry.ingress_transition()
+    prior: dict[str, dict[str, Any]] = {}
+    if existing is not None and existing["generation"] == generation:
+        prior = {allowance["node"]: allowance for allowance in existing["allowances"]}
+    deadline = (
+        parse_timestamp(now) + dt.timedelta(seconds=window_seconds)
+    ).isoformat()
+    allowances: list[dict[str, Any]] = []
+    for node in sorted(requested, key=lambda name: int(name[3:])):
+        previous = requested[node]
+        if previous == generation:
+            raise RegistryError(f"{node} allowance must name a previous generation")
+        status = statuses_by_node.get(node)
+        if (
+            status is None
+            or status["applied_generation"] != previous
+            or status["state"] == "reject-only"
+        ):
+            raise RegistryError(
+                f"{node} has not durably applied {previous[:16]}; "
+                "it cannot keep serving it during the rollout"
+            )
+        earlier = prior.get(node)
+        allowances.append(
+            {
+                "node": node,
+                "generation": previous,
+                "expires_at": (
+                    earlier["expires_at"]
+                    if earlier is not None and earlier["generation"] == previous
+                    else deadline
+                ),
+            }
+        )
+    transition = {
+        "schema_version": SCHEMA_VERSION,
+        "record_type": "haproxy-transition",
+        "generation": generation,
+        "allowances": allowances,
+        "created_at": (
+            existing["created_at"]
+            if existing is not None and existing["generation"] == generation
+            else now
+        ),
+        "updated_at": now,
+        "revision": existing["revision"] + 1 if existing is not None else 1,
+    }
+    validate_ingress_transition_record(transition, policy)
+    return transition
+
+
+def active_ingress_allowances(
+    desired: dict[str, Any] | None,
+    transition: dict[str, Any] | None,
+    now: dt.datetime,
+) -> list[dict[str, Any]]:
+    if desired is None or transition is None:
+        return []
+    if transition["generation"] != desired["generation"]:
+        return []
+    return [
+        allowance
+        for allowance in transition["allowances"]
+        if parse_timestamp(allowance["expires_at"]) > now
+    ]
+
+
+def command_ingress_finalize(registry: Registry, args: argparse.Namespace) -> Any:
+    """Withdraw rollout allowances once every allowed node applied desired."""
+
+    generation = validate_sha256(args.generation, "ingress generation")
+    with registry.lock():
+        desired = registry.ingress_desired()
+        if desired is None or desired["generation"] != generation:
+            raise RegistryError(
+                "refusing to finalize a superseded ingress generation"
+            )
+        transition = registry.ingress_transition()
+        if transition is None:
+            return {"finalized": False, "reason": "no-transition"}
+        if transition["generation"] == generation:
+            statuses = {
+                record["node"]: record
+                for record in registry.ingress_node_statuses()
+            }
+            pending = [
+                allowance["node"]
+                for allowance in transition["allowances"]
+                if statuses.get(allowance["node"], {}).get("state") != "applied"
+                or statuses[allowance["node"]]["applied_generation"] != generation
+            ]
+            if pending:
+                raise RegistryError(
+                    "rollout allowances remain for unapplied nodes: "
+                    + ", ".join(pending)
+                )
+        registry.ingress_transition_path.unlink(missing_ok=True)
+        return {"finalized": True, "generation": generation}
 
 
 def command_ingress_mark(registry: Registry, args: argparse.Namespace) -> Any:
@@ -3629,9 +3849,15 @@ def command_ingress_mark(registry: Registry, args: argparse.Namespace) -> Any:
 
 def command_ingress_status(registry: Registry, args: argparse.Namespace) -> Any:
     desired = registry.ingress_desired()
+    transition = registry.ingress_transition()
     return {
         "desired": desired,
         "nodes": registry.ingress_node_statuses(),
+        "transition": transition,
+        # Evaluated against the reader's clock; every consumer is local.
+        "active_allowances": active_ingress_allowances(
+            desired, transition, dt.datetime.now(dt.timezone.utc)
+        ),
     }
 
 
@@ -4690,7 +4916,30 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="configured mox node; repeat in mox1..moxN order",
     )
+    ingress_begin.add_argument(
+        "--compatible",
+        action="append",
+        default=[],
+        metavar="NODE=GENERATION",
+        help=(
+            "allow NODE to keep serving its applied GENERATION while the new "
+            "generation rolls out; repeat per node"
+        ),
+    )
+    ingress_begin.add_argument(
+        "--compatible-window-seconds",
+        type=int,
+        default=600,
+        help="upper bound on each rollout allowance (default: 600)",
+    )
     ingress_begin.set_defaults(handler=command_ingress_begin)
+
+    ingress_finalize = subparsers.add_parser(
+        "ingress-finalize",
+        help="withdraw rollout allowances after every allowed node applied",
+    )
+    ingress_finalize.add_argument("--generation", required=True)
+    ingress_finalize.set_defaults(handler=command_ingress_finalize)
 
     ingress_mark = subparsers.add_parser(
         "ingress-mark",

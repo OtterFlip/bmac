@@ -16,12 +16,16 @@ REGISTRY="${SCRIPT_DIR}/cluster_registry.py"
 RENDERER="${SCRIPT_DIR}/haproxy_routes.py"
 INSTALLED_SYNC="/usr/local/lib/app-ha-proxmox/lib/sync_haproxy_routes.sh"
 MAX_RETAINED_GENERATIONS=4
+COMPATIBLE_ROLLOUT_WINDOW_SECONDS=600
+LOCAL_INGRESS_MARKER=/run/app-ha-haproxy-ingress-current
 MODE=delegate
 LOCK_WAIT_SECONDS=130
 COORDINATOR_NODES_JSON=""
 WORK_DIR=""
 TRANSACTION=""
 LOCAL_FAIL_CLOSED_ARMED=false
+LOCAL_SERVING_GENERATION=""
+COMPATIBLE_PREVIOUS=""
 declare -a TRANSACTION_NODES=()
 declare -a TRANSACTION_VMIDS=()
 
@@ -483,9 +487,12 @@ if [[ -f /run/app-ha-haproxy-ingress-current &&
       ! -L /run/app-ha-haproxy-ingress-current ]]; then
   current="$(< /run/app-ha-haproxy-ingress-current)"
 fi
-if [[ "$current" != "$generation" ]] ||
-   ! nft list table inet app_ha_haproxy_ingress >/dev/null 2>&1; then
+# The DNAT table does not depend on the generation, and the loader deletes
+# before it adds. Replacing a live table would only refuse new connections.
+if ! nft list table inet app_ha_haproxy_ingress >/dev/null 2>&1; then
   /usr/local/sbin/app-ha-load-haproxy-ingress
+fi
+if [[ "$current" != "$generation" ]]; then
   printf '%s\n' "$generation" >/run/app-ha-haproxy-ingress-current
   chmod 0600 /run/app-ha-haproxy-ingress-current
 fi
@@ -516,12 +523,31 @@ set -Eeuo pipefail
 transaction="$1"; generation="$2"
 source_config="/etc/haproxy/app-ha-generations/${generation}/haproxy.cfg"
 temporary="/etc/haproxy/.haproxy.cfg.app-ha-${transaction}"
+previous="/etc/haproxy/.haproxy.cfg.app-ha-${transaction}.previous"
 marker_temporary="/etc/haproxy/.app-ha-active-generation-${transaction}"
 [[ "$transaction" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
 [[ "$generation" =~ ^[0-9a-f]{64}$ ]]
 [[ -f "$source_config" && ! -L "$source_config" ]]
 install -m 0644 "$source_config" "$temporary"
 haproxy -c -f "$temporary"
+rm -f -- "$previous"
+if [[ -f /etc/haproxy/haproxy.cfg && ! -L /etc/haproxy/haproxy.cfg ]]; then
+  install -m 0644 /etc/haproxy/haproxy.cfg "$previous"
+fi
+# The active marker still names the previous generation until the final
+# rename, so restoring its configuration leaves this LXC provably serving it.
+restore_previous() {
+  trap - ERR
+  rm -f -- "$temporary" "$marker_temporary"
+  if [[ -f "$previous" ]]; then
+    mv -f "$previous" /etc/haproxy/haproxy.cfg
+    if systemctl is-active --quiet haproxy; then
+      systemctl reload haproxy || true
+    fi
+  fi
+  exit 1
+}
+trap restore_previous ERR
 mv -f "$temporary" /etc/haproxy/haproxy.cfg
 haproxy -c -f /etc/haproxy/haproxy.cfg
 systemctl reload haproxy
@@ -529,6 +555,8 @@ systemctl is-active --quiet haproxy
 printf '%s\n' "$generation" >"$marker_temporary"
 chmod 0644 "$marker_temporary"
 mv -f "$marker_temporary" /etc/haproxy/app-ha-active-generation
+trap - ERR
+rm -f -- "$previous"
 LXC
 HOST
 }
@@ -603,12 +631,123 @@ set -Eeuo pipefail
 transaction="$1"
 [[ "$transaction" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
 rm -rf -- "/run/app-ha-haproxy-route-sync/${transaction}"
+rm -f -- "/etc/haproxy/.haproxy.cfg.app-ha-${transaction}" \
+  "/etc/haproxy/.haproxy.cfg.app-ha-${transaction}.previous" \
+  "/etc/haproxy/.app-ha-active-generation-${transaction}"
 find /etc/haproxy/app-ha-generations -mindepth 1 -maxdepth 1 \
   -type d -name ".*.${transaction}.candidate" -exec rm -rf -- {} + \
   2>/dev/null || true
 LXC
 fi
 HOST
+}
+
+# Prints "<ingress-generation> <active-generation>", using - for either when
+# public DNAT is absent or the LXC has no readable active marker.
+node_ingress_facts() {
+  local node="$1" vmid="$2"
+  validate_node "$node"
+  validate_vmid "$vmid"
+  run_on_node "$node" bash -s -- "$vmid" <<'HOST'
+set -Eeuo pipefail
+vmid="$1"
+[[ "$vmid" =~ ^91(1[1-9]|20)$ ]]
+enabled=-
+if nft list table inet app_ha_haproxy_ingress >/dev/null 2>&1 &&
+   [[ -f /run/app-ha-haproxy-ingress-current &&
+      ! -L /run/app-ha-haproxy-ingress-current ]]; then
+  enabled="$(< /run/app-ha-haproxy-ingress-current)"
+fi
+active=-
+if pct status "$vmid" </dev/null |
+  awk '$1 == "status:" && $2 == "running" { found=1 } END { exit !found }'; then
+  active="$(
+    pct exec "$vmid" -- cat /etc/haproxy/app-ha-active-generation \
+      </dev/null 2>/dev/null
+  )" || active=-
+fi
+[[ "$enabled" =~ ^[0-9a-f]{64}$ ]] || enabled=-
+[[ "$active" =~ ^[0-9a-f]{64}$ ]] || active=-
+printf '%s %s\n' "$enabled" "$active"
+HOST
+}
+
+fetch_node_generation() {
+  local node="$1" vmid="$2" generation="$3" archive="$4"
+  validate_node "$node"
+  validate_vmid "$vmid"
+  validate_generation "$generation"
+  [[ "$archive" == "${WORK_DIR}/previous-${node}.tar" ]] ||
+    die "Unsafe previous generation archive path"
+  run_on_node "$node" bash -s -- "$vmid" "$generation" >"$archive" <<'HOST'
+set -Eeuo pipefail
+vmid="$1"; generation="$2"
+[[ "$vmid" =~ ^91(1[1-9]|20)$ ]]
+[[ "$generation" =~ ^[0-9a-f]{64}$ ]]
+pct exec "$vmid" -- tar -C "/etc/haproxy/app-ha-generations/${generation}" \
+  -cf - . </dev/null
+HOST
+}
+
+# True when pmxcfs authorizes this node to serve the named generation: either
+# it is the durably applied desired generation, or an unexpired rollout
+# allowance names this node and the generation is its previous or the desired.
+serving_is_authorized() {
+  local node="$1" serving="$2" status_json="$3"
+  validate_node "$node"
+  validate_generation "$serving"
+  jq -e --arg node "$node" --arg serving "$serving" '
+    .desired.generation as $desired |
+    (
+      $serving == $desired and
+      any(
+        .nodes[];
+        .node == $node and
+        .desired_generation == $desired and
+        .applied_generation == $desired and
+        .state == "applied"
+      )
+    ) or any(
+      (.active_allowances // [])[];
+      .node == $node and (.generation == $serving or $serving == $desired)
+    )
+  ' <<<"$status_json" >/dev/null
+}
+
+# Sets COMPATIBLE_PREVIOUS when this node may keep public ingress while it
+# moves to the candidate: its ingress is enabled, it provably serves an
+# authorized and durably applied generation, and the renderer proves the
+# candidate cannot send any of that generation's traffic somewhere else.
+select_compatible_predecessor() {
+  local node="$1" vmid="$2" generation="$3" status_json="$4"
+  local facts enabled active archive comparison
+  COMPATIBLE_PREVIOUS=""
+  facts="$(node_ingress_facts "$node" "$vmid")" || return 1
+  read -r enabled active <<<"$facts"
+  [[ "$enabled" != - && "$enabled" == "$active" &&
+     "$enabled" != "$generation" ]] || return 1
+  serving_is_authorized "$node" "$enabled" "$status_json" || return 1
+  jq -e --arg node "$node" --arg serving "$enabled" '
+    any(
+      .nodes[];
+      .node == $node and
+      .applied_generation == $serving and
+      .state != "reject-only"
+    )
+  ' <<<"$status_json" >/dev/null || return 1
+  node_generation_is_current "$node" "$vmid" "$enabled" || return 1
+  archive="${WORK_DIR}/previous-${node}.tar"
+  comparison="${WORK_DIR}/compare-${node}.json"
+  fetch_node_generation "$node" "$vmid" "$enabled" "$archive" || return 1
+  if ! render_routes compare --previous-archive "$archive" \
+    --candidate-dir "${WORK_DIR}/generation" >"$comparison"; then
+    log "${node}: $(
+      jq -r '.reasons | join("; ")' "$comparison" 2>/dev/null ||
+        printf 'compatibility could not be evaluated'
+    )"
+    return 1
+  fi
+  COMPATIBLE_PREVIOUS="$enabled"
 }
 
 best_effort_disable_local_ingress() {
@@ -647,13 +786,20 @@ mark_ingress_state() {
 
 publish_desired_generation() {
   local coordinator="$1" generation="$2" bundle_sha256="$3"
-  local route_count="$4" output="$5" index
+  local route_count="$4" output="$5" index allowance
+  shift 5
   local -a arguments=(
     ingress-begin
     --generation "$generation"
     --bundle-sha256 "$bundle_sha256"
     --route-count "$route_count"
+    --compatible-window-seconds "$COMPATIBLE_ROLLOUT_WINDOW_SECONDS"
   )
+  for allowance in "$@"; do
+    [[ "$allowance" =~ ^mox([1-9]|10)=[0-9a-f]{64}$ ]] ||
+      die "Unsafe compatible rollout allowance"
+    arguments+=(--compatible "$allowance")
+  done
   validate_node "$coordinator"
   validate_generation "$generation"
   validate_digest "$bundle_sha256"
@@ -674,6 +820,14 @@ publish_desired_generation() {
     (.nodes | type == "array")
   ' "$output" >/dev/null ||
     die "Registry did not confirm the desired ingress generation"
+}
+
+finalize_rollout() {
+  local coordinator="$1" generation="$2"
+  validate_node "$coordinator"
+  validate_generation "$generation"
+  assert_coordinator_online_and_quorate "$coordinator"
+  registry_cmd ingress-finalize --generation "$generation" >/dev/null
 }
 
 verify_target_membership() {
@@ -720,6 +874,165 @@ abort_transaction_on_signal() {
   exit "$exit_code"
 }
 
+# Stages, classifies, publishes, and commits one rendered generation. It
+# appends to the caller's failures array and reads the caller's per-node
+# arrays: nodes, vmids, lxc_ips, lxc_gateways, needs_commit, compatible, and
+# previous_generations.
+rollout_generation() {
+  local coordinator="$1" generation="$2" transaction="$3"
+  local bundle="$4" bundle_sha256="$5" route_count="$6"
+  local index node status_json
+  local -a allowances=()
+
+  # Build and validate every missing generation before changing desired state
+  # or public ingress. A staging failure leaves the prior desired generation
+  # untouched and still serviceable.
+  for index in "${!nodes[@]}"; do
+    node="${nodes[$index]}"
+    if node_generation_is_current "$node" "${vmids[$index]}" "$generation"; then
+      continue
+    fi
+    if stage_node "$node" "${vmids[$index]}" "$transaction" "$generation" \
+      "$bundle" "$bundle_sha256" "${lxc_ips[$index]}" \
+      "${lxc_gateways[$index]}" "$PROXMOX_PRIVATE_BRIDGE"; then
+      if prune_node_generations \
+        "$node" "${vmids[$index]}" "$generation"; then
+        needs_commit[index]=true
+      else
+        failures+=("${node}: staged generation pruning failed")
+      fi
+    else
+      failures+=("${node}: staging failed")
+    fi
+  done
+
+  if ((${#failures[@]} == 0)); then
+    verify_target_membership "$coordinator" "${nodes[@]}"
+    # A stale node keeps public ingress only when the renderer proves its live
+    # generation cannot route any request differently from the candidate.
+    # pmxcfs records that as a bounded allowance in the desired commit.
+    if status_json="$(registry_cmd ingress-status)"; then
+      for index in "${!nodes[@]}"; do
+        [[ "${needs_commit[$index]}" == true ]] || continue
+        node="${nodes[$index]}"
+        if select_compatible_predecessor "$node" "${vmids[$index]}" \
+          "$generation" "$status_json"; then
+          compatible[index]=true
+          previous_generations[index]="$COMPATIBLE_PREVIOUS"
+          allowances+=("${node}=${COMPATIBLE_PREVIOUS}")
+          log "${node}: compatible with live ${COMPATIBLE_PREVIOUS:0:16}; ingress stays enabled during reload"
+        else
+          log "${node}: transition is not provably compatible; ingress closes until it commits"
+        fi
+      done
+    else
+      log "Ingress status is unreadable; every stale node closes until it commits"
+    fi
+    # Close every other stale public ingress before publishing the new desired
+    # pointer. A coordinator crash from this point onward therefore leaves
+    # those nodes disabled.
+    for index in "${!nodes[@]}"; do
+      [[ "${needs_commit[$index]}" == true &&
+         "${compatible[$index]}" != true ]] || continue
+      node="${nodes[$index]}"
+      if ! disable_ingress_node "$node" "${vmids[$index]}"; then
+        failures+=("${node}: stale ingress could not be disabled")
+      fi
+    done
+    # Membership can change while stale targets are being disabled. Refresh
+    # once more immediately before the pmxcfs desired-generation commit so a
+    # newly online node cannot continue serving an older generation.
+    ((${#failures[@]} > 0)) ||
+      verify_target_membership "$coordinator" "${nodes[@]}"
+  fi
+
+  if ((${#failures[@]} == 0)); then
+    publish_desired_generation "$coordinator" "$generation" "$bundle_sha256" \
+      "$route_count" "${WORK_DIR}/ingress-plan.json" "${allowances[@]}"
+    for index in "${!nodes[@]}"; do
+      node="${nodes[$index]}"
+      if [[ "${needs_commit[$index]}" == true ]]; then
+        if ! mark_ingress_state "$node" "$generation" staged; then
+          failures+=("${node}: staged state could not be persisted")
+        fi
+        continue
+      fi
+      if ! mark_ingress_state "$node" "$generation" applied; then
+        disable_ingress_node "$node" "${vmids[$index]}" || true
+        failures+=("${node}: current applied state could not be persisted")
+        continue
+      fi
+      if ! prune_node_generations "$node" "${vmids[$index]}" "$generation"; then
+        disable_ingress_node "$node" "${vmids[$index]}" || true
+        mark_ingress_state "$node" "$generation" reject-only || true
+        failures+=("${node}: generation pruning failed")
+        continue
+      fi
+      if ! enable_ingress_node "$node" "${vmids[$index]}" "$generation"; then
+        disable_ingress_node "$node" "${vmids[$index]}" || true
+        mark_ingress_state "$node" "$generation" reject-only || true
+        failures+=("${node}: current ingress could not be enabled")
+      fi
+    done
+  fi
+
+  if ((${#failures[@]} == 0)); then
+    for index in "${!nodes[@]}"; do
+      [[ "${needs_commit[$index]}" == true ]] || continue
+      node="${nodes[$index]}"
+
+      # A fresh coordinator check and the target's own pvecm check in
+      # install_node both occur immediately before this node's config commit.
+      if ! assert_coordinator_online_and_quorate "$coordinator"; then
+        failures+=("${node}: quorum was lost immediately before commit")
+        break
+      fi
+      if ! node_is_online "$node" "$COORDINATOR_NODES_JSON"; then
+        failures+=("${node}: node went offline immediately before commit")
+        break
+      fi
+      if ! install_node "$node" "${vmids[$index]}" "$transaction" "$generation"; then
+        # install_node restored the previous configuration. A compatible node
+        # that provably serves it again keeps ingress within its allowance
+        # while periodic reconciliation retries.
+        if [[ "${compatible[$index]}" == true ]] &&
+           node_generation_is_current "$node" "${vmids[$index]}" \
+             "${previous_generations[$index]}"; then
+          failures+=("${node}: generation commit or reload failed; compatible ${previous_generations[$index]:0:16} remains live within its rollout window")
+          continue
+        fi
+        disable_ingress_node "$node" "${vmids[$index]}" || true
+        mark_ingress_state "$node" "$generation" reject-only || true
+        failures+=("${node}: generation commit or reload failed")
+        continue
+      fi
+      if ! mark_ingress_state "$node" "$generation" applied; then
+        disable_ingress_node "$node" "${vmids[$index]}" || true
+        failures+=("${node}: applied status could not be committed")
+        continue
+      fi
+      if ! prune_node_generations "$node" "${vmids[$index]}" "$generation"; then
+        disable_ingress_node "$node" "${vmids[$index]}" || true
+        mark_ingress_state "$node" "$generation" reject-only || true
+        failures+=("${node}: generation pruning failed")
+        continue
+      fi
+      if ! enable_ingress_node "$node" "${vmids[$index]}" "$generation"; then
+        disable_ingress_node "$node" "${vmids[$index]}" || true
+        mark_ingress_state "$node" "$generation" reject-only || true
+        failures+=("${node}: ingress enablement failed")
+      fi
+    done
+  fi
+
+  if ((${#failures[@]} == 0)) &&
+     jq -e '.transition != null' "${WORK_DIR}/ingress-plan.json" >/dev/null; then
+    if ! finalize_rollout "$coordinator" "$generation"; then
+      failures+=("rollout allowances could not be withdrawn")
+    fi
+  fi
+}
+
 coordinator_transaction() {
   ((EUID == 0)) ||
     die "Route synchronization must run as root on the coordinator"
@@ -739,6 +1052,7 @@ coordinator_transaction() {
   local index node failure_summary
   local -a nodes=() vmids=() lxc_ips=() lxc_gateways=()
   local -a needs_commit=() failures=()
+  local -a compatible=() previous_generations=()
 
   WORK_DIR="$(mktemp -d /run/app-ha-haproxy-render.XXXXXX)"
 
@@ -784,6 +1098,8 @@ coordinator_transaction() {
       lxc_ips+=("${private_prefix}.$((HAPROXY_IP_START_OCTET + index - 1))/24")
       lxc_gateways+=("${private_prefix}.$((MOX_IP_START_OCTET + index - 1))")
       needs_commit+=(false)
+      compatible+=(false)
+      previous_generations+=("")
     fi
   done
   ((${#nodes[@]} > 0)) || die "No online mox hosts were found"
@@ -801,115 +1117,8 @@ coordinator_transaction() {
 
   log "Reconciling generation ${generation:0:16} on ${#nodes[@]} online mox host(s)"
 
-  # Build and validate every missing generation before changing desired state
-  # or public ingress. A staging failure leaves the prior desired generation
-  # untouched and still serviceable.
-  for index in "${!nodes[@]}"; do
-    node="${nodes[$index]}"
-    if node_generation_is_current "$node" "${vmids[$index]}" "$generation"; then
-      continue
-    fi
-    if stage_node "$node" "${vmids[$index]}" "$transaction" "$generation" \
-      "$bundle" "$bundle_sha256" "${lxc_ips[$index]}" \
-      "${lxc_gateways[$index]}" "$PROXMOX_PRIVATE_BRIDGE"; then
-      if prune_node_generations \
-        "$node" "${vmids[$index]}" "$generation"; then
-        needs_commit[index]=true
-      else
-        failures+=("${node}: staged generation pruning failed")
-      fi
-    else
-      failures+=("${node}: staging failed")
-    fi
-  done
-
-  if ((${#failures[@]} == 0)); then
-    verify_target_membership "$coordinator" "${nodes[@]}"
-    # Once every online node has a validated candidate, close stale public
-    # ingress before publishing the new desired pointer. A coordinator crash
-    # from this point onward therefore leaves stale nodes disabled.
-    for index in "${!nodes[@]}"; do
-      [[ "${needs_commit[$index]}" == true ]] || continue
-      node="${nodes[$index]}"
-      if ! disable_ingress_node "$node" "${vmids[$index]}"; then
-        failures+=("${node}: stale ingress could not be disabled")
-      fi
-    done
-    # Membership can change while stale targets are being disabled. Refresh
-    # once more immediately before the pmxcfs desired-generation commit so a
-    # newly online node cannot continue serving an older generation.
-    ((${#failures[@]} > 0)) ||
-      verify_target_membership "$coordinator" "${nodes[@]}"
-  fi
-
-  if ((${#failures[@]} == 0)); then
-    publish_desired_generation "$coordinator" "$generation" "$bundle_sha256" \
-      "$route_count" "${WORK_DIR}/ingress-plan.json"
-    for index in "${!nodes[@]}"; do
-      node="${nodes[$index]}"
-      if [[ "${needs_commit[$index]}" == true ]]; then
-        if ! mark_ingress_state "$node" "$generation" staged; then
-          failures+=("${node}: staged state could not be persisted")
-        fi
-        continue
-      fi
-      if ! mark_ingress_state "$node" "$generation" applied; then
-        disable_ingress_node "$node" "${vmids[$index]}" || true
-        failures+=("${node}: current applied state could not be persisted")
-        continue
-      fi
-      if ! prune_node_generations "$node" "${vmids[$index]}" "$generation"; then
-        disable_ingress_node "$node" "${vmids[$index]}" || true
-        mark_ingress_state "$node" "$generation" reject-only || true
-        failures+=("${node}: generation pruning failed")
-        continue
-      fi
-      if ! enable_ingress_node "$node" "${vmids[$index]}" "$generation"; then
-        disable_ingress_node "$node" "${vmids[$index]}" || true
-        mark_ingress_state "$node" "$generation" reject-only || true
-        failures+=("${node}: current ingress could not be enabled")
-      fi
-    done
-  fi
-
-  if ((${#failures[@]} == 0)); then
-    for index in "${!nodes[@]}"; do
-      [[ "${needs_commit[$index]}" == true ]] || continue
-      node="${nodes[$index]}"
-
-      # A fresh coordinator check and the target's own pvecm check in
-      # install_node both occur immediately before this node's config commit.
-      if ! assert_coordinator_online_and_quorate "$coordinator"; then
-        failures+=("${node}: quorum was lost immediately before commit")
-        break
-      fi
-      if ! node_is_online "$node" "$COORDINATOR_NODES_JSON"; then
-        failures+=("${node}: node went offline immediately before commit")
-        break
-      fi
-      if ! install_node "$node" "${vmids[$index]}" "$transaction" "$generation"; then
-        mark_ingress_state "$node" "$generation" reject-only || true
-        failures+=("${node}: generation commit or reload failed")
-        continue
-      fi
-      if ! mark_ingress_state "$node" "$generation" applied; then
-        disable_ingress_node "$node" "${vmids[$index]}" || true
-        failures+=("${node}: applied status could not be committed")
-        continue
-      fi
-      if ! prune_node_generations "$node" "${vmids[$index]}" "$generation"; then
-        disable_ingress_node "$node" "${vmids[$index]}" || true
-        mark_ingress_state "$node" "$generation" reject-only || true
-        failures+=("${node}: generation pruning failed")
-        continue
-      fi
-      if ! enable_ingress_node "$node" "${vmids[$index]}" "$generation"; then
-        disable_ingress_node "$node" "${vmids[$index]}" || true
-        mark_ingress_state "$node" "$generation" reject-only || true
-        failures+=("${node}: ingress enablement failed")
-      fi
-    done
-  fi
+  rollout_generation "$coordinator" "$generation" "$transaction" \
+    "$bundle" "$bundle_sha256" "$route_count"
 
   for index in "${!nodes[@]}"; do
     cleanup_node "${nodes[$index]}" "${vmids[$index]}" "$transaction" \
@@ -920,7 +1129,7 @@ coordinator_transaction() {
 
   if ((${#failures[@]} > 0)); then
     failure_summary="$(IFS=';'; printf '%s' "${failures[*]}")"
-    die "${failure_summary}; pending nodes remain fail-closed for periodic reconciliation"
+    die "${failure_summary}; pending nodes stay fail-closed or within a bounded compatible allowance for periodic reconciliation"
   fi
   rm -rf -- "$WORK_DIR"
   WORK_DIR=""
@@ -963,7 +1172,8 @@ local_vmid() {
 }
 
 assert_local_current() {
-  local node vmid status_json generation
+  local node vmid status_json generation serving=""
+  LOCAL_SERVING_GENERATION=""
   node="$(hostname -s)"
   vmid="$(local_vmid)"
   if ! assert_local_node_online_and_quorate; then
@@ -983,32 +1193,23 @@ assert_local_current() {
     disable_ingress_node "$node" "$vmid" || true
     return 1
   }
-  if ! jq -e --arg node "$node" --arg generation "$generation" '
-    any(
-      .nodes[];
-      .node == $node and
-      .desired_generation == $generation and
-      .applied_generation == $generation and
-      .state == "applied"
-    )
-  ' <<<"$status_json" >/dev/null; then
+  if [[ -f "$LOCAL_INGRESS_MARKER" && ! -L "$LOCAL_INGRESS_MARKER" ]]; then
+    serving="$(< "$LOCAL_INGRESS_MARKER")"
+  fi
+  if [[ ! "$serving" =~ ^[0-9a-f]{64}$ ]] ||
+     ! serving_is_authorized "$node" "$serving" "$status_json"; then
     disable_ingress_node "$node" "$vmid" || true
     return 1
   fi
-  if [[ ! -f /run/app-ha-haproxy-ingress-current ||
-        -L /run/app-ha-haproxy-ingress-current ||
-        "$(< /run/app-ha-haproxy-ingress-current)" != "$generation" ]]; then
+  if ! node_generation_is_current "$node" "$vmid" "$serving"; then
     disable_ingress_node "$node" "$vmid" || true
     return 1
   fi
-  if ! node_generation_is_current "$node" "$vmid" "$generation"; then
-    disable_ingress_node "$node" "$vmid" || true
-    return 1
-  fi
+  LOCAL_SERVING_GENERATION="$serving"
 }
 
 local_reconcile() {
-  local node vmid nodes_json coordinator status_json generation
+  local node vmid nodes_json coordinator
   local local_is_current=false
   node="$(hostname -s)"
   vmid="$(local_vmid)"
@@ -1028,9 +1229,7 @@ local_reconcile() {
      validate_nodes_json "$nodes_json" 2>/dev/null &&
      coordinator="$(first_online_node_from_json "$nodes_json" 2>/dev/null)" &&
      [[ "$node" != "$coordinator" ]]; then
-    status_json="$(registry_cmd ingress-status)"
-    generation="$(jq -er '.desired.generation' <<<"$status_json")"
-    enable_ingress_node "$node" "$vmid" "$generation" ||
+    enable_ingress_node "$node" "$vmid" "$LOCAL_SERVING_GENERATION" ||
       die "Current non-coordinator ingress could not be enabled"
     log "Local generation is current; coordinator ${coordinator} owns periodic reconciliation"
     return 0
@@ -1043,7 +1242,7 @@ local_reconcile() {
     delegate_to_coordinator
   ); then
     if assert_local_current; then
-      log "Coordinator sync is busy; local desired generation remains current"
+      log "Coordinator sync is busy or incomplete; local generation ${LOCAL_SERVING_GENERATION:0:16} remains authorized"
       return 0
     fi
     disable_ingress_node "$node" "$vmid" || true
@@ -1052,9 +1251,7 @@ local_reconcile() {
   if ! assert_local_current; then
     die "Local node did not reach the desired generation and remains disabled"
   fi
-  status_json="$(registry_cmd ingress-status)"
-  generation="$(jq -er '.desired.generation' <<<"$status_json")"
-  enable_ingress_node "$node" "$vmid" "$generation" ||
+  enable_ingress_node "$node" "$vmid" "$LOCAL_SERVING_GENERATION" ||
     die "Current local ingress could not be enabled"
 }
 

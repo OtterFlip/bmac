@@ -123,7 +123,11 @@ a deterministic, reject-by-default HAProxy generation. The synchronizer runs
 only through an online, quorate coordinator; stages and validates every
 currently configured proxy; persists the desired generation and per-node
 application state in pmxcfs; disables stale ingress on failure; and
-transactionally reloads or rolls back. Boot and periodic services reconcile a
+transactionally reloads or rolls back. A node keeps public ingress through a
+graceful reload only when `haproxy_routes.py compare` proves its live
+generation cannot route any request differently from the candidate; pmxcfs
+records that as a bounded per-node allowance. Every other stale node closes
+before the desired pointer moves. Boot and periodic services reconcile a
 returning node before its public DNAT path is enabled. Generation retention is
 bounded.
 

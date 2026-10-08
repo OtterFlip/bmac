@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import tarfile
 import tempfile
 from typing import Any, Sequence
 
@@ -40,6 +41,18 @@ SAFE_ABSOLUTE_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
 MAX_ROUTES = 4096
 MAX_INPUT_BYTES = 16 * 1024 * 1024
 DEFAULT_GENERATION_ROOT = Path("/etc/haproxy/app-ha-generations")
+GENERATION_FILES = (
+    "haproxy.cfg",
+    "manifest.json",
+    "maps/app-ha-http-host.map",
+    "maps/app-ha-tls-sni.map",
+)
+GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
+SERVER_LINE_RE = re.compile(
+    r"^    server app_ha_server_[A-Za-z0-9_.-]+ "
+    r"(?P<ip>[0-9.]+):(?P<port>[0-9]{1,5}) check$"
+)
+INCOMPATIBLE_EXIT = 3
 
 
 class RouteError(ValueError):
@@ -413,17 +426,12 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def write_generation(
-    output_dir: Path,
-    routes: Sequence[dict[str, Any]],
-    *,
-    generation_root: Path = DEFAULT_GENERATION_ROOT,
+def _manifest(
+    routes: Sequence[dict[str, Any]], files: dict[str, str]
 ) -> dict[str, Any]:
-    files = render_files(routes, generation_root=generation_root)
-    generation = routing_generation(routes)
-    manifest = {
+    return {
         "schema_version": SCHEMA_VERSION,
-        "generation": generation,
+        "generation": routing_generation(routes),
         "route_count": len(routes),
         "resource_count": len({route["resource"] for route in routes}),
         "files": {
@@ -431,6 +439,20 @@ def write_generation(
             for name, content in sorted(files.items())
         },
     }
+
+
+def _manifest_text(manifest: dict[str, Any]) -> str:
+    return json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+
+
+def write_generation(
+    output_dir: Path,
+    routes: Sequence[dict[str, Any]],
+    *,
+    generation_root: Path = DEFAULT_GENERATION_ROOT,
+) -> dict[str, Any]:
+    files = render_files(routes, generation_root=generation_root)
+    manifest = _manifest(routes, files)
 
     output_dir = output_dir.resolve()
     output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -444,7 +466,7 @@ def write_generation(
             destination.write_text(content, encoding="utf-8", newline="\n")
             destination.chmod(0o644)
         (temporary / "manifest.json").write_text(
-            json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=True) + "\n",
+            _manifest_text(manifest),
             encoding="utf-8",
             newline="\n",
         )
@@ -456,6 +478,197 @@ def write_generation(
         shutil.rmtree(temporary, ignore_errors=True)
         raise
     return manifest
+
+
+def _parse_map(text: str, prefix: str, description: str) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for line in text.splitlines():
+        fields = line.split(" ")
+        if len(fields) != 2:
+            raise RouteError(f"{description} has a malformed line: {line!r}")
+        domain, backend = fields
+        domain = validate_domain(domain)
+        if domain in entries:
+            raise RouteError(f"{description} repeats domain {domain!r}")
+        if not backend.startswith(prefix):
+            raise RouteError(f"{description} names an unexpected backend {backend!r}")
+        entries[domain] = validate_resource(backend[len(prefix) :])
+    return entries
+
+
+def _parse_server_targets(config: str) -> dict[str, tuple[str, int]]:
+    targets: dict[str, tuple[str, int]] = {}
+    backend: str | None = None
+    for line in config.splitlines():
+        if line.startswith("backend "):
+            backend = line[len("backend ") :]
+            continue
+        match = SERVER_LINE_RE.fullmatch(line)
+        if match is None or backend is None:
+            continue
+        if backend in targets:
+            raise RouteError(f"backend {backend!r} has more than one server")
+        address = _parse_ipv4(match.group("ip"), "rendered backend IP")
+        port = _expect_plain_int(int(match.group("port")), "rendered backend port")
+        targets[backend] = (str(address), port)
+    return targets
+
+
+def load_rendered_generation(
+    files: dict[str, str],
+    *,
+    generation_root: Path = DEFAULT_GENERATION_ROOT,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Recover a generation's routes and prove this renderer emits it byte-for-byte.
+
+    A generation produced by a different template, schema, or hand edit is
+    rejected, so compatibility never has to reason about unknown HAProxy
+    configuration.
+    """
+
+    if sorted(files) != sorted(GENERATION_FILES):
+        raise RouteError("rendered generation does not contain the exact file set")
+    try:
+        manifest = json.loads(
+            files["manifest.json"],
+            object_pairs_hook=_json_object_without_duplicate_keys,
+        )
+    except json.JSONDecodeError as exc:
+        raise RouteError(f"rendered manifest is not valid JSON: {exc}") from exc
+    if not isinstance(manifest, dict) or not isinstance(
+        manifest.get("generation"), str
+    ):
+        raise RouteError("rendered manifest has no generation")
+    generation = manifest["generation"]
+    if not GENERATION_RE.fullmatch(generation):
+        raise RouteError("rendered manifest generation is invalid")
+
+    http = _parse_map(
+        files["maps/app-ha-http-host.map"], "app_ha_http_", "HTTP Host map"
+    )
+    tls = _parse_map(files["maps/app-ha-tls-sni.map"], "app_ha_tls_", "TLS SNI map")
+    if http != tls:
+        raise RouteError("HTTP Host and TLS SNI maps disagree")
+    targets = _parse_server_targets(files["haproxy.cfg"])
+
+    routes: list[dict[str, Any]] = []
+    owners: dict[str, str] = {}
+    for domain, resource in http.items():
+        http_backend, tls_backend, _server = backend_names(resource)
+        if http_backend not in targets or tls_backend not in targets:
+            raise RouteError(f"route {domain!r} has no rendered backend server")
+        address, http_port = targets[http_backend]
+        tls_address, https_port = targets[tls_backend]
+        if address != tls_address:
+            raise RouteError(f"resource {resource!r} has inconsistent backend targets")
+        if owners.setdefault(address, resource) != resource:
+            raise RouteError(f"backend IP {address} is shared by two resources")
+        routes.append(
+            {
+                "domain": domain,
+                "resource": resource,
+                "ip": address,
+                "http_port": http_port,
+                "https_port": https_port,
+            }
+        )
+    routes.sort(key=lambda route: (route["domain"], route["resource"]))
+
+    expected = render_files(routes, generation_root=generation_root)
+    expected["manifest.json"] = _manifest_text(_manifest(routes, expected))
+    if any(files[name] != expected[name] for name in GENERATION_FILES):
+        raise RouteError(
+            "rendered generation is not byte-identical to this renderer's output"
+        )
+    if routing_generation(routes) != generation:
+        raise RouteError("rendered generation hash does not match its routes")
+    return generation, routes
+
+
+def read_generation_dir(root: Path) -> dict[str, str]:
+    files: dict[str, str] = {}
+    for relative in GENERATION_FILES:
+        path = root / relative
+        if path.is_symlink() or not path.is_file():
+            raise RouteError(f"rendered generation file is missing or unsafe: {path}")
+        if path.stat().st_size > MAX_INPUT_BYTES:
+            raise RouteError(f"rendered generation file is too large: {path}")
+        files[relative] = path.read_text(encoding="utf-8")
+    return files
+
+
+def read_generation_archive(path: Path) -> dict[str, str]:
+    """Read a generation tarball in memory, accepting only the exact layout."""
+
+    files: dict[str, str] = {}
+    try:
+        with tarfile.open(path, mode="r:") as archive:
+            for member in archive.getmembers():
+                name = member.name.removeprefix("./")
+                if member.isdir() and name in {"", ".", "maps"}:
+                    continue
+                if not member.isreg() or name not in GENERATION_FILES or name in files:
+                    raise RouteError(
+                        f"generation archive has an unexpected member: {member.name!r}"
+                    )
+                if member.size > MAX_INPUT_BYTES:
+                    raise RouteError(f"generation archive member is too large: {name}")
+                handle = archive.extractfile(member)
+                if handle is None:
+                    raise RouteError(f"generation archive member is unreadable: {name}")
+                files[name] = handle.read().decode("utf-8")
+    except (tarfile.TarError, UnicodeError) as exc:
+        raise RouteError(f"generation archive is unreadable: {exc}") from exc
+    return files
+
+
+def compare_generations(
+    previous: Sequence[dict[str, Any]],
+    candidate: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Decide whether serving `previous` during a rollout of `candidate` is safe.
+
+    Serving the previous generation is safe when it can only lack a new route
+    or retain a route the lifecycle has not yet released: no domain, resource,
+    or backend IP may resolve to a different target in the two generations.
+    """
+
+    def target(route: dict[str, Any]) -> tuple[str, str, int, int]:
+        return (
+            route["resource"],
+            route["ip"],
+            route["http_port"],
+            route["https_port"],
+        )
+
+    reasons: list[str] = []
+    previous_domains = {route["domain"]: target(route) for route in previous}
+    candidate_domains = {route["domain"]: target(route) for route in candidate}
+    for domain in sorted(previous_domains.keys() & candidate_domains.keys()):
+        if previous_domains[domain] != candidate_domains[domain]:
+            reasons.append(f"route {domain} changes its backend target")
+
+    previous_resources = {route["resource"]: target(route) for route in previous}
+    candidate_resources = {route["resource"]: target(route) for route in candidate}
+    for resource in sorted(previous_resources.keys() & candidate_resources.keys()):
+        if previous_resources[resource] != candidate_resources[resource]:
+            reasons.append(f"resource {resource} changes its backend target")
+
+    previous_owners = {route["ip"]: route["resource"] for route in previous}
+    candidate_owners = {route["ip"]: route["resource"] for route in candidate}
+    for address in sorted(previous_owners.keys() & candidate_owners.keys()):
+        if previous_owners[address] != candidate_owners[address]:
+            reasons.append(
+                f"backend IP {address} moves from {previous_owners[address]} "
+                f"to {candidate_owners[address]}"
+            )
+
+    return {
+        "compatible": not reasons,
+        "reasons": reasons,
+        "added_domains": sorted(candidate_domains.keys() - previous_domains.keys()),
+        "removed_domains": sorted(previous_domains.keys() - candidate_domains.keys()),
+    }
 
 
 def _json_object_without_duplicate_keys(
@@ -518,9 +731,55 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_compare_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="haproxy_routes.py compare",
+        description=(
+            "Exit 0 when a node may keep serving the previous rendered "
+            f"generation while the candidate rolls out, {INCOMPATIBLE_EXIT} "
+            "when the transition must fail closed."
+        ),
+    )
+    parser.add_argument("--previous-archive", type=Path, required=True)
+    parser.add_argument("--candidate-dir", type=Path, required=True)
+    return parser
+
+
+def compare_main(argv: Sequence[str]) -> int:
+    args = build_compare_parser().parse_args(argv)
+    try:
+        candidate_generation, candidate = load_rendered_generation(
+            read_generation_dir(args.candidate_dir)
+        )
+    except (OSError, RouteError) as exc:
+        print(f"ERROR: candidate generation: {exc}", file=sys.stderr)
+        return 1
+    try:
+        previous_generation, previous = load_rendered_generation(
+            read_generation_archive(args.previous_archive)
+        )
+    except (OSError, RouteError) as exc:
+        result = {
+            "compatible": False,
+            "reasons": [f"previous generation is not provably equivalent: {exc}"],
+            "added_domains": [],
+            "removed_domains": [],
+        }
+        previous_generation = None
+    else:
+        result = compare_generations(previous, candidate)
+    result["previous_generation"] = previous_generation
+    result["candidate_generation"] = candidate_generation
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["compatible"] else INCOMPATIBLE_EXIT
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["compare"]:
+        return compare_main(arguments[1:])
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     try:
         validate_generation_root(args.generation_root)
         routes = validate_routes(

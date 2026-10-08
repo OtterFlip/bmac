@@ -18,8 +18,8 @@ guests/staging/add_staging_vm.sh \
 ```
 
 Run the runtime updater first whenever this checkout's registry, HAProxy
-renderer, or lifecycle hook differs from the copies installed on the mox
-nodes. Existing VMs are not restarted and do not need hook reattachment.
+renderer or route synchronizer, or lifecycle hook differs from the copies
+installed on the mox nodes. Existing VMs are not restarted and do not need hook reattachment.
 
 The optional sanitizer must be a regular, non-symlink Bash file no larger
 than 1 MiB and must be idempotent. It is copied into the guest as a root-only
