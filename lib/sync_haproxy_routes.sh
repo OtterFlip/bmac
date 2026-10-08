@@ -18,6 +18,11 @@ INSTALLED_SYNC="/usr/local/lib/app-ha-proxmox/lib/sync_haproxy_routes.sh"
 MAX_RETAINED_GENERATIONS=4
 COMPATIBLE_ROLLOUT_WINDOW_SECONDS=600
 LOCAL_INGRESS_MARKER=/run/app-ha-haproxy-ingress-current
+# A coordinator commits one node through several separate steps (config and
+# reload, status, pruning, marker), so the unlocked local check retries across
+# that window before treating an inconsistent snapshot as unauthorized.
+LOCAL_CHECK_ATTEMPTS=4
+LOCAL_CHECK_RETRY_SECONDS=2
 MODE=delegate
 LOCK_WAIT_SECONDS=130
 COORDINATOR_NODES_JSON=""
@@ -1171,41 +1176,57 @@ local_vmid() {
   printf '%s\n' "$((9110 + index))"
 }
 
+local_active_generation() {
+  local vmid="$1" active
+  validate_vmid "$vmid"
+  pct status "$vmid" </dev/null |
+    awk '$1 == "status:" && $2 == "running" { found=1 } END { exit !found }' ||
+    return 1
+  active="$(
+    pct exec "$vmid" -- cat /etc/haproxy/app-ha-active-generation </dev/null
+  )" || return 1
+  [[ "$active" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$active"
+}
+
+# The marker only proves that ingress was opened. Authorization applies to the
+# generation HAProxy actually serves, because a coordinator reloads a
+# compatible node before it rewrites the marker.
+local_serving_is_authorized() {
+  local node="$1" vmid="$2" status_json marker="" active
+  status_json="$(registry_cmd ingress-status)" || return 1
+  jq -e '.desired.generation | test("^[0-9a-f]{64}$")' \
+    <<<"$status_json" >/dev/null 2>&1 || return 1
+  if [[ -f "$LOCAL_INGRESS_MARKER" && ! -L "$LOCAL_INGRESS_MARKER" ]]; then
+    marker="$(< "$LOCAL_INGRESS_MARKER")"
+  fi
+  [[ "$marker" =~ ^[0-9a-f]{64}$ ]] || return 1
+  active="$(local_active_generation "$vmid")" || return 1
+  serving_is_authorized "$node" "$active" "$status_json" || return 1
+  node_generation_is_current "$node" "$vmid" "$active" || return 1
+  LOCAL_SERVING_GENERATION="$active"
+}
+
 assert_local_current() {
-  local node vmid status_json generation serving=""
+  local node vmid attempt
   LOCAL_SERVING_GENERATION=""
   node="$(hostname -s)"
   vmid="$(local_vmid)"
-  if ! assert_local_node_online_and_quorate; then
-    disable_ingress_node "$node" "$vmid" || true
-    printf 'ERROR: local ingress is disabled because %s is not online and quorate\n' \
-      "$node" >&2
-    return 1
-  fi
-  if ! status_json="$(registry_cmd ingress-status)"; then
-    disable_ingress_node "$node" "$vmid" || true
-    return 1
-  fi
-  generation="$(
-    jq -er '.desired.generation | select(test("^[0-9a-f]{64}$"))' \
-      <<<"$status_json"
-  )" || {
-    disable_ingress_node "$node" "$vmid" || true
-    return 1
-  }
-  if [[ -f "$LOCAL_INGRESS_MARKER" && ! -L "$LOCAL_INGRESS_MARKER" ]]; then
-    serving="$(< "$LOCAL_INGRESS_MARKER")"
-  fi
-  if [[ ! "$serving" =~ ^[0-9a-f]{64}$ ]] ||
-     ! serving_is_authorized "$node" "$serving" "$status_json"; then
-    disable_ingress_node "$node" "$vmid" || true
-    return 1
-  fi
-  if ! node_generation_is_current "$node" "$vmid" "$serving"; then
-    disable_ingress_node "$node" "$vmid" || true
-    return 1
-  fi
-  LOCAL_SERVING_GENERATION="$serving"
+  for ((attempt = 1; ; attempt++)); do
+    if ! assert_local_node_online_and_quorate; then
+      disable_ingress_node "$node" "$vmid" || true
+      printf 'ERROR: local ingress is disabled because %s is not online and quorate\n' \
+        "$node" >&2
+      return 1
+    fi
+    if local_serving_is_authorized "$node" "$vmid"; then
+      return 0
+    fi
+    ((attempt < LOCAL_CHECK_ATTEMPTS)) || break
+    sleep "$LOCAL_CHECK_RETRY_SECONDS"
+  done
+  disable_ingress_node "$node" "$vmid" || true
+  return 1
 }
 
 local_reconcile() {

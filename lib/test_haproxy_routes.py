@@ -1065,6 +1065,7 @@ LOCAL_HARNESS = r"""
 MAX_MOX_HOSTS=2
 STATE=@STATE@
 LOCAL_INGRESS_MARKER="$STATE/marker"
+LOCAL_CHECK_RETRY_SECONDS=0
 hostname() { printf 'mox2\n'; }
 local_vmid() { printf '9112\n'; }
 assert_local_node_online_and_quorate() { [[ ! -e "$STATE/no-quorum" ]]; }
@@ -1072,7 +1073,17 @@ online_nodes_json() {
   printf '[{"node":"mox1","status":"online"},{"node":"mox2","status":"online"}]'
 }
 registry_cmd() { cat "$STATE/status.json"; }
-node_generation_is_current() { [[ "$3" == "$(< "$STATE/live")" ]]; }
+local_active_generation() { cat "$STATE/live"; }
+node_generation_is_current() {
+  local remaining
+  printf 'x' >>"$STATE/checks"
+  remaining="$(< "$STATE/inconsistent")"
+  if ((remaining > 0)); then
+    printf '%s' "$((remaining - 1))" >"$STATE/inconsistent"
+    return 1
+  fi
+  [[ "$3" == "$(< "$STATE/live")" ]]
+}
 disable_ingress_node() { printf 'disabled:%s\n' "$1"; }
 enable_ingress_node() { printf 'enabled:%s:%s\n' "$1" "${3:0:8}"; }
 delegate_to_coordinator() { printf 'delegated\n'; }
@@ -1091,11 +1102,17 @@ class LocalReconcileShellTest(unittest.TestCase):
         allowances: tuple[tuple[str, str], ...] = (),
         no_quorum: bool = False,
         expected: int = 0,
+        marker: str | None = PREVIOUS,
+        live: str = PREVIOUS,
+        inconsistent: int = 0,
     ) -> str:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
-            (state / "marker").write_text(self.PREVIOUS + "\n")
-            (state / "live").write_text(self.PREVIOUS)
+            if marker is not None:
+                (state / "marker").write_text(marker + "\n")
+            (state / "live").write_text(live)
+            (state / "inconsistent").write_text(str(inconsistent))
+            (state / "checks").write_text("")
             if no_quorum:
                 (state / "no-quorum").touch()
             (state / "status.json").write_text(
@@ -1158,6 +1175,43 @@ class LocalReconcileShellTest(unittest.TestCase):
             "assert_local_current 2>/dev/null || printf 'refused\\n'",
             allowances=(("mox2", self.PREVIOUS),),
             no_quorum=True,
+        )
+        self.assertEqual(output, "disabled:mox2\nrefused\n")
+
+    def test_reloaded_generation_ahead_of_marker_stays_enabled(self) -> None:
+        output = self.run_local(
+            "local_reconcile",
+            allowances=(("mox2", self.PREVIOUS),),
+            live=self.DESIRED,
+        )
+        self.assertNotIn("disabled", output)
+        self.assertNotIn("delegated", output)
+        self.assertIn(f"enabled:mox2:{self.DESIRED[:8]}", output)
+
+    def test_mid_commit_snapshot_is_retried_without_disabling(self) -> None:
+        output = self.run_local(
+            "assert_local_current && printf 'current:%s\\n' "
+            '"${LOCAL_SERVING_GENERATION:0:8}"; '
+            'printf "checks:%s\\n" "$(< "$STATE/checks")"',
+            allowances=(("mox2", self.PREVIOUS),),
+            inconsistent=2,
+        )
+        self.assertEqual(output, f"current:{self.PREVIOUS[:8]}\nchecks:xxx\n")
+
+    def test_persistent_inconsistency_fails_closed_after_retries(self) -> None:
+        output = self.run_local(
+            "assert_local_current || printf 'refused\\n'; "
+            'printf "checks:%s\\n" "$(< "$STATE/checks")"',
+            allowances=(("mox2", self.PREVIOUS),),
+            inconsistent=99,
+        )
+        self.assertEqual(output, "disabled:mox2\nrefused\nchecks:xxxx\n")
+
+    def test_missing_marker_fails_closed(self) -> None:
+        output = self.run_local(
+            "assert_local_current || printf 'refused\\n'",
+            allowances=(("mox2", self.PREVIOUS),),
+            marker=None,
         )
         self.assertEqual(output, "disabled:mox2\nrefused\n")
 

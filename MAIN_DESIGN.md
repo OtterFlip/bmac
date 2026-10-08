@@ -569,6 +569,13 @@ reload fails restores its previous configuration and keeps serving it until
 its allowance expires, while periodic reconciliation retries; after expiry it
 fails closed. No node serves a known-stale incompatible route, and the
 synchronizer does not globally roll already-current nodes back.
+
+Each node's own minute timer checks its ingress without the coordinator's
+lock, so it can observe a commit between reload and marker update. It
+therefore authorizes the generation HAProxy actually serves, requiring the
+marker only as proof that ingress was opened, and re-reads pmxcfs and the
+LXC for a few seconds before closing ingress over an inconsistent snapshot.
+Quorum loss still closes it immediately.
 Host-local generation bundles retain at most four directories, protecting the
 desired and active generations. pmxcfs retains eight generation metadata
 records.
