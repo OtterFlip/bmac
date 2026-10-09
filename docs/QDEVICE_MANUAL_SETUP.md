@@ -14,7 +14,7 @@ All administrative and Proxmox cluster communication occurs over Tailscale.
 No services should be intentionally exposed on the public Internet.
 
 The base VPS, Tailscale, SSH, hostname, and firewall hardening remain manual.
-`hosts/add_proxmox_host.sh` installs, enables, and verifies
+`scripts/user_callable/hosts/add_proxmox_host.sh` installs, enables, and verifies
 `corosync-qnetd` over Tailscale during the first Proxmox-host run. It prepares
 the service immediately but follows quorum parity: the QDevice vote is absent
 for an odd Proxmox node count and added for an even node count.
@@ -400,7 +400,7 @@ If UDP `41641` is later intentionally opened to improve direct Tailscale connect
 ## 16. Install and configure the QDevice software
 
 The Proxmox host setup workflow (`add_proxmox_host.sh`), or
-`qdevice/add_qdevice.sh` for a replacement QDevice, installs
+`scripts/user_callable/qdevice/add_qdevice.sh` for a replacement QDevice, installs
 `corosync-qnetd` here when it is missing, enables the service, and verifies
 that it listens on TCP `5403`. Concurrent mox installers serialize this work
 with `/run/lock/app-ha-qdevice-provision.lock` on the QDevice so their APT
@@ -418,7 +418,7 @@ Do not manually force a QDevice vote into a one-node cluster merely because
 the service is ready. The setup workflow adds or removes the vote according
 to the current odd/even Proxmox membership.
 
-`hosts/remove_proxmox_host.sh` follows the same rule. It removes the QDevice
+`scripts/user_callable/hosts/remove_proxmox_host.sh` follows the same rule. It removes the QDevice
 before deleting a node and adds it back only when the remaining node count is
 even. Re-adding it uses the workstation's `ssh qdevice` access to install a
 temporary key, as setup does, so the script checks that access before making
@@ -460,7 +460,7 @@ Also verify that the Proxmox nodes can reach the QDevice over Tailscale before c
 ## Checking the QDevice
 
 ```bash
-diagnostics/show_qdevice_state.sh
+scripts/user_callable/diagnostics/show_qdevice_state.sh
 ```
 
 This read-only report says whether the cluster needs a QDevice (it does with
@@ -475,7 +475,7 @@ do next.
 
 When the cluster needs its QDevice and the registered one is inaccessible:
 
-1. Run `qdevice/remove_qdevice.sh`. It cannot remove an inaccessible QDevice
+1. Run `scripts/user_callable/qdevice/remove_qdevice.sh`. It cannot remove an inaccessible QDevice
    gracefully, so it explains why and offers to remove it forcefully. If you
    accept, you must first remove the old machine from the Tailscale admin
    console and type `REMOVED FROM TAILSCALE`, so it can never communicate
@@ -491,7 +491,7 @@ When the cluster needs its QDevice and the registered one is inaccessible:
    the same hostname and the `tag:proxmox-qdevice` tag. The Tailscale policy
    must still allow `tag:proxmox-host` to reach it on TCP `5403`, and on TCP
    `22` while the next step runs.
-4. Run `qdevice/add_qdevice.sh`. It checks that the cluster needs a QDevice,
+4. Run `scripts/user_callable/qdevice/add_qdevice.sh`. It checks that the cluster needs a QDevice,
    asks for the QDevice hostname (default `PROXMOX_QDEVICE_HOST`) and checks
    `ssh` access to it, refuses a Proxmox VE host, then does section 16 and the
    cluster side as host setup does. It installs and verifies `corosync-qnetd`,
@@ -504,7 +504,7 @@ one, the script sees that the reachable machine is not the registered one
 (its Tailscale address differs). It then offers the same forced removal and
 leaves the new machine untouched.
 
-Host setup and `hosts/remove_proxmox_host.sh` remove the QDevice the same way
+Host setup and `scripts/user_callable/hosts/remove_proxmox_host.sh` remove the QDevice the same way
 when a membership change needs that: gracefully when it is accessible, and
 otherwise forcefully, after the same explanation and Tailscale confirmation.
 When the QDevice is inaccessible, they continue only if the cluster has an
@@ -513,12 +513,12 @@ before changing anything.
 
 ## Removing the QDevice
 
-Use [`remove_qdevice.sh`](remove_qdevice.sh) when intentionally retiring the
+Use [`remove_qdevice.sh`](../scripts/user_callable/qdevice/remove_qdevice.sh) when intentionally retiring the
 QDevice, replacing a failed one (above), or returning the dedicated host to a
 pre-QDevice state for a full setup test:
 
 ```bash
-qdevice/remove_qdevice.sh [qdevice-host]
+scripts/user_callable/qdevice/remove_qdevice.sh [qdevice-host]
 ```
 
 The script is deliberately destructive. It requires the exact interactive
@@ -535,7 +535,7 @@ TLS/NSS identity and certificates, Corosync/QDevice services and packages,
 package-specific state, and the `coroqnetd` account/group. It intentionally
 does not run `apt autoremove` and does not erase general system journals.
 That leaves a plain Ubuntu machine that can only act as a QDevice again if it
-is deliberately re-added with `qdevice/add_qdevice.sh`, so it stays enrolled
+is deliberately re-added with `scripts/user_callable/qdevice/add_qdevice.sh`, so it stays enrolled
 in Tailscale. If the QDevice is not accessible, the script offers the forced
 removal described under "Replacing a failed QDevice". Review its complete
 warning before use.

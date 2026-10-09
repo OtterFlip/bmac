@@ -10,10 +10,11 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).with_name("add_proxmox_host.sh")
-INVENTORY_SCRIPT = Path(__file__).with_name("inventory_disks.sh")
-QDEVICE_LIB = SCRIPT.parent.parent / "lib" / "qdevice.sh"
-MOX1_CONFIG = SCRIPT.parent.parent / "env" / "mox1.conf"
+HOSTS_DIR = Path(__file__).resolve().parent.parent / "user_callable" / "hosts"
+SCRIPT = HOSTS_DIR / "add_proxmox_host.sh"
+INVENTORY_SCRIPT = HOSTS_DIR / "inventory_disks.sh"
+QDEVICE_LIB = HOSTS_DIR.parents[1] / "lib" / "qdevice.sh"
+MOX1_CONFIG = HOSTS_DIR.parents[2] / "config" / "mox1.conf"
 TEST_IDRAC_IP = "192.0.2.63"
 
 
@@ -457,7 +458,7 @@ Flags:            Quorate Qdevice
 
     def test_inventory_helper_uses_live_host_state(self) -> None:
         text = INVENTORY_SCRIPT.read_text()
-        self.assertIn('source "${SCRIPT_DIR}/../lib/disk_workflows.sh"', text)
+        self.assertIn('source "${SCRIPT_DIR}/../../lib/disk_workflows.sh"', text)
         self.assertIn('dw_select_host "$HOST_ARG"', text)
         self.assertIn('dw_inventory "$LAYOUT"', text)
         self.assertNotIn("NVME_MIRROR_", text)
@@ -610,7 +611,7 @@ Flags:            Quorate Qdevice
             'output="${ARTIFACTS_DIR}/${iso_name}-${HOST_ID}-auto.iso"',
             source,
         )
-        ignore = SCRIPT.parent.parent.joinpath(".gitignore").read_text(encoding="utf-8")
+        ignore = HOSTS_DIR.parents[2].joinpath(".gitignore").read_text(encoding="utf-8")
         self.assertNotIn("\nartifacts/used-tailscale-auth-key-sha256\n", ignore)
         self.assertIn("artifacts/used-tailscale-auth-key-sha256.lock", ignore)
         ledger = SCRIPT.parent / "artifacts" / "used-tailscale-auth-key-sha256"
@@ -772,17 +773,64 @@ Flags:            Quorate Qdevice
             expected=1,
         )
         self.run_bash("printf 'GO\\n' | wait_for_exact 'ready.' 'OLD PHRASE'")
-        helper_prompt = self.run_bash(
-            """
+
+    def test_setup_runs_key_file_helpers_over_ssh_after_confirmation(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        fake_remote = """
             HOST_ID=mox2
-            wait_for_helper_success /root/example-helper 'example completed' <<<'GO'
-            """
+            remote() {
+              printf 'REMOTE %s\\n' "$*"
+              printf 'STDIN<%s>\\n' "$(cat)"
+              return "${REMOTE_STATUS:-0}"
+            }
+        """
+        plain = self.run_bash(
+            fake_remote
+            + "run_target_helper /root/example-helper 'example completed' <<<'y'\n"
         )
-        self.assertIn("TARGET-HOST HELPER SCRIPT STATUS", helper_prompt.stdout)
-        self.assertIn("Target host: mox2", helper_prompt.stdout)
-        self.assertIn("Helper script: /root/example-helper", helper_prompt.stdout)
-        self.assertIn("SCRIPT WORKED?", helper_prompt.stdout + helper_prompt.stderr)
-        self.assertEqual(source.count("wait_for_helper_success \"$helper\""), 4)
+        self.assertIn("TARGET-HOST HELPER SCRIPT", plain.stdout)
+        self.assertIn("Target host: mox2", plain.stdout)
+        self.assertIn("Helper script: /root/example-helper", plain.stdout)
+        self.assertIn("Expected result: example completed", plain.stdout)
+        self.assertIn("REMOTE /root/example-helper\nSTDIN<>", plain.stdout)
+
+        formatting = self.run_bash(
+            fake_remote
+            + "run_target_helper /root/example-helper 'formatted' 'Erase it.' <<<'GO'\n"
+        )
+        self.assertIn("Erase it.", formatting.stderr)
+        self.assertIn("REMOTE /root/example-helper\nSTDIN<GO>", formatting.stdout)
+
+        declined = self.run_bash(
+            fake_remote
+            + "run_target_helper /root/example-helper 'example completed' <<<'n'\n",
+            expected=1,
+        )
+        self.assertNotIn("REMOTE", declined.stdout)
+        self.assertIn("was not run; rerun this script", declined.stderr)
+
+        not_confirmed = self.run_bash(
+            fake_remote
+            + "run_target_helper /root/example-helper 'formatted' 'Erase it.' <<<'y'\n",
+            expected=1,
+        )
+        self.assertNotIn("REMOTE", not_confirmed.stdout)
+
+        failed = self.run_bash(
+            fake_remote
+            + "REMOTE_STATUS=3 run_target_helper /root/example-helper 'example completed' <<<'y'\n",
+            expected=1,
+        )
+        self.assertIn("/root/example-helper failed on mox2", failed.stderr)
+
+        self.assertNotIn("wait_for_helper_success", source)
+        self.assertNotIn("MANUAL LUKS ACTION REQUIRED", source)
+        self.assertEqual(source.count('run_target_helper "$helper"'), 4)
+        member = source[source.index("rebuild_luks_member() {") : source.index("encrypted_boot_test() {")]
+        extra = source[source.index("configure_extra_mirror() {") : source.index("configure_raw_extra_mirror() {")]
+        # Helpers that format LUKS take a GO confirmation; the others do not.
+        self.assertIn('"Format partition 3 of detached rpool member $member', member)
+        self.assertIn('"Prepare extra mirror $pair on disks', extra)
 
     def test_new_storage_paths_keep_resume_evidence_distinct_and_live_checked(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
@@ -798,9 +846,9 @@ Flags:            Quorate Qdevice
 
     def test_extra_mirrors_use_the_one_shared_rpool_mirror_tool(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
-        tool = (SCRIPT.parent.parent / "lib" / "rpool_mirror.sh").read_text(encoding="utf-8")
+        tool = (HOSTS_DIR.parents[1] / "host_runtime" / "rpool_mirror.sh").read_text(encoding="utf-8")
         # Nate asked for one copy of the add-a-mirror logic: setup and
-        # hosts/add_new_disk_vdev.sh both run lib/rpool_mirror.sh on the host.
+        # scripts/user_callable/hosts/add_new_disk_vdev.sh both run scripts/host_runtime/rpool_mirror.sh on the host.
         self.assertNotIn("zpool add", source)
         self.assertIn("zpool add", tool)
         for call in (
@@ -814,7 +862,7 @@ Flags:            Quorate Qdevice
 
     def test_boot_member_luks_uses_the_shared_rpool_mirror_tool(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
-        # The same member LUKS code serves hosts/add_replacement_disk.sh.
+        # The same member LUKS code serves scripts/user_callable/hosts/add_replacement_disk.sh.
         luks = source[source.index("rebuild_luks_member() {") : source.index("encrypted_boot_test() {")]
         self.assertNotIn("luksFormat", source)
         self.assertNotIn("update-initramfs", luks)

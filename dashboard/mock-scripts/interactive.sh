@@ -3,7 +3,7 @@
 # group, a confirmation, a manual action, phases, a plan, a result, and a
 # next step.
 set -euo pipefail
-source "$(cd -- "$(dirname -- "$0")/.." && pwd -P)/lib/ui_protocol.sh"
+source "$(cd -- "$(dirname -- "$0")/.." && pwd -P)/scripts/lib/ui_protocol.sh"
 bmac_ui_bootstrap "$@"
 
 bmac_ui_step "Validate inputs"
@@ -35,7 +35,7 @@ echo "WARNING: something mildly odd" >&2
 
 bmac_ui_step "Finish"
 bmac_ui_result vmid:int 100 name prod9
-bmac_ui_next_step "Inspect the VM." --command "diagnostics/show_prod_vm_state.sh prod9" \
+bmac_ui_next_step "Inspect the VM." --command "scripts/user_callable/diagnostics/show_prod_vm_state.sh prod9" \
   --workflow show_prod_vm_state --arg resource=prod9
 bmac_ui_next_step "Unknown workflow is dropped." --workflow not_a_workflow
 bmac_ui_step_done

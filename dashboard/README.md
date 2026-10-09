@@ -11,14 +11,13 @@ plans, progress, results, and suggested next steps into native-looking forms
 and dialogs. The scripts remain the authority: the dashboard never talks to
 Proxmox, SSH, or the registry itself.
 
-The design is in [`BMAC_CONTROL_PANEL_DESIGN.md`](../BMAC_CONTROL_PANEL_DESIGN.md);
-the wire protocol is described by
-[`protocol/bmac-ui-v1.schema.json`](../protocol/bmac-ui-v1.schema.json).
+The wire protocol is described by
+[`protocol/bmac-ui-v1.schema.json`](protocol/bmac-ui-v1.schema.json).
 
 ## What it does
 
 - **Overview pages** for hosts, production VMs, staging VMs, storage, and the
-  QDevice. Each list is filled by the fast `diagnostics/list_*.sh` scripts
+  QDevice. Each list is filled by the fast `scripts/user_callable/diagnostics/list_*.sh` scripts
   and has a refresh button; Settings can also refresh them on a timer.
 - **Operations** for every workflow in
   [`engine/workflows.json`](engine/workflows.json), launched from a dialog that
@@ -45,7 +44,7 @@ the wire protocol is described by
   `completed` event is reported as failed.
 - Secret field values (passwords, Tailscale auth keys) go only to the
   script's stdin. They are redacted from history and logs, and never used as
-  defaults. The dashboard checks that `env/secrets.env` exists but never reads
+  defaults. The dashboard checks that `config/secrets.env` exists but never reads
   it.
 - LUKS passphrases are never entered in the dashboard; the scripts ask you to
   type them at the host console.
@@ -134,12 +133,12 @@ dev/run_tests.py dashboard/test_workflow_registry.py      # from the repository 
 
 ## Adding a workflow
 
-1. Make the script support `--json`: source `lib/ui_protocol.sh`, call
+1. Make the script support `--json`: source `scripts/lib/ui_protocol.sh`, call
    `bmac_ui_bootstrap "$@"` before `main`, and give each prompt a JSON branch
    (`if bmac_ui_is_json; then ...; else <unchanged read>; fi`). Terminal output
-   must not change. See [`lib/README.md`](../lib/README.md#ui_protocolsh).
+   must not change. See [`scripts/lib/README.md`](../scripts/lib/README.md#ui_protocolsh).
 2. Emit `bmac_ui_plan_*` before changing anything, `bmac_ui_result` at the
    end, and `bmac_ui_next_step` for what the operator should do afterward.
 3. Add the workflow to `engine/workflows.json`, with its id equal to the
    script's basename.
-4. Add a JSON-mode test with `lib/ui_test_driver.py`.
+4. Add a JSON-mode test with `scripts/tests/ui_test_driver.py`.

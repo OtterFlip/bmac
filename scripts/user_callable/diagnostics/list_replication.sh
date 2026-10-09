@@ -17,20 +17,20 @@ if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); 
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
 for library in config.sh cluster_control.sh ui_protocol.sh quick_state.sh; do
-  [[ -f "${REPO_ROOT}/lib/${library}" && ! -L "${REPO_ROOT}/lib/${library}" ]] || {
-    printf 'ERROR: required library is unavailable: lib/%s\n' "$library" >&2
+  [[ -f "${REPO_ROOT}/scripts/lib/${library}" && ! -L "${REPO_ROOT}/scripts/lib/${library}" ]] || {
+    printf 'ERROR: required library is unavailable: scripts/lib/%s\n' "$library" >&2
     exit 2
   }
   # shellcheck source=/dev/null
-  source "${REPO_ROOT}/lib/${library}"
+  source "${REPO_ROOT}/scripts/lib/${library}"
 done
 bmac_ui_bootstrap "$@"
 
 usage() {
   cat <<'EOF'
-Usage: diagnostics/list_replication.sh [--guest prodN] [--json]
+Usage: scripts/user_callable/diagnostics/list_replication.sh [--guest prodN] [--json]
 
 Quickly list every replication job on every online host: source and target
 host, schedule, time of the last successful sync and of the next one, failure

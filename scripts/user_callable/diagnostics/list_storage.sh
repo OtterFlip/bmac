@@ -18,20 +18,20 @@ if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); 
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
 for library in config.sh cluster_control.sh ui_protocol.sh quick_state.sh; do
-  [[ -f "${REPO_ROOT}/lib/${library}" && ! -L "${REPO_ROOT}/lib/${library}" ]] || {
-    printf 'ERROR: required library is unavailable: lib/%s\n' "$library" >&2
+  [[ -f "${REPO_ROOT}/scripts/lib/${library}" && ! -L "${REPO_ROOT}/scripts/lib/${library}" ]] || {
+    printf 'ERROR: required library is unavailable: scripts/lib/%s\n' "$library" >&2
     exit 2
   }
   # shellcheck source=/dev/null
-  source "${REPO_ROOT}/lib/${library}"
+  source "${REPO_ROOT}/scripts/lib/${library}"
 done
 bmac_ui_bootstrap "$@"
 
 usage() {
   cat <<'EOF'
-Usage: diagnostics/list_storage.sh [--host moxN] [--json]
+Usage: scripts/user_callable/diagnostics/list_storage.sh [--host moxN] [--json]
 
 Quickly list every online host's ZFS pools with health, size, allocation, and
 free space (flagging less than 10% free), and its Proxmox storage with usage.

@@ -11,16 +11,16 @@ set -o pipefail
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-# shellcheck source=../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
 bmac_ui_bootstrap "$@"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
 REMOTE_REGISTRY="/usr/local/lib/app-ha-proxmox/lib/cluster_registry.py"
 
 usage() {
   cat <<'EOF'
-Usage: diagnostics/show_prod_vm_state.sh prodN
+Usage: scripts/user_callable/diagnostics/show_prod_vm_state.sh prodN
 
 Inspect one registered production VM without changing guest, Proxmox, HA,
 replication, route, or registry configuration. QGA and guest SSH inspection
@@ -477,7 +477,7 @@ else
 fi
 
 section "Hello application deployment (optional)" \
-  "report whether app/deploy_hello_app_to_prod.sh has deployed the hello app inside the guest; informational only."
+  "report whether scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh has deployed the hello app inside the guest; informational only."
 hello_answer=""
 if bmac_ui_is_json; then
   bmac_ui_confirm --id hello_app --question \
@@ -516,7 +516,7 @@ check() {
 
 check "nginx is installed" command -v nginx
 check "managed NGINX site exists at $site" \
-  grep -Fq 'Managed by app/deploy_hello_app_to_prod.sh' "$site"
+  grep -Eq 'Managed by (app|scripts/user_callable/guests/prod)/deploy_hello_app_to_prod[.]sh' "$site"
 check "NGINX site is enabled at $link" \
   test "$(readlink "$link" 2>/dev/null)" = ../sites-available/hello-app
 check "hello page exists at $index" grep -Fq '<h1>Hello, world!</h1>' "$index"
@@ -541,10 +541,10 @@ GUEST
 then
   printf '  [DEPLOYED] The hello app is deployed and serving on %s.\n' "$RESOURCE_NAME"
 else
-  printf '  [NOT DEPLOYED] The hello app is missing or incomplete on %s; see app/deploy_hello_app_to_prod.sh.\n' \
+  printf '  [NOT DEPLOYED] The hello app is missing or incomplete on %s; see scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh.\n' \
     "$RESOURCE_NAME"
   bmac_ui_next_step "The hello app is missing or incomplete on $RESOURCE_NAME." \
-    --command "app/deploy_hello_app_to_prod.sh" --workflow deploy_hello_app_to_prod
+    --command "scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh" --workflow deploy_hello_app_to_prod
 fi
 bmac_ui_step_done
 bmac_ui_result resource "$RESOURCE_NAME" verdict "$( ((verdict_rc == 0)) && echo healthy || echo unhealthy)"

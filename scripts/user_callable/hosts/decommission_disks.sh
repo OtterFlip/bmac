@@ -8,7 +8,7 @@
 # the host, forces their replication so the freed space reaches the host's
 # copies, scrubs rpool, and offers only vdevs whose removal keeps at least the
 # operator's minimum free space. ZFS removes one top-level vdev at a time, so
-# each run starts at most one removal; hosts/inventory_disks.sh finalizes a
+# each run starts at most one removal; scripts/user_callable/hosts/inventory_disks.sh finalizes a
 # completed removal, leaving its disks with no partitions or signatures (a
 # metadata-only release, not a data wipe), and reports when they can be pulled.
 
@@ -18,8 +18,8 @@ umask 077
 
 DW_SCRIPT_NAME=decommission_disks.sh
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-# shellcheck source=../lib/disk_workflows.sh
-source "${SCRIPT_DIR}/../lib/disk_workflows.sh"
+# shellcheck source=../../lib/disk_workflows.sh
+source "${SCRIPT_DIR}/../../lib/disk_workflows.sh"
 bmac_ui_bootstrap "$@"
 
 RECENT_SECONDS=86400
@@ -29,7 +29,7 @@ REPLICATION_POLL_SECONDS="${APP_HA_REPLICATION_POLL_SECONDS:-10}"
 
 usage() {
   cat <<'EOF'
-Usage: hosts/decommission_disks.sh [--host moxN]
+Usage: scripts/user_callable/hosts/decommission_disks.sh [--host moxN]
 
 Prepares the chosen host's rpool to give up one top-level mirror vdev and
 starts its removal:
@@ -47,7 +47,7 @@ Trims and scrubs completed in the last 24 hours are recorded on the host and
 not repeated, so an interrupted run can simply be started again. Run the
 script once per vdev; ZFS removes one top-level vdev at a time.
 
-After the evacuation, hosts/inventory_disks.sh finalizes the removal: it
+After the evacuation, scripts/user_callable/hosts/inventory_disks.sh finalizes the removal: it
 erases only the disks' metadata (LUKS key slots, ZFS labels, signatures, and
 the partition table) so they show as blank. It does not overwrite their data.
 EOF
@@ -83,7 +83,7 @@ dw_state show >"$STATE" || dw_die "could not read the storage state on $DW_HOST"
 
 units() {
   python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import host_storage; print(host_storage.format_byte_units(int(sys.argv[2])))' \
-    "$DW_LIB_DIR" "$1"
+    "$DW_UTILITIES_DIR" "$1"
 }
 
 dw_section "rpool on $DW_HOST"
@@ -94,13 +94,13 @@ dw_render_layout "$LAYOUT"
 if [[ "$(dw_json "$LAYOUT" 'str(d["pool"]["removal_in_progress"])')" == True ]]; then
   printf '\nA vdev removal is already in progress on %s:\n%s\n' \
     "$DW_HOST" "$(dw_json "$LAYOUT" 'd["pool"]["remove"]')"
-  printf 'ZFS removes one top-level vdev at a time. Follow it with\n  hosts/inventory_disks.sh --host %s\nand run this script again after it completes.\n' "$DW_HOST"
+  printf 'ZFS removes one top-level vdev at a time. Follow it with\n  scripts/user_callable/hosts/inventory_disks.sh --host %s\nand run this script again after it completes.\n' "$DW_HOST"
   exit 1
 fi
 PENDING="$(dw_json "$STATE" '" ".join(r["vdev"] for r in d["removals"] if r["state"] == "requested")')"
 if [[ -n "$PENDING" ]]; then
   printf '\nThe removal of %s is recorded on %s but has not been retired yet.\n' "$PENDING" "$DW_HOST"
-  printf 'Run hosts/inventory_disks.sh --host %s first; it finalizes completed retirement and identifies disks that are safe to remove physically.\n' "$DW_HOST"
+  printf 'Run scripts/user_callable/hosts/inventory_disks.sh --host %s first; it finalizes completed retirement and identifies disks that are safe to remove physically.\n' "$DW_HOST"
   exit 1
 fi
 
@@ -168,7 +168,7 @@ PY
 then
   printf '\nEvery staging VM related to %s must be destroyed first, so no staging clone\n' "$DW_HOST"
   printf 'or base snapshot keeps old blocks allocated. Destroy each staging VM with\n'
-  printf '  guests/staging/remove_staging_vm.sh stageNprodN\n'
+  printf '  scripts/user_callable/guests/staging/remove_staging_vm.sh stageNprodN\n'
   printf 'which also removes its base snapshot from every node. Wait until its\n'
   printf 'snapshot and cleanup records are gone, then run this script again.\n'
   exit 1
@@ -540,7 +540,7 @@ for member in json.loads(sys.argv[1])["members"]:
             mapper=f" (LUKS mapping {member['mapper'].rsplit('/', 1)[-1]})" if member["mapper"] else "",
         ))
 PY
-confirm_exact "Start removing $VDEV from rpool on $DW_HOST? ZFS copies its data onto the other vdevs in the background. You must then run hosts/inventory_disks.sh; it finalizes completed retirement and identifies disks that are safe to remove physically." "" destructive
+confirm_exact "Start removing $VDEV from rpool on $DW_HOST? ZFS copies its data onto the other vdevs in the background. You must then run scripts/user_callable/hosts/inventory_disks.sh; it finalizes completed retirement and identifies disks that are safe to remove physically." "" destructive
 
 REMOVAL_ID="$(dw_state record-removal --request "$REQUEST")" ||
   dw_die "could not record the removal on $DW_HOST; nothing was removed"
@@ -560,10 +560,10 @@ if ! REMOVE_OUTPUT="$(dw_on_host zpool remove rpool "$VDEV" 2>&1)"; then
   fi
   printf 'WARNING: zpool remove reported an error (%s), but %s may be removing it anyway.\n' \
     "${REMOVE_OUTPUT//$'\n'/ }" "$DW_HOST" >&2
-  printf 'The removal record stays requested. Run\n  hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
+  printf 'The removal record stays requested. Run\n  scripts/user_callable/hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
   printf 'to see whether the removal is running; it marks the record failed if not.\n'
   bmac_ui_next_step "See whether the removal of $VDEV is running; the inventory marks the record failed if not." \
-    --command "hosts/inventory_disks.sh --host $DW_HOST" --workflow inventory_disks --arg "host=$DW_HOST"
+    --command "scripts/user_callable/hosts/inventory_disks.sh --host $DW_HOST" --workflow inventory_disks --arg "host=$DW_HOST"
   exit 1
 fi
 
@@ -571,12 +571,12 @@ dw_collect_layout "$LAYOUT"
 dw_section "Removal started"
 printf '%s\n' "$(dw_json "$LAYOUT" 'd["pool"]["remove"] or "The removal already finished."')"
 printf '\n%s has been marked for removal from rpool on %s. ZFS is copying its data\n' "$VDEV" "$DW_HOST"
-printf 'onto the other vdevs. You must run\n  hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
+printf 'onto the other vdevs. You must run\n  scripts/user_callable/hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
 printf 'to finalize retirement after evacuation and determine which disks are safe to pull. To remove another vdev, run this\n'
 printf 'script again after this removal completes.\n'
 bmac_ui_result host "$DW_HOST" vdev "$VDEV" removal_id "$REMOVAL_ID"
 bmac_ui_next_step "Once the evacuation of $VDEV finishes, finalize its retirement and find the disks that are safe to pull." \
-  --command "hosts/inventory_disks.sh --host $DW_HOST" --workflow inventory_disks --arg "host=$DW_HOST"
+  --command "scripts/user_callable/hosts/inventory_disks.sh --host $DW_HOST" --workflow inventory_disks --arg "host=$DW_HOST"
 
 [[ "$VDEV_STATE" != ONLINE ]] || exit 0
 
@@ -591,7 +591,7 @@ if ! dw_ready "wait for the evacuation of $VDEV (zpool wait -t remove rpool), th
   printf '\nAfter the evacuation completes, clear the DEGRADED state with\n'
   printf '  ssh %s zpool scrub -w rpool\n' "$DW_HOST"
   printf 'and finalize the retirement of %s with\n' "$VDEV"
-  printf '  hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
+  printf '  scripts/user_callable/hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
   exit 0
 fi
 dw_on_host zpool wait -t remove rpool ||
@@ -608,4 +608,4 @@ fi
 printf 'rpool on %s now reports state %s.\n' "$DW_HOST" \
   "$(dw_json "$LAYOUT" 'd["pool"]["state"] or "unknown"')"
 printf '\nThe evacuation of %s is complete. Finalize its retirement now with\n' "$VDEV"
-printf '  hosts/inventory_disks.sh --host %s\n' "$DW_HOST"
+printf '  scripts/user_callable/hosts/inventory_disks.sh --host %s\n' "$DW_HOST"

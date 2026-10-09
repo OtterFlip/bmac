@@ -1,4 +1,4 @@
-// Result shapes of the fast read-only diagnostics (lib/quick_state.py). The
+// Result shapes of the fast read-only diagnostics (scripts/utilities/quick_state.py). The
 // dashboard renders these; it never computes cluster state itself.
 
 export interface HostRow {

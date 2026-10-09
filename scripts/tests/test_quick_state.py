@@ -1,7 +1,8 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Tests for lib/quick_state.py, the engine behind diagnostics/list_*.sh."""
+"""Tests for scripts/utilities/quick_state.py, the engine behind
+scripts/user_callable/diagnostics/list_*.sh."""
 
 from __future__ import annotations
 
@@ -14,9 +15,10 @@ import textwrap
 import unittest
 from pathlib import Path
 
-LIB_DIR = Path(__file__).resolve().parent
-QUICK_STATE = LIB_DIR / "quick_state.py"
-sys.path.insert(0, str(LIB_DIR))
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+LIB_DIR = SCRIPTS_DIR / "lib"
+QUICK_STATE = SCRIPTS_DIR / "utilities" / "quick_state.py"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ui_test_driver import run_json, scripted  # noqa: E402
 

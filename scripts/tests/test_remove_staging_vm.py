@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).with_name("remove_staging_vm.sh")
+SCRIPT = Path(__file__).resolve().parent.parent / "user_callable" / "guests" / "staging" / "remove_staging_vm.sh"
 
 
 class DestroyStagingVmTests(unittest.TestCase):

@@ -10,18 +10,18 @@ use crate::platform::command_output;
 /// Files that identify a BMAC checkout. A directory is accepted only if all of
 /// them exist, so a user-supplied path is never trusted on its own.
 const MARKERS: &[&str] = &[
-    "lib/config.sh",
-    "lib/ui_protocol.sh",
-    "lib/ui_json_run.sh",
-    "lib/ui_protocol.py",
-    "lib/cluster_registry.py",
-    "diagnostics/list_hosts.sh",
-    "guests/prod/add_prod_vm.sh",
-    "hosts/add_proxmox_host.sh",
+    "scripts/lib/config.sh",
+    "scripts/lib/ui_protocol.sh",
+    "scripts/utilities/ui_json_run.sh",
+    "scripts/lib/ui_protocol.py",
+    "scripts/host_runtime/cluster_registry.py",
+    "scripts/user_callable/diagnostics/list_hosts.sh",
+    "scripts/user_callable/guests/prod/add_prod_vm.sh",
+    "scripts/user_callable/hosts/add_proxmox_host.sh",
 ];
 
-/// Non-secret `env/cluster.conf` settings shown in the dashboard. Nothing
-/// else is read from env/: secrets.env is only checked for existence, and
+/// Non-secret `config/cluster.conf` settings shown in the dashboard. Nothing
+/// else is read from config/: secrets.env is only checked for existence, and
 /// `moxN.conf` files are only listed by name.
 const CLUSTER_KEYS: &[&str] = &[
     "PROXMOX_CLUSTER_NAME",
@@ -50,7 +50,7 @@ pub struct RepositoryInfo {
     pub cluster_conf_present: bool,
     pub secrets_env_present: bool,
     pub cluster_settings: Vec<ClusterSetting>,
-    /// Hosts with an `env/<host>.conf`, such as `mox3`, in numeric order.
+    /// Hosts with an `config/<host>.conf`, such as `mox3`, in numeric order.
     pub host_configs: Vec<String>,
 }
 
@@ -117,7 +117,7 @@ pub fn info(root: &Path) -> RepositoryInfo {
             .map(|o| !o.stdout.is_empty())
             .unwrap_or(false)
     });
-    let protocol_version = std::fs::read_to_string(root.join("lib/ui_protocol.sh"))
+    let protocol_version = std::fs::read_to_string(root.join("scripts/lib/ui_protocol.sh"))
         .ok()
         .and_then(|text| {
             text.lines().find_map(|line| line.strip_prefix("BMAC_UI_PROTOCOL_VERSION=")?.trim().parse().ok())
@@ -129,7 +129,7 @@ pub fn info(root: &Path) -> RepositoryInfo {
             crate::protocol::PROTOCOL_VERSION
         ));
     }
-    let cluster_conf = root.join("env/cluster.conf");
+    let cluster_conf = root.join("config/cluster.conf");
     let cluster_settings = std::fs::read_to_string(&cluster_conf)
         .map(|text| cluster_settings(&text))
         .unwrap_or_default();
@@ -143,9 +143,9 @@ pub fn info(root: &Path) -> RepositoryInfo {
         git_dirty,
         protocol_version,
         cluster_conf_present: cluster_conf.is_file(),
-        secrets_env_present: root.join("env/secrets.env").is_file(),
+        secrets_env_present: root.join("config/secrets.env").is_file(),
         cluster_settings,
-        host_configs: host_configs(&root.join("env")),
+        host_configs: host_configs(&root.join("config")),
     }
 }
 

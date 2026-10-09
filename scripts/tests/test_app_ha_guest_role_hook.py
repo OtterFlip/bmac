@@ -17,18 +17,18 @@ import tempfile
 import unittest
 
 
-HOSTS_DIR = Path(__file__).resolve().parent
-LIB_DIR = HOSTS_DIR.parent / "lib"
-HOOK = HOSTS_DIR / "app-ha-guest-role-hook.sh"
-REGISTRY = LIB_DIR / "cluster_registry.py"
-CLEANUP_WORKER = LIB_DIR / "process_deferred_cleanup.sh"
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+LIB_DIR = SCRIPTS_DIR / "lib"
+HOOK = SCRIPTS_DIR / "host_runtime" / "app-ha-guest-role-hook.sh"
+REGISTRY = SCRIPTS_DIR / "host_runtime" / "cluster_registry.py"
+CLEANUP_WORKER = SCRIPTS_DIR / "host_runtime" / "process_deferred_cleanup.sh"
 
 
 class GuestRoleHookTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        self.env_dir = self.root / "env"
+        self.config_dir = self.root / "config"
         self.bin_dir = self.root / "bin"
         self.install_lib = self.root / "install" / "lib"
         self.lock_dir = self.root / "locks"
@@ -36,7 +36,7 @@ class GuestRoleHookTest(unittest.TestCase):
         self.work_dir = self.root / "work"
         self.state_dir = self.root / "registry"
         for path in (
-            self.env_dir,
+            self.config_dir,
             self.bin_dir,
             self.install_lib,
             self.lock_dir,
@@ -45,7 +45,7 @@ class GuestRoleHookTest(unittest.TestCase):
         ):
             path.mkdir(parents=True)
 
-        cluster = self.env_dir / "cluster.conf"
+        cluster = self.config_dir / "cluster.conf"
         cluster.write_text(
             "\n".join(
                 (
@@ -287,7 +287,7 @@ else:
                 "APP_HA_WORK_DIR": str(self.work_dir),
                 "APP_HA_LOCAL_NODE": "mox1",
                 "APP_HA_CONFIG_TEST_MODE": "1",
-                "APP_HA_ENV_DIR": str(self.env_dir),
+                "APP_HA_CONFIG_DIR": str(self.config_dir),
                 "FAKE_STATE": str(self.fake_state),
                 "FAKE_ACTIONS": str(self.actions),
                 "PATH": f"{self.bin_dir}:{os.environ['PATH']}",

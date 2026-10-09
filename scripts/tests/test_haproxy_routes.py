@@ -23,11 +23,13 @@ import unittest
 # paths. A no-op where the temp directory is already a real path.
 tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
 
-LIB_DIR = Path(__file__).resolve().parent
-RENDERER_PATH = LIB_DIR / "haproxy_routes.py"
-REGISTRY_PATH = LIB_DIR / "cluster_registry.py"
-SYNC_PATH = LIB_DIR / "sync_haproxy_routes.sh"
-HOST_SETUP_PATH = LIB_DIR.parent / "hosts" / "add_proxmox_host.sh"
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+LIB_DIR = SCRIPTS_DIR / "lib"
+RUNTIME_DIR = SCRIPTS_DIR / "host_runtime"
+RENDERER_PATH = RUNTIME_DIR / "haproxy_routes.py"
+REGISTRY_PATH = RUNTIME_DIR / "cluster_registry.py"
+SYNC_PATH = RUNTIME_DIR / "sync_haproxy_routes.sh"
+HOST_SETUP_PATH = SCRIPTS_DIR / "user_callable" / "hosts" / "add_proxmox_host.sh"
 
 SPEC = importlib.util.spec_from_file_location("haproxy_routes", RENDERER_PATH)
 assert SPEC is not None and SPEC.loader is not None

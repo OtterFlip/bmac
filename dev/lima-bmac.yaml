@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Lima VM for running the complete BMAC test suite on a Mac. See
-# DEVELOPMENT.md.
+# dev/README.md.
 #
 # Debian 13 is the same userland as Proxmox VE 9 and the fixed HAProxy LXC,
 # so the Proxmox-host-only suites (lifecycle hook, deferred cleanup, prod ISO
@@ -18,7 +18,7 @@
 # cache; the runner therefore sets TMPDIR=/var/tmp.
 #
 # Not enabled: Rosetta (vmOpts.vz.rosetta) for the amd64-only
-# proxmox-auto-install-assistant used by hosts/add_proxmox_host.sh.
+# proxmox-auto-install-assistant used by scripts/user_callable/hosts/add_proxmox_host.sh.
 
 minimumLimaVersion: 2.0.0
 base:

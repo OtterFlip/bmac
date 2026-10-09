@@ -17,7 +17,7 @@ import unittest
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utilities"))
 import host_storage  # noqa: E402
 
 

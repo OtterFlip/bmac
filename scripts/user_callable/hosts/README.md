@@ -26,8 +26,8 @@ completed application-HA/VRRP deployment requires at least two candidates.
 
 The checked-in FiberState example uses private Layer-2 VLAN
 `10.213.0.0/24`. All addresses below are examples, not defaults: configure
-the VLAN and role ranges in `env/cluster.conf`, and configure each server's
-public, private-NIC, and iDRAC addresses in `env/moxN.conf`.
+the VLAN and role ranges in `config/cluster.conf`, and configure each server's
+public, private-NIC, and iDRAC addresses in `config/moxN.conf`.
 
 The implementation currently requires a shared IPv4 `/24`, but no role is
 tied to the example's host octets. The example allocation is:
@@ -228,7 +228,7 @@ names `crypt-rpool-mirrorN-1` and `crypt-rpool-mirrorN-2`:
   files.
 
 Adding a top-level vdev expands the pool. Removing one later
-(`hosts/decommission_disks.sh`) evacuates its data onto the other vdevs and
+(`scripts/user_callable/hosts/decommission_disks.sh`) evacuates its data onto the other vdevs and
 needs every vdev to share one ashift, which every script here keeps. Losing
 both members of any mirror vdev loses the striped pool. Disk serials, mapper
 identity, pool membership, and interrupted phase records are revalidated
@@ -241,14 +241,18 @@ member boots alone in the chosen clear or fully encrypted state, each missing
 member is restored and resilvered, then the healthy final mirror is rebooted.
 The drills can be skipped without changing the storage choice.
 
-Whenever setup pauses for an on-host helper, it prints a prominent
-`TARGET-HOST HELPER SCRIPT STATUS` block with the target host, exact helper
-path, and expected result. The following `SCRIPT WORKED?` prompt accepts `GO`
-only after the operator has actually run that helper successfully.
+Setup's on-host LUKS helpers read the temporary key file, so setup runs them
+itself over SSH; you never type the passphrase into them. Before each one it
+prints a `TARGET-HOST HELPER SCRIPT` block with the target host, exact helper
+path, and expected result, then asks to proceed: `GO` for a helper that
+formats LUKS, yes/no for one that only opens or tests mappings. Declining
+stops setup at that step, and a rerun resumes there. The post-setup disk
+workflows below are different: their helpers ask for the passphrase, so you
+still run them at the host console.
 
 ## Host setup flow
 
-Every `env/moxN.conf` needs the serial numbers of the NVMe drives that will
+Every `config/moxN.conf` needs the serial numbers of the NVMe drives that will
 form each rpool mirror and the MAC addresses of the host's public and private
 NICs. Without iDRAC it also needs each drive's exact byte capacity. Gather
 these values before running setup, once for each machine you intend to set up
@@ -256,7 +260,7 @@ as a Proxmox host.
 
 **Without iDRAC:** boot the machine into a Linux Live environment (for
 example an Ubuntu or Debian Live USB/CD in its try/live mode, not its
-installer). Copy `hosts/cluster_setup_prereq.sh` into that environment, for
+installer). Copy `scripts/user_callable/hosts/cluster_setup_prereq.sh` into that environment, for
 example from a second USB stick; it is a single standalone file that needs
 nothing else from this repository. Run it there:
 
@@ -273,7 +277,7 @@ addresses, but not the byte capacities, which setup reads through Redfish. The
 iDRAC web UI shows both the drive serial numbers and the NIC MAC addresses, so
 you do not need to boot a Live environment or run the prereq script.
 
-Fill in `env/moxN.conf`:
+Fill in `config/moxN.conf`:
 
 - For each desired mirror, choose two NVMe drives with distinct, non-empty
   serials whose capacities differ by at most 1%, and set
@@ -287,7 +291,7 @@ Fill in `env/moxN.conf`:
 Run host setup from an administrator workstation:
 
 ```bash
-hosts/add_proxmox_host.sh \
+scripts/user_callable/hosts/add_proxmox_host.sh \
   --host moxN [--encrypt | --no-encrypt] \
   [--run-boot-tests | --skip-boot-tests]
 ```
@@ -301,12 +305,12 @@ auth keys.
 The resumable flow:
 
 1. Selects iDRAC/Redfish or manual disk inventory, then strictly loads
-   `env/cluster.conf`, `env/moxN.conf`, and mode-`0600`
-   `env/secrets.env`; validates host formulas, serial-selected NVMe pairs,
+   `config/cluster.conf`, `config/moxN.conf`, and mode-`0600`
+   `config/secrets.env`; validates host formulas, serial-selected NVMe pairs,
    public/private MACs, hashes, and a secret-inclusive setup fingerprint.
 2. In iDRAC mode, queries Redfish without mutation. In manual mode, validates
    serials and exact capacities previously gathered with
-   `hosts/cluster_setup_prereq.sh` in a Live Linux environment. It then verifies
+   `scripts/user_callable/hosts/cluster_setup_prereq.sh` in a Live Linux environment. It then verifies
    the source ISO and builds host-specific media containing a fresh one-time,
    non-ephemeral `tag:proxmox-host` Tailscale key and a fresh SSH Ed25519 host
    key generated on the workstation. The first-boot payload installs that host
@@ -368,13 +372,13 @@ after correcting a failure.
 ## Adding and decommissioning rpool disks
 
 Four workstation scripts manage a host's rpool mirrors after setup. They run
-the same host-side code setup uses: `lib/rpool_mirror.sh` (installed per run as
+the same host-side code setup uses: `scripts/host_runtime/rpool_mirror.sh` (installed per run as
 `/usr/local/sbin/app-ha-rpool-mirror`) for every disk, LUKS, and zpool change,
-`lib/host_storage.py` for a read-only layout, and `lib/storage_state.py` for
+`scripts/utilities/host_storage.py` for a read-only layout, and `scripts/utilities/storage_state.py` for
 records kept on the host in `/var/lib/app-ha-storage/state.json`. rpool holds
 at most five mirrors, including mirror 0, the boot mirror that holds the ESPs.
 Mirror 0 is never removed. The 0-4 numbering limit applies only to
-`env/moxN.conf`: ZFS never reuses a top-level vdev number, so after
+`config/moxN.conf`: ZFS never reuses a top-level vdev number, so after
 `mirror-4` is decommissioned the next mirror added is `mirror-5`. A mirror
 added here takes the number ZFS will give it (one past the highest vdev
 number in rpool or in the host's removal records) and names its LUKS
@@ -383,11 +387,11 @@ mappings after it, for example `crypt-rpool-mirror5-1`.
 Each script prompts for a target host, defaults to `mox1`, accepts any
 configured `moxN` through `--host`, and starts by printing the same live disk
 inventory collected over SSH. After setup completes, the host is the source
-of truth; these scripts do not read or update `env/moxN.conf`.
+of truth; these scripts do not read or update `config/moxN.conf`.
 
 ### Adding a mirror
 
-`hosts/add_new_disk_vdev.sh [--host moxN]`:
+`scripts/user_callable/hosts/add_new_disk_vdev.sh [--host moxN]`:
 
 1. lists the disks that are not part of rpool, with serials and byte
    capacities, and asks for two whose capacities differ by at most 1%. A new
@@ -403,7 +407,7 @@ of truth; these scripts do not read or update `env/moxN.conf`.
    gives each disk one partition, formats both as LUKS2 with it, and opens them as
    `crypt-rpool-mirrorN-1` and `-2`. The passphrase is typed only at the
    console; setup's temporary key file no longer exists by then;
-3. copies both LUKS header backups to `hosts/artifacts/moxN/luks-headers/`
+3. copies both LUKS header backups to `scripts/user_callable/hosts/artifacts/moxN/luks-headers/`
    as `rpool-mirrorN-1.bin` and `-2.bin`, keeping any earlier backup under
    the same name (from a previous run or a pair N that was since
    decommissioned) as `.replaced-<time>`;
@@ -421,7 +425,7 @@ console.
 ### Replacing a pulled mirror member
 
 When a mirror member fails, pull its disk and install one of the same
-nominal capacity, then run `hosts/add_replacement_disk.sh [--host moxN]`:
+nominal capacity, then run `scripts/user_callable/hosts/add_replacement_disk.sh [--host moxN]`:
 
 1. lists the mirrors that are missing a member (or were detached down to one
    disk) and the unused disks large enough to hold the surviving member's
@@ -440,7 +444,7 @@ nominal capacity, then run `hosts/add_replacement_disk.sh [--host moxN]`:
    encrypts the new disk's member partition (partition 3 on mirror 0,
    partition 1 otherwise)
    under the pulled member's mapping name. The header backup is copied to
-   `hosts/artifacts/moxN/luks-headers/`, keeping the old one as
+   `scripts/user_callable/hosts/artifacts/moxN/luks-headers/`, keeping the old one as
    `.replaced-<time>`;
 4. records the new member in crypttab and proves the rebuilt initramfs unlocks
    it, rechecks that both boot ESPs are in sync, then runs `zpool replace`
@@ -457,7 +461,7 @@ reboot it.
 
 #### Testing the replacement without a disk swap
 
-`hosts/simulate_disk_failure_and_replacement.sh [--host moxN]` is a test aid
+`scripts/user_callable/hosts/simulate_disk_failure_and_replacement.sh [--host moxN]` is a test aid
 that **destroys the data on one disk**. It explains what it does and asks
 before doing anything. Then it lists the healthy two-way mirrors and asks for
 one mirror and one of its members. It takes that member `OFFLINE` and, on a
@@ -469,14 +473,14 @@ to bring the member back. On a LUKS host that has to happen at the host
 console, because it needs the passphrase. A record in `/root` lets a rerun
 erase the disk or back out a simulation that stopped between the two steps.
 It works with and without LUKS, and on the boot mirror. Then run
-`hosts/add_replacement_disk.sh` and choose the erased disk. Do not reboot
+`scripts/user_callable/hosts/add_replacement_disk.sh` and choose the erased disk. Do not reboot
 until it finishes: on a LUKS host, crypttab and the initramfs still list the
 erased member's UUID until that script replaces them. The mirror has no
 redundancy from the offline step until the resilver finishes.
 
 ### Decommissioning a mirror
 
-`hosts/decommission_disks.sh [--host moxN]` prepares rpool and starts one
+`scripts/user_callable/hosts/decommission_disks.sh [--host moxN]` prepares rpool and starts one
 top-level vdev removal:
 
 1. stops if a removal is running or an earlier one has not been retired;
@@ -484,7 +488,7 @@ top-level vdev removal:
    the host, and staging cloned from a production guest whose disk lives on
    the host (running there or replicating there). Leftover `stg-base-`
    snapshots and pending cleanup records for the host count too. Destroy them
-   with `guests/staging/remove_staging_vm.sh stageNprodN`;
+   with `scripts/user_callable/guests/staging/remove_staging_vm.sh stageNprodN`;
 3. lists the production guests that run on or replicate to the host, asks
    whether unwanted files have been deleted inside them, and checks that
    `ssh prodN` works for each;
@@ -507,7 +511,7 @@ production zvols; a full (refreserved) zvol keeps its space reserved.
 ### Inventorying and pulling disks
 
 After `decommission_disks.sh`, you must run
-`hosts/inventory_disks.sh [--host moxN]`. It shows removal progress. Once
+`scripts/user_callable/hosts/inventory_disks.sh [--host moxN]`. It shows removal progress. Once
 evacuation completes, it asks before closing the pair's LUKS mappings,
 removing them from crypttab, rebuilding and verifying the initramfs,
 releasing the disks, deleting their off-host LUKS header backups, and marking
@@ -526,7 +530,7 @@ current inventory.
 
 ## Production and staging lifecycle
 
-`guests/prod/add_prod_vm.sh` allocates a deterministic `prodN`, an address
+`scripts/user_callable/guests/prod/add_prod_vm.sh` allocates a deterministic `prodN`, an address
 from `PRODUCTION_IP_START` through `PRODUCTION_IP_END`, a MAC, and a
 live-checked VMID in pmxcfs. Host setup installs the production ISO
 cache/builder tools and their `curl`/`xorriso` dependencies on every mox. The
@@ -547,7 +551,7 @@ sparse by default, so `rpool` can be overcommitted; monitor pool free space on e
 placement node. Staging eviction is emergency reclamation, not production
 capacity.
 
-`guests/staging/add_staging_vm.sh` selects an active production source and
+`scripts/user_callable/guests/staging/add_staging_vm.sh` selects an active production source and
 an online placement standby, takes a unique source-owned Proxmox snapshot,
 requires the replicated snapshot GUID to match on every production placement
 node, creates a direct local ZFS clone, patches it offline, and registers one
@@ -739,9 +743,9 @@ keys, and LUKS headers stay outside pmxcfs.
   fallback does not replace those data paths.
 - QDevice failure: packet flow is unchanged, but even-node quorum safety is
   degraded. Do not perform membership changes until parity is healthy.
-  `diagnostics/show_qdevice_state.sh` reports the state. A lost QDevice is
-  replaced with `qdevice/remove_qdevice.sh` (which can forcefully remove an
-  unreachable one) and then `qdevice/add_qdevice.sh`.
+  `scripts/user_callable/diagnostics/show_qdevice_state.sh` reports the state. A lost QDevice is
+  replaced with `scripts/user_callable/qdevice/remove_qdevice.sh` (which can forcefully remove an
+  unreachable one) and then `scripts/user_callable/qdevice/add_qdevice.sh`.
 - Replication lag/failure: HA can recover only the last successful replicated
   state. A fully reserved production zvol also consumes reservation capacity
   on every target.
@@ -799,7 +803,7 @@ unreachable, so a rerun finishes it as a forced removal.
 1. It shows every member with what still blocks its removal: registry
    references (production placement, staging, pending cleanup), guests other
    than its `haproxyN` LXC, HA rules, or replication jobs. Move production
-   with `guests/prod/change_prod_vm_placement.sh` first.
+   with `scripts/user_callable/guests/prod/change_prod_vm_placement.sh` first.
 2. The cluster must be quorate with at least three members, every one
    online.
 3. You confirm that the host is out of every Cloudflare load balancer. If it
@@ -811,9 +815,9 @@ unreachable, so a rerun finishes it as a forced removal.
    cluster-wide SSH trust. It re-adds the QDevice only for an even remaining
    count.
 5. It records membership, frees the slot, resynchronizes HAProxy routes,
-   archives `hosts/artifacts/moxN` as `moxN.retired-<timestamp>`, offers to
+   archives `scripts/user_callable/hosts/artifacts/moxN` as `moxN.retired-<timestamp>`, offers to
    update `PROXMOX_CONTROL_NODE`, and lists the manual cleanup: Tailscale
-   device, `known_hosts`, `env/moxN.conf`, and Cloudflare.
+   device, `known_hosts`, `config/moxN.conf`, and Cloudflare.
 
 ### Forced removal
 
@@ -860,7 +864,7 @@ will never be connected to a network again in its old role. Then it:
 Validate configuration before mutation:
 
 ```bash
-lib/config.sh --check --host moxN --require-secrets
+scripts/lib/config.sh --check --host moxN --require-secrets
 ```
 
 Inspect cluster and registry state from a mox:
@@ -877,7 +881,7 @@ For a quick read-only hardware and network check from the administrator
 workstation, run:
 
 ```bash
-diagnostics/show_cluster_health.sh
+scripts/user_callable/diagnostics/show_cluster_health.sh
 ```
 
 It reports each member's Proxmox state, workstation SSH access, quorum, and
@@ -892,7 +896,7 @@ attention.
 For a broader read-only snapshot from the administrator workstation, run:
 
 ```bash
-diagnostics/show_cluster_state.sh \
+scripts/user_callable/diagnostics/show_cluster_state.sh \
   >cluster_state.txt
 ```
 
@@ -908,7 +912,7 @@ serials, the boot/ESP vdev, disks outside the pool, per-zvol allocation, the
 guests it runs, and the replicas it stores, run:
 
 ```bash
-diagnostics/show_proxmox_host_state.sh mox1 \
+scripts/user_callable/diagnostics/show_proxmox_host_state.sh mox1 \
   >mox1_state.txt
 ```
 
@@ -941,30 +945,30 @@ Repository checks:
 
 ```bash
 bash -n \
-  hosts/add_proxmox_host.sh \
-  hosts/app-ha-guest-role-hook.sh \
-  hosts/remove_proxmox_host.sh \
-  guests/prod/add_prod_vm.sh \
-  guests/staging/add_staging_vm.sh \
-  guests/staging/patch_staging_clone.sh \
-  lib/config.sh \
-  lib/sync_haproxy_routes.sh \
-  lib/process_deferred_cleanup.sh
+  scripts/user_callable/hosts/add_proxmox_host.sh \
+  scripts/host_runtime/app-ha-guest-role-hook.sh \
+  scripts/user_callable/hosts/remove_proxmox_host.sh \
+  scripts/user_callable/guests/prod/add_prod_vm.sh \
+  scripts/user_callable/guests/staging/add_staging_vm.sh \
+  scripts/utilities/patch_staging_clone.sh \
+  scripts/lib/config.sh \
+  scripts/host_runtime/sync_haproxy_routes.sh \
+  scripts/host_runtime/process_deferred_cleanup.sh
 
 dev/run_tests.py \
-  hosts/test_add_proxmox_host.py \
-  hosts/test_app_ha_guest_role_hook.py \
-  hosts/test_host_membership.py \
-  hosts/test_disk_workflows.py \
-  guests/prod/test_add_prod_vm.py \
-  guests/staging/test_staging_vm.py \
-  lib/test_shared_libs.py \
-  lib/test_haproxy_routes.py \
-  lib/test_process_deferred_cleanup.py
+  scripts/tests/test_add_proxmox_host.py \
+  scripts/tests/test_app_ha_guest_role_hook.py \
+  scripts/tests/test_host_membership.py \
+  scripts/tests/test_disk_workflows.py \
+  scripts/tests/test_add_prod_vm.py \
+  scripts/tests/test_staging_vm.py \
+  scripts/tests/test_shared_libs.py \
+  scripts/tests/test_haproxy_routes.py \
+  scripts/tests/test_process_deferred_cleanup.py
 ```
 
 `dev/run_tests.py` runs the tests in parallel; with no arguments it runs the
-whole suite. See [`MAIN_DESIGN.md`](../MAIN_DESIGN.md#tests).
+whole suite. See [`MAIN_DESIGN.md`](../../../docs/MAIN_DESIGN.md#tests).
 
 These tests mock destructive Proxmox behavior. They do not replace iDRAC,
 physical-link, quorum, migration, replication, HA, Cloudflare, or full

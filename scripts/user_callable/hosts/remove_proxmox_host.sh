@@ -23,10 +23,10 @@ set +x
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
-CONTROL_LIB="${REPO_ROOT}/lib/cluster_control.sh"
-MEMBERSHIP_LIB="${REPO_ROOT}/lib/host_membership.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
+CONTROL_LIB="${REPO_ROOT}/scripts/lib/cluster_control.sh"
+MEMBERSHIP_LIB="${REPO_ROOT}/scripts/lib/host_membership.sh"
 
 for library in "$CONFIG_LIB" "$CONTROL_LIB" "$MEMBERSHIP_LIB"; do
   [[ -f "$library" && ! -L "$library" ]] || {
@@ -34,11 +34,11 @@ for library in "$CONFIG_LIB" "$CONTROL_LIB" "$MEMBERSHIP_LIB"; do
     exit 1
   }
 done
-# shellcheck source=../lib/config.sh
+# shellcheck source=../../lib/config.sh
 source "$CONFIG_LIB"
-# shellcheck source=../lib/cluster_control.sh
+# shellcheck source=../../lib/cluster_control.sh
 source "$CONTROL_LIB"
-# shellcheck source=../lib/host_membership.sh
+# shellcheck source=../../lib/host_membership.sh
 source "$MEMBERSHIP_LIB"
 bmac_ui_bootstrap "$@"
 
@@ -75,8 +75,8 @@ cannot. Every other member must be online and the cluster must be quorate.
 
 Graceful removal, for an online host that answers SSH from this workstation,
 requires that nothing depends on it: no production placement (move production
-away first with guests/prod/change_prod_vm_owner.sh and
-guests/prod/change_prod_vm_placement.sh), no replica, staging VM, HA rule,
+away first with scripts/user_callable/guests/prod/change_prod_vm_owner.sh and
+scripts/user_callable/guests/prod/change_prod_vm_placement.sh), no replica, staging VM, HA rule,
 route, or pending deferred cleanup. At least two hosts must remain. Under the
 cluster control-plane lock it removes the QDevice vote, powers the host off,
 deletes it from the cluster, re-adds the QDevice when the remaining member
@@ -94,7 +94,7 @@ every production VM that ran on the host. It then:
   - removes the host from each production VM's registry placement, HA
     node-affinity rule, and replication jobs (a production VM may be left with
     a single placement host; add hosts back with
-    guests/prod/change_prod_vm_placement.sh);
+    scripts/user_callable/guests/prod/change_prod_vm_placement.sh);
   - deletes the host from corosync and pmxcfs, removes its cluster SSH trust,
     reconciles the QDevice vote, and frees its registry slot.
 
@@ -441,9 +441,9 @@ validate_eligibility() {
   if [[ -n "$blockers" ]]; then
     printf '\n%s cannot be removed yet:\n' "$TARGET_HOST" >&2
     sed 's/^/  - /' <<<"$blockers" >&2
-    printf '\nMove production placement off %s with guests/prod/change_prod_vm_owner.sh\n' \
+    printf '\nMove production placement off %s with scripts/user_callable/guests/prod/change_prod_vm_owner.sh\n' \
       "$TARGET_HOST" >&2
-    printf 'and guests/prod/change_prod_vm_placement.sh, destroy staging VMs that use it, and\n' >&2
+    printf 'and scripts/user_callable/guests/prod/change_prod_vm_placement.sh, destroy staging VMs that use it, and\n' >&2
     printf 'wait for deferred cleanup to finish.\n' >&2
     exit 1
   fi
@@ -538,7 +538,7 @@ for row in sorted(
         )
         continue
     if not placement:
-        refusals.append(f"{name} is placed only on {dead}; destroy it with guests/prod/remove_prod_vm.sh")
+        refusals.append(f"{name} is placed only on {dead}; destroy it with scripts/user_callable/guests/prod/remove_prod_vm.sh")
         continue
     if vm is None or vm.get("name") != name or vm.get("type") != "qemu":
         refusals.append(f"{name} (VMID {vmid}) is missing from live cluster resources")
@@ -756,7 +756,7 @@ show_forced_plan() {
     info "Cluster: ${MEMBERS[*]} -> $remaining members"
     show_qdevice_plan "$remaining"
     ((remaining > 1)) ||
-      info "A single remaining host cannot provide production HA; add hosts with hosts/add_proxmox_host.sh"
+      info "A single remaining host cannot provide production HA; add hosts with scripts/user_callable/hosts/add_proxmox_host.sh"
   fi
   if ((${#STAGING_NAMES[@]} > 0)); then
     info "Staging VMs destroyed: ${STAGING_NAMES[*]}"
@@ -1102,7 +1102,7 @@ release_slot() {
   hm_registry host-sync --live >/dev/null ||
     die "Could not record current cluster membership in the registry"
   hm_registry host-release "$TARGET_HOST" \
-    --reason "${REMOVAL_MODE} removal with hosts/remove_proxmox_host.sh" >/dev/null ||
+    --reason "${REMOVAL_MODE} removal with scripts/user_callable/hosts/remove_proxmox_host.sh" >/dev/null ||
     die "Could not free the $TARGET_HOST registry slot"
   info "The $TARGET_HOST slot is free for a future host"
 }
@@ -1194,10 +1194,10 @@ remove_forcefully() {
     info "Production $name placement: $(plan_field productions "$name" placement)"
   done
   ((${#PRODUCTION_NAMES[@]} == 0)) ||
-    info "Restore redundancy with guests/prod/change_prod_vm_placement.sh"
+    info "Restore redundancy with scripts/user_callable/guests/prod/change_prod_vm_placement.sh"
   ((${#PRODUCTION_NAMES[@]} == 0)) ||
     bmac_ui_next_step "Restore the redundancy of ${PRODUCTION_NAMES[*]}." \
-      --command "guests/prod/change_prod_vm_placement.sh" --workflow change_prod_vm_placement
+      --command "scripts/user_callable/guests/prod/change_prod_vm_placement.sh" --workflow change_prod_vm_placement
   bmac_ui_result host "$TARGET_HOST" removal forced members:raw "$(bmac_ui_json_array "${MEMBERS[@]}")"
   if [[ "$CONTROL_CHANGED" == true ]]; then
     control_offer_cluster_conf_update "$NEW_CONTROL_NODE"
@@ -1233,7 +1233,7 @@ main() {
   resolve_control_node --allow-offline || exit 1
   [[ -n "$CONTROL_PROBE_NODE" ]] || die "No reachable cluster member was found"
   [[ "$CONTROL_REGISTRY_SUPPORTS_HOSTS" == true ]] ||
-    die "The installed cluster registry predates host slots; run hosts/update_cluster_runtime.sh first"
+    die "The installed cluster registry predates host slots; run scripts/user_callable/hosts/update_cluster_runtime.sh first"
   choose_coordinator
   info "Control node: $CONTROL_NODE; commands run through $HM_COORDINATOR"
   hm_require_slot_registry
@@ -1246,7 +1246,7 @@ main() {
   else
     remove_forcefully
   fi
-  bash "${REPO_ROOT}/lib/report_stale_jump_ssh.sh" "$TARGET_HOST" || true
+  bash "${REPO_ROOT}/scripts/utilities/report_stale_jump_ssh.sh" "$TARGET_HOST" || true
 }
 
 if [[ "${REMOVE_PROXMOX_HOST_SOURCE_ONLY:-0}" != 1 ]]; then

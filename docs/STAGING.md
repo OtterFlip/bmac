@@ -7,7 +7,7 @@ BMAC can quickly-create lightweight staging VMs for testing changes before pushi
 Your production VM's disk is a ZFS zvol on the Proxmox host, and that ZFS zvol is being replicated with async ZFS replication, as often as once-per-minute, to a corresponding target zvol on the standby host.  This replication continues like clockwork even when you have created staging VMs on the target host, so your production data is still protected including new production data even when you are using staging guests on the standby host.
 
 <p align="center">
-  <img src="media/staging1.png" width="800">
+  <img src="../media/staging1.png" width="800">
 </p>
 
 ## Stage 2
@@ -15,7 +15,7 @@ Your production VM's disk is a ZFS zvol on the Proxmox host, and that ZFS zvol i
 When you use `/guests/staging/add_staging_vm.sh` to create a new staging VM based on a production VM, the script first creates a temporary staging snapshot on the actived host.
 
 <p align="center">
-  <img src="media/staging2.png" width="800">
+  <img src="../media/staging2.png" width="800">
 </p>
 
 ## Stage 3
@@ -23,7 +23,7 @@ When you use `/guests/staging/add_staging_vm.sh` to create a new staging VM base
 After the temporary staging snapshot has been created on the active host, the `/guests/staging/add_staging_vm.sh` script then immediately triggers replication so that this same snapshot will be available on the standby host.
 
 <p align="center">
-  <img src="media/staging3.png" width="800">
+  <img src="../media/staging3.png" width="800">
 </p>
 
 ## Stage 4
@@ -31,7 +31,7 @@ After the temporary staging snapshot has been created on the active host, the `/
 A lightweight Copy-on-Write linked-clone of the temporary staging snapshot on the standby host in then created. This linked clone, itself a zvol, requires no additional data copy to be created, only new data written to it is stored.
 
 <p align="center">
-  <img src="media/staging4.png" width="800">
+  <img src="../media/staging4.png" width="800">
 </p>
 
 ## Stage 5
@@ -41,6 +41,6 @@ This linked-clone zvol is then mounted on the standby host, and its EXT4 OS file
 If a failover occurs of the production VM, which requires bringing the production machine (ex: `prod1`) online on the standby host, a startup hook script will run before the prod VM is powered on, and this startup hook will ensure that, if there are any active staging VMs running on the standby host, that those staging VMs will be powered off before the prod VM is powered on.  This is a fast operation which ensures that the standby host has all of the RAM and CPU resources needed by the prod VM.  After powering-on the prod VM, any powered-off staging VMs are then automatically removed by this hook script.
 
 <p align="center">
-  <img src="media/staging5.png" width="800">
+  <img src="../media/staging5.png" width="800">
 </p>
 

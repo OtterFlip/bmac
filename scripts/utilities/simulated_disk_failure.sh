@@ -3,11 +3,11 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Root-only host side of hosts/simulate_disk_failure_and_replacement.sh, piped
+# Root-only host side of scripts/user_callable/hosts/simulate_disk_failure_and_replacement.sh, piped
 # to the host per run as: bash -s -- COMMAND MARKER [ARGS].
 #
 # It makes one member of a healthy two-way rpool mirror look like a disk that
-# was pulled and replaced with a blank one, so hosts/add_replacement_disk.sh
+# was pulled and replaced with a blank one, so scripts/user_callable/hosts/add_replacement_disk.sh
 # can be tested without physically swapping a disk. MARKER is a host file that
 # records the simulation between steps so a rerun can finish or back it out.
 #

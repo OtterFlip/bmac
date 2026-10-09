@@ -6,15 +6,15 @@
 """Workstation-side disk inventory: pool vdevs and disks outside every pool.
 
 Both commands read what the host-side collectors print: the layout from
-``lib/host_storage.py collect`` and the durable records from
-``lib/storage_state.py show``. Nothing here touches a host.
+``scripts/utilities/host_storage.py collect`` and the durable records from
+``scripts/utilities/storage_state.py show``. Nothing here touches a host.
 
 ``pending-removals LAYOUT STATE`` prints one tab-separated line per requested
 vdev removal: id, vdev, status, member serials, and LUKS mapper names. The
 status is evacuating, still-in-pool, needs-retire, or complete; this is the
-classification hosts/inventory_disks.sh acts on.
+classification scripts/user_callable/hosts/inventory_disks.sh acts on.
 
-``render --run-dir DIR`` reads the per-host files diagnostics/list_disks.sh
+``render --run-dir DIR`` reads the per-host files scripts/user_callable/diagnostics/list_disks.sh
 collected, prints a terminal report, and in JSON mode emits the same state as
 one structured ``result`` event plus ``next_step`` suggestions.
 """
@@ -344,7 +344,7 @@ def host_attention(host: dict[str, Any]) -> tuple[list[str], list[tuple]]:
                 member["missing"] or member["state"] != "ONLINE" for member in vdev["members"]
             ):
                 step(f"Replace the failed disk of {vdev['name']} on {node}.",
-                     "add_replacement_disk", "hosts/add_replacement_disk.sh")
+                     "add_replacement_disk", "scripts/user_callable/hosts/add_replacement_disk.sh")
     for removal in host["removals"]:
         if removal["status"] == "still-in-pool":
             problems.append(
@@ -352,7 +352,7 @@ def host_attention(host: dict[str, Any]) -> tuple[list[str], list[tuple]]:
                 "in rpool and no removal is running"
             )
             step(f"Record the stalled removal of {removal['vdev']} on {node}.",
-                 "inventory_disks", "hosts/inventory_disks.sh")
+                 "inventory_disks", "scripts/user_callable/hosts/inventory_disks.sh")
     waiting = [disk for disk in host["disks"] if disk["status"] == "awaiting_finalization"]
     if waiting:
         problems.append(
@@ -361,12 +361,12 @@ def host_attention(host: dict[str, Any]) -> tuple[list[str], list[tuple]]:
             + " finished evacuating and await retirement finalization"
         )
         step(f"Finalize the retirement of the decommissioned disks on {node}.",
-             "inventory_disks", "hosts/inventory_disks.sh")
+             "inventory_disks", "scripts/user_callable/hosts/inventory_disks.sh")
     for status, purpose, workflow, command, text in (
         ("pending_replacement", "a mirror replacement", "add_replacement_disk",
-         "hosts/add_replacement_disk.sh", "Finish the interrupted disk replacement on {node}."),
+         "scripts/user_callable/hosts/add_replacement_disk.sh", "Finish the interrupted disk replacement on {node}."),
         ("pending_addition", "a new mirror", "add_new_disk_vdev",
-         "hosts/add_new_disk_vdev.sh", "Resume adding the new mirror on {node}."),
+         "scripts/user_callable/hosts/add_new_disk_vdev.sh", "Resume adding the new mirror on {node}."),
     ):
         rows = [disk for disk in host["disks"] if disk["status"] == status]
         if rows:

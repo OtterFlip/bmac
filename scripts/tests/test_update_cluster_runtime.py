@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).with_name("update_cluster_runtime.sh")
+SCRIPT = Path(__file__).resolve().parent.parent / "user_callable" / "hosts" / "update_cluster_runtime.sh"
 
 
 class UpdateClusterRuntimeTests(unittest.TestCase):

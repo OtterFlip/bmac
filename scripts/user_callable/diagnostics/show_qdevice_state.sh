@@ -18,10 +18,10 @@ if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); 
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
-CONTROL_LIB="${REPO_ROOT}/lib/cluster_control.sh"
-MEMBERSHIP_LIB="${REPO_ROOT}/lib/host_membership.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
+CONTROL_LIB="${REPO_ROOT}/scripts/lib/cluster_control.sh"
+MEMBERSHIP_LIB="${REPO_ROOT}/scripts/lib/host_membership.sh"
 
 for library in "$CONFIG_LIB" "$CONTROL_LIB" "$MEMBERSHIP_LIB"; do
   [[ -f "$library" && ! -L "$library" ]] || {
@@ -29,11 +29,11 @@ for library in "$CONFIG_LIB" "$CONTROL_LIB" "$MEMBERSHIP_LIB"; do
     exit 2
   }
 done
-# shellcheck source=../lib/config.sh
+# shellcheck source=../../lib/config.sh
 source "$CONFIG_LIB"
-# shellcheck source=../lib/cluster_control.sh
+# shellcheck source=../../lib/cluster_control.sh
 source "$CONTROL_LIB"
-# shellcheck source=../lib/host_membership.sh
+# shellcheck source=../../lib/host_membership.sh
 source "$MEMBERSHIP_LIB"
 
 MEMBER_COUNT=0
@@ -50,7 +50,7 @@ declare -a PROBLEMS=()
 
 usage() {
   cat <<'EOF'
-Usage: diagnostics/show_qdevice_state.sh
+Usage: scripts/user_callable/diagnostics/show_qdevice_state.sh
 
 Report whether the cluster needs an external QDevice (it does when it has an
 even number of members), whether one is registered in corosync.conf, and
@@ -58,7 +58,7 @@ whether every member sees it alive and voting. When it is functional, print
 its details from the cluster and from the QDevice host
 (PROXMOX_QDEVICE_HOST, reached as root over SSH). When it is missing or has
 failed, explain what to do, including replacing it with
-qdevice/remove_qdevice.sh and qdevice/add_qdevice.sh.
+scripts/user_callable/qdevice/remove_qdevice.sh and scripts/user_callable/qdevice/add_qdevice.sh.
 
 Nothing is changed. Commands create normal SSH and command-access log entries.
 
@@ -95,8 +95,8 @@ qdevice_result() {
     problems:raw "$(bmac_ui_json_array "${PROBLEMS[@]}")"
 }
 
-ADD_STEPS=(--command "qdevice/add_qdevice.sh" --workflow add_qdevice)
-REMOVE_STEPS=(--command "qdevice/remove_qdevice.sh" --workflow remove_qdevice)
+ADD_STEPS=(--command "scripts/user_callable/qdevice/add_qdevice.sh" --workflow add_qdevice)
+REMOVE_STEPS=(--command "scripts/user_callable/qdevice/remove_qdevice.sh" --workflow remove_qdevice)
 
 indent() {
   sed 's/^/    /'
@@ -127,7 +127,7 @@ qdevice_verdict() {
     fi
     printf 'ATTENTION: a QDevice (%s) is registered, but the %s-member cluster has an odd\n' \
       "${REGISTERED_ADDRESS:-unknown address}" "$MEMBER_COUNT"
-    printf 'number of votes and must not use one. hosts/add_proxmox_host.sh removes it on its\n'
+    printf 'number of votes and must not use one. scripts/user_callable/hosts/add_proxmox_host.sh removes it on its\n'
     printf 'next run, or run "pvecm qdevice remove" on a member while every member is online.\n'
     qdevice_result attention "A QDevice is registered, but the ${MEMBER_COUNT}-member cluster has an odd number of votes and must not use one."
     bmac_ui_next_step "Remove the QDevice: the next host setup run removes it, or remove it now while every member is online." \
@@ -140,8 +140,8 @@ qdevice_verdict() {
       "$MEMBER_COUNT"
     printf 'With an even number of members and no tie-breaking vote, losing any one member\n'
     printf 'loses quorum. To add one:\n'
-    printf '  1. Prepare the machine with qdevice/QDEVICE_MANUAL_SETUP.md.\n'
-    printf '  2. Run qdevice/add_qdevice.sh.\n'
+    printf '  1. Prepare the machine with docs/QDEVICE_MANUAL_SETUP.md.\n'
+    printf '  2. Run scripts/user_callable/qdevice/add_qdevice.sh.\n'
     if ((QDEVICE_REACHABLE)); then
       printf '%s is reachable from this workstation and can be the one you add.\n' \
         "$PROXMOX_QDEVICE_HOST"
@@ -151,7 +151,7 @@ qdevice_verdict() {
     qdevice_result attention "The ${MEMBER_COUNT}-member cluster needs a QDevice and has none registered; losing any one member loses quorum."
     ((${#OFFLINE_MEMBERS[@]} == 0)) ||
       bmac_ui_next_step "Bring the offline members (${OFFLINE_MEMBERS[*]}) online first."
-    bmac_ui_next_step "Prepare the QDevice machine with qdevice/QDEVICE_MANUAL_SETUP.md, then add it to the cluster." \
+    bmac_ui_next_step "Prepare the QDevice machine with docs/QDEVICE_MANUAL_SETUP.md, then add it to the cluster." \
       "${ADD_STEPS[@]}"
     return 1
   fi
@@ -168,9 +168,9 @@ qdevice_verdict() {
     printf '(reachable: %s, Tailscale address: %s). The scripts reach the QDevice through\n' \
       "$([[ "$QDEVICE_REACHABLE" == 1 ]] && printf yes || printf no)" \
       "${QDEVICE_TAILSCALE_IP:-unknown}"
-    printf 'PROXMOX_QDEVICE_HOST in env/cluster.conf; correct it or your SSH configuration.\n'
+    printf 'PROXMOX_QDEVICE_HOST in config/cluster.conf; correct it or your SSH configuration.\n'
     qdevice_result attention "The QDevice at $REGISTERED_ADDRESS is alive and voting, but $PROXMOX_QDEVICE_HOST is not that machine."
-    bmac_ui_next_step "Correct PROXMOX_QDEVICE_HOST in env/cluster.conf or this workstation's SSH configuration so it names the registered QDevice."
+    bmac_ui_next_step "Correct PROXMOX_QDEVICE_HOST in config/cluster.conf or this workstation's SSH configuration so it names the registered QDevice."
     return 1
   fi
 
@@ -185,13 +185,13 @@ qdevice_verdict() {
     fi
     printf '\nIf it is only temporarily unreachable (network or Tailscale), restore access\n'
     printf 'and rerun this script. If it has failed and must be replaced:\n'
-    printf '  1. Run qdevice/remove_qdevice.sh. It cannot remove an inaccessible QDevice\n'
+    printf '  1. Run scripts/user_callable/qdevice/remove_qdevice.sh. It cannot remove an inaccessible QDevice\n'
     printf '     gracefully, so it offers to remove it forcefully: it removes the QDevice and\n'
     printf '     every association with it from the cluster without contacting it, once you\n'
     printf '     have removed the old machine from Tailscale so it can never communicate\n'
     printf '     with the cluster again.\n'
-    printf '  2. Prepare the new machine with qdevice/QDEVICE_MANUAL_SETUP.md.\n'
-    printf '  3. Run qdevice/add_qdevice.sh to add it to the cluster.\n'
+    printf '  2. Prepare the new machine with docs/QDEVICE_MANUAL_SETUP.md.\n'
+    printf '  3. Run scripts/user_callable/qdevice/add_qdevice.sh to add it to the cluster.\n'
   else
     printf 'ATTENTION: the QDevice at %s is registered and %s is reachable, but not\n' \
       "$REGISTERED_ADDRESS" "$PROXMOX_QDEVICE_HOST"
@@ -206,8 +206,8 @@ qdevice_verdict() {
   if ((inaccessible == 0)); then
     printf '\nRepair the problems above (for example restart corosync-qnetd on the QDevice or\n'
     printf 'corosync-qdevice on a member). If the QDevice cannot be repaired, replace it:\n'
-    printf 'qdevice/remove_qdevice.sh, then qdevice/QDEVICE_MANUAL_SETUP.md, then\n'
-    printf 'qdevice/add_qdevice.sh.\n'
+    printf 'scripts/user_callable/qdevice/remove_qdevice.sh, then docs/QDEVICE_MANUAL_SETUP.md, then\n'
+    printf 'scripts/user_callable/qdevice/add_qdevice.sh.\n'
   fi
   ((${#OFFLINE_MEMBERS[@]} == 0)) ||
     printf '\nEvery member must be online before the QDevice can be removed or added.\n'
@@ -217,7 +217,7 @@ qdevice_verdict() {
       --command "ssh root@$PROXMOX_QDEVICE_HOST" --workflow show_qdevice_state
     bmac_ui_next_step "If it has failed, remove it; the removal is forced and asks you to remove the old machine from Tailscale." \
       "${REMOVE_STEPS[@]}"
-    bmac_ui_next_step "Then prepare the new machine with qdevice/QDEVICE_MANUAL_SETUP.md and add it." "${ADD_STEPS[@]}"
+    bmac_ui_next_step "Then prepare the new machine with docs/QDEVICE_MANUAL_SETUP.md and add it." "${ADD_STEPS[@]}"
   else
     qdevice_result attention "The QDevice at $REGISTERED_ADDRESS is registered, but not every member sees it alive and voting."
     bmac_ui_next_step "Repair the problems found, for example restart corosync-qnetd on the QDevice or corosync-qdevice on a member."
@@ -238,7 +238,7 @@ collect_cluster() {
     exit 1
   fi
   probe="$CONTROL_PROBE_NODE"
-  # shellcheck disable=SC2034 # Read by the lib/host_membership.sh helpers.
+  # shellcheck disable=SC2034 # Read by the scripts/lib/host_membership.sh helpers.
   HM_COORDINATOR="$probe"
   MEMBERS=("${CONTROL_MEMBER_NODES[@]}")
   MEMBER_COUNT="${#MEMBERS[@]}"

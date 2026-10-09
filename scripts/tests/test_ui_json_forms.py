@@ -17,8 +17,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "lib"))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ui_test_driver import run_json, scripted  # noqa: E402
 
@@ -53,7 +53,7 @@ class JsonFormTest(unittest.TestCase):
     def test_extend_disk_increase_is_revalidated_until_within_the_allowance(self) -> None:
         argv = self.harness(
             "EXTEND_PROD_DISK_SOURCE_ONLY",
-            "guests/prod/extend_prod_vm_disk.sh",
+            "scripts/user_callable/guests/prod/extend_prod_vm_disk.sh",
             f"""
             RESOURCE_NAME=prod1
             CURRENT_DISK_BYTES={20 * GIB}
@@ -86,7 +86,7 @@ class JsonFormTest(unittest.TestCase):
         bad_sanitizer.write_text("#!/bin/sh\ntrue\n")
         argv = self.harness(
             "APP_HA_STAGING_VM_SOURCE_ONLY",
-            "guests/staging/add_staging_vm.sh",
+            "scripts/user_callable/guests/staging/add_staging_vm.sh",
             """
             SOURCE_NAME=prod1
             SOURCE_PRIMARY_DOMAIN=example.com
@@ -147,7 +147,7 @@ class JsonFormTest(unittest.TestCase):
         )
         argv = self.harness(
             "APP_HA_STAGING_VM_SOURCE_ONLY",
-            "guests/staging/add_staging_vm.sh",
+            "scripts/user_callable/guests/staging/add_staging_vm.sh",
             """
             bmac_ui_choose() { printf -v "$1" '%s' "$3"; }
             parse_selected_source() { SOURCE_PRIMARY_DOMAIN=example.com; }
@@ -187,7 +187,7 @@ class JsonFormTest(unittest.TestCase):
     def test_new_production_form_checks_placement_and_domains(self) -> None:
         argv = self.harness(
             "PRODUCTION_VM_SOURCE_ONLY",
-            "guests/prod/add_prod_vm.sh",
+            "scripts/user_callable/guests/prod/add_prod_vm.sh",
             """
             ONLINE_NODES=(mox1 mox2 mox3)
             PURPOSE_SLUG=production

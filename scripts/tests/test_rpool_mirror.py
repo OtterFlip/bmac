@@ -3,7 +3,7 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Fake-host tests for lib/rpool_mirror.sh, the shared rpool mirror tool."""
+"""Fake-host tests for scripts/host_runtime/rpool_mirror.sh, the shared rpool mirror tool."""
 
 from __future__ import annotations
 
@@ -16,8 +16,7 @@ import tempfile
 import unittest
 
 
-LIB_DIR = Path(__file__).resolve().parent
-TOOL = LIB_DIR / "rpool_mirror.sh"
+TOOL = Path(__file__).resolve().parent.parent / "host_runtime" / "rpool_mirror.sh"
 PASSPHRASE = "correct horse battery staple"
 DISK_BYTES = 2000398934016
 GIB = 1 << 30

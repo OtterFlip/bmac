@@ -11,11 +11,11 @@ set +x
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
-# shellcheck source=../../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)"
+# shellcheck source=../../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
 bmac_ui_bootstrap "$@"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
 REMOTE_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_ROOT}/lib/cluster_registry.py"
 REMOTE_HAPROXY_SYNC="${REMOTE_ROOT}/lib/sync_haproxy_routes.sh"

@@ -18,9 +18,9 @@ import unittest
 
 tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
 
-HOSTS_DIR = Path(__file__).resolve().parent
-REPO_ROOT = HOSTS_DIR.parent
-MEMBERSHIP_LIB = REPO_ROOT / "lib" / "host_membership.sh"
+HOSTS_DIR = Path(__file__).resolve().parent.parent / "user_callable" / "hosts"
+REPO_ROOT = HOSTS_DIR.parents[2]
+MEMBERSHIP_LIB = REPO_ROOT / "scripts" / "lib" / "host_membership.sh"
 REMOVE_SCRIPT = HOSTS_DIR / "remove_proxmox_host.sh"
 
 
@@ -121,7 +121,7 @@ class HostMembershipTest(unittest.TestCase):
     def test_new_control_node_must_be_a_remaining_online_member(self) -> None:
         completed = self.run_bash(
             f"""
-            source {shlex.quote(str(REPO_ROOT / "lib" / "cluster_control.sh"))}
+            source {shlex.quote(str(REPO_ROOT / "scripts" / "lib" / "cluster_control.sh"))}
             source {shlex.quote(str(MEMBERSHIP_LIB))}
             hm_choose_new_control_node mox1 chosen mox3 mox4
             printf 'CHOSEN=%s\\n' "$chosen"
@@ -132,7 +132,7 @@ class HostMembershipTest(unittest.TestCase):
         self.assertIn("CHOSEN=mox4", completed.stdout)
         defaulted = self.run_bash(
             f"""
-            source {shlex.quote(str(REPO_ROOT / "lib" / "cluster_control.sh"))}
+            source {shlex.quote(str(REPO_ROOT / "scripts" / "lib" / "cluster_control.sh"))}
             source {shlex.quote(str(MEMBERSHIP_LIB))}
             hm_choose_new_control_node mox1 chosen mox3 mox4
             printf 'CHOSEN=%s\\n' "$chosen"

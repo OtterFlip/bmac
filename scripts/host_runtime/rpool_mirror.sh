@@ -4,9 +4,9 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Root-only rpool mirror operations for one Proxmox host. This is the single
-# copy of the disk, LUKS, and zpool logic used by hosts/add_proxmox_host.sh,
-# hosts/add_new_disk_vdev.sh, hosts/add_replacement_disk.sh, and
-# hosts/inventory_disks.sh. Those workstation scripts
+# copy of the disk, LUKS, and zpool logic used by scripts/user_callable/hosts/add_proxmox_host.sh,
+# scripts/user_callable/hosts/add_new_disk_vdev.sh, scripts/user_callable/hosts/add_replacement_disk.sh, and
+# scripts/user_callable/hosts/inventory_disks.sh. Those workstation scripts
 # install it on the host as /usr/local/sbin/app-ha-rpool-mirror.
 #
 # Every subcommand selects disks by serial and re-proves their identity before
@@ -1091,7 +1091,7 @@ command_release_disks() {
 
 # ---------------------------------------------------------------------------
 # One mirror member at a time: setup's in-place LUKS conversion of the boot
-# mirror, and hosts/add_replacement_disk.sh.
+# mirror, and scripts/user_callable/hosts/add_replacement_disk.sh.
 
 # Print the disk, target, mapping, and header of MEMBER on the disk SERIALS[0]
 # after proving the mapping is open on that target.

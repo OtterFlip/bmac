@@ -12,10 +12,10 @@ with `python3 -m unittest`. It runs every test in its own process, one worker
 per CPU, and finishes the full suite in seconds instead of minutes.
 
 ```bash
-dev/run_tests.py                                   # the whole suite
-dev/run_tests.py hosts/test_add_proxmox_host.py    # specific files
-dev/run_tests.py lib.test_rpool_mirror.RpoolMirrorToolTest.test_add_uses_shared_crypttab_form_and_verifies_boot_unlock
-dev/run_tests.py -k reservation                    # filter by test name
+dev/run_tests.py                                           # the whole suite
+dev/run_tests.py scripts/tests/test_add_proxmox_host.py    # specific files
+dev/run_tests.py scripts.tests.test_rpool_mirror.RpoolMirrorToolTest.test_add_uses_shared_crypttab_form_and_verifies_boot_unlock
+dev/run_tests.py -k reservation                            # filter by test name
 ```
 
 - Run the whole suite before reporting work as finished; it is fast enough
@@ -31,6 +31,6 @@ dev/run_tests.py -k reservation                    # filter by test name
 - If a test fails only under parallel runs, fix the test's race rather than
   serializing it.
 
-See the Tests section of [`MAIN_DESIGN.md`](MAIN_DESIGN.md#tests) for
-details, and [`DEVELOPMENT.md`](DEVELOPMENT.md) for running the complete
+See the Tests section of [`docs/MAIN_DESIGN.md`](docs/MAIN_DESIGN.md#tests) for
+details, and [`dev/README.md`](dev/README.md) for running the complete
 suite on a Mac.

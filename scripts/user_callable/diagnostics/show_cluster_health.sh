@@ -20,10 +20,10 @@ if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); 
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
-CONTROL_LIB="${REPO_ROOT}/lib/cluster_control.sh"
-MEMBERSHIP_LIB="${REPO_ROOT}/lib/host_membership.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
+CONTROL_LIB="${REPO_ROOT}/scripts/lib/cluster_control.sh"
+MEMBERSHIP_LIB="${REPO_ROOT}/scripts/lib/host_membership.sh"
 
 for library in "$CONFIG_LIB" "$CONTROL_LIB" "$MEMBERSHIP_LIB"; do
   [[ -f "$library" && ! -L "$library" ]] || {
@@ -31,11 +31,11 @@ for library in "$CONFIG_LIB" "$CONTROL_LIB" "$MEMBERSHIP_LIB"; do
     exit 2
   }
 done
-# shellcheck source=../lib/config.sh
+# shellcheck source=../../lib/config.sh
 source "$CONFIG_LIB"
-# shellcheck source=../lib/cluster_control.sh
+# shellcheck source=../../lib/cluster_control.sh
 source "$CONTROL_LIB"
-# shellcheck source=../lib/host_membership.sh
+# shellcheck source=../../lib/host_membership.sh
 source "$MEMBERSHIP_LIB"
 
 PROBE=""
@@ -45,7 +45,7 @@ RUN_DIR=""
 
 usage() {
   cat <<'EOF'
-Usage: diagnostics/show_cluster_health.sh
+Usage: scripts/user_callable/diagnostics/show_cluster_health.sh
 
 Quickly check the cluster's hardware and networking:
 
@@ -168,7 +168,7 @@ find_cluster() {
     exit 1
   fi
   PROBE="$CONTROL_PROBE_NODE"
-  # shellcheck disable=SC2034 # Read by the lib/host_membership.sh helpers.
+  # shellcheck disable=SC2034 # Read by the scripts/lib/host_membership.sh helpers.
   HM_COORDINATOR="$PROBE"
   printf 'Read cluster membership through %s: %s\n' "$PROBE" "${CONTROL_MEMBER_NODES[*]}"
 
@@ -537,12 +537,12 @@ print(f"Registered QDevice: {(registered_address or 'unknown address') if regist
 if needed and not registered:
     problems.append(
         f"the {member_count}-host cluster needs a QDevice and none is registered "
-        "(see diagnostics/show_qdevice_state.sh)"
+        "(see scripts/user_callable/diagnostics/show_qdevice_state.sh)"
     )
 if registered and not needed:
     problems.append(
         f"a QDevice is registered but the {member_count}-host cluster must not use one "
-        "(see diagnostics/show_qdevice_state.sh)"
+        "(see scripts/user_callable/diagnostics/show_qdevice_state.sh)"
     )
 qdevice_file = run_dir / "qdevice.txt"
 if qdevice_file.exists():
@@ -557,7 +557,7 @@ if qdevice_file.exists():
         if registered:
             problems.append(
                 f"ssh root@{qdevice_host} fails from this workstation "
-                "(see diagnostics/show_qdevice_state.sh)"
+                "(see scripts/user_callable/diagnostics/show_qdevice_state.sh)"
             )
     else:
         tool = text.partition("QNETD_TOOL_BEGIN\n")[2].partition("QNETD_TOOL_END")[0]
@@ -856,27 +856,27 @@ for problem in problems:
     print(f"  - {problem}")
 print("\nNext steps:")
 for node in sorted(disk_problem_hosts, key=lambda name: int(name.removeprefix("mox"))):
-    print(f"  - {node}: diagnostics/show_proxmox_host_state.sh --host {node} shows every rpool")
-    print("    member's disk serial; hosts/add_replacement_disk.sh replaces a pulled mirror member.")
+    print(f"  - {node}: scripts/user_callable/diagnostics/show_proxmox_host_state.sh --host {node} shows every rpool")
+    print("    member's disk serial; scripts/user_callable/hosts/add_replacement_disk.sh replaces a pulled mirror member.")
     emit_next_step(f"{node}: see every rpool member's disk serial.",
-                   f"diagnostics/show_proxmox_host_state.sh --host {node}",
+                   f"scripts/user_callable/diagnostics/show_proxmox_host_state.sh --host {node}",
                    "show_proxmox_host_state", {"host": node})
     emit_next_step(f"{node}: replace a pulled mirror member.",
-                   f"hosts/add_replacement_disk.sh --host {node}",
+                   f"scripts/user_callable/hosts/add_replacement_disk.sh --host {node}",
                    "add_replacement_disk", {"host": node})
 for node in sorted(storage_hosts, key=lambda name: int(name.removeprefix("mox"))):
     print(f"  - {node}: add storage to rpool by installing two same-capacity disks and running")
-    print(f"    hosts/add_new_disk_vdev.sh --host {node}.")
+    print(f"    scripts/user_callable/hosts/add_new_disk_vdev.sh --host {node}.")
     emit_next_step(f"{node}: add storage to rpool by installing two same-capacity disks.",
-                   f"hosts/add_new_disk_vdev.sh --host {node}", "add_new_disk_vdev", {"host": node})
+                   f"scripts/user_callable/hosts/add_new_disk_vdev.sh --host {node}", "add_new_disk_vdev", {"host": node})
 if any("QDevice" in problem or "qnetd" in problem or qdevice_host in problem
        for problem in problems):
-    print("  - QDevice: diagnostics/show_qdevice_state.sh explains how to repair or replace it.")
+    print("  - QDevice: scripts/user_callable/diagnostics/show_qdevice_state.sh explains how to repair or replace it.")
     emit_next_step("QDevice: see how to repair or replace it.",
-                   "diagnostics/show_qdevice_state.sh", "show_qdevice_state")
-print("  - For full cluster detail, run diagnostics/show_cluster_state.sh.")
+                   "scripts/user_callable/diagnostics/show_qdevice_state.sh", "show_qdevice_state")
+print("  - For full cluster detail, run scripts/user_callable/diagnostics/show_cluster_state.sh.")
 emit_next_step("For full cluster detail, run the full cluster report.",
-               "diagnostics/show_cluster_state.sh", "show_cluster_state")
+               "scripts/user_callable/diagnostics/show_cluster_state.sh", "show_cluster_state")
 raise SystemExit(1)
 PY
 }

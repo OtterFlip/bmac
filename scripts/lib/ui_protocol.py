@@ -5,10 +5,10 @@
 
 """Workstation half of the bmac-ui v1 JSON protocol.
 
-lib/ui_json_run.sh starts two `filter` processes for a script running in JSON
+scripts/utilities/ui_json_run.sh starts two `filter` processes for a script running in JSON
 mode: one for its stdout and one for its stderr. Each turns every line it
 reads into exactly one NDJSON event on the runner's stdout. Lines that
-lib/ui_protocol.sh wrote as protocol events carry a per-run marker and are
+scripts/lib/ui_protocol.sh wrote as protocol events carry a per-run marker and are
 validated, normalized, and passed through; every other line becomes a `log`
 event. Nothing else is ever written to the runner's stdout.
 

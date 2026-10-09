@@ -27,9 +27,9 @@ fi
 QDEVICE_HOST="qdevice"
 PROXMOX_HOSTS=(mox{1..10})
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-# shellcheck source=../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
 bmac_ui_bootstrap "$@"
 SSH_OPTS=(
   -o BatchMode=yes
@@ -47,12 +47,12 @@ expected_migration_network=""
 expected_replication_ip_start=""
 expected_replication_ip_end=""
 
-if [[ -f "${REPO_ROOT}/lib/config.sh" &&
-      ! -L "${REPO_ROOT}/lib/config.sh" &&
-      -f "${REPO_ROOT}/guests/prod/prepare_prod_iso.sh" &&
-      ! -L "${REPO_ROOT}/guests/prod/prepare_prod_iso.sh" &&
-      -f "${REPO_ROOT}/guests/prod/build_ubuntu_autoinstall.py" &&
-      ! -L "${REPO_ROOT}/guests/prod/build_ubuntu_autoinstall.py" ]]; then
+if [[ -f "${REPO_ROOT}/scripts/lib/config.sh" &&
+      ! -L "${REPO_ROOT}/scripts/lib/config.sh" &&
+      -f "${REPO_ROOT}/scripts/host_runtime/prepare_prod_iso.sh" &&
+      ! -L "${REPO_ROOT}/scripts/host_runtime/prepare_prod_iso.sh" &&
+      -f "${REPO_ROOT}/scripts/host_runtime/build_ubuntu_autoinstall.py" &&
+      ! -L "${REPO_ROOT}/scripts/host_runtime/build_ubuntu_autoinstall.py" ]]; then
   local_prod_fields=()
   mapfile -d '' -t local_prod_fields < <(
     bash -c '
@@ -66,7 +66,7 @@ printf "%s\0%s\0%s\0%s\0%s\0%s\0" \
   "$PROXMOX_MIGRATION_NETWORK" \
   "$MOX_REPLICATION_IP_START" \
   "$MOX_REPLICATION_IP_END"
-' bash "${REPO_ROOT}/lib/config.sh"
+' bash "${REPO_ROOT}/scripts/lib/config.sh"
   )
   if ((${#local_prod_fields[@]} == 6)); then
     expected_prod_iso_sha256="${local_prod_fields[0],,}"
@@ -76,10 +76,10 @@ printf "%s\0%s\0%s\0%s\0%s\0%s\0" \
     expected_replication_ip_start="${local_prod_fields[4]}"
     expected_replication_ip_end="${local_prod_fields[5]}"
     expected_iso_preparer_sha256="$(
-      sha256sum "${REPO_ROOT}/guests/prod/prepare_prod_iso.sh" | awk '{print $1}'
+      sha256sum "${REPO_ROOT}/scripts/host_runtime/prepare_prod_iso.sh" | awk '{print $1}'
     )"
     expected_iso_builder_sha256="$(
-      sha256sum "${REPO_ROOT}/guests/prod/build_ubuntu_autoinstall.py" |
+      sha256sum "${REPO_ROOT}/scripts/host_runtime/build_ubuntu_autoinstall.py" |
         awk '{print $1}'
     )"
     local_prod_config_ready=1

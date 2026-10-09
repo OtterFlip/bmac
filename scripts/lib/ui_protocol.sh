@@ -7,7 +7,7 @@
 #
 # Every operator-callable script accepts --json. The script sources this file
 # and calls bmac_ui_bootstrap "$@" before parsing its arguments. With --json
-# present, bootstrap re-executes the script under lib/ui_json_run.sh, which
+# present, bootstrap re-executes the script under scripts/utilities/ui_json_run.sh, which
 # emits the protocol header, turns all of the script's ordinary output into
 # NDJSON `log` events, reads NDJSON responses, and finishes with exactly one
 # `completed` event. Without --json nothing changes: the emitters below are
@@ -48,7 +48,7 @@ bmac_ui_bootstrap() {
   done
   ((_bui_json)) || return 0
   _bui_script="$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")"
-  exec bash "${BMAC_UI_LIB_DIR}/ui_json_run.sh" "$_bui_script" "${_bui_rest[@]}"
+  exec bash "${BMAC_UI_LIB_DIR}/../utilities/ui_json_run.sh" "$_bui_script" "${_bui_rest[@]}"
 }
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parent / "report_stale_jump_ssh.sh"
+SCRIPT = Path(__file__).resolve().parent.parent / "utilities" / "report_stale_jump_ssh.sh"
 
 CONFIG = """\
 # BEGIN app-ha managed production guest prod1
@@ -62,8 +62,8 @@ class ReportStaleJumpSshTest(unittest.TestCase):
             (home / ".ssh" / "config").write_text(CONFIG, encoding="utf-8")
             output = self.run_report(home, "mox1").stdout
             self.assertIn("ACTION NEEDED", output)
-            self.assertIn("guests/setup_jump_ssh_access.sh prod1\n", output)
-            self.assertIn("guests/setup_jump_ssh_access.sh prod3\n", output)
+            self.assertIn("scripts/user_callable/guests/setup_jump_ssh_access.sh prod1\n", output)
+            self.assertIn("scripts/user_callable/guests/setup_jump_ssh_access.sh prod3\n", output)
             self.assertIn("pick the guest at 10.213.0.32, enter alias p2", output)
             self.assertNotIn("stage1prod1", output)
             self.assertNotIn("prod4", output)

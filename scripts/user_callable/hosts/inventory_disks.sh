@@ -13,19 +13,19 @@ umask 077
 
 DW_SCRIPT_NAME=inventory_disks.sh
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-# shellcheck source=../lib/disk_workflows.sh
-source "${SCRIPT_DIR}/../lib/disk_workflows.sh"
+# shellcheck source=../../lib/disk_workflows.sh
+source "${SCRIPT_DIR}/../../lib/disk_workflows.sh"
 bmac_ui_bootstrap "$@"
 
 usage() {
   cat <<'EOF'
-Usage: hosts/inventory_disks.sh [--host moxN]
+Usage: scripts/user_callable/hosts/inventory_disks.sh [--host moxN]
 
 Inventories all physical disks on the target host, every imported ZFS pool
 vdev and its member disks, and disks that are not in use and can safely be removed
 physically.
 
-When a vdev removal started by hosts/decommission_disks.sh has completed,
+When a vdev removal started by scripts/user_callable/hosts/decommission_disks.sh has completed,
 this script asks before closing its LUKS mappings, removing their crypttab
 entries, rebuilding the initramfs, releasing the disks, and marking them
 retired. Releasing a disk erases only its metadata (LUKS key slots, ZFS labels,
@@ -62,7 +62,7 @@ STATE="${DW_RUN_DIR}/state.json"
 dw_inventory "$LAYOUT" --allow-missing-pool
 dw_state show >"$STATE" || dw_die "could not read the storage state on $DW_HOST"
 
-# Finalize every completed vdev removal. diagnostics/list_disks.sh reports
+# Finalize every completed vdev removal. scripts/user_callable/diagnostics/list_disks.sh reports
 # disks as awaiting finalization from the same classification.
 PENDING_TEXT="$(python3 "$DW_DISK_INVENTORY" pending-removals "$LAYOUT" "$STATE")" ||
   dw_die "could not classify the recorded vdev removals on $DW_HOST"
@@ -130,9 +130,9 @@ for row in "${PENDING[@]}"; do
       dw_state set-removal "$removal_id" --state failed \
         --note "disks still in rpool with no removal running" >/dev/null ||
         dw_die "could not update the removal record on $DW_HOST"
-      printf 'The removal record is marked failed; rerun hosts/decommission_disks.sh.\n'
+      printf 'The removal record is marked failed; rerun scripts/user_callable/hosts/decommission_disks.sh.\n'
       bmac_ui_next_step "The removal of $vdev is marked failed; decommission it again." \
-        --command "hosts/decommission_disks.sh --host $DW_HOST" --workflow decommission_disks --arg "host=$DW_HOST"
+        --command "scripts/user_callable/hosts/decommission_disks.sh --host $DW_HOST" --workflow decommission_disks --arg "host=$DW_HOST"
       continue
       ;;
     needs-retire)

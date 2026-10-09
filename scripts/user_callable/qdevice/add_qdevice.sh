@@ -4,20 +4,20 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Add an external QDevice to a cluster that needs one: an even number of
-# members and no QDevice registered. Use it after qdevice/remove_qdevice.sh
+# members and no QDevice registered. Use it after scripts/user_callable/qdevice/remove_qdevice.sh
 # unregistered a failed QDevice, once a replacement has been prepared with
-# qdevice/QDEVICE_MANUAL_SETUP.md. It configures the QDevice the same way
-# hosts/add_proxmox_host.sh does.
+# docs/QDEVICE_MANUAL_SETUP.md. It configures the QDevice the same way
+# scripts/user_callable/hosts/add_proxmox_host.sh does.
 
 set -Eeuo pipefail
 set +x
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
-CONTROL_LIB="${REPO_ROOT}/lib/cluster_control.sh"
-MEMBERSHIP_LIB="${REPO_ROOT}/lib/host_membership.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
+CONTROL_LIB="${REPO_ROOT}/scripts/lib/cluster_control.sh"
+MEMBERSHIP_LIB="${REPO_ROOT}/scripts/lib/host_membership.sh"
 
 for library in "$CONFIG_LIB" "$CONTROL_LIB" "$MEMBERSHIP_LIB"; do
   [[ -f "$library" && ! -L "$library" ]] || {
@@ -25,11 +25,11 @@ for library in "$CONFIG_LIB" "$CONTROL_LIB" "$MEMBERSHIP_LIB"; do
     exit 1
   }
 done
-# shellcheck source=../lib/config.sh
+# shellcheck source=../../lib/config.sh
 source "$CONFIG_LIB"
-# shellcheck source=../lib/cluster_control.sh
+# shellcheck source=../../lib/cluster_control.sh
 source "$CONTROL_LIB"
-# shellcheck source=../lib/host_membership.sh
+# shellcheck source=../../lib/host_membership.sh
 source "$MEMBERSHIP_LIB"
 
 CURRENT_PHASE="startup"
@@ -44,15 +44,15 @@ Proxmox cluster when the cluster needs one: it has an even number of members
 and no QDevice is registered. Every member must be online and the cluster
 must be quorate.
 
-Prepare the QDevice machine first by following qdevice/QDEVICE_MANUAL_SETUP.md.
+Prepare the QDevice machine first by following docs/QDEVICE_MANUAL_SETUP.md.
 The script then asks for its SSH hostname (default: PROXMOX_QDEVICE_HOST in
-env/cluster.conf), checks 'ssh <hostname>', installs and verifies
+config/cluster.conf), checks 'ssh <hostname>', installs and verifies
 corosync-qnetd there, pins its SSH host key on every member, and runs
 'pvecm qdevice setup' through the cluster control node, as
-hosts/add_proxmox_host.sh does.
+scripts/user_callable/hosts/add_proxmox_host.sh does.
 
-To replace a registered QDevice that has failed, run qdevice/remove_qdevice.sh
-first. diagnostics/show_qdevice_state.sh reports which case applies.
+To replace a registered QDevice that has failed, run scripts/user_callable/qdevice/remove_qdevice.sh
+first. scripts/user_callable/diagnostics/show_qdevice_state.sh reports which case applies.
 
 Options:
   -h, --help
@@ -80,7 +80,7 @@ cleanup() {
   hm_release_control_plane_lock
   if ((code != 0)); then
     printf '\nFailed while %s.\n' "$CURRENT_PHASE" >&2
-    printf 'Run diagnostics/show_qdevice_state.sh to see the current QDevice state.\n' >&2
+    printf 'Run scripts/user_callable/diagnostics/show_qdevice_state.sh to see the current QDevice state.\n' >&2
     printf 'Correct the fault and rerun this script; it starts again from the live state.\n' >&2
   fi
   exit "$code"
@@ -108,7 +108,7 @@ require_qdevice_needed() {
     log "No QDevice is needed"
     info "The ${NODE_COUNT}-member cluster has an odd number of votes, so it does not use a QDevice."
     if qd_is_registered; then
-      warn "A QDevice is registered anyway. hosts/add_proxmox_host.sh removes it on its next run, or run 'pvecm qdevice remove' on a member while every member is online."
+      warn "A QDevice is registered anyway. scripts/user_callable/hosts/add_proxmox_host.sh removes it on its next run, or run 'pvecm qdevice remove' on a member while every member is online."
     fi
     exit 0
   fi
@@ -118,7 +118,7 @@ require_qdevice_needed() {
       info "Every member reports it alive and voting. No change was made."
       exit 0
     fi
-    die "A QDevice is registered but not healthy (${problem}). Run diagnostics/show_qdevice_state.sh; to replace it, run qdevice/remove_qdevice.sh first, then this script."
+    die "A QDevice is registered but not healthy (${problem}). Run scripts/user_callable/diagnostics/show_qdevice_state.sh; to replace it, run scripts/user_callable/qdevice/remove_qdevice.sh first, then this script."
   fi
   log "The ${NODE_COUNT}-member cluster needs a QDevice"
   info "With an even number of members and no QDevice, losing one member loses quorum."
@@ -129,10 +129,10 @@ print_setup_instructions() {
 
 Prepare the QDevice machine before continuing:
 
-  1. Follow qdevice/QDEVICE_MANUAL_SETUP.md, sections 1 through 15. Section 16
+  1. Follow docs/QDEVICE_MANUAL_SETUP.md, sections 1 through 15. Section 16
      (corosync-qnetd) is done by this script.
   2. If it replaces a failed QDevice, the old machine must already be removed
-     from the Tailscale admin console (qdevice/remove_qdevice.sh asks for this).
+     from the Tailscale admin console (scripts/user_callable/qdevice/remove_qdevice.sh asks for this).
      Otherwise the Tailscale hostname is ambiguous and this script stops.
   3. Tag the machine tag:proxmox-qdevice. The Tailscale policy must let
      tag:proxmox-host reach it on tcp:5403 and, while this script runs, on
@@ -143,7 +143,7 @@ Prepare the QDevice machine before continuing:
 EOF
   if bmac_ui_is_json; then
     bmac_ui_manual_action --id qdevice_ready --title "Prepare the QDevice machine" \
-      --instruction "Follow qdevice/QDEVICE_MANUAL_SETUP.md, sections 1 through 15. Section 16 (corosync-qnetd) is done by this workflow." \
+      --instruction "Follow docs/QDEVICE_MANUAL_SETUP.md, sections 1 through 15. Section 16 (corosync-qnetd) is done by this workflow." \
       --instruction "If it replaces a failed QDevice, the old machine must already be removed from the Tailscale admin console." \
       --instruction "Tag the machine tag:proxmox-qdevice. The Tailscale policy must let tag:proxmox-host reach it on tcp:5403 and, while this runs, on tcp:22." \
       --instruction "On this workstation, remove any host key recorded for the old machine (ssh-keygen -R <hostname>), then run 'ssh <hostname>' once and verify and accept the new host key." \
@@ -203,7 +203,7 @@ REMOTE
   )" || die "Could not inspect ${PROXMOX_QDEVICE_HOST}"
   case "$report" in
     PROXMOX*) die "${PROXMOX_QDEVICE_HOST} is a Proxmox VE host; the QDevice must be a separate Ubuntu machine" ;;
-    NOAPT*) die "${PROXMOX_QDEVICE_HOST} has no apt-get; follow qdevice/QDEVICE_MANUAL_SETUP.md" ;;
+    NOAPT*) die "${PROXMOX_QDEVICE_HOST} has no apt-get; follow docs/QDEVICE_MANUAL_SETUP.md" ;;
   esac
   info "${PROXMOX_QDEVICE_HOST}: $(awk '$1 == "OS" { sub(/^OS /, ""); print }' <<<"$report")"
   local clusters
@@ -240,7 +240,7 @@ main() {
   choose_qdevice_host
   CURRENT_PHASE="verifying QDevice access"
   hm_verify_qdevice_access ||
-    die "Set up root SSH from this workstation to ${PROXMOX_QDEVICE_HOST} (see qdevice/QDEVICE_MANUAL_SETUP.md) and rerun"
+    die "Set up root SSH from this workstation to ${PROXMOX_QDEVICE_HOST} (see docs/QDEVICE_MANUAL_SETUP.md) and rerun"
   inspect_qdevice_host
 
   log "QDevice plan"
@@ -264,9 +264,9 @@ main() {
 
   log "QDevice added"
   info "${PROXMOX_QDEVICE_HOST} (${QD_IPV4}) is alive and voting on all ${NODE_COUNT} members."
-  info "Check it any time with diagnostics/show_qdevice_state.sh."
+  info "Check it any time with scripts/user_callable/diagnostics/show_qdevice_state.sh."
   bmac_ui_result qdevice_host "$PROXMOX_QDEVICE_HOST" qdevice_ip "$QD_IPV4" members:int "$NODE_COUNT"
-  bmac_ui_next_step "Check the QDevice any time." --command "diagnostics/show_qdevice_state.sh" \
+  bmac_ui_next_step "Check the QDevice any time." --command "scripts/user_callable/diagnostics/show_qdevice_state.sh" \
     --workflow show_qdevice_state
 }
 

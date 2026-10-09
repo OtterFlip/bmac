@@ -17,7 +17,7 @@ import unittest
 
 tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
 
-PROD_DIR = Path(__file__).resolve().parent
+PROD_DIR = Path(__file__).resolve().parent.parent / "user_callable" / "guests" / "prod"
 PLACEMENT_SCRIPT = PROD_DIR / "change_prod_vm_placement.sh"
 OWNER_SCRIPT = PROD_DIR / "change_prod_vm_owner.sh"
 

@@ -45,13 +45,13 @@ the password hash.
 Start with a live read-only rehearsal:
 
 ```bash
-guests/prod/add_prod_vm.sh --dry-run
+scripts/user_callable/guests/prod/add_prod_vm.sh --dry-run
 ```
 
 Create or resume:
 
 ```bash
-guests/prod/add_prod_vm.sh
+scripts/user_callable/guests/prod/add_prod_vm.sh
 ```
 
 The purpose slug is an arbitrary operator-chosen application/workload label,
@@ -98,7 +98,7 @@ production-first lifecycle hook. It starts with autostart disabled and is not
 HA-managed yet. The chosen allocation is applied and verified on every
 replica. Sparse (no ZFS refreservation) is the default because it lets an
 `fstrim` inside the guest return freed blocks to `rpool`, which top-level
-vdev removal (`hosts/decommission_disks.sh`) depends on. The cost is that
+vdev removal (`scripts/user_callable/hosts/decommission_disks.sh`) depends on. The cost is that
 `rpool` can be overcommitted: monitor pool free space on every placement
 node, including room for replication snapshots. Full allocation applies a
 ZFS refreservation instead, so placement nodes need free space for that
@@ -218,7 +218,7 @@ a no-op.
 
 The alias jumps through the mox that coordinated creation, so it stops working
 once that host leaves the cluster. Other administrators, and anyone repairing a
-stale alias, run `guests/setup_jump_ssh_access.sh [prodN | stageNprodN]` from
+stale alias, run `scripts/user_callable/guests/setup_jump_ssh_access.sh [prodN | stageNprodN]` from
 their workstation. It lists every registered production and staging guest,
 attests the selected running guest's host key through QGA, defaults the jump
 host to the node currently running the guest, and replaces this workstation's
@@ -228,7 +228,7 @@ Inspect a completed production VM across registry, Proxmox, HA, replication,
 storage, QGA, private networking, and strict SSH without changing it:
 
 ```bash
-diagnostics/show_prod_vm_state.sh prodN >prodN_state.txt
+scripts/user_callable/diagnostics/show_prod_vm_state.sh prodN >prodN_state.txt
 ```
 
 ## Destruction
@@ -236,8 +236,8 @@ diagnostics/show_prod_vm_state.sh prodN >prodN_state.txt
 Rehearse and then permanently remove one production resource:
 
 ```bash
-guests/prod/remove_prod_vm.sh --dry-run prodN
-guests/prod/remove_prod_vm.sh prodN
+scripts/user_callable/guests/prod/remove_prod_vm.sh --dry-run prodN
+scripts/user_callable/guests/prod/remove_prod_vm.sh prodN
 ```
 
 The destroyer refuses production resources with staging dependents, requires
@@ -258,15 +258,15 @@ hosts. It passes some or all of that capacity to the VM while the VM keeps
 running:
 
 ```bash
-guests/prod/extend_prod_vm_disk.sh --dry-run
-guests/prod/extend_prod_vm_disk.sh
+scripts/user_callable/guests/prod/extend_prod_vm_disk.sh --dry-run
+scripts/user_callable/guests/prod/extend_prod_vm_disk.sh
 ```
 
 Prerequisites:
 
 - Every cluster node is online and runs a `cluster_registry.py` that supports
   `update --disk-bytes`. After pulling this change, deploy it with
-  `hosts/update_cluster_runtime.sh`. Older registries reject a record that
+  `scripts/user_callable/hosts/update_cluster_runtime.sh`. Older registries reject a record that
   carries the exact grown size, so the script checks every node first.
 - Non-interactive root SSH to the guest works from the workstation, normally
   through the `ssh prodN` alias that `add_prod_vm.sh` offers to configure.
@@ -360,7 +360,7 @@ derived from it.
 Adding a host:
 
 1. The host must be online and hold fewer production placements than its
-   `MAX_PROD_VM_COUNT_ON_THIS_HOST` in `env/moxN.conf`. Its `local-zfs`
+   `MAX_PROD_VM_COUNT_ON_THIS_HOST` in `config/moxN.conf`. Its `local-zfs`
    storage must be active, the VM's hookscript must be present, and it must
    hold no volumes for the VMID. After receiving a replica the size of the
    VM's volumes (their summed ZFS `used` on the owner), its pool must still
@@ -415,7 +415,7 @@ offers the remaining hosts (answer `q` to stop there).
 
 ## Failure and resume behavior
 
-Temporary local request material lives under `guests/prod/artifacts` with
+Temporary local request material lives under `scripts/user_callable/guests/prod/artifacts` with
 directory mode `0700` and files at `0600`; it is removed on exit. Remote
 request files are mode `0600` below `/run` and are removed after the build or
 by cleanup. A known-unattached per-VM ISO is removed after a failed run. If an
@@ -452,11 +452,12 @@ absence of destructive rollback commands.
 ## Tests
 
 ```bash
-bash -n guests/prod/add_prod_vm.sh guests/prod/extend_prod_vm_disk.sh \
-  guests/prod/change_prod_vm_placement.sh guests/prod/change_prod_vm_owner.sh
+bash -n scripts/user_callable/guests/prod/add_prod_vm.sh scripts/user_callable/guests/prod/extend_prod_vm_disk.sh \
+  scripts/user_callable/guests/prod/change_prod_vm_placement.sh scripts/user_callable/guests/prod/change_prod_vm_owner.sh
 
-dev/run_tests.py guests/prod/test_*.py
+dev/run_tests.py scripts/tests/test_add_prod_vm.py scripts/tests/test_change_prod_vm_placement.py \
+  scripts/tests/test_extend_prod_vm_disk.py scripts/tests/test_remove_prod_vm.py
 ```
 
 `dev/run_tests.py` runs the tests in parallel; with no arguments it runs the
-whole suite. See [`MAIN_DESIGN.md`](../../MAIN_DESIGN.md#tests).
+whole suite. See [`MAIN_DESIGN.md`](../../../../docs/MAIN_DESIGN.md#tests).

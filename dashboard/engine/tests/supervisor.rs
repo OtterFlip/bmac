@@ -1,5 +1,5 @@
 //! End-to-end supervisor tests: real Bash mock scripts running through the
-//! repository's real lib/ui_json_run.sh and lib/ui_protocol.sh.
+//! repository's real scripts/utilities/ui_json_run.sh and scripts/lib/ui_protocol.sh.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -62,13 +62,21 @@ fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
     let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for sub in ["lib", "diagnostics", "guests/prod", "hosts", "mock"] {
+    for sub in [
+        "scripts/lib",
+        "scripts/utilities",
+        "scripts/host_runtime",
+        "scripts/user_callable/diagnostics",
+        "scripts/user_callable/guests/prod",
+        "scripts/user_callable/hosts",
+        "mock",
+    ] {
         std::fs::create_dir_all(root.join(sub)).unwrap();
     }
-    for file in ["lib/ui_protocol.sh", "lib/ui_json_run.sh", "lib/ui_protocol.py"] {
+    for file in ["scripts/lib/ui_protocol.sh", "scripts/utilities/ui_json_run.sh", "scripts/lib/ui_protocol.py"] {
         std::fs::copy(real.join(file), root.join(file)).unwrap();
     }
-    for marker in ["lib/config.sh", "lib/cluster_registry.py", "diagnostics/list_hosts.sh", "guests/prod/add_prod_vm.sh", "hosts/add_proxmox_host.sh"] {
+    for marker in ["scripts/lib/config.sh", "scripts/host_runtime/cluster_registry.py", "scripts/user_callable/diagnostics/list_hosts.sh", "scripts/user_callable/guests/prod/add_prod_vm.sh", "scripts/user_callable/hosts/add_proxmox_host.sh"] {
         std::fs::write(root.join(marker), "").unwrap();
     }
     let mocks = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mock-scripts");

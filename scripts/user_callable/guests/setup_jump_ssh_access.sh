@@ -13,10 +13,10 @@ set +x
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-# shellcheck source=../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
 REMOTE_REGISTRY="/usr/local/lib/app-ha-proxmox/lib/cluster_registry.py"
 
 RESOURCE_NAME=""
@@ -56,7 +56,7 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: guests/setup_jump_ssh_access.sh [prodN | stageNprodN]
+Usage: scripts/user_callable/guests/setup_jump_ssh_access.sh [prodN | stageNprodN]
 
 Run from an administrator workstation. With no argument, lists every
 registered production and staging guest and prompts for one. The script then:
@@ -344,7 +344,7 @@ select_jump_host() {
   done
 
   # ProxyJump resolves the jump host through this workstation's own SSH
-  # config, so prove that path independently of lib/config.sh's options.
+  # config, so prove that path independently of scripts/lib/config.sh's options.
   ssh -o BatchMode=yes -o ConnectTimeout=10 \
     -o ControlMaster=no -o ControlPath=none "$JUMP_HOST" true </dev/null ||
     die "'ssh $JUMP_HOST' does not work from this workstation. Add a Host $JUMP_HOST entry (HostName, User root) to ~/.ssh/config and accept its host key, then rerun."
@@ -464,7 +464,7 @@ configure_alias() {
     warn "SSH alias must use 1-64 letters, digits, dots, underscores, or hyphens"
   done
   [[ "$SSH_ALIAS" == "$RESOURCE_NAME" ]] ||
-    warn "Other scripts (for example hosts/decommission_disks.sh) run 'ssh $RESOURCE_NAME'; they will not use alias $SSH_ALIAS"
+    warn "Other scripts (for example scripts/user_callable/hosts/decommission_disks.sh) run 'ssh $RESOURCE_NAME'; they will not use alias $SSH_ALIAS"
 
   local effective
   effective="$(ssh -G "$SSH_ALIAS" 2>/dev/null || true)"

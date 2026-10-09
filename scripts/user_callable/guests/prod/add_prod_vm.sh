@@ -13,10 +13,10 @@ set +x
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
-# shellcheck source=../../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)"
+# shellcheck source=../../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
 REMOTE_INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_INSTALL_ROOT}/lib/cluster_registry.py"
 REMOTE_HAPROXY_SYNC="${REMOTE_INSTALL_ROOT}/lib/sync_haproxy_routes.sh"
@@ -100,7 +100,7 @@ usage() {
 Usage: add_prod_vm.sh [--dry-run] [timeout options]
 
 Run from an administrator workstation. The script loads cluster.conf and the
-mode-0600 secrets.env through lib/config.sh, chooses the first
+mode-0600 secrets.env through scripts/lib/config.sh, chooses the first
 reachable mox coordinator, prompts for placement and VM policy, and resumes an
 existing allocation when the requested purpose is already registered.
 
@@ -592,7 +592,7 @@ PY
 load_and_validate_config() {
   CURRENT_PHASE="loading layered configuration"
   require_regular_file "$CONFIG_LIB"
-  # shellcheck source=../../lib/config.sh
+  # shellcheck source=../../../lib/config.sh
   source "$CONFIG_LIB"
   load_proxmox_config --require-secrets ||
     die "Could not load cluster.conf and secrets.env"
@@ -1070,7 +1070,7 @@ collect_new_request_json() {
   VM_MEMORY_MB=$((VM_MEMORY_GIB * 1024))
   if [[ "$allocation_choice" == full ]]; then
     DISK_ALLOCATION="reserved"
-    warn "Full allocation keeps freed space reserved to this VM; hosts/decommission_disks.sh cannot reclaim it"
+    warn "Full allocation keeps freed space reserved to this VM; scripts/user_callable/hosts/decommission_disks.sh cannot reclaim it"
   else
     DISK_ALLOCATION="sparse"
   fi
@@ -1121,7 +1121,7 @@ collect_new_request() {
   VM_MEMORY_MB=$((VM_MEMORY_GIB * 1024))
 
   # Sparse is the default because a guest fstrim can then return freed blocks
-  # to rpool, which top-level vdev removal (hosts/decommission_disks.sh)
+  # to rpool, which top-level vdev removal (scripts/user_callable/hosts/decommission_disks.sh)
   # depends on. Resumed allocations keep whatever policy the registry recorded.
   info "Sparse allocation lets an fstrim inside the guest return freed space to rpool."
   info "With full allocation, the disks of this VM's hosts cannot later be decommissioned"
@@ -1133,7 +1133,7 @@ collect_new_request() {
     sparse) DISK_ALLOCATION="sparse" ;;
     full | reserved | refreservation)
       DISK_ALLOCATION="reserved"
-      warn "Full allocation keeps freed space reserved to this VM; hosts/decommission_disks.sh cannot reclaim it"
+      warn "Full allocation keeps freed space reserved to this VM; scripts/user_callable/hosts/decommission_disks.sh cannot reclaim it"
       ;;
     *) die "Disk allocation must be sparse or full" ;;
   esac

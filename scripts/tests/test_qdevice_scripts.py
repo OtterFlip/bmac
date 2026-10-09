@@ -19,14 +19,14 @@ import unittest
 
 tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
 
-QDEVICE_DIR = Path(__file__).resolve().parent
-REPO_ROOT = QDEVICE_DIR.parent
-SHOW_SCRIPT = REPO_ROOT / "diagnostics" / "show_qdevice_state.sh"
+QDEVICE_DIR = Path(__file__).resolve().parent.parent / "user_callable" / "qdevice"
+REPO_ROOT = QDEVICE_DIR.parents[2]
+SHOW_SCRIPT = REPO_ROOT / "scripts" / "user_callable" / "diagnostics" / "show_qdevice_state.sh"
 ADD_SCRIPT = QDEVICE_DIR / "add_qdevice.sh"
 REMOVE_SCRIPT = QDEVICE_DIR / "remove_qdevice.sh"
-MEMBERSHIP_LIB = REPO_ROOT / "lib" / "host_membership.sh"
-QDEVICE_LIB = REPO_ROOT / "lib" / "qdevice.sh"
-CONTROL_LIB = REPO_ROOT / "lib" / "cluster_control.sh"
+MEMBERSHIP_LIB = REPO_ROOT / "scripts" / "lib" / "host_membership.sh"
+QDEVICE_LIB = REPO_ROOT / "scripts" / "lib" / "qdevice.sh"
+CONTROL_LIB = REPO_ROOT / "scripts" / "lib" / "cluster_control.sh"
 
 BEGIN = "# BEGIN app-ha managed qdevice host key"
 END = "# END app-ha managed qdevice host key"
@@ -72,7 +72,7 @@ class QdeviceVerdictTest(unittest.TestCase):
     def test_even_cluster_without_qdevice_points_to_add_qdevice(self) -> None:
         out = self.verdict(1, MEMBER_COUNT=2, QDEVICE_REACHABLE=1)
         self.assertIn("needs a QDevice and has none registered", out)
-        self.assertIn("qdevice/add_qdevice.sh", out)
+        self.assertIn("scripts/user_callable/qdevice/add_qdevice.sh", out)
         self.assertIn("qdevice is reachable", out)
 
     def test_functional_qdevice_is_ok(self) -> None:
@@ -97,9 +97,9 @@ class QdeviceVerdictTest(unittest.TestCase):
             QDEVICE_REACHABLE=0,
         )
         self.assertIn("ssh root@qdevice fails", out)
-        purge = out.index("qdevice/remove_qdevice.sh")
+        purge = out.index("scripts/user_callable/qdevice/remove_qdevice.sh")
         manual = out.index("QDEVICE_MANUAL_SETUP.md")
-        add = out.index("qdevice/add_qdevice.sh")
+        add = out.index("scripts/user_callable/qdevice/add_qdevice.sh")
         self.assertLess(purge, manual)
         self.assertLess(manual, add)
         self.assertIn("removed the old machine from Tailscale", out)
@@ -248,7 +248,7 @@ class AddQdeviceTest(unittest.TestCase):
             1,
         )
         self.assertIn("not healthy (mox2 does not report it)", failed.stderr)
-        self.assertIn("qdevice/remove_qdevice.sh first", failed.stderr)
+        self.assertIn("scripts/user_callable/qdevice/remove_qdevice.sh first", failed.stderr)
         unreadable = self.need("NODE_COUNT=2\nqd_check_registered() { return 2; }", 1)
         self.assertIn("Could not read /etc/pve/corosync.conf", unreadable.stderr)
 
@@ -285,10 +285,10 @@ class RemoveQdeviceTest(unittest.TestCase):
     def test_host_defaults_to_cluster_conf_and_needs_the_cluster_first(self) -> None:
         root = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(root)], check=False))
-        env_dir, bin_dir = root / "env", root / "bin"
-        env_dir.mkdir()
+        config_dir, bin_dir = root / "config", root / "bin"
+        config_dir.mkdir()
         bin_dir.mkdir()
-        (env_dir / "cluster.conf").write_text(
+        (config_dir / "cluster.conf").write_text(
             "\n".join(
                 (
                     "PROXMOX_CLUSTER_NAME=MyAppCloud",
@@ -329,7 +329,7 @@ class RemoveQdeviceTest(unittest.TestCase):
                 "PATH": f"{bin_dir}:/usr/bin:/bin",
                 "HOME": str(root),
                 "APP_HA_CONFIG_TEST_MODE": "1",
-                "APP_HA_ENV_DIR": str(env_dir),
+                "APP_HA_CONFIG_DIR": str(config_dir),
                 "FAKE_SSH_CALLS": str(calls),
             },
             check=False,

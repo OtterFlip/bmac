@@ -11,20 +11,26 @@
 # mapfile -d, which this library's callers rely on, arrived in Bash 4.4. macOS
 # ships /bin/bash 3.2; a newer bash must come first on PATH there.
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
-  printf 'ERROR: lib/config.sh requires Bash 4.4 or newer (found %s).\n' \
+  printf 'ERROR: scripts/lib/config.sh requires Bash 4.4 or newer (found %s).\n' \
     "${BASH_VERSION:-unknown}" >&2
   # shellcheck disable=SC2317 # exit is the executable-script fallback.
   return 2 2>/dev/null || exit 2
 fi
 
 PROXMOX_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-PROXMOX_DEPLOY_DIR="$(cd -- "${PROXMOX_LIB_DIR}/.." && pwd -P)"
+# A checkout keeps this file in scripts/lib/; the host runtime installs it in
+# lib/ directly under its install root. Either way config/ sits in the root.
+if [[ "${PROXMOX_LIB_DIR}" == */scripts/lib ]]; then
+  PROXMOX_DEPLOY_DIR="$(cd -- "${PROXMOX_LIB_DIR}/../.." && pwd -P)"
+else
+  PROXMOX_DEPLOY_DIR="$(cd -- "${PROXMOX_LIB_DIR}/.." && pwd -P)"
+fi
 # The prompt helpers below ask through the dashboard in JSON mode. The host
 # runtime installs this file without ui_protocol.sh; hosts never run in JSON
 # mode.
 if ! declare -F bmac_ui_is_json >/dev/null; then
   if [[ -f "${PROXMOX_LIB_DIR}/ui_protocol.sh" ]]; then
-    # shellcheck source=./ui_protocol.sh
+    # shellcheck source=ui_protocol.sh
     source "${PROXMOX_LIB_DIR}/ui_protocol.sh"
   else
     bmac_ui_is_json() { return 1; }
@@ -34,16 +40,16 @@ fi
 PROXMOX_REPO_ROOT="$PROXMOX_DEPLOY_DIR"
 
 # Tests may point the parser at synthetic files. Production callers always use
-# env/ next to this library and cannot redirect the loader through an inherited
+# config/ next to this library and cannot redirect the loader through an inherited
 # value.
 if [[ "${APP_HA_CONFIG_TEST_MODE:-0}" == 1 ]]; then
-  PROXMOX_ENV_DIR="${APP_HA_ENV_DIR:?APP_HA_ENV_DIR is required in test mode}"
+  PROXMOX_CONFIG_DIR="${APP_HA_CONFIG_DIR:?APP_HA_CONFIG_DIR is required in test mode}"
 else
-  PROXMOX_ENV_DIR="${PROXMOX_DEPLOY_DIR}/env"
+  PROXMOX_CONFIG_DIR="${PROXMOX_DEPLOY_DIR}/config"
 fi
 
-PROXMOX_CLUSTER_CONFIG="${PROXMOX_ENV_DIR}/cluster.conf"
-PROXMOX_SECRETS_CONFIG="${PROXMOX_ENV_DIR}/secrets.env"
+PROXMOX_CLUSTER_CONFIG="${PROXMOX_CONFIG_DIR}/cluster.conf"
+PROXMOX_SECRETS_CONFIG="${PROXMOX_CONFIG_DIR}/secrets.env"
 
 declare -Ag _PROXMOX_CONFIG_SEEN=()
 declare -Ag _PROXMOX_CONFIG_ORIGIN=()
@@ -828,7 +834,7 @@ PY
 
 _config_validate_mox() {
   local host="$1" index prefix="$PRIVATE_SUBNET_PREFIX"
-  local source_file="${PROXMOX_ENV_DIR}/${host}.conf"
+  local source_file="${PROXMOX_CONFIG_DIR}/${host}.conf"
   index="$(mox_index "$host")" || return
   _config_require_from_file mox "$source_file" \
     PROXMOX_IP PROXMOX_GATEWAY PROXMOX_PREFIX \
@@ -948,7 +954,7 @@ load_proxmox_config() {
 
   if [[ -n "$selected_host" ]]; then
     mox_index "$selected_host" >/dev/null || return
-    host_file="${PROXMOX_ENV_DIR}/${selected_host}.conf"
+    host_file="${PROXMOX_CONFIG_DIR}/${selected_host}.conf"
     _config_parse_file "$host_file" mox 0 || return
     _config_validate_mox "$selected_host" || return
   fi
@@ -1163,7 +1169,7 @@ Usage:
   config.sh --check [--host moxN] [--require-secrets | --no-secrets]
   source config.sh; load_proxmox_config [--host moxN] [--require-secrets]
 
-Strictly parses env/cluster.conf, an optional selected
+Strictly parses config/cluster.conf, an optional selected
 moxN.conf, and the Git-ignored secrets.env. It never evaluates configuration
 as shell code and never prints secret values.
 

@@ -20,10 +20,11 @@ import unittest
 # paths. A no-op where the temp directory is already a real path.
 tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
 
-STAGING_DIR = Path(__file__).resolve().parent
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+STAGING_DIR = SCRIPTS_DIR / "user_callable" / "guests" / "staging"
 CREATE_SCRIPT = STAGING_DIR / "add_staging_vm.sh"
-PATCH_SCRIPT = STAGING_DIR / "patch_staging_clone.sh"
-TREE_HELPER = STAGING_DIR / "patch_staging_guest_tree.py"
+PATCH_SCRIPT = SCRIPTS_DIR / "utilities" / "patch_staging_clone.sh"
+TREE_HELPER = SCRIPTS_DIR / "utilities" / "patch_staging_guest_tree.py"
 
 
 class StagingShellUnitTest(unittest.TestCase):
@@ -649,13 +650,13 @@ class StagingDryRunTest(unittest.TestCase):
         runs_before = set(artifacts.glob("run-*")) if artifacts.exists() else set()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            env_dir = root / "env"
+            config_dir = root / "config"
             bin_dir = root / "bin"
-            env_dir.mkdir()
+            config_dir.mkdir()
             bin_dir.mkdir()
             calls = root / "ssh-calls.jsonl"
-            cluster = env_dir / "cluster.conf"
-            secrets = env_dir / "secrets.env"
+            cluster = config_dir / "cluster.conf"
+            secrets = config_dir / "secrets.env"
             cluster.write_text(
                 "\n".join(
                     (
@@ -700,7 +701,7 @@ class StagingDryRunTest(unittest.TestCase):
                 encoding="utf-8",
             )
             for index in (1, 2):
-                (env_dir / f"mox{index}.conf").write_text(
+                (config_dir / f"mox{index}.conf").write_text(
                     "\n".join(
                         (
                             f"NVME_MIRROR_0_SERIAL_1=test-mox{index}-a",
@@ -916,7 +917,7 @@ else:
                 {
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                 "APP_HA_CONFIG_TEST_MODE": "1",
-                "APP_HA_ENV_DIR": str(env_dir),
+                "APP_HA_CONFIG_DIR": str(config_dir),
                     "FAKE_SSH_CALLS": str(calls),
                 }
             )

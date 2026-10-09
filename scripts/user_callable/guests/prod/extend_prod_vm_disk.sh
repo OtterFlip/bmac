@@ -13,10 +13,10 @@ set +x
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
-# shellcheck source=../../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)"
+# shellcheck source=../../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
 REMOTE_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_ROOT}/lib/cluster_registry.py"
 
@@ -179,7 +179,7 @@ load_and_validate_config() {
   CURRENT_PHASE="loading cluster configuration"
   [[ -f "$CONFIG_LIB" && ! -L "$CONFIG_LIB" ]] ||
     die "Configuration library is unavailable"
-  # shellcheck source=../../lib/config.sh
+  # shellcheck source=../../../lib/config.sh
   source "$CONFIG_LIB"
   load_proxmox_config --no-secrets ||
     die "Could not load cluster configuration"
@@ -506,7 +506,7 @@ PY
         update --help
     )" || die "Could not run the installed cluster registry on $node"
     grep -q -- '--disk-bytes' <<<"$help_text" ||
-      die "The installed cluster registry on $node lacks disk-growth support; run hosts/update_cluster_runtime.sh first"
+      die "The installed cluster registry on $node lacks disk-growth support; run scripts/user_callable/hosts/update_cluster_runtime.sh first"
   done
   info "Every cluster node runs a registry with exact disk-size support"
 

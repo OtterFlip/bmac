@@ -9,8 +9,8 @@
 # host both partitions become LUKS2 with the host's single shared rpool
 # passphrase, which the operator types at
 # the host console; on an unencrypted host they stay unencrypted. The disk,
-# LUKS, and zpool logic is lib/rpool_mirror.sh, the same code
-# hosts/add_proxmox_host.sh uses for extra mirrors at install time.
+# LUKS, and zpool logic is scripts/host_runtime/rpool_mirror.sh, the same code
+# scripts/user_callable/hosts/add_proxmox_host.sh uses for extra mirrors at install time.
 
 set -Eeuo pipefail
 set +x
@@ -18,15 +18,15 @@ umask 077
 
 DW_SCRIPT_NAME=add_new_disk_vdev.sh
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-# shellcheck source=../lib/disk_workflows.sh
-source "${SCRIPT_DIR}/../lib/disk_workflows.sh"
+# shellcheck source=../../lib/disk_workflows.sh
+source "${SCRIPT_DIR}/../../lib/disk_workflows.sh"
 bmac_ui_bootstrap "$@"
 
 MAX_MIRRORS=5
 
 usage() {
   cat <<'EOF'
-Usage: hosts/add_new_disk_vdev.sh [--host moxN]
+Usage: scripts/user_callable/hosts/add_new_disk_vdev.sh [--host moxN]
 
 Adds two new disks to the chosen host's rpool as one new mirror vdev:
 

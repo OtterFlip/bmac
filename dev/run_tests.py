@@ -5,10 +5,10 @@
 
 """Run the unittest suite in parallel, one test per worker process.
 
-    dev/run_tests.py                                  every tracked test_*.py
-    dev/run_tests.py -j 8 -k reservation              8 workers, filtered
-    dev/run_tests.py lib/test_haproxy_routes.py       specific targets
-    dev/run_tests.py lib.test_rpool_mirror.RpoolMirrorToolTest.test_add
+    dev/run_tests.py                                        every tracked test_*.py
+    dev/run_tests.py -j 8 -k reservation                    8 workers, filtered
+    dev/run_tests.py scripts/tests/test_haproxy_routes.py   specific targets
+    dev/run_tests.py scripts.tests.test_rpool_mirror.RpoolMirrorToolTest.test_add
 
 Targets are test files, modules, classes, or single test ids, as accepted by
 ``python3 -m unittest``; with none, every tracked test_*.py runs. -k follows

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parent / "setup_jump_ssh_access.sh"
+SCRIPT = Path(__file__).resolve().parent.parent / "user_callable" / "guests" / "setup_jump_ssh_access.sh"
 
 HOST_KEY = (
     "ssh-ed25519 "
@@ -149,12 +149,12 @@ configure_alias
             self.assertIn("user operator", effective)
 
     def test_every_managed_block_writer_restores_global_scope(self) -> None:
-        repo = SCRIPT.parent.parent
+        user_callable = SCRIPT.parent.parent
         writers = {
-            repo / "guests" / "setup_jump_ssh_access.sh": 'f"# END app-ha managed {label} {alias}",',
-            repo / "guests" / "prod" / "add_prod_vm.sh": "    end,\n",
-            repo / "guests" / "staging" / "add_staging_vm.sh": "    end,\n",
-            repo / "hosts" / "add_proxmox_host.sh": "    end,\n",
+            user_callable / "guests" / "setup_jump_ssh_access.sh": 'f"# END app-ha managed {label} {alias}",',
+            user_callable / "guests" / "prod" / "add_prod_vm.sh": "    end,\n",
+            user_callable / "guests" / "staging" / "add_staging_vm.sh": "    end,\n",
+            user_callable / "hosts" / "add_proxmox_host.sh": "    end,\n",
         }
         for path, end_line in writers.items():
             text = path.read_text(encoding="utf-8")

@@ -213,13 +213,13 @@ export function createMockBackend(): Backend {
       ]();
       emit(run, { type: "result", data });
       if (id === "list_guests" || id === "list_replication") {
-        emit(run, { type: "next_step", text: "Inspect prod2's replication and HA state.", command: "diagnostics/show_prod_vm_state.sh prod2", workflow: "show_prod_vm_state", args: { resource: "prod2" } });
+        emit(run, { type: "next_step", text: "Inspect prod2's replication and HA state.", command: "scripts/user_callable/diagnostics/show_prod_vm_state.sh prod2", workflow: "show_prod_vm_state", args: { resource: "prod2" } });
       }
       if (id === "list_storage") {
-        emit(run, { type: "next_step", text: "Inspect mox3's pool members and disk serials.", command: "diagnostics/show_proxmox_host_state.sh --host mox3", workflow: "show_proxmox_host_state", args: { host: "mox3" } });
+        emit(run, { type: "next_step", text: "Inspect mox3's pool members and disk serials.", command: "scripts/user_callable/diagnostics/show_proxmox_host_state.sh --host mox3", workflow: "show_proxmox_host_state", args: { host: "mox3" } });
       }
       if (id === "list_disks") {
-        emit(run, { type: "next_step", text: "Finalize the retirement of the decommissioned disks on mox3.", command: "hosts/inventory_disks.sh --host mox3", workflow: "inventory_disks", args: { host: "mox3" } });
+        emit(run, { type: "next_step", text: "Finalize the retirement of the decommissioned disks on mox3.", command: "scripts/user_callable/hosts/inventory_disks.sh --host mox3", workflow: "inventory_disks", args: { host: "mox3" } });
       }
       return;
     }
@@ -229,12 +229,12 @@ export function createMockBackend(): Backend {
         await log(run, [`== ${section} ==`, ...Array.from({ length: 14 }, (_, i) => `  mox${(i % 3) + 1}  ${section.toLowerCase()} check ${i + 1}: ok`)], 40);
       }
       await log(run, ["", "WARNING: mox3 rpool is 91% allocated", "", "Next steps:", "  - Inspect mox3's pool members and disk serials."], 30);
-      emit(run, { type: "next_step", text: "Inspect mox3's pool members and disk serials.", command: "diagnostics/show_proxmox_host_state.sh --host mox3", workflow: "show_proxmox_host_state", args: { host: "mox3" } });
+      emit(run, { type: "next_step", text: "Inspect mox3's pool members and disk serials.", command: "scripts/user_callable/diagnostics/show_proxmox_host_state.sh --host mox3", workflow: "show_proxmox_host_state", args: { host: "mox3" } });
       return;
     }
 
     step(run, "Validate the cluster");
-    await log(run, ["==> Loading env/cluster.conf", "==> Finding a reachable cluster member", "    using mox1 (quorate, 3 of 3 votes)"], 120);
+    await log(run, ["==> Loading config/cluster.conf", "==> Finding a reachable cluster member", "    using mox1 (quorate, 3 of 3 votes)"], 120);
 
     if (id === "add_staging_vm" && !r.dry_run) {
       const source = await ask(run, {
@@ -329,7 +329,7 @@ export function createMockBackend(): Backend {
     await log(run, ["    verified", "", "Done."], 80);
     emit(run, { type: "result", data: destructive ? { removed: target, vmid: 101 } : { name: "stage1prod1", vmid: 200, node: "mox2", ip: "10.213.0.201", url: "https://stage1.app.example.com" } });
     emit(run, { type: "next_step", text: "Refresh the guest list to confirm the change.", workflow: "list_guests", args: {} });
-    if (!destructive) emit(run, { type: "next_step", text: "Set up SSH to the new VM.", command: "guests/setup_jump_ssh_access.sh stage1prod1", workflow: "setup_jump_ssh_access", args: { resource: "stage1prod1" } });
+    if (!destructive) emit(run, { type: "next_step", text: "Set up SSH to the new VM.", command: "scripts/user_callable/guests/setup_jump_ssh_access.sh stage1prod1", workflow: "setup_jump_ssh_access", args: { resource: "stage1prod1" } });
   }
 
   const finish = (run: MockRun, status: RunStatus, message: string | null, exit: number) => {
@@ -432,8 +432,8 @@ export function createMockBackend(): Backend {
         { id: "ssh_agent", label: "SSH agent", status: "ok", detail: "SSH_AUTH_SOCK is set." },
         { id: "flock", label: "flock", status: "ok", detail: "Available for host and QDevice workflows." },
         { id: "tailscale", label: "Tailscale", status: "ok", detail: "Backend state: Running" },
-        { id: "cluster_conf", label: "env/cluster.conf", status: "ok", detail: "Present." },
-        { id: "secrets_env", label: "env/secrets.env", status: "ok", detail: "Present (its contents are never read by the dashboard)." },
+        { id: "cluster_conf", label: "config/cluster.conf", status: "ok", detail: "Present." },
+        { id: "secrets_env", label: "config/secrets.env", status: "ok", detail: "Present (its contents are never read by the dashboard)." },
       ];
       return checks;
     },

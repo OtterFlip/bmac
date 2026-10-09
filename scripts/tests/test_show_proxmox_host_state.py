@@ -17,10 +17,10 @@ import tempfile
 import unittest
 
 
-DIAGNOSTICS_DIR = Path(__file__).resolve().parent
-LIB_DIR = DIAGNOSTICS_DIR.parent / "lib"
-SCRIPT = DIAGNOSTICS_DIR / "show_proxmox_host_state.sh"
-sys.path.insert(0, str(LIB_DIR))
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+SCRIPT = SCRIPTS_DIR / "user_callable" / "diagnostics" / "show_proxmox_host_state.sh"
+sys.path.insert(0, str(SCRIPTS_DIR / "utilities"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_host_storage as storage_fixtures  # noqa: E402
 from ui_test_driver import run_json, scripted  # noqa: E402
 
@@ -94,7 +94,7 @@ elif words[:2] == ["bash", "-c"] and "/etc/crypttab" in words[2]:
     print("crypt-rpool-a UUID=1111 app-ha-rpool luks,initramfs,keyscript=decrypt_keyctl")
 elif tuple(words) == ("python3", "-", "collect"):
     if "def collect(" not in payload:
-        raise SystemExit("collect was not given lib/host_storage.py")
+        raise SystemExit("collect was not given scripts/utilities/host_storage.py")
     fixture("storage.json")
 elif tuple(words) == ("ip", "-4", "-o", "address", "show"):
     print("3: vmbr-private    inet 10.213.0.10/24 scope global secondary vmbr-private")
@@ -109,17 +109,17 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
-        self.env_dir = root / "env"
+        self.config_dir = root / "config"
         self.bin_dir = root / "bin"
         self.fixtures = root / "fixtures"
-        for path in (self.env_dir, self.bin_dir, self.fixtures):
+        for path in (self.config_dir, self.bin_dir, self.fixtures):
             path.mkdir()
         self.calls = root / "ssh-calls.jsonl"
         known_hosts = root / "known_hosts"
         known_hosts.write_text("", encoding="utf-8")
         known_hosts.chmod(0o600)
 
-        (self.env_dir / "cluster.conf").write_text(
+        (self.config_dir / "cluster.conf").write_text(
             "\n".join(
                 (
                     "MAX_MOX_HOSTS=10",
@@ -213,7 +213,7 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
         self.environment.update(
             {
                 "APP_HA_CONFIG_TEST_MODE": "1",
-                "APP_HA_ENV_DIR": str(self.env_dir),
+                "APP_HA_CONFIG_DIR": str(self.config_dir),
                 "PROXMOX_SSH_KNOWN_HOSTS_FILE": str(known_hosts),
                 "FAKE_FIXTURES": str(self.fixtures),
                 "FAKE_SSH_CALLS": str(self.calls),
@@ -248,7 +248,7 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
             "MAX_STAGING_VM_COUNT_ON_THIS_HOST=5",
             "",
         ]
-        (self.env_dir / "mox1.conf").write_text("\n".join(lines), encoding="utf-8")
+        (self.config_dir / "mox1.conf").write_text("\n".join(lines), encoding="utf-8")
 
     def run_script(self, *arguments: str, expected: int) -> subprocess.CompletedProcess[str]:
         completed = subprocess.run(
@@ -324,10 +324,10 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
         self.assertIn("[ATTENTION] mox1 has one or more attention items above.", output)
 
     def test_missing_host_conf_does_not_affect_report(self) -> None:
-        (self.env_dir / "mox1.conf").unlink()
+        (self.config_dir / "mox1.conf").unlink()
         output = self.run_script("mox1", expected=0).stdout
         self.assertIn("DISK INVENTORY FOR mox1", output)
-        self.assertNotIn("env/mox1.conf", output)
+        self.assertNotIn("config/mox1.conf", output)
 
     def test_usage_errors(self) -> None:
         self.calls.unlink(missing_ok=True)

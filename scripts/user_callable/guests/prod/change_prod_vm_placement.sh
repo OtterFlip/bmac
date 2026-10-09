@@ -14,11 +14,11 @@ set +x
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
-# shellcheck source=../../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
-PROD_HA_LIB="${REPO_ROOT}/lib/prod_ha.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)"
+# shellcheck source=../../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
+PROD_HA_LIB="${REPO_ROOT}/scripts/lib/prod_ha.sh"
 
 for library in "$CONFIG_LIB" "$PROD_HA_LIB"; do
   [[ -f "$library" && ! -L "$library" ]] || {
@@ -26,12 +26,12 @@ for library in "$CONFIG_LIB" "$PROD_HA_LIB"; do
     exit 1
   }
 done
-# shellcheck source=../../lib/config.sh
+# shellcheck source=../../../lib/config.sh
 source "$CONFIG_LIB"
-# shellcheck source=../../lib/prod_ha.sh
+# shellcheck source=../../../lib/prod_ha.sh
 source "$PROD_HA_LIB"
 
-# shellcheck disable=SC2034 # Read by prod_acquire_lease in lib/prod_ha.sh.
+# shellcheck disable=SC2034 # Read by prod_acquire_lease in scripts/lib/prod_ha.sh.
 LEASE_OWNER_LABEL="change-placement"
 POOL_RESERVE_PERCENT=10
 MIN_PLACEMENT_HOSTS=2
@@ -51,7 +51,7 @@ prompts for one (default: the lowest-numbered active prodN), then asks whether
 to add or remove placement hosts and which ones.
 
 Adding a host requires it to be online, to have room under its
-MAX_PROD_VM_COUNT_ON_THIS_HOST limit (env/moxN.conf), and to keep 10% of its
+MAX_PROD_VM_COUNT_ON_THIS_HOST limit (config/moxN.conf), and to keep 10% of its
 pool size available after receiving a replica. The script records the host in
 the registry placement, creates a replication job from the live owner, waits
 for a successful initial replication, and only then adds the host to the
@@ -193,11 +193,11 @@ add_blocker() {
     return 0
   }
   limit="$(production_limit_on "$node")" || {
-    printf 'env/%s.conf is missing or invalid\n' "$node"
+    printf 'config/%s.conf is missing or invalid\n' "$node"
     return 0
   }
   [[ "$limit" =~ ^[1-9][0-9]*$ ]] || {
-    printf 'MAX_PROD_VM_COUNT_ON_THIS_HOST is invalid in env/%s.conf\n' "$node"
+    printf 'MAX_PROD_VM_COUNT_ON_THIS_HOST is invalid in config/%s.conf\n' "$node"
     return 0
   }
   count="$(production_count_on "$node")"
@@ -475,7 +475,7 @@ choose_add_hosts() {
     list_contains "$node" "${PLACEMENT_NODES[@]}" || candidates+=("$node")
   done
   ((${#candidates[@]} > 0)) ||
-    die "Every cluster member already holds $RESOURCE_NAME; add a host with hosts/add_proxmox_host.sh first"
+    die "Every cluster member already holds $RESOURCE_NAME; add a host with scripts/user_callable/hosts/add_proxmox_host.sh first"
   measure_replica
   printf '\nHosts that can be added (replica needs %s bytes in pool %s):\n' \
     "$REPLICA_BYTES" "$POOL_NAME"

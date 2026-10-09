@@ -3,7 +3,7 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Tests for lib/disk_inventory.py, behind diagnostics/list_disks.sh."""
+"""Tests for scripts/utilities/disk_inventory.py, behind scripts/user_callable/diagnostics/list_disks.sh."""
 
 from __future__ import annotations
 
@@ -15,9 +15,10 @@ import sys
 import tempfile
 import unittest
 
-LIB_DIR = Path(__file__).resolve().parent
-DISK_INVENTORY = LIB_DIR / "disk_inventory.py"
-LIST_DISKS = LIB_DIR.parent / "diagnostics" / "list_disks.sh"
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+LIB_DIR = SCRIPTS_DIR / "lib"
+DISK_INVENTORY = SCRIPTS_DIR / "utilities" / "disk_inventory.py"
+LIST_DISKS = SCRIPTS_DIR / "user_callable" / "diagnostics" / "list_disks.sh"
 
 # Plays every host for list_disks.sh: answers mox_ssh with the files in
 # FAKE_ROOT, and fails like a timed-out connection for hosts in `unreachable`.
@@ -54,8 +55,8 @@ elif words[:3] == ["python3", "-", "show"]:
 else:
     sys.exit(f"unexpected command on {node}: {words}")
 '''
-sys.path.insert(0, str(LIB_DIR))
-sys.path.insert(0, str(LIB_DIR.parent / "hosts"))
+sys.path.insert(0, str(SCRIPTS_DIR / "utilities"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import disk_inventory  # noqa: E402
 from test_disk_workflows import fixtures_cluster_conf  # noqa: E402
@@ -285,9 +286,9 @@ class ListDisksScriptTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)
         self.root = root
-        for name in ("env", "bin", "fake"):
+        for name in ("config", "bin", "fake"):
             (root / name).mkdir()
-        (root / "env" / "cluster.conf").write_text(
+        (root / "config" / "cluster.conf").write_text(
             fixtures_cluster_conf().replace("MAX_MOX_HOSTS=10", "MAX_MOX_HOSTS=3")
         )
         known_hosts = root / "known_hosts"
@@ -309,7 +310,7 @@ class ListDisksScriptTest(unittest.TestCase):
         self.env = {key: value for key, value in os.environ.items() if not key.startswith("BMAC_UI")}
         self.env.update({
             "APP_HA_CONFIG_TEST_MODE": "1",
-            "APP_HA_ENV_DIR": str(root / "env"),
+            "APP_HA_CONFIG_DIR": str(root / "config"),
             "PROXMOX_SSH_KNOWN_HOSTS_FILE": str(known_hosts),
             "FAKE_ROOT": str(fake),
             "PATH": f"{root / 'bin'}:{os.environ['PATH']}",

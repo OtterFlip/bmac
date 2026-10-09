@@ -12,41 +12,41 @@ umask 077
 # headers stay below ./artifacts. Re-run the script to resume after a reboot.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-# shellcheck source=../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
-CONFIG_LIB="${SCRIPT_DIR}/../lib/config.sh"
-CLUSTER_REGISTRY_SOURCE="${SCRIPT_DIR}/../lib/cluster_registry.py"
-HAPROXY_RENDERER_SOURCE="${SCRIPT_DIR}/../lib/haproxy_routes.py"
-HAPROXY_SYNC_SOURCE="${SCRIPT_DIR}/../lib/sync_haproxy_routes.sh"
-DEFERRED_CLEANUP_SOURCE="${SCRIPT_DIR}/../lib/process_deferred_cleanup.sh"
-RPOOL_MIRROR_SOURCE="${SCRIPT_DIR}/../lib/rpool_mirror.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
+CONFIG_LIB="${SCRIPT_DIR}/../../lib/config.sh"
+CLUSTER_REGISTRY_SOURCE="${SCRIPT_DIR}/../../host_runtime/cluster_registry.py"
+HAPROXY_RENDERER_SOURCE="${SCRIPT_DIR}/../../host_runtime/haproxy_routes.py"
+HAPROXY_SYNC_SOURCE="${SCRIPT_DIR}/../../host_runtime/sync_haproxy_routes.sh"
+DEFERRED_CLEANUP_SOURCE="${SCRIPT_DIR}/../../host_runtime/process_deferred_cleanup.sh"
+RPOOL_MIRROR_SOURCE="${SCRIPT_DIR}/../../host_runtime/rpool_mirror.sh"
 RPOOL_MIRROR_TOOL=/usr/local/sbin/app-ha-rpool-mirror
-PROD_ISO_BUILDER_SOURCE="${SCRIPT_DIR}/../guests/prod/build_ubuntu_autoinstall.py"
-PROD_ISO_PREPARER_SOURCE="${SCRIPT_DIR}/../guests/prod/prepare_prod_iso.sh"
-CANONICAL_GUEST_ROLE_HOOK_SOURCE="${SCRIPT_DIR}/app-ha-guest-role-hook.sh"
-CLUSTER_CONFIG_SOURCE="${SCRIPT_DIR}/../env/cluster.conf"
+PROD_ISO_BUILDER_SOURCE="${SCRIPT_DIR}/../../host_runtime/build_ubuntu_autoinstall.py"
+PROD_ISO_PREPARER_SOURCE="${SCRIPT_DIR}/../../host_runtime/prepare_prod_iso.sh"
+CANONICAL_GUEST_ROLE_HOOK_SOURCE="${REPO_ROOT}/scripts/host_runtime/app-ha-guest-role-hook.sh"
+CLUSTER_CONFIG_SOURCE="${SCRIPT_DIR}/../../../config/cluster.conf"
 ARTIFACTS_DIR="${SCRIPT_DIR}/artifacts"
 
 [[ -f "$CONFIG_LIB" ]] || {
   printf 'ERROR: Missing Proxmox configuration library: %s\n' "$CONFIG_LIB" >&2
   exit 1
 }
-# shellcheck source=../lib/config.sh
+# shellcheck source=../../lib/config.sh
 source "$CONFIG_LIB"
-CONTROL_LIB="${SCRIPT_DIR}/../lib/cluster_control.sh"
+CONTROL_LIB="${SCRIPT_DIR}/../../lib/cluster_control.sh"
 [[ -f "$CONTROL_LIB" ]] || {
   printf 'ERROR: Missing cluster control-node library: %s\n' "$CONTROL_LIB" >&2
   exit 1
 }
-# shellcheck source=../lib/cluster_control.sh
+# shellcheck source=../../lib/cluster_control.sh
 source "$CONTROL_LIB"
-QDEVICE_LIB="${SCRIPT_DIR}/../lib/qdevice.sh"
+QDEVICE_LIB="${SCRIPT_DIR}/../../lib/qdevice.sh"
 [[ -f "$QDEVICE_LIB" ]] || {
   printf 'ERROR: Missing QDevice library: %s\n' "$QDEVICE_LIB" >&2
   exit 1
 }
-# shellcheck source=../lib/qdevice.sh
+# shellcheck source=../../lib/qdevice.sh
 source "$QDEVICE_LIB"
 
 SELECTED_HOST=""
@@ -162,11 +162,11 @@ prompt_yes_default_yes() {
 choose_hardware_inventory_mode() {
   printf '\nDISK INVENTORY METHOD\n'
   printf 'iDRAC mode queries Redfish to verify configured disk serials, capacities, and health.\n'
-  printf 'Manual mode uses serials and exact byte capacities gathered beforehand by copying hosts/cluster_setup_prereq.sh to a Linux Live environment booted on the host and running it there.\n'
+  printf 'Manual mode uses serials and exact byte capacities gathered beforehand by copying scripts/user_callable/hosts/cluster_setup_prereq.sh to a Linux Live environment booted on the host and running it there.\n'
   if bmac_ui_is_json; then
     bmac_ui_choose HARDWARE_INVENTORY_MODE "Disk inventory method" idrac \
       idrac "iDRAC/Redfish: verify disk serials, capacities, and health" \
-      manual "Manual: serials and byte capacities from hosts/cluster_setup_prereq.sh"
+      manual "Manual: serials and byte capacities from scripts/user_callable/hosts/cluster_setup_prereq.sh"
   elif prompt_yes "Use iDRAC/Redfish for disk inventory on this run?"; then
     HARDWARE_INVENTORY_MODE=idrac
   else
@@ -207,22 +207,29 @@ wait_for_exact() {
   done
 }
 
-wait_for_helper_success() {
-  local helper=$1 purpose=$2
-  printf '\n========== TARGET-HOST HELPER SCRIPT STATUS ==========\n'
+# Setup's LUKS helpers read the staged root-only key file instead of prompting
+# for the passphrase, so they run over SSH rather than at the host console. A
+# helper that formats LUKS asks for GO itself; pass the operator's GO as
+# CONFIRMATION and it is forwarded to the helper.
+run_target_helper() {
+  local helper=$1 purpose=$2 confirmation=${3:-}
+  printf '\n========== TARGET-HOST HELPER SCRIPT ==========\n'
   printf 'Target host: %s\n' "$HOST_ID"
   printf 'Helper script: %s\n' "$helper"
   printf 'Expected result: %s\n' "$purpose"
-  printf 'Do not continue until you have run this helper on the target host and it has completed successfully.\n'
-  if bmac_ui_is_json; then
-    bmac_ui_manual_action --id helper --title "Run $helper on $HOST_ID" \
-      --instruction "At the console of $HOST_ID, run $helper as shown in the script output above." \
-      --instruction "Expected result: $purpose" \
-      --instruction "Continue only after the helper has completed successfully." \
-      --ack-label "The helper succeeded"
-    return
+  printf 'The helper reads the root-only temporary LUKS key file; it will not prompt for the password.\n'
+  if [[ -n "$confirmation" ]]; then
+    confirm_exact "$confirmation"
+  else
+    prompt_yes_default_yes "Run $helper on $HOST_ID now?" ||
+      fail "$helper was not run; rerun this script to resume at this step."
   fi
-  wait_for_exact "SCRIPT WORKED?" "GO"
+  log "Running $helper on $HOST_ID"
+  if [[ -n "$confirmation" ]]; then
+    remote "$helper" <<<GO
+  else
+    remote "$helper" </dev/null
+  fi || fail "$helper failed on $HOST_ID; fix the reported condition and rerun this script, which resumes at this step."
 }
 
 usage() {
@@ -256,7 +263,7 @@ host_artifacts_present() {
 # node, which creates the cluster.
 choose_host_slot() {
   load_proxmox_config --no-secrets >/dev/null ||
-    fail "Could not load env/cluster.conf to list host slots"
+    fail "Could not load config/cluster.conf to list host slots"
   local status=0 slots_json="" index node state config recommended=""
   local -A slot_state=()
   info "Looking for a reachable cluster member..."
@@ -302,8 +309,8 @@ for row in json.loads(sys.argv[1]):
       state="free"
       [[ -n "$recommended" ]] || recommended="$node"
     fi
-    config="no env/${node}.conf"
-    [[ ! -f "${SCRIPT_DIR}/../env/${node}.conf" ]] || config="env/${node}.conf"
+    config="no config/${node}.conf"
+    [[ ! -f "${SCRIPT_DIR}/../../../config/${node}.conf" ]] || config="config/${node}.conf"
     printf '  %-6s %-44s %s\n' "$node" "$state" "$config"
   done
   if ((status != 0)); then
@@ -313,15 +320,15 @@ for row in json.loads(sys.argv[1]):
   [[ -n "$recommended" ]] ||
     fail "Every host slot through mox${MAX_MOX_HOSTS} is in use"
   printf '\nRecommended host slot: %s\n' "$recommended"
-  [[ -f "${SCRIPT_DIR}/../env/${recommended}.conf" ]] ||
-    printf 'Create env/%s.conf with that host'"'"'s values before continuing with it.\n' \
+  [[ -f "${SCRIPT_DIR}/../../../config/${recommended}.conf" ]] ||
+    printf 'Create config/%s.conf with that host'"'"'s values before continuing with it.\n' \
       "$recommended"
   printf 'To resume an interrupted setup, enter that host instead.\n'
   if bmac_ui_is_json; then
     local -a options=()
     for ((index = 1; index <= MAX_MOX_HOSTS; index += 1)); do
       node="mox${index}"
-      [[ -f "${SCRIPT_DIR}/../env/${node}.conf" ]] || continue
+      [[ -f "${SCRIPT_DIR}/../../../config/${node}.conf" ]] || continue
       state="free"
       if control_list_contains "$node" "${CONTROL_MEMBER_NODES[@]}"; then
         state="cluster member"
@@ -331,9 +338,9 @@ for row in json.loads(sys.argv[1]):
       ! host_artifacts_present "$node" || state+="; resume setup"
       options+=("$node" "$node · $state")
     done
-    ((${#options[@]} > 0)) || fail "Create env/${recommended}.conf with that host's values first"
+    ((${#options[@]} > 0)) || fail "Create config/${recommended}.conf with that host's values first"
     bmac_ui_choose SELECTED_HOST "Host to configure (recommended: $recommended)" \
-      "$([[ -f "${SCRIPT_DIR}/../env/${recommended}.conf" ]] && printf '%s' "$recommended")" \
+      "$([[ -f "${SCRIPT_DIR}/../../../config/${recommended}.conf" ]] && printf '%s' "$recommended")" \
       "${options[@]}"
   else
     read -r -p "Host to configure [${recommended}]: " SELECTED_HOST
@@ -381,8 +388,8 @@ parse_args() {
   fi
   mox_index "$SELECTED_HOST" >/dev/null ||
     fail "--host must be mox1 through mox10"
-  [[ -f "${SCRIPT_DIR}/../env/${SELECTED_HOST}.conf" ]] ||
-    fail "Missing env/${SELECTED_HOST}.conf"
+  [[ -f "${SCRIPT_DIR}/../../../config/${SELECTED_HOST}.conf" ]] ||
+    fail "Missing config/${SELECTED_HOST}.conf"
 }
 
 reset_or_resume_existing_state() {
@@ -532,7 +539,7 @@ load_configuration() {
         capacity_name="NVME_MIRROR_${pair}_CAPACITY_BYTES_${member}"
         capacity="${!capacity_name:-}"
         [[ "$capacity" =~ ^[1-9][0-9]*$ ]] ||
-          fail "$capacity_name must be an exact positive byte count in manual inventory mode; gather it by running hosts/cluster_setup_prereq.sh in a Linux Live environment booted on the host"
+          fail "$capacity_name must be an exact positive byte count in manual inventory mode; gather it by running scripts/user_callable/hosts/cluster_setup_prereq.sh in a Linux Live environment booted on the host"
       fi
     done
   done
@@ -1630,8 +1637,8 @@ This host can be set up without it only if the cluster has an odd number of
 members afterward, which needs no QDevice. A QDevice that is still registered
 is then removed forcefully, after you remove it from Tailscale. If the cluster
 will need a QDevice, stop now and fix access to it, or replace it with
-qdevice/remove_qdevice.sh, qdevice/QDEVICE_MANUAL_SETUP.md, and
-qdevice/add_qdevice.sh. Setup stops before the join if it would need one.
+scripts/user_callable/qdevice/remove_qdevice.sh, docs/QDEVICE_MANUAL_SETUP.md, and
+scripts/user_callable/qdevice/add_qdevice.sh. Setup stops before the join if it would need one.
 EOF
     require_yes "Continue without an accessible QDevice?"
     return
@@ -2458,8 +2465,8 @@ REMOTE
     write_state "$prepared_state"
   fi
 
-  # lib/rpool_mirror.sh holds the one copy of the member LUKS logic, shared
-  # with hosts/add_replacement_disk.sh.
+  # scripts/host_runtime/rpool_mirror.sh holds the one copy of the member LUKS logic, shared
+  # with scripts/user_callable/hosts/add_replacement_disk.sh.
   install_rpool_mirror_tool
   if [[ "$mapper_in_pool" == false ]]; then
     remote_script "$helper" "$RPOOL_MIRROR_TOOL" "$member" "$LUKS_SECRET_FILE" \
@@ -2478,12 +2485,9 @@ REMOTE
       fail "Prepared LUKS helper for member $member is missing from $HOST_ID"
     remote grep -Fq -- "$serial" "$helper" ||
       fail "Prepared member $member helper no longer matches configured serial $serial"
-    printf '\nMANUAL LUKS ACTION REQUIRED\n'
-    printf 'At the target host console, log in as root and run:\n  %s\n' "$helper"
-    printf 'It asks you to type GO. Rerunning it after it reported success is harmless.\n'
-    printf 'The helper reads the root-only temporary LUKS key file; it will not prompt for the password.\n'
-    wait_for_helper_success "$helper" \
-      "LUKS member ${member} was formatted/opened and its header was backed up"
+    run_target_helper "$helper" \
+      "LUKS member ${member} was formatted/opened and its header was backed up" \
+      "Format partition 3 of detached rpool member $member ($serial) as LUKS2 with the shared passphrase, open it as /dev/mapper/${mapper}, and back up its header. A partition that is not LUKS yet is erased; LUKS that the passphrase already opens is reused."
     remote "$RPOOL_MIRROR_TOOL" luks-check-member --member "$member" "$serial" ||
       fail "LUKS member $member is not open on partition 3 of $serial with its header backed up"
 
@@ -2631,11 +2635,9 @@ fi
 EOF
 chmod 0700 "$helper"
 REMOTE
-  printf '\nMANUAL LUKS ACTION REQUIRED\n'
-  printf 'Encrypted member %s booted alone. At the target host console, log in as root and restore member %s by running:\n  %s\n' \
-    "$survivor" "$unavailable" "$helper"
-  printf 'The helper reads the root-only temporary LUKS key file; it will not prompt for the password.\n'
-  wait_for_helper_success "$helper" \
+  printf '\nEncrypted member %s booted alone. Member %s is restored next.\n' \
+    "$survivor" "$unavailable"
+  run_target_helper "$helper" \
     "encrypted member ${unavailable} reopened as /dev/mapper/${mapper}"
   remote test -b "/dev/mapper/$mapper" ||
     fail "Expected restored mapper /dev/mapper/$mapper is not open"
@@ -2699,9 +2701,9 @@ REMOTE
   write_state encrypted-mirror-verified
 }
 
-# Install lib/rpool_mirror.sh on the target as the one copy of the member LUKS
-# and extra-mirror disk, LUKS, and zpool logic. hosts/add_new_disk_vdev.sh and
-# hosts/add_replacement_disk.sh install the same file after setup.
+# Install scripts/host_runtime/rpool_mirror.sh on the target as the one copy of the member LUKS
+# and extra-mirror disk, LUKS, and zpool logic. scripts/user_callable/hosts/add_new_disk_vdev.sh and
+# scripts/user_callable/hosts/add_replacement_disk.sh install the same file after setup.
 install_rpool_mirror_tool() {
   local expected actual staged=/root/.app-ha-rpool-mirror.upload
   expected="$(sha256sum "$RPOOL_MIRROR_SOURCE" | awk '{print $1}')"
@@ -2802,7 +2804,7 @@ configure_extra_mirror() {
           "FORMAT EXTRA MIRROR ${pair}"
       fi
 
-      # The console helper only wraps the shared tool, which proves the key
+      # The helper only wraps the shared tool, which proves the key
       # file against every existing rpool LUKS member before formatting.
       remote_script "$helper" "$helper_config" "$pair_config_hash" \
         "$RPOOL_MIRROR_TOOL" "$pair" "$LUKS_SECRET_FILE" \
@@ -2834,21 +2836,19 @@ REMOTE
   [[ "$remote_helper_hash" == "$pair_config_hash" ]] ||
     fail "Prepared helper for extra mirror $pair no longer matches configured serials and capacity"
 
-  printf '\nMANUAL LUKS ACTION REQUIRED\n'
-  printf 'At the target host console, log in as root and run:\n  %s\n' "$helper"
-  printf 'The helper reads the root-only temporary LUKS key file; it will not prompt for the password.\n'
-  wait_for_helper_success "$helper" \
-    "both encrypted members of extra mirror ${pair} were prepared"
+  run_target_helper "$helper" \
+    "both encrypted members of extra mirror ${pair} were prepared" \
+    "Prepare extra mirror $pair on disks $serial_1 and $serial_2: fresh disks are erased, partitioned, and formatted as LUKS2 with the shared passphrase; LUKS from an earlier run of this step is reused. Both members are opened and their headers backed up."
 
   remote "$RPOOL_MIRROR_TOOL" luks-check-prepared --pair "$pair" \
     "$serial_1" "$serial_2" ||
-    fail "Extra mirror $pair was not fully prepared; rerun the helper at the console"
+    fail "Extra mirror $pair was not fully prepared; rerun this script to retry the helper"
   copy_from_host "$remote_header_1" "$header_1"
   copy_from_host "$remote_header_2" "$header_2"
   chmod 0600 "$header_1" "$header_2"
 
   confirm_exact \
-    "Add encrypted mappers $mapper_1 and $mapper_2 to rpool as one new top-level mirror vdev. A later top-level vdev removal is possible (hosts/decommission_disks.sh) but evacuates its data first." \
+    "Add encrypted mappers $mapper_1 and $mapper_2 to rpool as one new top-level mirror vdev. A later top-level vdev removal is possible (scripts/user_callable/hosts/decommission_disks.sh) but evacuates its data first." \
     "ADD EXTRA MIRROR ${pair} TO RPOOL"
   remote "$RPOOL_MIRROR_TOOL" luks-add --pair "$pair" "$serial_1" "$serial_2" ||
     fail "Could not add extra mirror $pair to rpool"
@@ -2887,7 +2887,7 @@ REMOTE
     fail "Recorded unencrypted extra mirror $pair is no longer present in rpool"
 
   confirm_exact \
-    "Erase both serial-selected disks for extra mirror $pair, give each one partition, and add the partitions as one unencrypted top-level rpool mirror vdev. These disks receive no ESP. A later top-level vdev removal is possible (hosts/decommission_disks.sh) but evacuates its data first." \
+    "Erase both serial-selected disks for extra mirror $pair, give each one partition, and add the partitions as one unencrypted top-level rpool mirror vdev. These disks receive no ESP. A later top-level vdev removal is possible (scripts/user_callable/hosts/decommission_disks.sh) but evacuates its data first." \
     "ADD UNENCRYPTED EXTRA MIRROR ${pair}"
   install_rpool_mirror_tool
   remote "$RPOOL_MIRROR_TOOL" clear-add "${size_args[@]}" "$serial_1" "$serial_2" ||
@@ -3035,10 +3035,7 @@ chmod 0700 "$helper"
 REMOTE
 
   if ! remote test -s "$marker"; then
-    printf '\nMANUAL SHARED-PASSPHRASE VERIFICATION REQUIRED\n'
-    printf 'At the target host console, log in as root and run:\n  %s\n' "$helper"
-    printf 'The helper reads the root-only temporary LUKS key file and tests every member; it will not prompt for the password.\n'
-    wait_for_helper_success "$helper" \
+    run_target_helper "$helper" \
       "all ${#EXPECTED_RPOOL_MAPPERS[@]} LUKS members passed shared-key verification"
   fi
   remote test -s "$marker" ||
@@ -3398,7 +3395,7 @@ cluster_node_control() {
     "root@${node}.${PROXMOX_INTERNAL_DOMAIN}" "$@"
 }
 
-# lib/qdevice.sh reaches the cluster through the cluster control node.
+# scripts/lib/qdevice.sh reaches the cluster through the cluster control node.
 qd_coordinator() {
   cluster_control_node
 }
@@ -3559,10 +3556,10 @@ cluster_setup() {
     members="$(cluster_member_nodes)" ||
       fail "Could not list cluster members through ${EXISTING_NODE}"
     if grep -Fxq "$HOST_ID" <<<"$members"; then
-      fail "$HOST_ID is already listed as a cluster member, but it does not report membership itself. If this host was reinstalled, first remove the old $HOST_ID with hosts/remove_proxmox_host.sh"
+      fail "$HOST_ID is already listed as a cluster member, but it does not report membership itself. If this host was reinstalled, first remove the old $HOST_ID with scripts/user_callable/hosts/remove_proxmox_host.sh"
     fi
     if cluster_control test -e "/etc/pve/nodes/${HOST_ID}"; then
-      fail "/etc/pve/nodes/${HOST_ID} still exists although $HOST_ID is not a member. Finish removing the previous $HOST_ID with hosts/remove_proxmox_host.sh before reusing the slot."
+      fail "/etc/pve/nodes/${HOST_ID} still exists although $HOST_ID is not a member. Finish removing the previous $HOST_ID with scripts/user_callable/hosts/remove_proxmox_host.sh before reusing the slot."
     fi
     reserve_registry_host_slot
 
@@ -3719,7 +3716,7 @@ recover_qdevice_after_failed_join() {
     return
   fi
   if [[ "$QD_REMOVAL" == forced ]]; then
-    printf 'The QDevice was removed forcefully, so it cannot be restored. Add a replacement with qdevice/add_qdevice.sh.\n' >&2
+    printf 'The QDevice was removed forcefully, so it cannot be restored. Add a replacement with scripts/user_callable/qdevice/add_qdevice.sh.\n' >&2
     return
   fi
   assert_all_cluster_nodes_online "$expected_count" >/dev/null
@@ -4102,7 +4099,7 @@ test -x /usr/local/lib/app-ha-proxmox/guests/prod/build_ubuntu_autoinstall.py
 test -x /usr/local/lib/app-ha-proxmox/guests/prod/prepare_prod_iso.sh
 test -d /var/lib/app-ha-proxmox/iso-cache
 [[ "$(stat -c %a /var/lib/app-ha-proxmox/iso-cache)" == 700 ]]
-test -f /usr/local/lib/app-ha-proxmox/env/cluster.conf
+test -f /usr/local/lib/app-ha-proxmox/config/cluster.conf
 bash -n "/var/lib/vz/snippets/$hook_name" \
   /usr/local/lib/app-ha-proxmox/lib/process_deferred_cleanup.sh \
   /usr/local/lib/app-ha-proxmox/guests/prod/prepare_prod_iso.sh
@@ -4198,7 +4195,7 @@ PYTHONDONTWRITEBYTECODE=1 \
 install_tree() {
   local source_root="$1"
   install -d -m 0755 \
-    "$install_root/lib" "$install_root/env" "$install_root/guests/prod"
+    "$install_root/lib" "$install_root/config" "$install_root/guests/prod"
   install -d -o root -g root -m 0700 /var/lib/app-ha-proxmox/iso-cache
   install -o root -g root -m 0755 "$source_root/config.sh" \
     "$install_root/lib/.config.sh.new"
@@ -4219,7 +4216,8 @@ install_tree() {
   install -o root -g root -m 0755 "$source_root/prepare_prod_iso.sh" \
     "$install_root/guests/prod/.prepare_prod_iso.sh.new"
   install -o root -g root -m 0644 "$source_root/cluster.conf" \
-    "$install_root/env/.cluster.conf.new"
+    "$install_root/config/.cluster.conf.new"
+  mv -f "$install_root/config/.cluster.conf.new" "$install_root/config/cluster.conf"
   mv -f "$install_root/lib/.config.sh.new" "$install_root/lib/config.sh"
   mv -f "$install_root/lib/.cluster_registry.py.new" \
     "$install_root/lib/cluster_registry.py"
@@ -4235,7 +4233,9 @@ install_tree() {
     "$install_root/guests/prod/build_ubuntu_autoinstall.py"
   mv -f "$install_root/guests/prod/.prepare_prod_iso.sh.new" \
     "$install_root/guests/prod/prepare_prod_iso.sh"
-  mv -f "$install_root/env/.cluster.conf.new" "$install_root/env/cluster.conf"
+  # Runtimes installed before config/ was named env/ keep a stale copy there.
+  rm -f "$install_root/env/cluster.conf"
+  [[ ! -d "$install_root/env" ]] || rmdir --ignore-fail-on-non-empty "$install_root/env"
 }
 
 install_tree "$source_dir"
@@ -4345,7 +4345,7 @@ tar -C "$install_root" -cf "$bundle" lib/config.sh lib/cluster_registry.py \
   lib/haproxy_routes.py lib/sync_haproxy_routes.sh \
   lib/process_deferred_cleanup.sh "lib/$hook_name" \
   guests/prod/build_ubuntu_autoinstall.py \
-  guests/prod/prepare_prod_iso.sh env/cluster.conf
+  guests/prod/prepare_prod_iso.sh config/cluster.conf
 
 nodes_json="$(pvesh get /nodes --output-format json)"
 unexpected="$(jq -r --argjson maximum "$max_hosts" '
@@ -4422,7 +4422,7 @@ tar -xf "$bundle" -C "$incoming"
 for source in lib/config.sh lib/cluster_registry.py lib/haproxy_routes.py \
   lib/sync_haproxy_routes.sh lib/process_deferred_cleanup.sh \
   "lib/$hook_name" guests/prod/build_ubuntu_autoinstall.py \
-  guests/prod/prepare_prod_iso.sh env/cluster.conf; do
+  guests/prod/prepare_prod_iso.sh config/cluster.conf; do
   [[ -f "$incoming/$source" && ! -L "$incoming/$source" ]]
 done
 bash -n "$incoming/lib/config.sh" "$incoming/lib/sync_haproxy_routes.sh" \
@@ -4433,8 +4433,11 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$incoming/lib/haproxy_routes.py" --help >/dev
 PYTHONDONTWRITEBYTECODE=1 \
   python3 "$incoming/guests/prod/build_ubuntu_autoinstall.py" --help >/dev/null
 install -d -m 0755 \
-  "$install_root/lib" "$install_root/env" "$install_root/guests/prod"
+  "$install_root/lib" "$install_root/config" "$install_root/guests/prod"
 install -d -o root -g root -m 0700 /var/lib/app-ha-proxmox/iso-cache
+install -o root -g root -m 0644 "$incoming/config/cluster.conf" \
+  "$install_root/config/.cluster.conf.new"
+mv -f "$install_root/config/.cluster.conf.new" "$install_root/config/cluster.conf"
 for name in config.sh cluster_registry.py haproxy_routes.py \
   sync_haproxy_routes.sh process_deferred_cleanup.sh "$hook_name"; do
   mode=0755
@@ -4448,9 +4451,8 @@ for name in build_ubuntu_autoinstall.py prepare_prod_iso.sh; do
   mv -f "$install_root/guests/prod/.${name}.new" \
     "$install_root/guests/prod/$name"
 done
-install -o root -g root -m 0644 "$incoming/env/cluster.conf" \
-  "$install_root/env/.cluster.conf.new"
-mv -f "$install_root/env/.cluster.conf.new" "$install_root/env/cluster.conf"
+rm -f "$install_root/env/cluster.conf"
+[[ ! -d "$install_root/env" ]] || rmdir --ignore-fail-on-non-empty "$install_root/env"
 "$install_root/lib/config.sh" --check --no-secrets >/dev/null
 
 content="$(

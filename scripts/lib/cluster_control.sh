@@ -6,14 +6,14 @@
 # Workstation helpers that resolve the cluster control node: the member that
 # new hosts join through and that hosts the cluster control-plane lock. Once a
 # cluster exists, its registry records the authoritative control node and
-# env/cluster.conf PROXMOX_CONTROL_NODE must agree with it. Before a cluster
+# config/cluster.conf PROXMOX_CONTROL_NODE must agree with it. Before a cluster
 # exists, PROXMOX_CONTROL_NODE (or the operator's answer) names the host that
-# creates it. Source after lib/config.sh and load_proxmox_config.
+# creates it. Source after scripts/lib/config.sh and load_proxmox_config.
 
 # Callers read the CONTROL_* globals.
 # shellcheck disable=SC2034
 
-# shellcheck source=./ui_protocol.sh
+# shellcheck source=ui_protocol.sh
 declare -F bmac_ui_is_json >/dev/null ||
   source "$(dirname -- "${BASH_SOURCE[0]}")/ui_protocol.sh"
 
@@ -189,7 +189,7 @@ resolve_control_node() {
     if bmac_ui_is_json; then
       bmac_ui_input answer --id control_node --label "Cluster control node" \
         --default "$default" --required --pattern '^mox([1-9]|10)$' \
-        --help "PROXMOX_CONTROL_NODE is not set in env/cluster.conf. The control node coordinates cluster changes."
+        --help "PROXMOX_CONTROL_NODE is not set in config/cluster.conf. The control node coordinates cluster changes."
     else
       IFS= read -r -p "Cluster control node [${default}]: " answer ||
         config_die "Input ended before the control node was chosen" || return 1
@@ -203,7 +203,7 @@ resolve_control_node() {
   if ((status == 0)); then
     if [[ -n "$CONTROL_RECORDED_NODE" && "$answer" != "$CONTROL_RECORDED_NODE" ]]; then
       if [[ -n "$configured" ]]; then
-        config_die "$(control_mismatch_message "PROXMOX_CONTROL_NODE=${configured} in env/cluster.conf")"
+        config_die "$(control_mismatch_message "PROXMOX_CONTROL_NODE=${configured} in config/cluster.conf")"
       else
         config_die "$(control_mismatch_message "${answer} was entered")"
       fi
@@ -278,7 +278,7 @@ control_rewrite_cluster_conf() {
 }
 
 # Tell the operator about a control-node change and offer to update this
-# workstation's env/cluster.conf.
+# workstation's config/cluster.conf.
 control_offer_cluster_conf_update() {
   local node="$1" answer
   printf '\nThe cluster control node is now %s.\n' "$node"
@@ -287,7 +287,7 @@ control_offer_cluster_conf_update() {
       "$PROXMOX_CLUSTER_CONFIG" "$node"
     return 0
   fi
-  printf 'Every workstation that runs the host scripts must set PROXMOX_CONTROL_NODE=%s in env/cluster.conf.\n' \
+  printf 'Every workstation that runs the host scripts must set PROXMOX_CONTROL_NODE=%s in config/cluster.conf.\n' \
     "$node"
   if bmac_ui_is_json; then
     bmac_ui_ask "Update PROXMOX_CONTROL_NODE in ${PROXMOX_CLUSTER_CONFIG} to ${node} now?" \

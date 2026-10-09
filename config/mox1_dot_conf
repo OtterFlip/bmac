@@ -1,4 +1,4 @@
-# Copy env/mox1_dot_conf to env/mox1.conf (the copy goes in the same directory),
+# Copy config/mox1_dot_conf to config/mox1.conf (the copy goes in the same directory),
 # and then fill in the mox1.conf copy with the actual correct values that match
 # your first proxmox host's settings.  Make sure you fill in the serial number
 # and byte capacities for both members of mirror 0, as well as MAC addresses
@@ -9,7 +9,7 @@
 # The resulting moxN.conf is input only for add_proxmox_host.sh's initial
 # execution and retries after an incomplete setup. After setup succeeds, the
 # host itself is authoritative; later scripts neither read nor update this file.
-# REMOVE THIS COMMENT FROM THE TOP OF YOUR env/mox1.conf file
+# REMOVE THIS COMMENT FROM THE TOP OF YOUR config/mox1.conf file
 
 # IDRAC_IP is optional and is required only when add_proxmox_host.sh is run
 # with iDRAC/Redfish inventory (the script prompts for this choice).
@@ -23,7 +23,7 @@
 # setup run.
 # Corresponding *_CAPACITY_BYTES_* values are required only when running
 # add_proxmox_host.sh without iDRAC/Redfish inventory. Without iDRAC, gather
-# serials and capacities by running hosts/cluster_setup_prereq.sh in a Linux
+# serials and capacities by running scripts/user_callable/hosts/cluster_setup_prereq.sh in a Linux
 # Live environment booted on this machine; with iDRAC, read the serials in the
 # iDRAC web UI. The two disks of a pair may differ in capacity by
 # up to 1%, and either may be listed first: the mirror uses the smaller one.
@@ -57,7 +57,7 @@ PROXMOX_PREFIX=24
 TAILSCALE_HOSTNAME=mox1
 
 # NICs are selected by permanent MAC, never by unstable enoN names.
-# Read them in the iDRAC web UI, or run hosts/cluster_setup_prereq.sh in a
+# Read them in the iDRAC web UI, or run scripts/user_callable/hosts/cluster_setup_prereq.sh in a
 # Linux Live environment booted on this machine.
 # In the iDRAC web UI they're under the network Port tab with the field label "Virtual MAC Addresses"
 PROXMOX_PUBLIC_MAC=AA:BB:CC:DD:EE:FF

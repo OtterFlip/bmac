@@ -3,7 +3,8 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Fast, read-only cluster state for the diagnostics/list_*.sh scripts.
+"""Fast, read-only cluster state for the
+scripts/user_callable/diagnostics/list_*.sh scripts.
 
 `collect KIND` runs on one cluster member as root, fed over SSH as
 `python3 - collect KIND ...`. It runs only read-only Proxmox API (pvesh),
@@ -226,8 +227,8 @@ def command_collect(args):
 
 
 def emitter():
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import ui_protocol  # noqa: E402  (lives next to this file)
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+    import ui_protocol  # noqa: E402  (lives in scripts/lib)
 
     return ui_protocol
 
@@ -451,10 +452,10 @@ def render_hosts(report, args, ui):
     finish(summary, problems, ui, [
         (any("offline" in p or "SSH" in p for p in problems),
          "Run the full health check to see why a host is offline or unreachable.",
-         "diagnostics/show_cluster_health.sh", "show_cluster_health", {}),
+         "scripts/user_callable/diagnostics/show_cluster_health.sh", "show_cluster_health", {}),
         (any("QDevice" in p for p in problems),
          "Inspect the QDevice and follow its repair instructions.",
-         "diagnostics/show_qdevice_state.sh", "show_qdevice_state", {}),
+         "scripts/user_callable/diagnostics/show_qdevice_state.sh", "show_qdevice_state", {}),
     ])
 
 
@@ -620,12 +621,12 @@ def render_guests(report, args, ui):
             row["registry_state"] == "active" and row["live_status"] != "running"
         ):
             steps.append((True, f"Inspect {row['name']} across HA, replication, routing, and SSH.",
-                          f"diagnostics/show_prod_vm_state.sh {row['name']}",
+                          f"scripts/user_callable/diagnostics/show_prod_vm_state.sh {row['name']}",
                           "show_prod_vm_state", {"resource": row["name"]}))
     for row in staging:
         if row["registry_state"] in ("cleanup_pending", "failed"):
             steps.append((True, f"Finish removing {row['name']}.",
-                          f"guests/staging/remove_staging_vm.sh {row['name']}",
+                          f"scripts/user_callable/guests/staging/remove_staging_vm.sh {row['name']}",
                           "remove_staging_vm", {"resource": row["name"]}))
     finish(summary, problems, ui, steps)
 
@@ -681,7 +682,7 @@ def render_replication(report, args, ui):
     steps = []
     for name in sorted({row["guest_name"] for row in jobs if row["fail_count"] and row["guest_name"]}):
         steps.append((True, f"Inspect {name}'s replication and HA state.",
-                      f"diagnostics/show_prod_vm_state.sh {name}",
+                      f"scripts/user_callable/diagnostics/show_prod_vm_state.sh {name}",
                       "show_prod_vm_state", {"resource": name}))
     finish(summary, problems, ui, steps)
 
@@ -758,7 +759,7 @@ def render_storage(report, args, ui):
     for host in hosts:
         if any(problem.startswith(f"{host['node']}: pool") for problem in problems):
             steps.append((True, f"Inspect {host['node']}'s pool members and disk serials.",
-                          f"diagnostics/show_proxmox_host_state.sh --host {host['node']}",
+                          f"scripts/user_callable/diagnostics/show_proxmox_host_state.sh --host {host['node']}",
                           "show_proxmox_host_state", {"host": host["node"]}))
     finish(summary, problems, ui, steps)
 

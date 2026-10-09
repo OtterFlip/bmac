@@ -18,20 +18,20 @@ if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); 
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
 for library in config.sh cluster_control.sh ui_protocol.sh quick_state.sh; do
-  [[ -f "${REPO_ROOT}/lib/${library}" && ! -L "${REPO_ROOT}/lib/${library}" ]] || {
-    printf 'ERROR: required library is unavailable: lib/%s\n' "$library" >&2
+  [[ -f "${REPO_ROOT}/scripts/lib/${library}" && ! -L "${REPO_ROOT}/scripts/lib/${library}" ]] || {
+    printf 'ERROR: required library is unavailable: scripts/lib/%s\n' "$library" >&2
     exit 2
   }
   # shellcheck source=/dev/null
-  source "${REPO_ROOT}/lib/${library}"
+  source "${REPO_ROOT}/scripts/lib/${library}"
 done
 bmac_ui_bootstrap "$@"
 
 usage() {
   cat <<'EOF'
-Usage: diagnostics/list_hosts.sh [--no-ssh-check] [--json]
+Usage: scripts/user_callable/diagnostics/list_hosts.sh [--no-ssh-check] [--json]
 
 Quickly list every Proxmox host in the cluster: online state, uptime, CPU and
 memory use, registry slot, and which host is the control node, plus cluster

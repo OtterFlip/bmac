@@ -12,15 +12,15 @@ set +x
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-# shellcheck source=../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
-REGISTRY_SOURCE="${REPO_ROOT}/lib/cluster_registry.py"
-RENDERER_SOURCE="${REPO_ROOT}/lib/haproxy_routes.py"
-ROUTE_SYNC_SOURCE="${REPO_ROOT}/lib/sync_haproxy_routes.sh"
-CLEANUP_SOURCE="${REPO_ROOT}/lib/process_deferred_cleanup.sh"
-HOOK_SOURCE="${SCRIPT_DIR}/app-ha-guest-role-hook.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
+REGISTRY_SOURCE="${REPO_ROOT}/scripts/host_runtime/cluster_registry.py"
+RENDERER_SOURCE="${REPO_ROOT}/scripts/host_runtime/haproxy_routes.py"
+ROUTE_SYNC_SOURCE="${REPO_ROOT}/scripts/host_runtime/sync_haproxy_routes.sh"
+CLEANUP_SOURCE="${REPO_ROOT}/scripts/host_runtime/process_deferred_cleanup.sh"
+HOOK_SOURCE="${REPO_ROOT}/scripts/host_runtime/app-ha-guest-role-hook.sh"
 INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${INSTALL_ROOT}/lib/cluster_registry.py"
 REMOTE_RENDERER="${INSTALL_ROOT}/lib/haproxy_routes.py"
@@ -465,7 +465,7 @@ main() {
     log "Dry run complete; no cluster files were changed"
     bmac_ui_step_done
     bmac_ui_next_step "Review the hash drift above, then update the runtime for real." \
-      --command "hosts/update_cluster_runtime.sh" --workflow update_cluster_runtime --arg dry_run=false
+      --command "scripts/user_callable/hosts/update_cluster_runtime.sh" --workflow update_cluster_runtime --arg dry_run=false
     return 0
   fi
 

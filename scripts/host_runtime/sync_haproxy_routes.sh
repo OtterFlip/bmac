@@ -1283,7 +1283,7 @@ main() {
   fi
   trap process_exit_cleanup EXIT
   require_file "$CONFIG_LIB"
-  # shellcheck source=./config.sh
+  # shellcheck source=../lib/config.sh
   source "$CONFIG_LIB"
   load_proxmox_config --no-secrets ||
     die "Could not load cluster.conf without secrets"

@@ -16,18 +16,18 @@ if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); 
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-# shellcheck source=../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
+# shellcheck source=../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
 bmac_ui_bootstrap "$@"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
-STORAGE_LIB="${REPO_ROOT}/lib/host_storage.py"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
+STORAGE_LIB="${REPO_ROOT}/scripts/utilities/host_storage.py"
 REMOTE_REGISTRY="/usr/local/lib/app-ha-proxmox/lib/cluster_registry.py"
 RESERVATION_DIR="/run/app-ha-production-starting"
 
 usage() {
   cat <<'EOF'
-Usage: diagnostics/show_proxmox_host_state.sh [--host moxN]
+Usage: scripts/user_callable/diagnostics/show_proxmox_host_state.sh [--host moxN]
 
 Show one Proxmox host's current configuration, the guests it runs and the
 replicas it stores, and its rpool storage layout: every vdev resolved to

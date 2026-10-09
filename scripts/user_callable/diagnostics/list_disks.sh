@@ -6,7 +6,7 @@
 # Read-only list of every host's pool vdevs (state, LUKS, member disks) and
 # every disk outside a pool with its status: available, awaiting retirement
 # finalization, part of an interrupted add or replace, or in use. Each host is
-# read directly, in parallel, with the collectors hosts/inventory_disks.sh
+# read directly, in parallel, with the collectors scripts/user_callable/hosts/inventory_disks.sh
 # uses; unlike that workflow, this never finalizes anything.
 
 set -u
@@ -20,22 +20,22 @@ if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); 
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-for library in config.sh cluster_control.sh ui_protocol.sh quick_state.sh \
-  host_storage.py storage_state.py disk_inventory.py; do
-  [[ -f "${REPO_ROOT}/lib/${library}" && ! -L "${REPO_ROOT}/lib/${library}" ]] || {
-    printf 'ERROR: required library is unavailable: lib/%s\n' "$library" >&2
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
+for library in lib/config.sh lib/cluster_control.sh lib/ui_protocol.sh lib/quick_state.sh \
+  utilities/host_storage.py utilities/storage_state.py utilities/disk_inventory.py; do
+  [[ -f "${REPO_ROOT}/scripts/${library}" && ! -L "${REPO_ROOT}/scripts/${library}" ]] || {
+    printf 'ERROR: required library is unavailable: scripts/%s\n' "$library" >&2
     exit 2
   }
   [[ "$library" != *.py ]] || continue
   # shellcheck source=/dev/null
-  source "${REPO_ROOT}/lib/${library}"
+  source "${REPO_ROOT}/scripts/${library}"
 done
 bmac_ui_bootstrap "$@"
 
 usage() {
   cat <<'EOF'
-Usage: diagnostics/list_disks.sh [--host moxN] [--json]
+Usage: scripts/user_callable/diagnostics/list_disks.sh [--host moxN] [--json]
 
 List every online host's ZFS pool vdevs with their state, whether they use
 LUKS, and each member disk's serial and size, then every physical disk that
@@ -44,7 +44,7 @@ is not in a pool with its serial, size, and status:
   Available               unused; safe to pull or to use in a new vdev or
                           replacement
   Awaiting finalization   decommissioned and evacuated; run
-                          hosts/inventory_disks.sh to finalize its retirement
+                          scripts/user_callable/hosts/inventory_disks.sh to finalize its retirement
   Evacuating              ZFS is still copying data off its vdev
   Replacement in progress / New mirror in progress
                           an interrupted add or replace; rerun that workflow
@@ -89,10 +89,10 @@ done
 collect_host() {
   local node="$1" base="${QS_RUN_DIR}/$1"
   mox_ssh "$node" python3 - collect --allow-missing-pool \
-    <"${REPO_ROOT}/lib/host_storage.py" >"${base}.layout.json" 2>"${base}.layout.err" ||
+    <"${REPO_ROOT}/scripts/utilities/host_storage.py" >"${base}.layout.json" 2>"${base}.layout.err" ||
     { rm -f -- "${base}.layout.json"; return 0; }
   mox_ssh "$node" python3 - show \
-    <"${REPO_ROOT}/lib/storage_state.py" >"${base}.state.json" 2>"${base}.state.err" ||
+    <"${REPO_ROOT}/scripts/utilities/storage_state.py" >"${base}.state.json" 2>"${base}.state.err" ||
     rm -f -- "${base}.state.json"
 }
 
@@ -111,6 +111,6 @@ done
 ((${#pids[@]} == 0)) || wait "${pids[@]}"
 
 bmac_ui_step "Summarize disk state"
-python3 "${REPO_ROOT}/lib/disk_inventory.py" render --run-dir "$QS_RUN_DIR" ||
+python3 "${REPO_ROOT}/scripts/utilities/disk_inventory.py" render --run-dir "$QS_RUN_DIR" ||
   qs_die "could not summarize the disk state"
 bmac_ui_step_done

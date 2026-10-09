@@ -4,18 +4,19 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Workstation helpers shared by the host disk workflows. Source after setting
-# DW_SCRIPT_NAME. Host work goes through lib/config.sh strict SSH; host-side
-# logic lives in lib/rpool_mirror.sh, lib/host_storage.py, and
-# lib/storage_state.py, which are piped or installed per run so the host
+# DW_SCRIPT_NAME. Host work goes through scripts/lib/config.sh strict SSH; host-side
+# logic lives in scripts/host_runtime/rpool_mirror.sh, scripts/utilities/host_storage.py, and
+# scripts/utilities/storage_state.py, which are piped or installed per run so the host
 # always runs this checkout's version.
 
 DW_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-DW_REPO_ROOT="$(cd -- "${DW_LIB_DIR}/.." && pwd -P)"
+DW_REPO_ROOT="$(cd -- "${DW_LIB_DIR}/../.." && pwd -P)"
+DW_UTILITIES_DIR="${DW_REPO_ROOT}/scripts/utilities"
 DW_CONFIG_LIB="${DW_LIB_DIR}/config.sh"
-DW_HOST_STORAGE="${DW_LIB_DIR}/host_storage.py"
-DW_STORAGE_STATE="${DW_LIB_DIR}/storage_state.py"
-DW_RPOOL_MIRROR="${DW_LIB_DIR}/rpool_mirror.sh"
-DW_DISK_INVENTORY="${DW_LIB_DIR}/disk_inventory.py"
+DW_HOST_STORAGE="${DW_UTILITIES_DIR}/host_storage.py"
+DW_STORAGE_STATE="${DW_UTILITIES_DIR}/storage_state.py"
+DW_RPOOL_MIRROR="${DW_REPO_ROOT}/scripts/host_runtime/rpool_mirror.sh"
+DW_DISK_INVENTORY="${DW_UTILITIES_DIR}/disk_inventory.py"
 DW_REMOTE_REGISTRY=/usr/local/lib/app-ha-proxmox/lib/cluster_registry.py
 if [[ "${APP_HA_DISK_TEST_MODE:-0}" == 1 ]]; then
   DW_REMOTE_TOOL="${APP_HA_REMOTE_RPOOL_MIRROR:?APP_HA_REMOTE_RPOOL_MIRROR is required in test mode}"
@@ -24,12 +25,12 @@ if [[ "${APP_HA_DISK_TEST_MODE:-0}" == 1 ]]; then
 else
   DW_REMOTE_TOOL=/usr/local/sbin/app-ha-rpool-mirror
   DW_REMOTE_ROOT=/root
-  DW_ARTIFACTS_DIR="${DW_REPO_ROOT}/hosts/artifacts"
+  DW_ARTIFACTS_DIR="${DW_REPO_ROOT}/scripts/user_callable/hosts/artifacts"
 fi
 DW_HOST=""
 DW_RUN_DIR=""
 
-# shellcheck source=./ui_protocol.sh
+# shellcheck source=ui_protocol.sh
 declare -F bmac_ui_is_json >/dev/null || source "${DW_LIB_DIR}/ui_protocol.sh"
 
 dw_die() {
@@ -59,7 +60,7 @@ dw_init() {
     "$DW_RPOOL_MIRROR" "$DW_DISK_INVENTORY"; do
     [[ -f "$library" && ! -L "$library" ]] || dw_die "required library is unavailable: $library"
   done
-  # shellcheck source=./config.sh
+  # shellcheck source=config.sh
   source "$DW_CONFIG_LIB"
   load_proxmox_config --no-secrets >/dev/null || dw_die "cluster configuration is invalid"
   DW_RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/${DW_SCRIPT_NAME%.sh}.XXXXXX")"
@@ -167,7 +168,7 @@ dw_ready() {
   prompt_yes "Ready to start it now?"
 }
 
-# Install lib/rpool_mirror.sh on the host and prove its contents.
+# Install scripts/host_runtime/rpool_mirror.sh on the host and prove its contents.
 dw_install_tool() {
   local expected actual
   expected="$(dw_sha256 "$DW_RPOOL_MIRROR")"

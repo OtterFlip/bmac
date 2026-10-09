@@ -207,25 +207,25 @@ pub fn run(platform: &PlatformInfo, repo: Option<&Path>) -> Vec<Check> {
     });
 
     if let Some(root) = repo {
-        let conf = root.join("env/cluster.conf").is_file();
+        let conf = root.join("config/cluster.conf").is_file();
         checks.push(with_fix(
             check(
                 "cluster_conf",
-                "env/cluster.conf",
+                "config/cluster.conf",
                 if conf { CheckStatus::Ok } else { CheckStatus::Error },
                 if conf { "Present." } else { "Missing; every cluster workflow needs it." },
             ),
-            "Copy env/cluster_dot_conf to env/cluster.conf and fill it in.",
+            "Copy config/cluster_dot_conf to config/cluster.conf and fill it in.",
         ));
-        let secrets = root.join("env/secrets.env").is_file();
+        let secrets = root.join("config/secrets.env").is_file();
         checks.push(with_fix(
             check(
                 "secrets_env",
-                "env/secrets.env",
+                "config/secrets.env",
                 if secrets { CheckStatus::Ok } else { CheckStatus::Warning },
                 if secrets { "Present (its contents are never read by the dashboard)." } else { "Missing; creating hosts and VMs needs it." },
             ),
-            "Copy env/secrets_dot_env to env/secrets.env, fill it in, and chmod 600 it.",
+            "Copy config/secrets_dot_env to config/secrets.env, fill it in, and chmod 600 it.",
         ));
     }
     checks

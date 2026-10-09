@@ -4,8 +4,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # The one implementation of the cluster's external QDevice vote, shared by
-# hosts/add_proxmox_host.sh, hosts/remove_proxmox_host.sh,
-# qdevice/add_qdevice.sh, qdevice/remove_qdevice.sh, and the diagnostics:
+# scripts/user_callable/hosts/add_proxmox_host.sh, scripts/user_callable/hosts/remove_proxmox_host.sh,
+# scripts/user_callable/qdevice/add_qdevice.sh, scripts/user_callable/qdevice/remove_qdevice.sh, and the diagnostics:
 # verifying access to the QDevice host, preparing corosync-qnetd on it, pinning
 # its SSH host key on the members, adding, removing, and reconciling the vote,
 # clearing stale registrations, forgetting a retired QDevice, and checking vote
@@ -27,7 +27,7 @@
 # forced: the operator must agree, remove the machine from Tailscale, and
 # confirm that, because the machine keeps this cluster's QDevice certificates.
 
-# shellcheck source=./ui_protocol.sh
+# shellcheck source=ui_protocol.sh
 declare -F bmac_ui_is_json >/dev/null ||
   source "$(dirname -- "${BASH_SOURCE[0]}")/ui_protocol.sh"
 
@@ -154,7 +154,7 @@ qd_verify_access() {
 qd_require_access_for() {
   local node_count="$1"
   ((node_count % 2 == 1)) || [[ "$QD_IPV4" =~ ^100\. ]] ||
-    qd_fail "The ${node_count}-member cluster needs a QDevice, but ${PROXMOX_QDEVICE_HOST} is not accessible (${QD_ACCESS_PROBLEM:-not verified}). Fix access to it, or replace it with qdevice/remove_qdevice.sh, qdevice/QDEVICE_MANUAL_SETUP.md, and qdevice/add_qdevice.sh, then rerun."
+    qd_fail "The ${node_count}-member cluster needs a QDevice, but ${PROXMOX_QDEVICE_HOST} is not accessible (${QD_ACCESS_PROBLEM:-not verified}). Fix access to it, or replace it with scripts/user_callable/qdevice/remove_qdevice.sh, docs/QDEVICE_MANUAL_SETUP.md, and scripts/user_callable/qdevice/add_qdevice.sh, then rerun."
 }
 
 # Install corosync-qnetd on the QDevice host when it is missing, then require

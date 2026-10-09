@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).with_name("extend_prod_vm_disk.sh")
+SCRIPT = Path(__file__).resolve().parent.parent / "user_callable" / "guests" / "prod" / "extend_prod_vm_disk.sh"
 MIB = 2**20
 GIB = 2**30
 

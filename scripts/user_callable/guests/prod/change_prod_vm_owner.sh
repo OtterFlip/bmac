@@ -12,11 +12,11 @@ set +x
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
-# shellcheck source=../../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
-PROD_HA_LIB="${REPO_ROOT}/lib/prod_ha.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)"
+# shellcheck source=../../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
+PROD_HA_LIB="${REPO_ROOT}/scripts/lib/prod_ha.sh"
 
 for library in "$CONFIG_LIB" "$PROD_HA_LIB"; do
   [[ -f "$library" && ! -L "$library" ]] || {
@@ -24,12 +24,12 @@ for library in "$CONFIG_LIB" "$PROD_HA_LIB"; do
     exit 1
   }
 done
-# shellcheck source=../../lib/config.sh
+# shellcheck source=../../../lib/config.sh
 source "$CONFIG_LIB"
-# shellcheck source=../../lib/prod_ha.sh
+# shellcheck source=../../../lib/prod_ha.sh
 source "$PROD_HA_LIB"
 
-# shellcheck disable=SC2034 # Read by prod_acquire_lease in lib/prod_ha.sh.
+# shellcheck disable=SC2034 # Read by prod_acquire_lease in scripts/lib/prod_ha.sh.
 LEASE_OWNER_LABEL="change-owner"
 REPLICATION_TIMEOUT_SECONDS=3600
 RELOCATE_TIMEOUT_SECONDS=900
@@ -57,7 +57,7 @@ Proxmox to reverse the replication jobs and records the new owner and
 replication targets in the registry.
 
 The VM must not have staging VMs derived from it; destroy them first with
-guests/staging/remove_staging_vm.sh. Staging VMs of other production VMs on
+scripts/user_callable/guests/staging/remove_staging_vm.sh. Staging VMs of other production VMs on
 the chosen host are evicted when production starts there.
 
 Options:
@@ -111,7 +111,7 @@ validate_strict_layout() {
   mapfile -t expected < <(sort_nodes "${PLACEMENT_NODES[@]}")
   mapfile -t actual < <(sort_nodes "${RULE_NODES[@]}")
   [[ "${expected[*]}" == "${actual[*]}" ]] ||
-    die "HA rule nodes (${RULE_NODES[*]}) differ from registry placement (${PLACEMENT_NODES[*]}); finish the placement change with guests/prod/change_prod_vm_placement.sh first"
+    die "HA rule nodes (${RULE_NODES[*]}) differ from registry placement (${PLACEMENT_NODES[*]}); finish the placement change with scripts/user_callable/guests/prod/change_prod_vm_placement.sh first"
   local -a want_targets=() have_targets=()
   for node in "${PLACEMENT_NODES[@]}"; do
     [[ "$node" == "$OWNER_NODE" ]] || want_targets+=("$node")
@@ -123,7 +123,7 @@ validate_strict_layout() {
   mapfile -t expected < <(sort_nodes "${want_targets[@]}")
   mapfile -t actual < <(sort_nodes "${have_targets[@]}")
   [[ "${expected[*]}" == "${actual[*]}" ]] ||
-    die "Replication targets (${have_targets[*]:-none}) differ from placement minus the owner (${want_targets[*]:-none}); repair them with guests/prod/change_prod_vm_placement.sh first"
+    die "Replication targets (${have_targets[*]:-none}) differ from placement minus the owner (${want_targets[*]:-none}); repair them with scripts/user_callable/guests/prod/change_prod_vm_placement.sh first"
   for node in "${PLACEMENT_NODES[@]}"; do
     list_contains "$node" "${ONLINE_NODES[@]}" ||
       die "Every placement host must be online; $node is offline"
@@ -173,7 +173,7 @@ choose_target() {
   done
   mapfile -t candidates < <(sort_nodes "${candidates[@]}")
   ((${#candidates[@]} > 0)) ||
-    die "$RESOURCE_NAME has no other placement host; add one with guests/prod/change_prod_vm_placement.sh"
+    die "$RESOURCE_NAME has no other placement host; add one with scripts/user_callable/guests/prod/change_prod_vm_placement.sh"
   printf '\n%s runs on %s. It can be relocated to:\n' "$RESOURCE_NAME" "$OWNER_NODE"
   local staging memory
   local -a options=()

@@ -10,7 +10,7 @@
 #
 # Graceful removal detaches the QDevice from the cluster, then removes
 # QDevice/Corosync software and persistent state from the QDevice host. Its
-# Tailscale enrollment is left as is, so qdevice/add_qdevice.sh can add the
+# Tailscale enrollment is left as is, so scripts/user_callable/qdevice/add_qdevice.sh can add the
 # same machine again.
 #
 # Forced removal is for a QDevice that this workstation cannot reach as root,
@@ -19,25 +19,25 @@
 # from Tailscale, and confirm that before the QDevice is removed from the
 # cluster and every Proxmox host forgets it.
 #
-# The cluster side uses lib/qdevice.sh, the same code that host setup, host
-# removal, and qdevice/add_qdevice.sh use, through the cluster control node
+# The cluster side uses scripts/lib/qdevice.sh, the same code that host setup, host
+# removal, and scripts/user_callable/qdevice/add_qdevice.sh use, through the cluster control node
 # and under the cluster control-plane lock.
 #
 # Usage:
 #   ./remove_qdevice.sh [qdevice-host]
 #
 # The QDevice host defaults, when prompted, to PROXMOX_QDEVICE_HOST in
-# env/cluster.conf.
+# config/cluster.conf.
 
 set -Eeuo pipefail
 set +x
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
-CONTROL_LIB="${REPO_ROOT}/lib/cluster_control.sh"
-MEMBERSHIP_LIB="${REPO_ROOT}/lib/host_membership.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
+CONTROL_LIB="${REPO_ROOT}/scripts/lib/cluster_control.sh"
+MEMBERSHIP_LIB="${REPO_ROOT}/scripts/lib/host_membership.sh"
 
 for library in "$CONFIG_LIB" "$CONTROL_LIB" "$MEMBERSHIP_LIB"; do
   [[ -f "$library" && ! -L "$library" ]] || {
@@ -45,11 +45,11 @@ for library in "$CONFIG_LIB" "$CONTROL_LIB" "$MEMBERSHIP_LIB"; do
     exit 1
   }
 done
-# shellcheck source=../lib/config.sh
+# shellcheck source=../../lib/config.sh
 source "$CONFIG_LIB"
-# shellcheck source=../lib/cluster_control.sh
+# shellcheck source=../../lib/cluster_control.sh
 source "$CONTROL_LIB"
-# shellcheck source=../lib/host_membership.sh
+# shellcheck source=../../lib/host_membership.sh
 source "$MEMBERSHIP_LIB"
 bmac_ui_bootstrap "$@"
 
@@ -130,7 +130,7 @@ and it is the machine the cluster registered:
     hard dependency on these; on a dedicated QDevice server that normally
     does not apply.
 
-  * Leave the QDevice host's Tailscale enrollment as is. qdevice/add_qdevice.sh
+  * Leave the QDevice host's Tailscale enrollment as is. scripts/user_callable/qdevice/add_qdevice.sh
     can add the same machine again; it reinstalls corosync-qnetd.
 
 "apt autoremove" is NOT run, and the systemd journal and other general logs
@@ -150,7 +150,7 @@ the same name):
 
 If the cluster has an even number of members, it has no tie-breaking vote
 afterward: losing any one member loses quorum until a QDevice is added again
-with qdevice/add_qdevice.sh.
+with scripts/user_callable/qdevice/add_qdevice.sh.
 
 To continue, type exactly, in all-caps: GO
 Anything else aborts without making changes.
@@ -218,10 +218,10 @@ load_cluster_shape() {
 print_even_count_warning() {
   ((NODE_COUNT % 2 == 0)) || return 0
   echo "- The ${NODE_COUNT}-member cluster now has no tie-breaking vote: losing any one"
-  echo "  member loses quorum. Add a QDevice promptly with qdevice/add_qdevice.sh."
+  echo "  member loses quorum. Add a QDevice promptly with scripts/user_callable/qdevice/add_qdevice.sh."
   bmac_ui_warning "The ${NODE_COUNT}-member cluster has no tie-breaking vote: losing any one member loses quorum."
   bmac_ui_next_step "Add a QDevice promptly; the cluster has no tie-breaking vote." \
-    --command "qdevice/add_qdevice.sh" --workflow add_qdevice
+    --command "scripts/user_callable/qdevice/add_qdevice.sh" --workflow add_qdevice
 }
 
 echo "Resolving the cluster control node..."
@@ -280,13 +280,13 @@ if [[ "$QD_REMOVAL" == forced ]]; then
   echo "- On this workstation, remove its old host key before preparing a replacement:"
   echo "      ssh-keygen -R $QDEVICE_HOST"
   print_even_count_warning
-  echo "- Check the cluster with diagnostics/show_qdevice_state.sh. To add a"
-  echo "  replacement, follow qdevice/QDEVICE_MANUAL_SETUP.md, then run qdevice/add_qdevice.sh."
+  echo "- Check the cluster with scripts/user_callable/diagnostics/show_qdevice_state.sh. To add a"
+  echo "  replacement, follow docs/QDEVICE_MANUAL_SETUP.md, then run scripts/user_callable/qdevice/add_qdevice.sh."
   bmac_ui_result removal forced qdevice_host "$QDEVICE_HOST"
   bmac_ui_next_step "Keep the old QDevice machine removed from Tailscale, and wipe it before it is ever reconnected to any network."
   bmac_ui_next_step "On this workstation, remove the old QDevice's host key before preparing a replacement." \
     --command "ssh-keygen -R $QDEVICE_HOST"
-  bmac_ui_next_step "Check the cluster's QDevice state." --command "diagnostics/show_qdevice_state.sh" \
+  bmac_ui_next_step "Check the cluster's QDevice state." --command "scripts/user_callable/diagnostics/show_qdevice_state.sh" \
     --workflow show_qdevice_state
   exit 0
 fi
@@ -501,7 +501,7 @@ echo "- Remaining /etc/corosync and known QDevice/Corosync runtime/state directo
 echo "- The coroqnetd system account/group is gone."
 echo "- apt autoremove was NOT run; generic/shared dependency packages were intentionally retained."
 echo "- General system journal/history was intentionally retained."
-echo "- $QDEVICE_HOST is still enrolled in Tailscale. qdevice/add_qdevice.sh can add it again."
+echo "- $QDEVICE_HOST is still enrolled in Tailscale. scripts/user_callable/qdevice/add_qdevice.sh can add it again."
 bmac_ui_result removal "${QD_REMOVAL:-detached}" qdevice_host "$QDEVICE_HOST"
 print_even_count_warning
 bmac_ui_next_step "$QDEVICE_HOST is still enrolled in Tailscale; the add QDevice workflow can add it again." \

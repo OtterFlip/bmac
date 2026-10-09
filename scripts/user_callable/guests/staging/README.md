@@ -10,10 +10,10 @@ a currently-running registered production VM. Run it from an administrator
 workstation:
 
 ```bash
-hosts/update_cluster_runtime.sh --dry-run
-hosts/update_cluster_runtime.sh
-guests/staging/add_staging_vm.sh --dry-run
-guests/staging/add_staging_vm.sh \
+scripts/user_callable/hosts/update_cluster_runtime.sh --dry-run
+scripts/user_callable/hosts/update_cluster_runtime.sh
+scripts/user_callable/guests/staging/add_staging_vm.sh --dry-run
+scripts/user_callable/guests/staging/add_staging_vm.sh \
   --sanitizer /absolute/path/to/local-staging-sanitizer.sh
 ```
 
@@ -189,7 +189,7 @@ verify the newly generated staging SSH host key before first use. When selected
 during request collection, the creator waits up to 180 seconds for QGA and the
 regenerated Ed25519 key, then installs and validates the strict workstation
 alias automatically. Other workstations, or a stale alias whose jump host left
-the cluster, use `guests/setup_jump_ssh_access.sh` instead.
+the cluster, use `scripts/user_callable/guests/setup_jump_ssh_access.sh` instead.
 
 ## Route and start behavior
 
@@ -209,8 +209,8 @@ Run the read-only plan first, or omit the resource name to list registered
 staging guests and select one interactively:
 
 ```bash
-guests/staging/remove_staging_vm.sh --dry-run
-guests/staging/remove_staging_vm.sh
+scripts/user_callable/guests/staging/remove_staging_vm.sh --dry-run
+scripts/user_callable/guests/staging/remove_staging_vm.sh
 ```
 
 Destruction requires every source production placement node online. It
@@ -248,18 +248,18 @@ staging environment.
 
 ```bash
 bash -n \
-  guests/staging/add_staging_vm.sh \
-  guests/staging/remove_staging_vm.sh \
-  guests/staging/patch_staging_clone.sh
+  scripts/user_callable/guests/staging/add_staging_vm.sh \
+  scripts/user_callable/guests/staging/remove_staging_vm.sh \
+  scripts/utilities/patch_staging_clone.sh
 
 dev/run_tests.py \
-  guests/staging/test_staging_vm.py \
-  guests/staging/test_remove_staging_vm.py \
-  lib/test_shared_libs.py
+  scripts/tests/test_staging_vm.py \
+  scripts/tests/test_remove_staging_vm.py \
+  scripts/tests/test_shared_libs.py
 ```
 
 `dev/run_tests.py` runs the tests in parallel; with no arguments it runs the
-whole suite. See [`MAIN_DESIGN.md`](../../MAIN_DESIGN.md#tests).
+whole suite. See [`MAIN_DESIGN.md`](../../../../docs/MAIN_DESIGN.md#tests).
 
 The tests exercise shell syntax, argv-safe remote execution, offline identity
 and sanitizer rendering, snapshot metadata/refcount invariants, rollback

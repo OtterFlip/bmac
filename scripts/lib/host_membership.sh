@@ -3,16 +3,16 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Workstation helpers shared by hosts/remove_proxmox_host.sh,
-# qdevice/add_qdevice.sh, qdevice/remove_qdevice.sh, and the diagnostics:
+# Workstation helpers shared by scripts/user_callable/hosts/remove_proxmox_host.sh,
+# scripts/user_callable/qdevice/add_qdevice.sh, scripts/user_callable/qdevice/remove_qdevice.sh, and the diagnostics:
 # logging and prompts, command execution on cluster members through one
 # coordinator, the cluster control-plane lock that host setup also takes,
-# Proxmox node deletion, and host-slot bookkeeping. It connects lib/qdevice.sh, which holds the QDevice
-# logic, to the cluster through the coordinator. Source after lib/config.sh,
-# load_proxmox_config, and lib/cluster_control.sh. Callers set HM_COORDINATOR
+# Proxmox node deletion, and host-slot bookkeeping. It connects scripts/lib/qdevice.sh, which holds the QDevice
+# logic, to the cluster through the coordinator. Source after scripts/lib/config.sh,
+# load_proxmox_config, and scripts/lib/cluster_control.sh. Callers set HM_COORDINATOR
 # to an online member that survives the change.
 
-# shellcheck source=./ui_protocol.sh
+# shellcheck source=ui_protocol.sh
 declare -F bmac_ui_is_json >/dev/null ||
   source "$(dirname -- "${BASH_SOURCE[0]}")/ui_protocol.sh"
 
@@ -148,7 +148,7 @@ hm_require_slot_registry() {
     die "Could not run the installed cluster registry on $HM_COORDINATOR"
   if ! grep -q -- 'host-references' <<<"$help_text" ||
     ! grep -q -- 'host-release' <<<"$help_text"; then
-    die "The installed cluster registry predates host slots; run hosts/update_cluster_runtime.sh first"
+    die "The installed cluster registry predates host slots; run scripts/user_callable/hosts/update_cluster_runtime.sh first"
   fi
 }
 
@@ -189,7 +189,7 @@ hm_cluster_status() {
   hm_exec "$HM_COORDINATOR" pvecm status
 }
 
-# lib/qdevice.sh reaches the cluster through HM_COORDINATOR.
+# scripts/lib/qdevice.sh reaches the cluster through HM_COORDINATOR.
 qd_coordinator() {
   printf '%s\n' "$HM_COORDINATOR"
 }
@@ -206,7 +206,7 @@ qd_exec_coordinator_tty() {
   local destination
   _mox_ssh_options "$HM_COORDINATOR" || return 1
   destination="$(_mox_ssh_destination "$HM_COORDINATOR")" || return 1
-  # shellcheck disable=SC2029 # The command string is assembled by lib/qdevice.sh.
+  # shellcheck disable=SC2029 # The command string is assembled by scripts/lib/qdevice.sh.
   ssh -tt "${MOX_SSH_OPTIONS[@]}" "${MOX_SSH_USER:-root}@${destination}" "$1"
 }
 
@@ -226,10 +226,10 @@ hm_verify_qdevice_access() {
 # Take the same control-plane lock host setup takes: a workstation flock plus
 # a lease on LOCK_HOST held by a coprocess until hm_release_control_plane_lock.
 hm_acquire_control_plane_lock() {
-  local lock_host="$1" lock_file="${REPO_ROOT}/hosts/artifacts/cluster-control-plane.lock"
+  local lock_host="$1" lock_file="${REPO_ROOT}/scripts/user_callable/hosts/artifacts/cluster-control-plane.lock"
   local remote_lock_command status="" destination
   hm_valid_node "$lock_host" || die "Invalid control-plane lock host: $lock_host"
-  install -d -m 0700 "${REPO_ROOT}/hosts/artifacts"
+  install -d -m 0700 "${REPO_ROOT}/scripts/user_callable/hosts/artifacts"
   exec {HM_LOCK_FILE_FD}>"$lock_file"
   chmod 0600 "$lock_file"
   info "Waiting for exclusive cluster membership changes..."
@@ -424,10 +424,10 @@ print(removed)
   info "Removed $node from cluster SSH authorized_keys and known_hosts"
 }
 
-# Rename hosts/artifacts/NODE so a future host in the slot starts fresh.
+# Rename scripts/user_callable/hosts/artifacts/NODE so a future host in the slot starts fresh.
 hm_archive_host_artifacts() {
   local node="$1" source destination
-  source="${REPO_ROOT}/hosts/artifacts/${node}"
+  source="${REPO_ROOT}/scripts/user_callable/hosts/artifacts/${node}"
   [[ -e "$source" ]] || return 0
   [[ -d "$source" && ! -L "$source" ]] ||
     die "Refusing to archive unexpected path $source"
@@ -472,12 +472,12 @@ hm_print_reinstall_follow_ups() {
   printf '  - Remove the %s device from the Tailscale admin console (Machines) so a\n' "$node"
   printf '    future host in this slot can register the same Tailscale hostname.\n'
   printf '  - On this workstation: ssh-keygen -R %s\n' "$node"
-  printf '  - Remove or update env/%s.conf. A future host may reuse the %s slot;\n' "$node" "$node"
-  printf '    hosts/add_proxmox_host.sh recommends the lowest free slot.\n'
+  printf '  - Remove or update config/%s.conf. A future host may reuse the %s slot;\n' "$node" "$node"
+  printf '    scripts/user_callable/hosts/add_proxmox_host.sh recommends the lowest free slot.\n'
   printf '  - In Cloudflare Load Balancing, remove the %s pool and monitor from every\n' "$node"
   printf '    load balancer if you have not already done so.\n'
   bmac_ui_next_step "Remove the $node device from the Tailscale admin console (Machines) so a future host in this slot can register the same Tailscale hostname."
   bmac_ui_next_step "On this workstation, forget $node's SSH host key." --command "ssh-keygen -R $node"
-  bmac_ui_next_step "Remove or update env/$node.conf. A future host may reuse the $node slot; host setup recommends the lowest free slot."
+  bmac_ui_next_step "Remove or update config/$node.conf. A future host may reuse the $node slot; host setup recommends the lowest free slot."
   bmac_ui_next_step "In Cloudflare Load Balancing, remove the $node pool and monitor from every load balancer if you have not already done so."
 }

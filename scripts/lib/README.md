@@ -11,9 +11,9 @@ SPDX-License-Identifier: GPL-3.0-only
 parses literal `KEY=VALUE` assignments without `source` or `eval`, in this
 order:
 
-1. `env/cluster.conf`
-2. the selected `env/moxN.conf`, when requested
-3. optional Git-ignored `env/secrets.env`
+1. `config/cluster.conf`
+2. the selected `config/moxN.conf`, when requested
+3. optional Git-ignored `config/secrets.env`
 
 It rejects unknown, misplaced, and duplicate keys; symlinks in any path
 component; world-writable non-secret files; and any `secrets.env` mode other
@@ -23,10 +23,10 @@ are common. Secret values are never included in validation output or the
 effective-configuration hash.
 
 ```bash
-lib/config.sh --help
-lib/config.sh --check --host mox1 --require-secrets
+scripts/lib/config.sh --help
+scripts/lib/config.sh --check --host mox1 --require-secrets
 
-source lib/config.sh
+source scripts/lib/config.sh
 load_proxmox_config --host mox1 --require-secrets
 ```
 
@@ -58,16 +58,16 @@ supplied by the caller after checking the Proxmox API; the registry reserves
 them and rejects duplicates and the HAProxy range.
 
 ```bash
-sudo lib/cluster_registry.py init
-sudo lib/cluster_registry.py list
-sudo lib/cluster_registry.py allocate-prod --help
-sudo lib/cluster_registry.py allocate-staging --help
-sudo lib/cluster_registry.py update --help
-sudo lib/cluster_registry.py list-routes
+sudo scripts/host_runtime/cluster_registry.py init
+sudo scripts/host_runtime/cluster_registry.py list
+sudo scripts/host_runtime/cluster_registry.py allocate-prod --help
+sudo scripts/host_runtime/cluster_registry.py allocate-staging --help
+sudo scripts/host_runtime/cluster_registry.py update --help
+sudo scripts/host_runtime/cluster_registry.py list-routes
 ```
 
 `update PRODN --disk-bytes N` records the exact root disk size after
-`guests/prod/extend_prod_vm_disk.sh` grows a production zvol. It accepts only
+`scripts/user_callable/guests/prod/extend_prod_vm_disk.sh` grows a production zvol. It accepts only
 whole-MiB values larger than the current size, and stores them in the optional
 `spec.disk_bytes`. `spec.disk_gib` keeps the creation-time size.
 
@@ -148,15 +148,15 @@ the proxmox-boot-tool ESPs, device-removal progress, disks outside `rpool`
 (and those holding a registered ESP, a boot-disk replacement not yet in the
 pool), vdevs resilvering a replacement, and per-zvol allocation and snapshot
 usage. `render` prints that layout on
-the workstation. `diagnostics/show_proxmox_host_state.sh` uses both.
+the workstation. `scripts/user_callable/diagnostics/show_proxmox_host_state.sh` uses both.
 
 ## `rpool_mirror.sh`
 
 The root-only host tool behind every rpool mirror change, installed per run
-as `/usr/local/sbin/app-ha-rpool-mirror` by `hosts/add_proxmox_host.sh` and
+as `/usr/local/sbin/app-ha-rpool-mirror` by `scripts/user_callable/hosts/add_proxmox_host.sh` and
 the disk workflows. Subcommands select disks by serial and re-prove identity
-before acting: `check-new`, `luks-prepare` (console; key file during setup,
-hidden prompt afterwards; proven against every existing LUKS member),
+before acting: `check-new`, `luks-prepare` (key file over SSH during setup,
+hidden prompt at the console afterwards; proven against every existing LUKS member),
 `luks-check-prepared`, `luks-backup-headers`, `luks-add` (crypttab in the
 host's existing form, initramfs rebuilt and unpacked to prove boot unlock,
 then `zpool add` with the pool's one ashift), `clear-add`, and `retire-luks`.
@@ -166,7 +166,7 @@ hold a survivor's partitions, and `release-disks` erases only the metadata of
 retired disks. One member at a time (A or B on a boot disk's partition 3, N-M
 on partition 1 of an extra mirror's disk): `luks-prepare-member`, `luks-check-member`,
 `luks-backup-headers --member`, and `luks-register`, which setup's boot-mirror
-LUKS conversion and `hosts/add_replacement_disk.sh` share; plus
+LUKS conversion and `scripts/user_callable/hosts/add_replacement_disk.sh` share; plus
 `copy-partitions` (copy the survivor's partition table onto a disk that can
 hold it), `boot-esp` (format,
 register, and sync the new ESP), and `replace-member` (`zpool replace` or
@@ -174,7 +174,7 @@ register, and sync the new ESP), and `replace-member` (`zpool replace` or
 
 ## `simulated_disk_failure.sh`
 
-Host side of the `hosts/simulate_disk_failure_and_replacement.sh` test aid,
+Host side of the `scripts/user_callable/hosts/simulate_disk_failure_and_replacement.sh` test aid,
 piped to a host as `bash -s -- COMMAND MARKER`. `offline` proves that the pool
 is healthy and the chosen disk holds exactly one member of a two-way mirror
 whose other member is `ONLINE`. It records the simulation in MARKER, then
@@ -200,13 +200,13 @@ mirror-member replacement, so a rerun can tell it from a failed disk.
 workflows: target-host prompting, strict SSH, shared live disk inventory,
 per-run tool installation with a hash check, host-side Python, and long-step
 prompts. Post-setup workflows use the host as their storage source of truth
-and do not read or update `env/moxN.conf`.
+and do not read or update `config/moxN.conf`.
 
 ## `cluster_control.sh`
 
 Workstation library for the control node. `resolve_control_node
 [--allow-offline]` reads the registry's control node through a reachable
-member. It stops when `PROXMOX_CONTROL_NODE` in `env/cluster.conf`
+member. It stops when `PROXMOX_CONTROL_NODE` in `config/cluster.conf`
 disagrees, and prompts when the setting is missing. Before a cluster exists,
 the configured or entered node is the one that creates it.
 `control_offer_cluster_conf_update moxN` offers to rewrite the
@@ -215,21 +215,21 @@ workstation must then make the same change.
 
 ## `host_membership.sh`
 
-Workstation library shared by `hosts/remove_proxmox_host.sh`,
-`qdevice/add_qdevice.sh`, `qdevice/remove_qdevice.sh`, and the diagnostics:
+Workstation library shared by `scripts/user_callable/hosts/remove_proxmox_host.sh`,
+`scripts/user_callable/qdevice/add_qdevice.sh`, `scripts/user_callable/qdevice/remove_qdevice.sh`, and the diagnostics:
 
 - QDevice access check, add, remove, and vote-parity verification;
 - the control-plane lock that host setup also takes;
 - `pvecm delnode` with a wait for the node to leave;
 - removal of the node directory and of the host's cluster-wide SSH trust;
-- archiving of `hosts/artifacts/moxN`;
+- archiving of `scripts/user_callable/hosts/artifacts/moxN`;
 - choice of a new control node;
 - the reinstall follow-up list.
 
 ## `prod_ha.sh`
 
-Workstation library shared by `guests/prod/change_prod_vm_placement.sh` and
-`guests/prod/change_prod_vm_owner.sh`:
+Workstation library shared by `scripts/user_callable/guests/prod/change_prod_vm_placement.sh` and
+`scripts/user_callable/guests/prod/change_prod_vm_owner.sh`:
 
 - production VM selection;
 - loading and validating live HA, rule, and replication state;
@@ -243,7 +243,7 @@ Workstation library shared by `guests/prod/change_prod_vm_placement.sh` and
 ## `ui_protocol.sh`
 
 Every operator script supports `--json`, which makes it speak the bmac-ui v1
-NDJSON protocol ([`protocol/bmac-ui-v1.schema.json`](../protocol/bmac-ui-v1.schema.json))
+NDJSON protocol ([`dashboard/protocol/bmac-ui-v1.schema.json`](../../dashboard/protocol/bmac-ui-v1.schema.json))
 instead of drawing a terminal UI. The BMAC dashboard uses it; anything else
 may too. Without `--json` nothing changes: every helper below is silent and
 scripts keep their own terminal prompts.
@@ -299,7 +299,7 @@ Python half, and also lets Python helpers emit events (`emit_event`,
 
 ## `quick_state.sh` and `quick_state.py`
 
-The engine behind `diagnostics/list_hosts.sh`, `list_guests.sh`,
+The engine behind `scripts/user_callable/diagnostics/list_hosts.sh`, `list_guests.sh`,
 `list_replication.sh`, and `list_storage.sh`: fast, read-only state for one
 area, read through one reachable member over a single SSH connection. The
 collector (`quick_state.py collect KIND`) runs on that host and uses only
@@ -309,14 +309,14 @@ as one `result` event plus next steps.
 
 ## `disk_inventory.py`
 
-The workstation half of `diagnostics/list_disks.sh`. That script runs
+The workstation half of `scripts/user_callable/diagnostics/list_disks.sh`. That script runs
 `host_storage.py collect` and `storage_state.py show` on every online host in
 parallel. `disk_inventory.py render` then turns the results into every pool
 vdev (state, LUKS, member serials and sizes) and every disk outside a pool,
 with a status: available, awaiting finalization, evacuating, part of an
 interrupted replacement or new mirror, or in use. `disk_inventory.py
 pending-removals` is the classification of requested vdev removals that
-`hosts/inventory_disks.sh` acts on, so both scripts agree on which disks
+`scripts/user_callable/hosts/inventory_disks.sh` acts on, so both scripts agree on which disks
 await finalization.
 
 ## Tests
@@ -324,15 +324,17 @@ await finalization.
 From the repository root, every library test, in parallel:
 
 ```bash
-dev/run_tests.py lib/test_*.py
+dev/run_tests.py scripts/tests/test_{disk_inventory,haproxy_routes,host_storage}.py \
+  scripts/tests/test_{process_deferred_cleanup,quick_state,report_stale_jump_ssh}.py \
+  scripts/tests/test_{rpool_mirror,shared_libs,storage_state,ui_json_forms,ui_protocol}.py
 ```
 
 The JSON-mode library, forms, and quick-state tests alone:
 
 ```bash
-dev/run_tests.py lib/test_ui_protocol.py lib/test_ui_json_forms.py lib/test_quick_state.py \
-  lib/test_disk_inventory.py
+dev/run_tests.py scripts/tests/test_ui_protocol.py scripts/tests/test_ui_json_forms.py scripts/tests/test_quick_state.py \
+  scripts/tests/test_disk_inventory.py
 ```
 
 With no arguments `dev/run_tests.py` runs the whole suite. See
-[`MAIN_DESIGN.md`](../MAIN_DESIGN.md#tests).
+[`MAIN_DESIGN.md`](../../docs/MAIN_DESIGN.md#tests).

@@ -7,7 +7,7 @@
 # bmac_ui_bootstrap when they are called with --json; it is not normally run
 # by hand:
 #
-#   lib/ui_json_run.sh /abs/path/to/script.sh [SCRIPT ARGS...]
+#   scripts/utilities/ui_json_run.sh /abs/path/to/script.sh [SCRIPT ARGS...]
 #
 # stdout carries only NDJSON: a `protocol` event, `workflow_started`, every
 # line the script prints (as `log` events, or the script's own protocol
@@ -20,8 +20,8 @@
 set -u
 set -o pipefail
 
-RUNNER_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-# shellcheck source=ui_protocol.sh
+RUNNER_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../lib" && pwd -P)"
+# shellcheck source=../lib/ui_protocol.sh
 source "${RUNNER_LIB_DIR}/ui_protocol.sh"
 
 (($# >= 1)) || {
@@ -49,7 +49,7 @@ command -v python3 >/dev/null 2>&1 || {
 }
 
 WORKFLOW="$(basename -- "$SCRIPT" .sh)"
-REPO_ROOT="$(cd -- "${RUNNER_LIB_DIR}/.." && pwd -P)"
+REPO_ROOT="$(cd -- "${RUNNER_LIB_DIR}/../.." && pwd -P)"
 SCRIPT_REL="${SCRIPT#"${REPO_ROOT}/"}"
 RUN_ID="${BMAC_UI_RUN_ID:-}"
 [[ "$RUN_ID" =~ ^[A-Za-z0-9_.:-]{1,80}$ ]] ||

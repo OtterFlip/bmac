@@ -17,9 +17,8 @@ import tempfile
 import unittest
 
 
-DIAGNOSTICS_DIR = Path(__file__).resolve().parent
-SCRIPT = DIAGNOSTICS_DIR / "show_cluster_health.sh"
-sys.path.insert(0, str(DIAGNOSTICS_DIR.parent / "lib"))
+SCRIPT = Path(__file__).resolve().parent.parent / "user_callable" / "diagnostics" / "show_cluster_health.sh"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ui_test_driver import run_json, scripted  # noqa: E402
 
 # The workstation's ssh. It answers the cluster discovery and QDevice
@@ -230,15 +229,15 @@ class ShowClusterHealthTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
-        env_dir, bin_dir, remote_bin = root / "env", root / "bin", root / "remote-bin"
-        for path in (env_dir, bin_dir, remote_bin):
+        config_dir, bin_dir, remote_bin = root / "config", root / "bin", root / "remote-bin"
+        for path in (config_dir, bin_dir, remote_bin):
             path.mkdir()
         self.calls = root / "ssh-calls.jsonl"
         self.scenario_path = root / "scenario.json"
         known_hosts = root / "known_hosts"
         known_hosts.write_text("", encoding="utf-8")
         known_hosts.chmod(0o600)
-        (env_dir / "cluster.conf").write_text(
+        (config_dir / "cluster.conf").write_text(
             "\n".join(
                 (
                     "PROXMOX_CLUSTER_NAME=MyAppCloud",
@@ -289,7 +288,7 @@ class ShowClusterHealthTest(unittest.TestCase):
         self.environment.update(
             {
                 "APP_HA_CONFIG_TEST_MODE": "1",
-                "APP_HA_ENV_DIR": str(env_dir),
+                "APP_HA_CONFIG_DIR": str(config_dir),
                 "PROXMOX_SSH_KNOWN_HOSTS_FILE": str(known_hosts),
                 "FAKE_SCENARIO": str(self.scenario_path),
                 "FAKE_SSH_CALLS": str(self.calls),
@@ -366,7 +365,7 @@ class ShowClusterHealthTest(unittest.TestCase):
             output,
         )
         self.assertIn("ATTENTION: 1 problem found:", output)
-        self.assertIn("hosts/add_new_disk_vdev.sh --host mox2", output)
+        self.assertIn("scripts/user_callable/hosts/add_new_disk_vdev.sh --host mox2", output)
         self.assertNotIn("show_proxmox_host_state.sh --host mox2", output)
 
     def test_unreadable_rpool_space_is_a_problem(self) -> None:

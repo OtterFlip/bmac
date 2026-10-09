@@ -2,7 +2,7 @@
 # Mock workflow that runs until interrupted, with a phase that must not be
 # interrupted, and cleans up on SIGINT.
 set -euo pipefail
-source "$(cd -- "$(dirname -- "$0")/.." && pwd -P)/lib/ui_protocol.sh"
+source "$(cd -- "$(dirname -- "$0")/.." && pwd -P)/scripts/lib/ui_protocol.sh"
 bmac_ui_bootstrap "$@"
 
 cleanup() {

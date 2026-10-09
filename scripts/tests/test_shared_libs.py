@@ -29,10 +29,11 @@ import uuid
 # paths. A no-op where the temp directory is already a real path.
 tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
 
-LIB_DIR = Path(__file__).resolve().parent
-REGISTRY = LIB_DIR / "cluster_registry.py"
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+LIB_DIR = SCRIPTS_DIR / "lib"
+REGISTRY = SCRIPTS_DIR / "host_runtime" / "cluster_registry.py"
 CONFIG = LIB_DIR / "config.sh"
-MOX1_CONFIG = LIB_DIR.parent / "env" / "mox1.conf"
+MOX1_CONFIG = SCRIPTS_DIR.parent / "config" / "mox1.conf"
 
 
 def checked_in_config_value(path: Path, key: str) -> str:
@@ -1887,11 +1888,11 @@ print(json.dumps([
 class ConfigLoaderTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.env_dir = Path(self.temporary.name) / "env"
-        self.env_dir.mkdir()
-        self.cluster = self.env_dir / "cluster.conf"
-        self.mox = self.env_dir / "mox10.conf"
-        self.secrets = self.env_dir / "secrets.env"
+        self.config_dir = Path(self.temporary.name) / "config"
+        self.config_dir.mkdir()
+        self.cluster = self.config_dir / "cluster.conf"
+        self.mox = self.config_dir / "mox10.conf"
+        self.secrets = self.config_dir / "secrets.env"
         self.cluster.write_text(
             "\n".join(
                 [
@@ -1960,7 +1961,7 @@ class ConfigLoaderTest(unittest.TestCase):
         environment.update(
             {
                 "APP_HA_CONFIG_TEST_MODE": "1",
-                "APP_HA_ENV_DIR": str(self.env_dir),
+                "APP_HA_CONFIG_DIR": str(self.config_dir),
             }
         )
         environment.update(environment_updates or {})
@@ -2060,7 +2061,7 @@ class ConfigLoaderTest(unittest.TestCase):
         environment.update(
             {
                 "APP_HA_CONFIG_TEST_MODE": "1",
-                "APP_HA_ENV_DIR": str(self.env_dir),
+                "APP_HA_CONFIG_DIR": str(self.config_dir),
             }
         )
         completed = subprocess.run(
@@ -2149,7 +2150,7 @@ done
         environment.update(
             {
                 "APP_HA_CONFIG_TEST_MODE": "1",
-                "APP_HA_ENV_DIR": str(self.env_dir),
+                "APP_HA_CONFIG_DIR": str(self.config_dir),
                 "IDRAC_PASSWORD": "inherited-secret",
             }
         )
@@ -2326,7 +2327,7 @@ bash -c '[[ -z "${PROMPTED_SECRET+x}" && -z "${TAILSCALE_AUTH_KEY+x}" ]]'
         environment.update(
             {
                 "APP_HA_CONFIG_TEST_MODE": "1",
-                "APP_HA_ENV_DIR": str(self.env_dir),
+                "APP_HA_CONFIG_DIR": str(self.config_dir),
             }
         )
         completed = subprocess.run(

@@ -6,8 +6,8 @@
 # Standalone and read-only. Copy this single file to a Linux Live environment
 # booted on a machine that will become a Proxmox host, and run it there. It
 # lists every NVMe drive's serial number and exact byte capacity and every
-# physical Ethernet NIC's MAC address: the values env/moxN.conf needs before
-# hosts/add_proxmox_host.sh runs. It depends on nothing else in this repo.
+# physical Ethernet NIC's MAC address: the values config/moxN.conf needs before
+# scripts/user_callable/hosts/add_proxmox_host.sh runs. It depends on nothing else in this repo.
 
 set -Eeuo pipefail
 
@@ -15,7 +15,7 @@ SYS="${CLUSTER_SETUP_PREREQ_SYS:-/sys}"
 
 describe() {
   cat <<'EOF'
-CLUSTER SETUP PREREQUISITES: DRIVE AND NIC VALUES FOR env/moxN.conf
+CLUSTER SETUP PREREQUISITES: DRIVE AND NIC VALUES FOR config/moxN.conf
 
 Run this in a Linux Live environment booted on a machine you intend to set up
 as a Proxmox host (repeat on each such machine). It only reads hardware
@@ -25,8 +25,8 @@ It lists:
   - every NVMe drive's serial number and exact byte capacity
   - every physical Ethernet NIC's MAC address and link state
 
-Copy these values into that host's env/moxN.conf on your administrator
-workstation before running hosts/add_proxmox_host.sh:
+Copy these values into that host's config/moxN.conf on your administrator
+workstation before running scripts/user_callable/hosts/add_proxmox_host.sh:
   - For each rpool mirror (mirror 0 is mandatory and becomes the boot mirror),
     pick two NVMe drives whose capacities differ by at most 1% and set
     NVME_MIRROR_<P>_SERIAL_<M> and NVME_MIRROR_<P>_CAPACITY_BYTES_<M>.
@@ -37,7 +37,7 @@ workstation before running hosts/add_proxmox_host.sh:
 
 iDRAC ALTERNATIVE: if you will run setup with iDRAC/Redfish, you do not need
 this script or a Live environment. You must still set the drive serial numbers
-and NIC MAC addresses in env/moxN.conf, and you can read both in the iDRAC
+and NIC MAC addresses in config/moxN.conf, and you can read both in the iDRAC
 admin web UI. The CAPACITY_BYTES values are not needed in that case; setup
 reads the capacities through Redfish.  In the iDRAC admin web UI the NIC
 MAC address values you should look for are under the port tab with the

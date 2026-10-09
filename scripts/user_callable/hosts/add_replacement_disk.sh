@@ -13,8 +13,8 @@
 # replacement also gets its own registered ESP, so either disk can boot the
 # host. On an encrypted host the new member gets the
 # shared rpool LUKS passphrase, which the operator types at the host console.
-# The disk, LUKS, ESP, and zpool logic is lib/rpool_mirror.sh, the same code
-# hosts/add_proxmox_host.sh uses.
+# The disk, LUKS, ESP, and zpool logic is scripts/host_runtime/rpool_mirror.sh, the same code
+# scripts/user_callable/hosts/add_proxmox_host.sh uses.
 
 set -Eeuo pipefail
 set +x
@@ -22,13 +22,13 @@ umask 077
 
 DW_SCRIPT_NAME=add_replacement_disk.sh
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-# shellcheck source=../lib/disk_workflows.sh
-source "${SCRIPT_DIR}/../lib/disk_workflows.sh"
+# shellcheck source=../../lib/disk_workflows.sh
+source "${SCRIPT_DIR}/../../lib/disk_workflows.sh"
 bmac_ui_bootstrap "$@"
 
 usage() {
   cat <<'EOF'
-Usage: hosts/add_replacement_disk.sh [--host moxN]
+Usage: scripts/user_callable/hosts/add_replacement_disk.sh [--host moxN]
 
 Replaces the pulled member of one rpool mirror on the chosen host:
 
@@ -78,10 +78,10 @@ dw_section "Current rpool on $DW_HOST"
 dw_render_layout "$LAYOUT"
 
 [[ "$(dw_json "$LAYOUT" 'd["pool"]["removal_in_progress"]')" != true ]] ||
-  dw_die "a vdev removal is in progress on $DW_HOST, and ZFS does not change mirror members until it finishes. Check it with hosts/inventory_disks.sh --host $DW_HOST; to restore redundancy sooner, cancel it on the host with: zpool remove -s rpool"
+  dw_die "a vdev removal is in progress on $DW_HOST, and ZFS does not change mirror members until it finishes. Check it with scripts/user_callable/hosts/inventory_disks.sh --host $DW_HOST; to restore redundancy sooner, cancel it on the host with: zpool remove -s rpool"
 
 # The host records the disk chosen for a replacement until it joins the
-# mirror (lib/storage_state.py).
+# mirror (scripts/utilities/storage_state.py).
 STATE="${DW_RUN_DIR}/state.json"
 dw_state show >"$STATE" || dw_die "could not read the storage records on $DW_HOST"
 
@@ -468,7 +468,7 @@ dw_render_layout "$LAYOUT"
 dw_section "Resilver underway"
 printf 'ZFS is resilvering %s onto disk %s in the background; this script does not wait for it.\n' \
   "$VDEV" "$NEW_SERIAL"
-printf 'Follow it with diagnostics/show_proxmox_host_state.sh %s (or zpool status rpool on the host).\n' \
+printf 'Follow it with scripts/user_callable/diagnostics/show_proxmox_host_state.sh %s (or zpool status rpool on the host).\n' \
   "$DW_HOST"
 if [[ "$ROLE" == boot ]]; then
   printf 'Both boot-mirror disks hold a registered ESP with the same boot loader, kernels,\n'
@@ -477,7 +477,7 @@ fi
 bmac_ui_result host "$DW_HOST" vdev "$VDEV" serial "$NEW_SERIAL" capacity "$NEW_SIZE" \
   "header_backup?" "$LOCAL_HEADER"
 bmac_ui_next_step "Follow the resilver of $VDEV until it finishes." \
-  --command "diagnostics/show_proxmox_host_state.sh $DW_HOST" \
+  --command "scripts/user_callable/diagnostics/show_proxmox_host_state.sh $DW_HOST" \
   --workflow show_proxmox_host_state --arg "host=$DW_HOST"
 bmac_ui_next_step "Once the resilver finishes, test a reboot of $DW_HOST by hand: migrate every production guest off it, then reboot it gracefully$([[ "$ENCRYPTED" == true ]] && printf ' and enter the shared passphrase once at its console')."
 printf '\nOnce the resilver finishes, test a reboot of %s by hand: first gracefully\n' "$DW_HOST"

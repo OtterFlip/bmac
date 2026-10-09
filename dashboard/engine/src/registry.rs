@@ -73,7 +73,7 @@ pub struct Param {
 #[serde(rename_all = "snake_case")]
 pub enum ParamSuggest {
     /// Host slots that are not cluster members, preferring those with an
-    /// `env/<host>.conf`.
+    /// `config/<host>.conf`.
     FreeHostSlots,
 }
 

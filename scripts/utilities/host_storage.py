@@ -785,7 +785,7 @@ def attention_items(
         items.append(
             f"disk {disk['disk']} ({disk['serial'] or 'no serial'}) holds a registered "
             "ESP but is not an rpool member; finish its replacement with "
-            "hosts/add_replacement_disk.sh"
+            "scripts/user_callable/hosts/add_replacement_disk.sh"
         )
     if configured:
         live = {

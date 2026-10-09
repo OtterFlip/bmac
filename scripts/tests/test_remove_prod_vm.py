@@ -6,7 +6,7 @@ import subprocess
 import unittest
 
 
-SCRIPT = Path(__file__).with_name("remove_prod_vm.sh")
+SCRIPT = Path(__file__).resolve().parent.parent / "user_callable" / "guests" / "prod" / "remove_prod_vm.sh"
 
 
 class RemoveProductionVmTest(unittest.TestCase):

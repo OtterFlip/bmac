@@ -3,16 +3,16 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Workstation helpers shared by guests/prod/change_prod_vm_placement.sh and
-# guests/prod/change_prod_vm_owner.sh: cluster discovery through one
+# Workstation helpers shared by scripts/user_callable/guests/prod/change_prod_vm_placement.sh and
+# scripts/user_callable/guests/prod/change_prod_vm_owner.sh: cluster discovery through one
 # coordinator, production selection, live HA/replication inspection, stale
 # registry-owner repair, the production orchestration lease, and replication
-# health waits. Callers define REPO_ROOT and source lib/config.sh first.
+# health waits. Callers define REPO_ROOT and source scripts/lib/config.sh first.
 
 # Callers read and set many of these globals.
 # shellcheck disable=SC2034
 
-# shellcheck source=./ui_protocol.sh
+# shellcheck source=ui_protocol.sh
 declare -F bmac_ui_is_json >/dev/null ||
   source "$(dirname -- "${BASH_SOURCE[0]}")/ui_protocol.sh"
 
@@ -433,7 +433,7 @@ PY
 
 prod_refuse_staging_dependents() {
   ((${#STAGING_DEPENDENTS[@]} == 0)) && return 0
-  die "$RESOURCE_NAME has staging VMs derived from it (${STAGING_DEPENDENTS[*]}); destroy them with guests/staging/remove_staging_vm.sh first"
+  die "$RESOURCE_NAME has staging VMs derived from it (${STAGING_DEPENDENTS[*]}); destroy them with scripts/user_callable/guests/staging/remove_staging_vm.sh first"
 }
 
 # Read live HA and replication state for the selected VM into OWNER_NODE,

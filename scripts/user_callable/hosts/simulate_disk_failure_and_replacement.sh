@@ -3,12 +3,12 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Test aid for hosts/add_replacement_disk.sh. The data center cannot swap a
+# Test aid for scripts/user_callable/hosts/add_replacement_disk.sh. The data center cannot swap a
 # disk on request, so this script makes one member of a healthy two-way rpool
 # mirror look like a disk that was pulled and replaced with a blank one: it
 # takes the member offline (closing its LUKS mapping on an encrypted host),
 # then erases the disk so it shows as a blank, unused disk. The host-side
-# logic is lib/simulated_disk_failure.sh, piped to the host per run.
+# logic is scripts/utilities/simulated_disk_failure.sh, piped to the host per run.
 
 set -Eeuo pipefail
 set +x
@@ -16,18 +16,18 @@ umask 077
 
 DW_SCRIPT_NAME=simulate_disk_failure_and_replacement.sh
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-# shellcheck source=../lib/disk_workflows.sh
-source "${SCRIPT_DIR}/../lib/disk_workflows.sh"
+# shellcheck source=../../lib/disk_workflows.sh
+source "${SCRIPT_DIR}/../../lib/disk_workflows.sh"
 bmac_ui_bootstrap "$@"
-SIMULATOR="${DW_LIB_DIR}/simulated_disk_failure.sh"
+SIMULATOR="${DW_UTILITIES_DIR}/simulated_disk_failure.sh"
 
 usage() {
   cat <<'EOF'
-Usage: hosts/simulate_disk_failure_and_replacement.sh [--host moxN]
+Usage: scripts/user_callable/hosts/simulate_disk_failure_and_replacement.sh [--host moxN]
 
 TEST AID; DESTROYS THE DATA ON ONE DISK. Simulates a failed rpool mirror
 member whose disk the data center replaced with a blank one, so that
-hosts/add_replacement_disk.sh can be tested without a physical disk swap:
+scripts/user_callable/hosts/add_replacement_disk.sh can be tested without a physical disk swap:
 
   1. lists the healthy two-way mirrors and lets you pick one, then one of its
      two members;
@@ -36,7 +36,7 @@ hosts/add_replacement_disk.sh can be tested without a physical disk swap:
   3. after a second confirmation, erases the disk: LUKS key slots, ZFS
      labels, signatures, and partition table, then discards every block, so
      the disk shows as blank and unused (irreversible);
-  4. shows the inventory hosts/add_replacement_disk.sh will work from.
+  4. shows the inventory scripts/user_callable/hosts/add_replacement_disk.sh will work from.
 
 Works with and without LUKS. The pool must be healthy, and the mirror has no
 redundancy from step 2 until the replacement finishes resilvering. A rerun
@@ -69,7 +69,7 @@ dw_init
 
 dw_section "Simulate a disk failure and replacement"
 cat <<'EOF'
-This is a test aid for hosts/add_replacement_disk.sh. It makes one member of a
+This is a test aid for scripts/user_callable/hosts/add_replacement_disk.sh. It makes one member of a
 healthy rpool mirror look like a disk that failed, was pulled, and was replaced
 by the data center with a blank disk:
 
@@ -79,7 +79,7 @@ by the data center with a blank disk:
     a discard of every block). Everything on it is destroyed for good.
 
 The mirror has NO REDUNDANCY from the moment the member goes offline until
-hosts/add_replacement_disk.sh has resilvered the disk back in. Make sure your
+scripts/user_callable/hosts/add_replacement_disk.sh has resilvered the disk back in. Make sure your
 backups are current, and do not run this on a host whose data you cannot lose.
 EOF
 printf '\n'
@@ -164,7 +164,7 @@ print_next_steps() {
   printf 'member with no disk, and disk %s as blank, unused, and eligible for safe\n' "$serial"
   printf 'physical removal.\n\n'
   printf 'Run the replacement script and choose %s and disk %s:\n' "$vdev" "$serial"
-  printf '  ./hosts/add_replacement_disk.sh --host %s\n\n' "$DW_HOST"
+  printf '  ./scripts/user_callable/hosts/add_replacement_disk.sh --host %s\n\n' "$DW_HOST"
   printf 'Do not reboot %s until add_replacement_disk.sh has finished:\n' "$DW_HOST"
   if [[ "$mapper" != - ]]; then
     printf '  - /etc/crypttab and the initramfs still list the erased LUKS UUID of %s,\n' "$mapper"
@@ -177,7 +177,7 @@ print_next_steps() {
   fi
   printf '  - %s has no redundancy until the replacement finishes resilvering.\n' "$vdev"
   bmac_ui_next_step "Add a replacement: choose $vdev and disk $serial." \
-    --command "./hosts/add_replacement_disk.sh --host $DW_HOST" \
+    --command "./scripts/user_callable/hosts/add_replacement_disk.sh --host $DW_HOST" \
     --workflow add_replacement_disk --arg "host=$DW_HOST"
   bmac_ui_next_step "Do not reboot $DW_HOST until the replacement has finished; $vdev has no redundancy until it finishes resilvering."
 }

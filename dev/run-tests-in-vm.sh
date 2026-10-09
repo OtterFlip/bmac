@@ -5,11 +5,11 @@
 
 # Run bash -n and the complete unittest suite, in parallel through
 # dev/run_tests.py, inside a local Lima VM built from dev/lima-bmac.yaml. The
-# VM is created and started on first use. See DEVELOPMENT.md.
+# VM is created and started on first use. See dev/README.md.
 #
-#   dev/run-tests-in-vm.sh                            everything
-#   dev/run-tests-in-vm.sh -v -k reservation          extra dev/run_tests.py args
-#   dev/run-tests-in-vm.sh lib.test_haproxy_routes    specific targets
+#   dev/run-tests-in-vm.sh                                     everything
+#   dev/run-tests-in-vm.sh -v -k reservation                   extra dev/run_tests.py args
+#   dev/run-tests-in-vm.sh scripts.tests.test_haproxy_routes   specific targets
 #
 # BMAC_LIMA_INSTANCE overrides the instance name (default: bmac).
 

@@ -24,7 +24,7 @@ interactive, fail closed, and resume only after comparing durable state with
 live hardware, Proxmox, ZFS, quorum, and registry state. A recorded phase is
 never sufficient evidence by itself.
 
-Executable scripts and the files under [`env/`](env/) win if prose ever
+Executable scripts and the files under [`config/`](../config/) win if prose ever
 conflicts. The checked-in files are a FiberState example, not portable
 defaults. In that example:
 
@@ -35,10 +35,10 @@ defaults. In that example:
   the cluster registry; slots may have gaps and freed slots are reused
   lowest first;
 - hosts can be removed gracefully, or forcefully after a permanent failure
-  (`hosts/remove_proxmox_host.sh`), and production
+  (`scripts/user_callable/hosts/remove_proxmox_host.sh`), and production
   placement and ownership can be changed
-  (`guests/prod/change_prod_vm_placement.sh`,
-  `guests/prod/change_prod_vm_owner.sh`);
+  (`scripts/user_callable/guests/prod/change_prod_vm_placement.sh`,
+  `scripts/user_callable/guests/prod/change_prod_vm_owner.sh`);
 - staging Host/SNI routing and generic production creation are implemented;
 - the former legacy design documents have been consolidated into this README
   and removed.
@@ -136,7 +136,8 @@ Do not rely on this architecture until all of these are true:
 
 ### Administrator workstation: Linux or macOS
 
-The operator scripts under `guests/`, `diagnostics/`, and `app/` run from
+The operator scripts under `scripts/user_callable/guests/` and
+`scripts/user_callable/diagnostics/` run from
 Linux or macOS. Everything GNU-specific in them executes on a Proxmox host or
 inside a guest over SSH; the workstation side needs only:
 
@@ -146,7 +147,7 @@ inside a guest over SSH; the workstation side needs only:
   is LibreSSL and does not; `brew install openssl@3` and put it first on
   `PATH`. The creators check this before loading secrets.
 - `python3` 3.9 or newer, plus the stock `ssh`, `scp`, `ssh-keygen`, `install`,
-  `stat`, `wc`, `awk`, and `sha256sum`. `lib/config.sh` detects GNU versus BSD
+  `stat`, `wc`, `awk`, and `sha256sum`. `scripts/lib/config.sh` detects GNU versus BSD
   `stat` by probing the tool, so Homebrew coreutils is neither required nor a
   problem.
 
@@ -165,69 +166,69 @@ nothing can prompt mid-run. Before the first use from any workstation:
 #### Which scripts run from macOS
 
 Every workstation script listed in this section, plus
-`guests/setup_jump_ssh_access.sh` and
-`hosts/simulate_disk_failure_and_replacement.sh`, has been verified from an
+`scripts/user_callable/guests/setup_jump_ssh_access.sh` and
+`scripts/user_callable/hosts/simulate_disk_failure_and_replacement.sh`, has been verified from an
 x64 Ubuntu workstation against the live cluster (2026-10-06). The lists below
 cover macOS only.
 
 Verified from macOS against the live cluster (2026-09-21, full
 destroy/create/deploy/stage cycle on the test domain):
 
-- `guests/prod/add_prod_vm.sh`, including `--dry-run`, the local root
+- `scripts/user_callable/guests/prod/add_prod_vm.sh`, including `--dry-run`, the local root
   password hash, the `scp` uploads, and the jump-SSH alias it writes to
   `~/.ssh/config`;
-- `guests/prod/remove_prod_vm.sh`, including `--dry-run`;
-- `app/deploy_hello_app_to_prod.sh`;
-- `diagnostics/show_prod_vm_state.sh`;
-- `guests/staging/add_staging_vm.sh`, without `--sanitizer`;
-- `guests/staging/remove_staging_vm.sh`.
+- `scripts/user_callable/guests/prod/remove_prod_vm.sh`, including `--dry-run`;
+- `scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh`;
+- `scripts/user_callable/diagnostics/show_prod_vm_state.sh`;
+- `scripts/user_callable/guests/staging/add_staging_vm.sh`, without `--sanitizer`;
+- `scripts/user_callable/guests/staging/remove_staging_vm.sh`.
 
 Expected to work on macOS, not yet run there against a cluster:
 
-- `guests/prod/extend_prod_vm_disk.sh`. Its local work is the config load,
+- `scripts/user_callable/guests/prod/extend_prod_vm_disk.sh`. Its local work is the config load,
   `ssh -G`, `python3`, and strict SSH, the same as the production creator;
-- `guests/staging/add_staging_vm.sh --sanitizer PATH`. The sanitizer size
+- `scripts/user_callable/guests/staging/add_staging_vm.sh --sanitizer PATH`. The sanitizer size
   check was the macOS-specific part; it is covered by unit tests only;
-- `diagnostics/show_cluster_state.sh`. Its only local work is the config load
+- `scripts/user_callable/diagnostics/show_cluster_state.sh`. Its only local work is the config load
   and two `sha256sum` calls. It needs a terminal;
-- `diagnostics/show_proxmox_host_state.sh`. It uses the same strict SSH
+- `scripts/user_callable/diagnostics/show_proxmox_host_state.sh`. It uses the same strict SSH
   helpers as `show_prod_vm_state.sh`, plus local `python3`, and is covered by
   fake-SSH unit tests only;
-- `hosts/add_new_disk_vdev.sh`, `hosts/add_replacement_disk.sh`,
-  `hosts/decommission_disks.sh`, and `hosts/inventory_disks.sh`. Their local work is the
+- `scripts/user_callable/hosts/add_new_disk_vdev.sh`, `scripts/user_callable/hosts/add_replacement_disk.sh`,
+  `scripts/user_callable/hosts/decommission_disks.sh`, and `scripts/user_callable/hosts/inventory_disks.sh`. Their local work is the
   config load, `python3`, and SSH; covered by fake-SSH unit tests only;
-- `hosts/update_cluster_runtime.sh`. Local commands are portable and its unit
+- `scripts/user_callable/hosts/update_cluster_runtime.sh`. Local commands are portable and its unit
   tests pass on macOS. It rewrites the runtime on every node, so treat the
   first macOS run as a test, not as routine;
-- `diagnostics/show_qdevice_state.sh`. Config load, `python3`, and strict SSH;
+- `scripts/user_callable/diagnostics/show_qdevice_state.sh`. Config load, `python3`, and strict SSH;
   covered by unit tests only;
-- `diagnostics/show_cluster_health.sh`. Config load, `python3`, and strict SSH;
+- `scripts/user_callable/diagnostics/show_cluster_health.sh`. Config load, `python3`, and strict SSH;
   covered by fake-SSH unit tests only;
-- `guests/prod/change_prod_vm_placement.sh` and
-  `guests/prod/change_prod_vm_owner.sh`. Their local work is the config load,
+- `scripts/user_callable/guests/prod/change_prod_vm_placement.sh` and
+  `scripts/user_callable/guests/prod/change_prod_vm_owner.sh`. Their local work is the config load,
   `python3`, `mktemp`, and strict SSH, the same as the production creator.
 
 Linux workstation only:
 
-- `hosts/add_proxmox_host.sh`. It needs `flock` and `ip` locally, and the
+- `scripts/user_callable/hosts/add_proxmox_host.sh`. It needs `flock` and `ip` locally, and the
   install-ISO phase executes the amd64 Linux `proxmox-auto-install-assistant`,
   so it also cannot run on arm64 Linux.
-- `hosts/remove_proxmox_host.sh`, `qdevice/add_qdevice.sh`, and
-  `qdevice/remove_qdevice.sh`. They take the
+- `scripts/user_callable/hosts/remove_proxmox_host.sh`, `scripts/user_callable/qdevice/add_qdevice.sh`, and
+  `scripts/user_callable/qdevice/remove_qdevice.sh`. They take the
   same workstation `flock` as host setup.
 
 Never run on a workstation, so the workstation OS does not matter. These
 execute on a Proxmox host, inside a guest, or from a live Linux boot, and are
 free to use GNU-only tools:
 
-- `guests/prod/prepare_prod_iso.sh`, `guests/prod/build_ubuntu_autoinstall.py`;
-- `guests/staging/patch_staging_clone.sh`,
-  `guests/staging/patch_staging_guest_tree.py`;
-- `hosts/app-ha-guest-role-hook.sh`, `hosts/cluster_setup_prereq.sh`;
-- `lib/cluster_registry.py`, `lib/haproxy_routes.py`,
-  `lib/sync_haproxy_routes.sh`, `lib/process_deferred_cleanup.sh`.
+- `scripts/host_runtime/prepare_prod_iso.sh`, `scripts/host_runtime/build_ubuntu_autoinstall.py`;
+- `scripts/utilities/patch_staging_clone.sh`,
+  `scripts/utilities/patch_staging_guest_tree.py`;
+- `scripts/host_runtime/app-ha-guest-role-hook.sh`, `scripts/user_callable/hosts/cluster_setup_prereq.sh`;
+- `scripts/host_runtime/cluster_registry.py`, `scripts/host_runtime/haproxy_routes.py`,
+  `scripts/host_runtime/sync_haproxy_routes.sh`, `scripts/host_runtime/process_deferred_cleanup.sh`.
 
-`lib/config.sh` is the one file that runs in both places: every workstation
+`scripts/lib/config.sh` is the one file that runs in both places: every workstation
 script sources it, and the hosts keep their own installed copy.
 
 When changing a workstation script, the portability traps that actually bit
@@ -240,7 +241,7 @@ both.
 macOS limits:
 
 - The checkout must not sit under a symlinked path (`/tmp`, `/var`, and `/etc`
-  are symlinks on macOS). The loader rejects symlinked components of `env/`.
+  are symlinks on macOS). The loader rejects symlinked components of `config/`.
 - The `0600` and "not group/world writable" checks read mode bits only. A
   macOS ACL (`chmod +a`) can grant another user read access to `secrets.env` or
   write access to the SSH `known_hosts` trust file without changing those
@@ -248,7 +249,7 @@ macOS limits:
 - On macOS the unit suite skips the classes that exercise Proxmox-host-only
   scripts (`prepare_prod_iso.sh`, `process_deferred_cleanup.sh`), and the
   lifecycle-hook tests need `flock` and GNU `stat`. Those run only in a Linux
-  test pass; [`DEVELOPMENT.md`](DEVELOPMENT.md) sets one up in a Lima VM.
+  test pass; [`dev/README.md`](../dev/README.md) sets one up in a Lima VM.
 
 ## Responsibility boundaries
 
@@ -280,7 +281,7 @@ macOS limits:
 
 Every IP address in this document is an example from one FiberState
 deployment. Do not copy it into another installation. Enter the values
-provided by your data center in `env/cluster.conf` and `env/moxN.conf` before
+provided by your data center in `config/cluster.conf` and `config/moxN.conf` before
 running any script. The scripts consume and validate those files; production
 code must not use the example addresses as fallback defaults.
 
@@ -293,7 +294,7 @@ Provider inputs map to configuration as follows:
   `HAPROXY_IP_START/END`, `PRODUCTION_IP_START/END`, and
   `STAGING_IP_START/END`;
 - each server's public IP, public gateway, netmask/prefix, private NIC
-  address, and iDRAC address go in its `env/moxN.conf`;
+  address, and iDRAC address go in its `config/moxN.conf`;
 - the provider's IPMI VPN URL and credentials are operator access
   information only and are not consumed by these scripts.
 
@@ -358,7 +359,7 @@ mox2
 ```
 
 Only `mox1.conf` and `mox2.conf` currently exist. Adding `moxN` requires its
-`env/moxN.conf`; setup recommends the lowest slot the registry records as
+`config/moxN.conf`; setup recommends the lowest slot the registry records as
 free, and every address derives from the slot number, so gaps are safe. The VRRP
 configuration on every installed candidate nevertheless lists all other
 addresses through configured `MAX_MOX_HOSTS=10`.
@@ -670,7 +671,7 @@ voters alive/voting and, for an even cluster, exactly one healthy QDevice vote.
 ## Host storage, LUKS, and mirrors
 
 The reviewed source is `proxmox-ve_9.2-1.iso`, verified against
-[`hosts/artifacts/proxmox-ve_9.2-1.iso.SHA256.txt`](hosts/artifacts/proxmox-ve_9.2-1.iso.SHA256.txt)
+[`scripts/user_callable/hosts/artifacts/proxmox-ve_9.2-1.iso.SHA256.txt`](../scripts/user_callable/hosts/artifacts/proxmox-ve_9.2-1.iso.SHA256.txt)
 and the exact SHA-256 in `cluster.conf`. The host workflow creates a
 host-specific unattended ISO with public networking, serial-selected mirror
 1, administrator keys, a temporary setup key, a fresh one-time Tailscale key,
@@ -685,7 +686,7 @@ ZFS's own `mirror-0`, `mirror-1`, ... vdev names:
   conversion.
 - Each run selects iDRAC/Redfish or manual disk inventory. Redfish mode
   remotely verifies serial, capacity, and health. Manual mode uses the
-  standalone, read-only `hosts/cluster_setup_prereq.sh`, copied to and run in a
+  standalone, read-only `scripts/user_callable/hosts/cluster_setup_prereq.sh`, copied to and run in a
   Linux Live environment booted on the machine,
   and requires an exact `NVME_MIRROR_<P>_CAPACITY_BYTES_<M>` value for every
   configured serial; the members of each pair may differ by at most 1%, in
@@ -696,9 +697,10 @@ ZFS's own `mirror-0`, `mirror-1`, ... vdev names:
   backup and partition start, detaches the ZFS member, expands partition 3 to
   end 1 GiB short of the smaller boot disk's whole-GiB size (the same byte on
   both disks, whichever is smaller), clears only old ZFS signatures, and prepares LUKS2
-  through a helper run at the target host console. The helper, the crypttab
-  entry, and the initramfs check are `lib/rpool_mirror.sh` member commands,
-  the same ones `hosts/add_replacement_disk.sh` uses.
+  through a helper that setup runs over SSH after the operator confirms; it
+  reads the temporary key file, so it needs no console. The helper, the crypttab
+  entry, and the initramfs check are `scripts/host_runtime/rpool_mirror.sh` member commands,
+  the same ones `scripts/user_callable/hosts/add_replacement_disk.sh` uses.
 - Converted members are `/dev/mapper/crypt-rpool-a` and
   `/dev/mapper/crypt-rpool-b`. Each is recorded once in `/etc/crypttab`, the
   rebuilt initramfs is proven to unlock it, and it is reattached and
@@ -730,7 +732,7 @@ ZFS's own `mirror-0`, `mirror-1`, ... vdev names:
   pool health, and boot-tool state.
 
 The LUKS password is loaded only from the mode-`0600`, Git-ignored
-`env/secrets.env`. It is sent to the selected host only over SSH stdin, written
+`config/secrets.env`. It is sent to the selected host only over SSH stdin, written
 as root-owned mode `0600` `/root/.app-ha-luks-passphrase`, and consumed by
 conversion/restoration helpers through cryptsetup `--key-file`; it is never a
 process argument, setup-state value, log value, generated-media value,
@@ -756,14 +758,14 @@ the selected storage policy or skip final non-boot validation.
 
 ## Configuration, secrets, and artifacts
 
-Workflows use [`lib/config.sh`](lib/config.sh). It parses literal `KEY=VALUE`
+Workflows use [`scripts/lib/config.sh`](../scripts/lib/config.sh). It parses literal `KEY=VALUE`
 data without `source` or `eval`, in this order when each layer is requested:
 
-1. [`env/cluster.conf`](env/cluster.conf): shared non-secret policy;
-2. `env/moxN.conf`: selected host hardware and public/private identity;
-3. local `env/secrets.env`: allowed secrets only, when required.
+1. [`config/cluster.conf`](../config/cluster.conf): shared non-secret policy;
+2. `config/moxN.conf`: selected host hardware and public/private identity;
+3. local `config/secrets.env`: allowed secrets only, when required.
 
-`env/moxN.conf` is setup input only: initial host setup and retries before
+`config/moxN.conf` is setup input only: initial host setup and retries before
 setup completes. Post-setup disk and diagnostic workflows load cluster policy
 only and use the target host's live state as authoritative.
 
@@ -801,9 +803,9 @@ HAProxy     1 vCPU, 512 MiB RAM, 8 GiB local-zfs
 Production and staging prompts can override their documented compute choices;
 they cannot override the fixed network/storage identity model.
 
-[`env/secrets_dot_env`](env/secrets_dot_env) is the checked-in key template;
-copy it to local `env/secrets.env`, keep the template value-free, and populate
-only the ignored local copy. `env/secrets.env` may contain only:
+[`config/secrets_dot_env`](../config/secrets_dot_env) is the checked-in key template;
+copy it to local `config/secrets.env`, keep the template value-free, and populate
+only the ignored local copy. `config/secrets.env` may contain only:
 
 ```text
 IDRAC_USER
@@ -827,24 +829,24 @@ The Tailscale enrollment secret is deliberately not file-backed:
 - a fresh, single-use, non-ephemeral `tag:proxmox-host` Tailscale auth key is
   entered silently for each host ISO and its digest is reserved against reuse.
 
-`PROXMOX_LUKS_PASSWORD` is file-backed only in `env/secrets.env` and in the
+`PROXMOX_LUKS_PASSWORD` is file-backed only in `config/secrets.env` and in the
 short-lived on-host file described above. It is never embedded in an ISO.
 
 Local artifacts are sensitive even when they contain hashes rather than
 plaintext:
 
-- `hosts/artifacts/<moxN>/*.iso`: generated host-specific installation media;
-- `hosts/artifacts/<moxN>/generated/`: answer and first-boot input files;
-- `hosts/artifacts/<moxN>/ssh/`: temporary setup key;
-- `hosts/artifacts/<moxN>/state/`: resumable phase evidence and host key;
-- `hosts/artifacts/<moxN>/logs/`: install, storage, quorum, and verification
+- `scripts/user_callable/hosts/artifacts/<moxN>/*.iso`: generated host-specific installation media;
+- `scripts/user_callable/hosts/artifacts/<moxN>/generated/`: answer and first-boot input files;
+- `scripts/user_callable/hosts/artifacts/<moxN>/ssh/`: temporary setup key;
+- `scripts/user_callable/hosts/artifacts/<moxN>/state/`: resumable phase evidence and host key;
+- `scripts/user_callable/hosts/artifacts/<moxN>/logs/`: install, storage, quorum, and verification
   evidence;
-- `hosts/artifacts/<moxN>/luks-headers/`: LUKS headers and GPT backups;
-- `guests/prod/artifacts/` and `guests/staging/artifacts/`: mode-`0700`
+- `scripts/user_callable/hosts/artifacts/<moxN>/luks-headers/`: LUKS headers and GPT backups;
+- `scripts/user_callable/guests/prod/artifacts/` and `scripts/user_callable/guests/staging/artifacts/`: mode-`0700`
   ephemeral creator workspaces.
 
 These per-host trees are Git-ignored. The shared
-`hosts/artifacts/used-tailscale-auth-key-sha256` digest denylist is
+`scripts/user_callable/hosts/artifacts/used-tailscale-auth-key-sha256` digest denylist is
 intentionally tracked so key reuse remains blocked across workstations and
 fresh checkouts. Its ignored `.lock` file prevents concurrent setup processes
 from both passing the check-before-append operation. Back up host recovery
@@ -858,38 +860,38 @@ hosts and create, grow, or remove guests, four (7-10) that grow, shrink, or
 repair a host's storage, three (11-13) that move production between hosts and
 change cluster membership, and one (14) that replaces a failed QDevice:
 
-1. `hosts/add_proxmox_host.sh` — destructively install or reconcile
+1. `scripts/user_callable/hosts/add_proxmox_host.sh` — destructively install or reconcile
    one `moxN`, create or join the cluster, and install storage, networking,
    QDevice, VRRP, HAProxy, registry, lifecycle, and cleanup services. Read
-   [`hosts/README.md`](hosts/README.md). Usage:
+   [`scripts/user_callable/hosts/README.md`](../scripts/user_callable/hosts/README.md). Usage:
 
    ```bash
-   hosts/add_proxmox_host.sh \
+   scripts/user_callable/hosts/add_proxmox_host.sh \
      --host moxN [--encrypt | --no-encrypt] \
      [--run-boot-tests | --skip-boot-tests]
    ```
 
-2. `guests/prod/add_prod_vm.sh` — create or safely resume one
+2. `scripts/user_callable/guests/prod/add_prod_vm.sh` — create or safely resume one
    replicated, HA-managed `prodN`. Read
-   [`guests/prod/README.md`](guests/prod/README.md). Start with:
+   [`scripts/user_callable/guests/prod/README.md`](../scripts/user_callable/guests/prod/README.md). Start with:
 
    ```bash
-   guests/prod/add_prod_vm.sh --dry-run
-   guests/prod/add_prod_vm.sh
+   scripts/user_callable/guests/prod/add_prod_vm.sh --dry-run
+   scripts/user_callable/guests/prod/add_prod_vm.sh
    ```
 
-3. `guests/prod/remove_prod_vm.sh` — permanently remove one production VM
+3. `scripts/user_callable/guests/prod/remove_prod_vm.sh` — permanently remove one production VM
    after exact identity and dependency validation. It removes routes, HA and
    affinity, replication and target copies, QEMU config/disks, orchestration,
    and registry metadata while retaining the shared source ISO cache. Start
    with the read-only rehearsal:
 
    ```bash
-   guests/prod/remove_prod_vm.sh --dry-run prodN
-   guests/prod/remove_prod_vm.sh prodN
+   scripts/user_callable/guests/prod/remove_prod_vm.sh --dry-run prodN
+   scripts/user_callable/guests/prod/remove_prod_vm.sh prodN
    ```
 
-4. `guests/prod/extend_prod_vm_disk.sh` — after placement pools gain
+4. `scripts/user_callable/guests/prod/extend_prod_vm_disk.sh` — after placement pools gain
    capacity, grow one running production VM's root zvol and then its final
    ext4 partition and filesystem online. Growth is capped so every placement
    pool keeps 10% of its total size available; it replicates the new size to
@@ -897,47 +899,47 @@ change cluster membership, and one (14) that replaces a failed QDevice:
    with the read-only rehearsal:
 
    ```bash
-   guests/prod/extend_prod_vm_disk.sh --dry-run
-   guests/prod/extend_prod_vm_disk.sh
+   scripts/user_callable/guests/prod/extend_prod_vm_disk.sh --dry-run
+   scripts/user_callable/guests/prod/extend_prod_vm_disk.sh
    ```
 
-5. `guests/staging/add_staging_vm.sh` — create one
+5. `scripts/user_callable/guests/staging/add_staging_vm.sh` — create one
    disposable, non-HA `stageNprodN` linked clone from a registered active
    production VM. Read
-   [`guests/staging/README.md`](guests/staging/README.md). Start with:
+   [`scripts/user_callable/guests/staging/README.md`](../scripts/user_callable/guests/staging/README.md). Start with:
 
    ```bash
-   guests/staging/add_staging_vm.sh --dry-run
-   guests/staging/add_staging_vm.sh \
+   scripts/user_callable/guests/staging/add_staging_vm.sh --dry-run
+   scripts/user_callable/guests/staging/add_staging_vm.sh \
      --sanitizer /absolute/path/to/staging-sanitizer.sh
    ```
 
-6. `guests/staging/remove_staging_vm.sh` — interactively select and
+6. `scripts/user_callable/guests/staging/remove_staging_vm.sh` — interactively select and
    permanently remove one staging VM after exact identity, clone-origin, and
    snapshot-GUID validation. It removes only that guest's route, VM-owned
    disks, linked clone, one exact source-owned snapshot and its replicated
    copies, and registry allocation. Start with:
 
    ```bash
-   guests/staging/remove_staging_vm.sh --dry-run
-   guests/staging/remove_staging_vm.sh
+   scripts/user_callable/guests/staging/remove_staging_vm.sh --dry-run
+   scripts/user_callable/guests/staging/remove_staging_vm.sh
    ```
 
-7. `hosts/add_new_disk_vdev.sh` — add two new identical-capacity disks to a
+7. `scripts/user_callable/hosts/add_new_disk_vdev.sh` — add two new identical-capacity disks to a
    host's rpool as one new mirror vdev. On a LUKS host the operator types the
    shared passphrase at the host console, where it is proven against every
    existing member before the disks are formatted; the script then proves the
    rebuilt initramfs unlocks them before `zpool add`.
-8. `hosts/decommission_disks.sh` — prepare a host's rpool to give up one
+8. `scripts/user_callable/hosts/decommission_disks.sh` — prepare a host's rpool to give up one
    non-boot mirror vdev (related staging destroyed first; guest trims,
    forced replication, and a scrub, each skipped if done in the last 24
    hours) and start its `zpool remove` while keeping a minimum free space of
    at least 50 GiB.
-9. `hosts/inventory_disks.sh` — inventory all disks and rpool vdev members
+9. `scripts/user_callable/hosts/inventory_disks.sh` — inventory all disks and rpool vdev members
    from live host state; once a removal completes, close the removed pair's
    LUKS mappings, update crypttab and the initramfs, then list only disks not
    in use as safe to pull.
-10. `hosts/add_replacement_disk.sh` — after a failed mirror member's disk was
+10. `scripts/user_callable/hosts/add_replacement_disk.sh` — after a failed mirror member's disk was
    pulled and an identical-capacity disk installed, put the new disk into
    that mirror (`zpool replace`, or `zpool attach` for a mirror detached to
    one disk). A boot-mirror replacement
@@ -946,18 +948,18 @@ change cluster membership, and one (14) that replaces a failed QDevice:
    console. It starts the resilver without waiting for it.
 
 Workflows 7-10 are described in
-[`hosts/README.md`](hosts/README.md#adding-and-decommissioning-rpool-disks).
-They share `lib/rpool_mirror.sh` with host setup, so there is one copy of the
+[`scripts/user_callable/hosts/README.md`](../scripts/user_callable/hosts/README.md#adding-and-decommissioning-rpool-disks).
+They share `scripts/host_runtime/rpool_mirror.sh` with host setup, so there is one copy of the
 logic that adds a mirror or encrypts a mirror member.
 
 ```bash
-hosts/add_new_disk_vdev.sh --host moxN
-hosts/add_replacement_disk.sh --host moxN
-hosts/decommission_disks.sh --host moxN
-hosts/inventory_disks.sh --host moxN
+scripts/user_callable/hosts/add_new_disk_vdev.sh --host moxN
+scripts/user_callable/hosts/add_replacement_disk.sh --host moxN
+scripts/user_callable/hosts/decommission_disks.sh --host moxN
+scripts/user_callable/hosts/inventory_disks.sh --host moxN
 ```
 
-11. `guests/prod/change_prod_vm_placement.sh` — add hosts to or remove hosts
+11. `scripts/user_callable/guests/prod/change_prod_vm_placement.sh` — add hosts to or remove hosts
    from one production VM's placement. Adding checks the host's
    `MAX_PROD_VM_COUNT_ON_THIS_HOST` and a 10% pool reserve after the replica.
    It records the registry placement, replicates, and widens the HA rule only
@@ -965,11 +967,11 @@ hosts/inventory_disks.sh --host moxN
    first, then the registry, then deletes the replication job and replica. It
    never removes the live owner and keeps at least two placement hosts. It
    detects and finishes an interrupted change.
-12. `guests/prod/change_prod_vm_owner.sh` — move one production VM to another
+12. `scripts/user_callable/guests/prod/change_prod_vm_owner.sh` — move one production VM to another
    placement host with `ha-manager relocate` after checking that HA,
    replication, and the registry agree. It then verifies the reversed
    replication and records the new owner.
-13. `hosts/remove_proxmox_host.sh` — remove one host, gracefully when it is
+13. `scripts/user_callable/hosts/remove_proxmox_host.sh` — remove one host, gracefully when it is
    an online member that answers SSH, and forcefully when it cannot be
    contacted. Either way it chooses a new control node if needed and frees
    the host's registry slot.
@@ -987,15 +989,15 @@ hosts/inventory_disks.sh --host moxN
      communicate with the cluster again.
    - A host Proxmox sees online that does not answer SSH, or that answers SSH
      while Proxmox sees it offline, is refused.
-14. `qdevice/add_qdevice.sh` — add a QDevice to an even-member cluster that
-   has none, typically after `qdevice/remove_qdevice.sh` removed a failed
-   one. `diagnostics/show_qdevice_state.sh` reports whether a QDevice is
+14. `scripts/user_callable/qdevice/add_qdevice.sh` — add a QDevice to an even-member cluster that
+   has none, typically after `scripts/user_callable/qdevice/remove_qdevice.sh` removed a failed
+   one. `scripts/user_callable/diagnostics/show_qdevice_state.sh` reports whether a QDevice is
    needed, functional, or inaccessible. The full replacement procedure is in
-   [`qdevice/QDEVICE_MANUAL_SETUP.md`](qdevice/QDEVICE_MANUAL_SETUP.md#replacing-a-failed-qdevice).
+   [`QDEVICE_MANUAL_SETUP.md`](QDEVICE_MANUAL_SETUP.md#replacing-a-failed-qdevice).
 
 Workflows 11-13 are described in
-[`guests/prod/README.md`](guests/prod/README.md#changing-placement) and
-[`hosts/README.md`](hosts/README.md#removing-hosts). The
+[`scripts/user_callable/guests/prod/README.md`](../scripts/user_callable/guests/prod/README.md#changing-placement) and
+[`scripts/user_callable/hosts/README.md`](../scripts/user_callable/hosts/README.md#removing-hosts). The
 documented order for moving to bigger hosts is: set up the new hosts, add
 them to placement, change the owner, remove the old hosts from placement,
 then remove the old hosts.
@@ -1013,13 +1015,27 @@ removal `moxN IS PERMANENTLY DISCONNECTED`.
 ## Helper inventory
 
 These are supporting diagnostics, maintenance utilities, implementation
-helpers, and tests rather than additional deployment workflows:
+helpers, and tests rather than additional deployment workflows.
+
+Every script lives under `scripts/`:
+
+- `scripts/user_callable/` holds the scripts an operator runs, by area:
+  `diagnostics/`, `hosts/`, `guests/` (with `prod/` and `staging/`), and
+  `qdevice/`. The dashboard's workflows are these scripts.
+- `scripts/lib/` holds the libraries those scripts source or import.
+- `scripts/utilities/` holds scripts that only other scripts run, on the
+  workstation or piped or copied to a host for one run.
+- `scripts/host_runtime/` holds the files installed on every Proxmox host:
+  the registry, HAProxy renderer and synchronizer, deferred-cleanup worker,
+  QEMU lifecycle hook, rpool mirror tool, and production ISO tools. Hosts
+  install them under `/usr/local/lib/app-ha-proxmox` in their own layout.
+- `scripts/tests/` holds every `test_*.py` and the JSON-mode test driver.
 
 All `test_*.py` files use Python's standard `unittest` framework plus mocked
-Bash/Proxmox commands and temporary roots; they depend on the adjacent
-scripts/libraries named in their descriptions.
+Bash/Proxmox commands and temporary roots; they depend on the scripts and
+libraries named in their descriptions.
 
-- `diagnostics/show_cluster_health.sh` is a quick, read-only workstation
+- `scripts/user_callable/diagnostics/show_cluster_health.sh` is a quick, read-only workstation
   check of hardware and networking that ignores guests. For each member it
   reports Proxmox online state, workstation SSH access, quorum, and the
   corosync, pve-cluster, and QDevice-client services. A member the
@@ -1031,10 +1047,10 @@ scripts/libraries named in their descriptions.
   read/write/checksum counts, each member resolved through LUKS to its disk
   serial, and every drive's `smartctl -H` result. From `zfs list -p` it takes
   rpool's used and available bytes, treats their sum as usable space, and
-  flags a host as needing more storage (`hosts/add_new_disk_vdev.sh`) when
+  flags a host as needing more storage (`scripts/user_callable/hosts/add_new_disk_vdev.sh`) when
   less than 10% is available. It ends with a problem list and exits 1 when
   anything needs attention.
-- `diagnostics/show_cluster_state.sh` is an interactive, read-only
+- `scripts/user_callable/diagnostics/show_cluster_state.sh` is an interactive, read-only
   workstation diagnostic for the QDevice and reachable `mox1` through
   `mox10`. It reports identity, clocks, Tailscale, firewall/listener state,
   Proxmox/Corosync quorum and links, native per-node SSH trust, QDevice
@@ -1045,63 +1061,63 @@ scripts/libraries named in their descriptions.
   durable report is useful:
 
   ```bash
-  diagnostics/show_cluster_state.sh \
+  scripts/user_callable/diagnostics/show_cluster_state.sh \
     >cluster_state.txt
   ```
 
-- `diagnostics/show_prod_vm_state.sh prodN` is a read-only cross-layer
+- `scripts/user_callable/diagnostics/show_prod_vm_state.sh prodN` is a read-only cross-layer
   production guest diagnostic. It checks registry/orchestration state, live
   QEMU identity and power, HA request and strict node-affinity, replication,
   routes, ZFS allocation, QGA, private networking, and QGA-attested strict
   root SSH, then prints a `HEALTHY` or `UNHEALTHY` verdict:
 
   ```bash
-  diagnostics/show_prod_vm_state.sh prod1 \
+  scripts/user_callable/diagnostics/show_prod_vm_state.sh prod1 \
     >prod1_state.txt
   ```
 
-- `diagnostics/show_proxmox_host_state.sh [--host moxN]` is a read-only report for one
+- `scripts/user_callable/diagnostics/show_proxmox_host_state.sh [--host moxN]` is a read-only report for one
   host: versions, CPU and RAM, quorum, HA and app-ha services, failed units,
   network and egress VIP ownership, the guests it runs with their registry
   roles, the production replicas it stores, pending deferred cleanup, and its
-  `rpool` layout. `lib/host_storage.py` resolves every vdev through LUKS to
+  `rpool` layout. `scripts/utilities/host_storage.py` resolves every vdev through LUKS to
   physical disk serials, marks the boot/ESP vdev, and shows device-removal
   progress, disks outside `rpool`, ZFS available space in bytes, MiB, and
   GiB, and each zvol's allocation, snapshots, and last replication. It exits
   1 when anything needs attention:
 
   ```bash
-  diagnostics/show_proxmox_host_state.sh mox1 \
+  scripts/user_callable/diagnostics/show_proxmox_host_state.sh mox1 \
     >mox1_state.txt
   ```
 
-- `diagnostics/show_qdevice_state.sh` is a read-only workstation report on
+- `scripts/user_callable/diagnostics/show_qdevice_state.sh` is a read-only workstation report on
   the QDevice. It says whether the member count needs one and whether one is
   registered, shows each member's vote view, and shows the QDevice host's
   qnetd state and connected clusters. It ends with a verdict: OK, needs a
-  QDevice (`qdevice/add_qdevice.sh`), registered but inaccessible
-  (`qdevice/remove_qdevice.sh`, then `qdevice/add_qdevice.sh`), or reachable
+  QDevice (`scripts/user_callable/qdevice/add_qdevice.sh`), registered but inaccessible
+  (`scripts/user_callable/qdevice/remove_qdevice.sh`, then `scripts/user_callable/qdevice/add_qdevice.sh`), or reachable
   but unhealthy (the problems found). It exits 1 when anything needs
   attention.
-- `qdevice/add_qdevice.sh` adds a QDevice to an all-online, quorate cluster
+- `scripts/user_callable/qdevice/add_qdevice.sh` adds a QDevice to an all-online, quorate cluster
   with an even member count and no registered QDevice. It verifies
   `ssh qdevice`, refuses a Proxmox VE host, and holds the cluster
   control-plane lock. It installs `corosync-qnetd`, pins the QDevice's SSH
   host key on every member, runs `pvecm qdevice setup` through the control
   node, and verifies every member's vote layout, as host setup does.
-- `lib/qdevice.sh` is the one implementation of the QDevice vote: verifying
+- `scripts/lib/qdevice.sh` is the one implementation of the QDevice vote: verifying
   access, preparing `corosync-qnetd`, pinning its host key, adding, removing,
   reconciling, clearing stale registrations, forgetting a retired QDevice,
   and checking vote layouts. Host setup, host removal,
-  `qdevice/add_qdevice.sh`, `qdevice/remove_qdevice.sh`, and the diagnostics
+  `scripts/user_callable/qdevice/add_qdevice.sh`, `scripts/user_callable/qdevice/remove_qdevice.sh`, and the diagnostics
   use it. It removes a QDevice gracefully when this workstation reaches it as
   root and it is the registered machine. Otherwise the removal is forced: the
   operator must agree and confirm the machine was removed from Tailscale, and
   every member forgets it. Membership changes continue with an inaccessible
   QDevice only when the resulting member count is odd. Each caller supplies
-  how it reaches the cluster: `lib/host_membership.sh` through its
+  how it reaches the cluster: `scripts/lib/host_membership.sh` through its
   coordinator, host setup through its cluster control node.
-- `qdevice/remove_qdevice.sh` is an intentionally destructive maintenance tool
+- `scripts/user_callable/qdevice/remove_qdevice.sh` is an intentionally destructive maintenance tool
   for teardown, clean-room retesting, or replacing a failed QDevice. Every
   member must be online and the cluster quorate. Under the cluster
   control-plane lock it first removes the QDevice through the supported
@@ -1116,66 +1132,66 @@ scripts/libraries named in their descriptions.
   operator confirms the old machine was removed from Tailscale. It then
   runs `pvecm qdevice remove` and removes the QDevice client, certificates,
   and host-key trust from every Proxmox node. Read
-  [`qdevice/QDEVICE_MANUAL_SETUP.md`](qdevice/QDEVICE_MANUAL_SETUP.md) and its
+  [`QDEVICE_MANUAL_SETUP.md`](QDEVICE_MANUAL_SETUP.md) and its
   exact `GO` destructive confirmation before running:
 
   ```bash
-  qdevice/remove_qdevice.sh [qdevice-host]
+  scripts/user_callable/qdevice/remove_qdevice.sh [qdevice-host]
   ```
 
-- `hosts/add_proxmox_host.sh` is the host setup workflow. It depends on
-  `lib/`, layered `env/` configuration, either iDRAC/Redfish or a manual Live
+- `scripts/user_callable/hosts/add_proxmox_host.sh` is the host setup workflow. It depends on
+  `scripts/lib/`, layered `config/` configuration, either iDRAC/Redfish or a manual Live
   Linux disk inventory, Tailscale, the reviewed Proxmox ISO, and Proxmox
   cluster tools.
-- `hosts/app-ha-guest-role-hook.sh` is the generic QEMU lifecycle hook installed
+- `scripts/host_runtime/app-ha-guest-role-hook.sh` is the generic QEMU lifecycle hook installed
   on every mox node. It depends on installed `config.sh`,
   `cluster_registry.py`, Proxmox/QEMU/ZFS tools, and the deferred-cleanup
   service; it protects production starts and rejects unsafe staging starts.
-- `hosts/test_add_proxmox_host.py` tests host safety, QDevice parity, resume,
+- `scripts/tests/test_add_proxmox_host.py` tests host safety, QDevice parity, resume,
   storage, and VRRP invariants without installing a host.
-- `hosts/test_app_ha_guest_role_hook.py` tests fail-closed production/staging
+- `scripts/tests/test_app_ha_guest_role_hook.py` tests fail-closed production/staging
   admission and cleanup behavior against synthetic Proxmox and registry state.
-- `guests/prod/prepare_prod_iso.sh` is installed on every mox and atomically
+- `scripts/host_runtime/prepare_prod_iso.sh` is installed on every mox and atomically
   downloads or reuses the hash-addressed Ubuntu source cache before invoking
   the host-installed `build_ubuntu_autoinstall.py`; it depends on `curl`,
   Python, and `xorriso`.
-- `guests/prod/build_ubuntu_autoinstall.py` verifies a configured compatible
+- `scripts/host_runtime/build_ubuntu_autoinstall.py` verifies a configured compatible
   Ubuntu source and builds the answer-file-driven per-VM installer when
   `PROD_GUEST_OS_INSTALL_MODE=ubuntu-autoinstall`.
-- `guests/prod/test_add_prod_vm.py` tests installer rendering, allocation,
+- `scripts/tests/test_add_prod_vm.py` tests installer rendering, allocation,
   resume, SSH, HA, and destructive guards for production creation.
-- `guests/prod/extend_prod_vm_disk.sh` runs from the workstation. It uses
+- `scripts/user_callable/guests/prod/extend_prod_vm_disk.sh` runs from the workstation. It uses
   strict mox SSH for Proxmox/ZFS work and the operator's `ssh prodN` alias
   for the guest, where it needs Python 3, `findmnt`, `sfdisk`, `tune2fs`,
   `growpart` (`cloud-guest-utils`), and `resize2fs`.
-- `guests/prod/test_extend_prod_vm_disk.py` tests the integer growth-limit
+- `scripts/tests/test_extend_prod_vm_disk.py` tests the integer growth-limit
   math, increase parsing and MiB rounding, guest-disk validation, and
   mutation ordering.
-- `guests/prod/change_prod_vm_placement.sh` and
-  `guests/prod/change_prod_vm_owner.sh` run from the workstation over strict
-  mox SSH and share `lib/prod_ha.sh`. That library handles production
+- `scripts/user_callable/guests/prod/change_prod_vm_placement.sh` and
+  `scripts/user_callable/guests/prod/change_prod_vm_owner.sh` run from the workstation over strict
+  mox SSH and share `scripts/lib/prod_ha.sh`. That library handles production
   selection, live HA/replication state, the per-resource lease, registry
   updates, and replication waits.
-- `guests/prod/test_change_prod_vm_placement.py` tests host eligibility,
+- `scripts/tests/test_change_prod_vm_placement.py` tests host eligibility,
   add/remove ordering, partial-change repair, and the owner script's
   agreement checks.
-- `hosts/remove_proxmox_host.sh` runs from the workstation and uses
-  `lib/host_membership.sh` (QDevice access and parity, control-plane lock,
-  node deletion, SSH-trust removal) and `lib/cluster_control.sh`
+- `scripts/user_callable/hosts/remove_proxmox_host.sh` runs from the workstation and uses
+  `scripts/lib/host_membership.sh` (QDevice access and parity, control-plane lock,
+  node deletion, SSH-trust removal) and `scripts/lib/cluster_control.sh`
   (control-node resolution and the `cluster.conf` update).
-  `hosts/test_host_membership.py` tests the choice between graceful and
+  `scripts/tests/test_host_membership.py` tests the choice between graceful and
   forced removal, graceful-removal blockers, the forced-removal plan and
   candidates, and QDevice vote checks.
-- `guests/staging/patch_staging_clone.sh` is the root-only host wrapper for
+- `scripts/utilities/patch_staging_clone.sh` is the root-only host wrapper for
   offline clone validation, mounting, and teardown. It is invoked by the
   staging creator and depends on ZFS block-device, filesystem, and Proxmox
   tools plus `patch_staging_guest_tree.py`.
-- `guests/staging/patch_staging_guest_tree.py` performs descriptor-relative,
+- `scripts/utilities/patch_staging_guest_tree.py` performs descriptor-relative,
   no-symlink guest-tree rewrites for identity, MAC-bound networking, SSH keys,
   Tailscale removal, and the optional pre-network sanitizer.
-- `guests/staging/test_staging_vm.py` tests staging allocation, source-snapshot
+- `scripts/tests/test_staging_vm.py` tests staging allocation, source-snapshot
   dependency records, safe offline patching, rollback, and read-only dry-run.
-- `app/deploy_hello_app_to_prod.sh` deploys a minimal NGINX HTTPS hello-world
+- `scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh` deploys a minimal NGINX HTTPS hello-world
   site onto one active registry `prodN`. It uses the guest's workstation SSH
   alias, installs NGINX if needed, writes a Cloudflare Origin CA certificate
   and key, and configures the registered primary/alias names plus every
@@ -1185,57 +1201,58 @@ scripts/libraries named in their descriptions.
   their own deployment tooling:
 
   ```bash
-  app/deploy_hello_app_to_prod.sh
+  scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh
   ```
 
-`lib/` is the shared orchestration layer:
+`scripts/lib/`, `scripts/utilities/`, and `scripts/host_runtime/` are the
+shared orchestration layer:
 
-- `lib/config.sh` strictly parses and validates `env/` without evaluating it,
+- `scripts/lib/config.sh` strictly parses and validates `config/` without evaluating it,
   derives mox/HAProxy addressing, and supplies strict SSH/ProxyJump helpers; it
   depends on Bash and ordinary validation/SSH utilities.
-- `lib/cluster_registry.py` owns schema-validated, secret-free pmxcfs metadata,
+- `scripts/host_runtime/cluster_registry.py` owns schema-validated, secret-free pmxcfs metadata,
   deterministic IP/MAC allocation, mutation locking, cleanup records, ingress
   status, and reconciliation; it uses the Python standard library and, for
   live reconciliation, `pvesh`.
-- `lib/haproxy_routes.py` validates exact registry routes and renders one
+- `scripts/host_runtime/haproxy_routes.py` validates exact registry routes and renders one
   deterministic reject-by-default HAProxy generation using the Python
   standard library.
-- `lib/sync_haproxy_routes.sh` retrieves routes through a coordinator,
+- `scripts/host_runtime/sync_haproxy_routes.sh` retrieves routes through a coordinator,
   validates every online target before publishing desired state, and keeps
   stale or partially committed targets fail-closed until reconciliation; it
   depends on `config.sh`, the registry/renderer, SSH, `pvesh`/`pct`, `jq`,
   `tar`, nftables, and HAProxy inside each LXC.
-- `lib/process_deferred_cleanup.sh` is the bounded, idempotent cleanup worker
+- `scripts/host_runtime/process_deferred_cleanup.sh` is the bounded, idempotent cleanup worker
   run by the installed systemd timer; unsafe or unreachable work stays
   pending. It depends on `config.sh`, the registry and route synchronizer, plus
   Proxmox, QEMU, ZFS, and block-device inspection tools.
-- `lib/host_storage.py` collects a read-only JSON layout of one host's
+- `scripts/utilities/host_storage.py` collects a read-only JSON layout of one host's
   `rpool` (vdevs, member disk serials through LUKS, the boot/ESP vdev,
   removal progress, disks outside the pool, registered ESPs on disks outside
   the pool, open rpool LUKS mappings, crypttab entries, zvols) and renders it
-  for `diagnostics/show_proxmox_host_state.sh` and the disk workflows.
-- `lib/rpool_mirror.sh` is the single copy of the host-side mirror logic
+  for `scripts/user_callable/diagnostics/show_proxmox_host_state.sh` and the disk workflows.
+- `scripts/host_runtime/rpool_mirror.sh` is the single copy of the host-side mirror logic
   (disk checks, console LUKS preparation, crypttab/initramfs, `zpool add`,
   boot-disk partitioning and ESPs, member replacement, and LUKS retirement)
   used by host setup and workflows 7, 9, and 10.
-- `lib/storage_state.py` keeps trim, scrub, vdev-removal, and pending
+- `scripts/utilities/storage_state.py` keeps trim, scrub, vdev-removal, and pending
   mirror-addition and member-replacement records on the host;
-  `lib/disk_workflows.sh` holds the workstation plumbing shared by workflows
+  `scripts/lib/disk_workflows.sh` holds the workstation plumbing shared by workflows
   6-9.
-- `lib/test_shared_libs.py`, `lib/test_haproxy_routes.py`,
-  `lib/test_process_deferred_cleanup.py`, and `lib/test_host_storage.py` test
+- `scripts/tests/test_shared_libs.py`, `scripts/tests/test_haproxy_routes.py`,
+  `scripts/tests/test_process_deferred_cleanup.py`, and `scripts/tests/test_host_storage.py` test
   configuration, pmxcfs semantics, registry/IPAM, route rendering,
   transactions, cleanup guards, and `rpool` layout parsing.
-- [`lib/README.md`](lib/README.md) documents direct library interfaces.
+- [`scripts/lib/README.md`](../scripts/lib/README.md) documents direct library interfaces.
 
-`env/` is the only repository configuration layer for these workflows:
+`config/` is the only repository configuration layer for these workflows:
 `cluster.conf` contains shared non-secret policy, each `moxN.conf` contains
 non-secret host/hardware inputs, and the local Git-ignored `secrets.env` holds
 only the allowed setup/console secrets at mode `0600`. All workflows depend on
-`lib/config.sh`; never source these files directly, commit secret values, or
+`scripts/lib/config.sh`; never source these files directly, commit secret values, or
 copy secrets into pmxcfs.
 
-`hosts/artifacts/` contains the reviewed source-ISO checksum and ignored
+`scripts/user_callable/hosts/artifacts/` contains the reviewed source-ISO checksum and ignored
 per-host generated media, state, logs, setup keys, GPT backups, and LUKS header
 backups. Keep those sensitive recovery artifacts off Git and back them up
 securely.
@@ -1261,12 +1278,12 @@ The order matters. Do not create guests before host and cluster convergence.
 
 ### 2. Prepare and validate configuration
 
-Create local mode-`0600` `env/secrets.env` from
-[`env/secrets_dot_env`](env/secrets_dot_env), then validate one host without
+Create local mode-`0600` `config/secrets.env` from
+[`config/secrets_dot_env`](../config/secrets_dot_env), then validate one host without
 mutation:
 
 ```bash
-lib/config.sh \
+scripts/lib/config.sh \
   --check --host mox1 --require-secrets
 ```
 
@@ -1280,13 +1297,14 @@ Run the host workflow first for the control node, then for each later host,
 one at a time:
 
 ```bash
-hosts/add_proxmox_host.sh --host mox1 --run-boot-tests
-hosts/add_proxmox_host.sh --host mox2 --run-boot-tests
+scripts/user_callable/hosts/add_proxmox_host.sh --host mox1 --run-boot-tests
+scripts/user_callable/hosts/add_proxmox_host.sh --host mox2 --run-boot-tests
 ```
 
 Keep every existing node online while adding another. Enter the LUKS
-passphrase through iDRAC when a boot requires it; conversion helpers use the
-temporary root-only key file and require only `GO`. Preserve every exported
+passphrase through iDRAC when a boot requires it; setup runs its conversion
+helpers itself over SSH with the temporary root-only key file after you
+confirm each one. Preserve every exported
 header. If a phase fails, correct the condition and rerun the identical
 command; do not skip the phase marker or manually improvise the next step.
 
@@ -1297,8 +1315,8 @@ registry health before proceeding.
 ### 4. Create a generic production VM
 
 ```bash
-guests/prod/add_prod_vm.sh --dry-run
-guests/prod/add_prod_vm.sh
+scripts/user_callable/guests/prod/add_prod_vm.sh --dry-run
+scripts/user_callable/guests/prod/add_prod_vm.sh
 ```
 
 Choose at least two online placement nodes with enough CPU, RAM, and
@@ -1314,7 +1332,7 @@ over the private address. Then configure Cloudflare origins/DNS/health checks
 and verify both public paths.
 
 For a first HTTPS smoke test after `add_prod_vm.sh` finishes,
-`app/deploy_hello_app_to_prod.sh` installs a minimal NGINX hello-world site on
+`scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh` installs a minimal NGINX hello-world site on
 one active `prodN`, including `/healthz` and the registered
 production/staging hostnames. It requires a working `ssh prodN` alias from
 production creation, `curl` on the guest, and a Cloudflare Origin CA
@@ -1327,8 +1345,8 @@ ready.
 First supply an idempotent app-specific sanitizer or choose link-down:
 
 ```bash
-guests/staging/add_staging_vm.sh --dry-run
-guests/staging/add_staging_vm.sh \
+scripts/user_callable/guests/staging/add_staging_vm.sh --dry-run
+scripts/user_callable/guests/staging/add_staging_vm.sh \
   --sanitizer /absolute/path/to/staging-sanitizer.sh
 ```
 
@@ -1345,7 +1363,7 @@ before depending on the platform.
 
 ## Host workflow in detail
 
-`hosts/add_proxmox_host.sh` is the host workflow. It is destructive and
+`scripts/user_callable/hosts/add_proxmox_host.sh` is the host workflow. It is destructive and
 resumable:
 
 1. **Load and fingerprint inputs.** It strictly loads `cluster.conf`,
@@ -1356,7 +1374,7 @@ resumable:
    changed.
 2. **Discover hardware.** In iDRAC mode, Redfish inventories the target before
    mutation. In manual mode, the workflow validates configured exact byte
-   capacities previously gathered by running `hosts/cluster_setup_prereq.sh` in a
+   capacities previously gathered by running `scripts/user_callable/hosts/cluster_setup_prereq.sh` in a
    Linux Live environment. Both paths validate serial-selected pairs and enough
    reserved tail space for mirror-0 LUKS conversion.
 3. **Build host media.** It verifies the source hash; obtains the reviewed
@@ -1402,7 +1420,7 @@ Important installed host-local paths and units include:
 /usr/local/lib/app-ha-proxmox/lib/haproxy_routes.py
 /usr/local/lib/app-ha-proxmox/lib/sync_haproxy_routes.sh
 /usr/local/lib/app-ha-proxmox/lib/process_deferred_cleanup.sh
-/usr/local/lib/app-ha-proxmox/env/cluster.conf
+/usr/local/lib/app-ha-proxmox/config/cluster.conf
 /var/lib/vz/snippets/app-ha-guest-role-hook.sh
 
 app-ha-host-guard.service
@@ -1425,8 +1443,8 @@ lifecycle hook in this checkout, update their installed copies before running
 a guest workflow:
 
 ```bash
-hosts/update_cluster_runtime.sh --dry-run
-hosts/update_cluster_runtime.sh
+scripts/user_callable/hosts/update_cluster_runtime.sh --dry-run
+scripts/user_callable/hosts/update_cluster_runtime.sh
 ```
 
 The updater requires every configured Proxmox node to be online and directly
@@ -2287,7 +2305,7 @@ pmxcfs.
 
 ### Secrets and recovery material
 
-- Keep `env/secrets.env` local, Git-ignored, non-symlinked, owned by root or
+- Keep `config/secrets.env` local, Git-ignored, non-symlinked, owned by root or
   the invoking user, and exactly mode `0600`.
 - Keep `PROXMOX_LUKS_PASSWORD` only in `secrets.env`; host setup may stage it
   temporarily at mode `0600` on the selected rpool for conversion and tests,
@@ -2449,13 +2467,13 @@ readiness until every mox reports the exact healthy vote layout.
 
 For an odd cluster, remove an unnecessary QDevice only with all nodes online.
 For an even cluster, restore `corosync-qnetd`, Tailscale TCP 5403, literal IP
-identity, and voting state. `diagnostics/show_qdevice_state.sh` reports which
+identity, and voting state. `scripts/user_callable/diagnostics/show_qdevice_state.sh` reports which
 case applies. When the QDevice machine is lost, replace it:
 
-1. `qdevice/remove_qdevice.sh` removes it forcefully, without contacting it,
+1. `scripts/user_callable/qdevice/remove_qdevice.sh` removes it forcefully, without contacting it,
    after you confirm it was removed from Tailscale;
-2. prepare a new machine with `qdevice/QDEVICE_MANUAL_SETUP.md`;
-3. `qdevice/add_qdevice.sh` adds it.
+2. prepare a new machine with `docs/QDEVICE_MANUAL_SETUP.md`;
+3. `scripts/user_callable/qdevice/add_qdevice.sh` adds it.
 
 Until the replacement is added, losing any one member of an even cluster
 loses quorum.
@@ -2594,7 +2612,7 @@ public listener from a non-Tailscale network.
 ### Configuration and registry
 
 ```bash
-lib/config.sh --check --host mox1 --require-secrets
+scripts/lib/config.sh --check --host mox1 --require-secrets
 
 ssh root@mox1 \
   /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py list
@@ -2724,15 +2742,15 @@ Run shell syntax checks from the repository root:
 
 ```bash
 bash -n \
-  hosts/add_proxmox_host.sh \
-  hosts/app-ha-guest-role-hook.sh \
-  guests/prod/add_prod_vm.sh \
-  guests/staging/add_staging_vm.sh \
-  guests/staging/remove_staging_vm.sh \
-  guests/staging/patch_staging_clone.sh \
-  lib/config.sh \
-  lib/sync_haproxy_routes.sh \
-  lib/process_deferred_cleanup.sh
+  scripts/user_callable/hosts/add_proxmox_host.sh \
+  scripts/host_runtime/app-ha-guest-role-hook.sh \
+  scripts/user_callable/guests/prod/add_prod_vm.sh \
+  scripts/user_callable/guests/staging/add_staging_vm.sh \
+  scripts/user_callable/guests/staging/remove_staging_vm.sh \
+  scripts/utilities/patch_staging_clone.sh \
+  scripts/lib/config.sh \
+  scripts/host_runtime/sync_haproxy_routes.sh \
+  scripts/host_runtime/process_deferred_cleanup.sh
 ```
 
 Run the complete unit suite, every tracked `test_*.py`, in parallel:
@@ -2763,47 +2781,47 @@ serially in one process.
 
 On a Mac, `dev/run-tests-in-vm.sh` runs `bash -n` on every tracked script and
 then `dev/run_tests.py` inside a Debian 13 Lima VM; see
-[`DEVELOPMENT.md`](DEVELOPMENT.md).
+[`dev/README.md`](../dev/README.md).
 
 Coverage by test helper:
 
-- `hosts/test_add_proxmox_host.py`: QDevice vote/parity parsing, current ISO
+- `scripts/tests/test_add_proxmox_host.py`: QDevice vote/parity parsing, current ISO
   resume, changed boot ID, destructive confirmations, serial storage
   selection, strict SSH, VRRP peers/priorities, and host safety invariants.
-- `hosts/test_app_ha_guest_role_hook.py`: exact role identity, no destructive
+- `scripts/tests/test_app_ha_guest_role_hook.py`: exact role identity, no destructive
   authority without registry/HA, staging disk/volume/GUID guards, production
   reservations, stopping every staging guest before queuing any destruction,
   the real cleanup worker deferring destruction until post-start, and remote
   deferral.
-- `guests/prod/test_add_prod_vm.py`: autoinstall network/root/QGA/SSH,
+- `scripts/tests/test_add_prod_vm.py`: autoinstall network/root/QGA/SSH,
   startup retry semantics, ISO hash/release/boot metadata/atomicity, live
   nodes with slot gaps, QDevice gate, resume sentinels, exact VM/Secure Boot contract,
   argv-safe SSH, non-mutating dry-run, and absence of destructive rollback.
-- `guests/prod/test_extend_prod_vm_disk.py`: per-host 10% pool reserve with
+- `scripts/tests/test_extend_prod_vm_disk.py`: per-host 10% pool reserve with
   smallest-headroom selection, sparse guest-free and overhead math, reserved
   refreservation ratio, whole-MiB rounding, unit parsing and limits, guest
   root-disk validation, and mutation ordering.
-- `guests/staging/test_staging_vm.py`: argv-safe node execution, identity and
+- `scripts/tests/test_staging_vm.py`: argv-safe node execution, identity and
   sanitizer rewrites, symlink escape rejection, mapping/unmount safety,
   stopped-VM disk-reference rejection, snapshot/refcount ordering, rollback,
   and non-mutating dry-run with no secret export.
-- `lib/test_shared_libs.py`: layered config provenance/modes/redaction,
+- `scripts/tests/test_shared_libs.py`: layered config provenance/modes/redaction,
   deterministic allocation, uniqueness, leases/phases, state transitions,
   snapshot dependencies, deferred cleanup, pmxcfs-compatible atomic writes
   and stale-lock handling, route limits, ingress crash recovery/retention,
   history/cleanup bounds, and safe live reconciliation.
-- `lib/test_haproxy_routes.py`: route schema/ranges/uniqueness, deterministic
+- `scripts/tests/test_haproxy_routes.py`: route schema/ranges/uniqueness, deterministic
   maps/manifests, reject-only empty config, real `haproxy -c` when available,
   quorum and partial-commit fail-closed behavior, and fixed local ingress.
-- `lib/test_process_deferred_cleanup.py`: exact VM/volume/snapshot/route
+- `scripts/tests/test_process_deferred_cleanup.py`: exact VM/volume/snapshot/route
   cleanup, offline-source deferral, lifecycle-lock scope, failed route sync,
   GUID protection, first-host no-op, restart finalization, and syntax.
-- `lib/test_host_storage.py`: `zpool status` topology, resilver nesting and
+- `scripts/tests/test_host_storage.py`: `zpool status` topology, resilver nesting and
   auxiliary sections, removal progress, LUKS and by-id member resolution to
   disk serials, boot/ESP vdev detection, disks outside `rpool`, registered
   ESPs outside `rpool`, all-disk use classification, safe physical-removal
   classification, zvol allocation and snapshots, and render output.
-- `lib/test_rpool_mirror.py`: the shared mirror tool against fake disk, LUKS,
+- `scripts/tests/test_rpool_mirror.py`: the shared mirror tool against fake disk, LUKS,
   zpool, and initramfs commands: disk safety checks, the passphrase proven
   before any disk is touched, reuse or refusal of existing LUKS, the host's
   crypttab form, no `zpool add` unless the initramfs unlocks the new disks,
@@ -2813,17 +2831,17 @@ Coverage by test helper:
   `zpool replace` until that ESP is in sync, closing a pulled disk's leftover
   mapping, refusing a failed disk that is still installed, and `zpool attach`
   for a mirror detached to one disk.
-- `lib/test_storage_state.py`: locked host-side trim, scrub, vdev-removal,
+- `scripts/tests/test_storage_state.py`: locked host-side trim, scrub, vdev-removal,
   mirror-addition, and member-replacement resume records.
-- `hosts/test_disk_workflows.py`: workflows 7-10 end to end against a fake SSH
+- `scripts/tests/test_disk_workflows.py`: workflows 7-10 end to end against a fake SSH
   host and guests: console hand-off, resume, capacity checks, the five-mirror
   limit, related-staging refusal, trim and scrub reuse within 24 hours,
   forced replication, minimum-free-space rules, removal records, retirement,
   and boot, extra, and unencrypted member replacement.
-- `diagnostics/test_show_proxmox_host_state.py`: the host report against a
+- `scripts/tests/test_show_proxmox_host_state.py`: the host report against a
   fake SSH that rejects any non-read-only command, live disk inventory,
   attention exit status, and usage errors.
-- `diagnostics/test_show_cluster_health.py`: the cluster health check with
+- `scripts/tests/test_show_cluster_health.py`: the cluster health check with
   its real host collector run against fake `pvecm`, `corosync-cfgtool`,
   `zpool`, `zfs`, `lsblk`, `smartctl`, and `systemctl`: a healthy cluster, a
   faulted member and failed drive named by serial, low and unreadable rpool
@@ -2855,7 +2873,7 @@ and must not be inferred from registry primitives or old design prose:
   or failover policy.
 - **Generic application deployment.** Production creation installs Ubuntu,
   not an application. Real applications use their own deployment tooling.
-  The sample `app/deploy_hello_app_to_prod.sh` only deploys a hello-world
+  The sample `scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh` only deploys a hello-world
   NGINX site for platform smoke-testing.
 - **Backups and point-in-time recovery.** ZFS replication and staging
   snapshots are not backup jobs. No script configures off-cluster backups,
@@ -2887,12 +2905,12 @@ treated as operational.
 
 Authority order is:
 
-1. current executable scripts and checked-in `env/cluster.conf`/`moxN.conf`;
+1. current executable scripts and checked-in `config/cluster.conf`/`moxN.conf`;
 2. this comprehensive top-level overview;
-3. scoped detail in [`hosts/README.md`](hosts/README.md),
-   [`guests/prod/README.md`](guests/prod/README.md),
-   [`guests/staging/README.md`](guests/staging/README.md), and
-   [`lib/README.md`](lib/README.md);
+3. scoped detail in [`scripts/user_callable/hosts/README.md`](../scripts/user_callable/hosts/README.md),
+   [`scripts/user_callable/guests/prod/README.md`](../scripts/user_callable/guests/prod/README.md),
+   [`scripts/user_callable/guests/staging/README.md`](../scripts/user_callable/guests/staging/README.md), and
+   [`scripts/lib/README.md`](../scripts/lib/README.md);
 
 Still-valid explanatory material consolidated from the removed legacy
 documents includes:

@@ -3,7 +3,7 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Fake-sysfs tests for the standalone hosts/cluster_setup_prereq.sh."""
+"""Fake-sysfs tests for the standalone scripts/user_callable/hosts/cluster_setup_prereq.sh."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).with_name("cluster_setup_prereq.sh")
+SCRIPT = Path(__file__).resolve().parent.parent / "user_callable" / "hosts" / "cluster_setup_prereq.sh"
 
 FAKE_LSBLK = r'''#!/usr/bin/env bash
 # lsblk -dno FIELD DEVICE or lsblk -dnbo SIZE DEVICE
@@ -122,7 +122,7 @@ class ClusterSetupPrereqTest(unittest.TestCase):
         for text in (
             "Linux Live environment booted on a machine",
             "changes nothing",
-            "env/moxN.conf",
+            "config/moxN.conf",
             "NVME_MIRROR_<P>_SERIAL_<M> and NVME_MIRROR_<P>_CAPACITY_BYTES_<M>",
             "PROXMOX_PUBLIC_MAC",
             "PROXMOX_SECONDARY_MAC",

@@ -12,10 +12,10 @@ set -uo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: lib/report_stale_jump_ssh.sh moxN
+Usage: scripts/utilities/report_stale_jump_ssh.sh moxN
 
 Scan ~/.ssh/config for production and staging guest aliases that jump through
-moxN and print the guests/setup_jump_ssh_access.sh command that repairs each.
+moxN and print the scripts/user_callable/guests/setup_jump_ssh_access.sh command that repairs each.
 EOF
 }
 
@@ -36,8 +36,8 @@ command -v python3 >/dev/null 2>&1 || {
 
 repairs=""
 if [[ "${BMAC_UI_JSON:-}" == 1 ]]; then
-  # shellcheck source=ui_protocol.sh
-  source "$(dirname -- "${BASH_SOURCE[0]}")/ui_protocol.sh"
+  # shellcheck source=../lib/ui_protocol.sh
+  source "$(dirname -- "${BASH_SOURCE[0]}")/../lib/ui_protocol.sh"
   repairs="$(mktemp)" || repairs=""
 fi
 
@@ -145,11 +145,11 @@ for alias in sorted(stale):
 print("    Repair each one from this workstation:")
 for alias in sorted(stale):
     if guest_name.fullmatch(alias):
-        print(f"      guests/setup_jump_ssh_access.sh {alias}")
+        print(f"      scripts/user_callable/guests/setup_jump_ssh_access.sh {alias}")
     else:
         address = stale[alias].get("address", "its private IP")
         print(
-            "      guests/setup_jump_ssh_access.sh   "
+            "      scripts/user_callable/guests/setup_jump_ssh_access.sh   "
             f"(pick the guest at {address}, enter alias {alias})"
         )
 print("    Other administrators' workstations need the same repair.")
@@ -165,11 +165,11 @@ if [[ -n "$repairs" ]]; then
   while IFS=$'\t' read -r alias registered address; do
     if [[ "$registered" == 1 ]]; then
       bmac_ui_next_step "Repair the jump SSH alias $alias; it still jumps through $removed_host." \
-        --command "guests/setup_jump_ssh_access.sh $alias" \
+        --command "scripts/user_callable/guests/setup_jump_ssh_access.sh $alias" \
         --workflow setup_jump_ssh_access --arg "resource=$alias"
     else
       bmac_ui_next_step "Repair the hand-written jump SSH alias $alias: pick the guest at $address and enter alias $alias." \
-        --command "guests/setup_jump_ssh_access.sh" --workflow setup_jump_ssh_access
+        --command "scripts/user_callable/guests/setup_jump_ssh_access.sh" --workflow setup_jump_ssh_access
     fi
   done <"$repairs"
   rm -f -- "$repairs"

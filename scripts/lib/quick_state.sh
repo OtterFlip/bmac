@@ -3,13 +3,15 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Workstation driver shared by the fast diagnostics/list_*.sh scripts. It
-# finds one reachable cluster member, runs lib/quick_state.py's read-only
+# Workstation driver shared by the fast
+# scripts/user_callable/diagnostics/list_*.sh scripts. It
+# finds one reachable cluster member, runs scripts/utilities/quick_state.py's read-only
 # collector there over a single SSH connection, and renders the result
-# locally. Source after lib/config.sh, lib/cluster_control.sh, and
-# lib/ui_protocol.sh.
+# locally. Source after scripts/lib/config.sh, scripts/lib/cluster_control.sh, and
+# scripts/lib/ui_protocol.sh.
 
 QS_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+QS_COLLECTOR="$(cd -- "${QS_LIB_DIR}/../utilities" && pwd -P)/quick_state.py"
 QS_RUN_DIR=""
 QS_PROBE=""
 
@@ -37,7 +39,7 @@ qs_find_probe() {
     0) ;;
     1)
       bmac_ui_next_step "Check this workstation's Tailscale connection and SSH access to the hosts." \
-        --command "diagnostics/show_cluster_health.sh" --workflow show_cluster_health
+        --command "scripts/user_callable/diagnostics/show_cluster_health.sh" --workflow show_cluster_health
       QS_ERROR_CODE=no_reachable_member qs_die \
         "no cluster member (mox1 through mox${MAX_MOX_HOSTS}) is reachable over strict SSH from this workstation"
       ;;
@@ -57,7 +59,7 @@ qs_collect() {
   bmac_ui_step "Collect ${kind} state on ${QS_PROBE}"
   mox_ssh "$QS_PROBE" python3 - collect "$kind" \
     --registry "$CONTROL_REMOTE_REGISTRY" --state-dir "$CLUSTER_STATE_DIR" "$@" \
-    <"${QS_LIB_DIR}/quick_state.py" >"${QS_RUN_DIR}/report.json" ||
+    <"$QS_COLLECTOR" >"${QS_RUN_DIR}/report.json" ||
     QS_ERROR_CODE=collect_failed qs_die "could not collect ${kind} state on ${QS_PROBE}"
 }
 
@@ -85,7 +87,7 @@ qs_render() {
   local kind="$1"
   shift
   bmac_ui_step "Summarize ${kind} state"
-  python3 "${QS_LIB_DIR}/quick_state.py" render "$kind" \
+  python3 "$QS_COLLECTOR" render "$kind" \
     --report "${QS_RUN_DIR}/report.json" "$@" ||
     qs_die "could not summarize the ${kind} state"
   bmac_ui_step_done

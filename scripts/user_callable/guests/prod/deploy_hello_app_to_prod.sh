@@ -13,12 +13,12 @@ set +x
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-# shellcheck source=../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)"
+# shellcheck source=../../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
 bmac_ui_bootstrap "$@"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
-APT_LOCK_LIB="${REPO_ROOT}/lib/apt_lock_wait.sh"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
+APT_LOCK_LIB="${REPO_ROOT}/scripts/lib/apt_lock_wait.sh"
 REMOTE_INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_INSTALL_ROOT}/lib/cluster_registry.py"
 
@@ -121,13 +121,13 @@ registry_cmd() {
 
 load_config() {
   require_regular_file "$CONFIG_LIB" "Configuration library"
-  # shellcheck source=../lib/config.sh
+  # shellcheck source=../../../lib/config.sh
   source "$CONFIG_LIB"
   require_regular_file "$APT_LOCK_LIB" "Apt lock wait library"
-  # shellcheck source=../lib/apt_lock_wait.sh
+  # shellcheck source=../../../lib/apt_lock_wait.sh
   source "$APT_LOCK_LIB"
   load_proxmox_config --no-secrets >/dev/null ||
-    die "Could not load env/cluster.conf"
+    die "Could not load config/cluster.conf"
 
   [[ -n "${CLUSTER_STATE_DIR:-}" ]] || die "CLUSTER_STATE_DIR is not configured"
   [[ -n "${MAX_MOX_HOSTS:-}" ]] || die "MAX_MOX_HOSTS is not configured"
@@ -552,7 +552,7 @@ write_nginx_assets() {
   done
 
   cat >"$site_file" <<EOF2
-# Managed by app/deploy_hello_app_to_prod.sh for $RESOURCE_NAME.
+# Managed by scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh for $RESOURCE_NAME.
 # Production aliases and every default staging name are intentionally listed
 # explicitly so staging clones inherit a ready-to-use NGINX configuration.
 

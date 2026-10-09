@@ -12,12 +12,12 @@ set +x
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
-# shellcheck source=../../lib/ui_protocol.sh
-source "${REPO_ROOT}/lib/ui_protocol.sh"
-CONFIG_LIB="${REPO_ROOT}/lib/config.sh"
-PATCH_HELPER="${SCRIPT_DIR}/patch_staging_clone.sh"
-GUEST_TREE_HELPER="${SCRIPT_DIR}/patch_staging_guest_tree.py"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)"
+# shellcheck source=../../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
+PATCH_HELPER="${REPO_ROOT}/scripts/utilities/patch_staging_clone.sh"
+GUEST_TREE_HELPER="${REPO_ROOT}/scripts/utilities/patch_staging_guest_tree.py"
 REMOTE_INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_INSTALL_ROOT}/lib/cluster_registry.py"
 REMOTE_HAPROXY_SYNC="${REMOTE_INSTALL_ROOT}/lib/sync_haproxy_routes.sh"
@@ -360,7 +360,7 @@ PY
 load_and_validate_config() {
   CURRENT_PHASE="loading layered configuration"
   require_regular_file "$CONFIG_LIB"
-  # shellcheck source=../../lib/config.sh
+  # shellcheck source=../../../lib/config.sh
   source "$CONFIG_LIB"
   load_proxmox_config --require-secrets ||
     die "Could not load cluster.conf and secrets.env"

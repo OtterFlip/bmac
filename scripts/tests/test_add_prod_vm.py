@@ -23,10 +23,11 @@ import unittest
 # paths. A no-op where the temp directory is already a real path.
 tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
 
-PROD_DIR = Path(__file__).resolve().parent
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+PROD_DIR = SCRIPTS_DIR / "user_callable" / "guests" / "prod"
 SCRIPT = PROD_DIR / "add_prod_vm.sh"
-BUILDER_PATH = PROD_DIR / "build_ubuntu_autoinstall.py"
-PREPARER_PATH = PROD_DIR / "prepare_prod_iso.sh"
+BUILDER_PATH = SCRIPTS_DIR / "host_runtime" / "build_ubuntu_autoinstall.py"
+PREPARER_PATH = SCRIPTS_DIR / "host_runtime" / "prepare_prod_iso.sh"
 
 SPEC = importlib.util.spec_from_file_location("build_ubuntu_autoinstall", BUILDER_PATH)
 assert SPEC and SPEC.loader
@@ -1126,12 +1127,12 @@ printf '%s\\n' "$ROOT_VOLUME"
         runs_before = set(artifacts.glob("run-*")) if artifacts.exists() else set()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            env_dir = root / "env"
+            config_dir = root / "config"
             bin_dir = root / "bin"
-            env_dir.mkdir()
+            config_dir.mkdir()
             bin_dir.mkdir()
-            cluster = env_dir / "cluster.conf"
-            secrets = env_dir / "secrets.env"
+            cluster = config_dir / "cluster.conf"
+            secrets = config_dir / "secrets.env"
             calls = root / "ssh-calls.jsonl"
 
             cluster.write_text(
@@ -1185,7 +1186,7 @@ printf '%s\\n' "$ROOT_VOLUME"
                 encoding="utf-8",
             )
             for index in (1, 2):
-                (env_dir / f"mox{index}.conf").write_text(
+                (config_dir / f"mox{index}.conf").write_text(
                     "\n".join(
                         (
                             f"NVME_MIRROR_0_SERIAL_1=test-mox{index}-a",
@@ -1272,7 +1273,7 @@ else:
                 {
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                     "APP_HA_CONFIG_TEST_MODE": "1",
-                    "APP_HA_ENV_DIR": str(env_dir),
+                    "APP_HA_CONFIG_DIR": str(config_dir),
                     "FAKE_SSH_CALLS": str(calls),
                 }
             )

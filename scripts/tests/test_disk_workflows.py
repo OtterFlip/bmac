@@ -10,7 +10,7 @@ simulate_disk_failure_and_replacement.sh.
 One fake `ssh` plays the Proxmox host (the storage layout, registry,
 replication, zpool, and the installed rpool mirror tool) and the production
 guests reached as `ssh prodN`. The host's storage state file is handled by the
-real lib/storage_state.py.
+real scripts/utilities/storage_state.py.
 """
 
 from __future__ import annotations
@@ -25,15 +25,18 @@ import time
 import unittest
 
 
-HOSTS_DIR = Path(__file__).resolve().parent
-LIB_DIR = HOSTS_DIR.parent / "lib"
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+HOSTS_DIR = SCRIPTS_DIR / "user_callable" / "hosts"
+LIB_DIR = SCRIPTS_DIR / "lib"
+UTILITIES_DIR = SCRIPTS_DIR / "utilities"
 ADD = HOSTS_DIR / "add_new_disk_vdev.sh"
 REPLACE = HOSTS_DIR / "add_replacement_disk.sh"
 DECOMMISSION = HOSTS_DIR / "decommission_disks.sh"
 INVENTORY = HOSTS_DIR / "inventory_disks.sh"
 SIMULATE = HOSTS_DIR / "simulate_disk_failure_and_replacement.sh"
 MARKER = "/fake/root/app-ha-simulated-disk-failure"
-sys.path.insert(0, str(LIB_DIR))
+sys.path.insert(0, str(UTILITIES_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_host_storage as fixtures  # noqa: E402
 from ui_test_driver import run_json, scripted  # noqa: E402
 
@@ -426,18 +429,18 @@ class DiskWorkflowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        self.env_dir = self.root / "env"
+        self.config_dir = self.root / "config"
         self.bin_dir = self.root / "bin"
         self.artifacts = self.root / "artifacts"
-        for path in (self.env_dir, self.bin_dir, self.artifacts):
+        for path in (self.config_dir, self.bin_dir, self.artifacts):
             path.mkdir()
         known_hosts = self.root / "known_hosts"
         known_hosts.write_text("")
         known_hosts.chmod(0o600)
-        (self.env_dir / "cluster.conf").write_text(
+        (self.config_dir / "cluster.conf").write_text(
             fixtures_cluster_conf(), encoding="utf-8"
         )
-        self.conf = self.env_dir / "mox1.conf"
+        self.conf = self.config_dir / "mox1.conf"
         self.conf.write_text(MOX1_CONF, encoding="utf-8")
         self.conf.chmod(0o600)
         self.host_state = self.root / "host-storage-state.json"
@@ -478,7 +481,7 @@ class DiskWorkflowTest(unittest.TestCase):
         self.environment.update(
             {
                 "APP_HA_CONFIG_TEST_MODE": "1",
-                "APP_HA_ENV_DIR": str(self.env_dir),
+                "APP_HA_CONFIG_DIR": str(self.config_dir),
                 "APP_HA_DISK_TEST_MODE": "1",
                 "APP_HA_REMOTE_RPOOL_MIRROR": REMOTE_TOOL,
                 "APP_HA_REMOTE_ROOT": "/fake/root",
@@ -1097,7 +1100,7 @@ class DiskWorkflowTest(unittest.TestCase):
             completed.stdout,
         )
         self.assertNotIn("stage1prod3", completed.stdout)
-        self.assertIn("guests/staging/remove_staging_vm.sh stageNprodN", completed.stdout)
+        self.assertIn("scripts/user_callable/guests/staging/remove_staging_vm.sh stageNprodN", completed.stdout)
         self.assertEqual(self.actions("fstrim"), [])
 
     def test_decommission_flags_leftover_staging_snapshots(self) -> None:
@@ -1217,7 +1220,7 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertFalse(members[1]["luks"])
         self.assertIn("ssh mox1 zpool scrub -w rpool", completed.stdout)
         self.assertTrue(
-            completed.stdout.rstrip().endswith("hosts/inventory_disks.sh --host mox1")
+            completed.stdout.rstrip().endswith("scripts/user_callable/hosts/inventory_disks.sh --host mox1")
         )
         self.assertNotIn(["zpool", "wait", "-t", "remove", "rpool"], self.actions("zpool"))
 
@@ -1241,7 +1244,7 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertIn("rpool on mox1 now reports state ONLINE.", completed.stdout)
         self.assertTrue(
             completed.stdout.rstrip().endswith(
-                "Finalize its retirement now with\n  hosts/inventory_disks.sh --host mox1"
+                "Finalize its retirement now with\n  scripts/user_callable/hosts/inventory_disks.sh --host mox1"
             )
         )
         self.assertEqual(len(self.host_storage_state()["scrubs"]), 2)
@@ -1511,7 +1514,7 @@ class DiskWorkflowTest(unittest.TestCase):
              ["simulate", "offline", MARKER, "mirror-1", "S2EXTRA1"],
              ["simulate", "wipe", MARKER]],
         )
-        self.assertIn("./hosts/add_replacement_disk.sh --host mox1", output)
+        self.assertIn("./scripts/user_callable/hosts/add_replacement_disk.sh --host mox1", output)
         self.assertIn("still list the erased LUKS UUID of crypt-rpool-mirror1-1", output)
         self.assertNotIn("boot-mirror ESP", output)
         self.assertEqual(self.actions("tool"), [])
@@ -1574,7 +1577,7 @@ class DiskWorkflowTest(unittest.TestCase):
 
     def test_shell_syntax(self) -> None:
         for script in (ADD, REPLACE, DECOMMISSION, INVENTORY, SIMULATE,
-                       LIB_DIR / "disk_workflows.sh", LIB_DIR / "simulated_disk_failure.sh"):
+                       LIB_DIR / "disk_workflows.sh", UTILITIES_DIR / "simulated_disk_failure.sh"):
             completed = subprocess.run(
                 ["bash", "-n", str(script)], text=True, capture_output=True, check=False
             )
