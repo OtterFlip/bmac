@@ -25,7 +25,7 @@ refuse a `secrets.env` whose mode is not exactly `0600`, and any
 world-writable `.conf`. Read the comments at the top of each template before
 filling it in.
 
-## Treat your copies as read-only
+## Treat your copies as read-only (one tiny exception below)
 
 Once a file has been used to build the cluster, its values are baked into the
 hosts and guests. Editing them afterwards does not change the cluster; it only
