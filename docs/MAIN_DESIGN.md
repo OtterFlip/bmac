@@ -293,7 +293,7 @@ Provider inputs map to configuration as follows:
   staging allocation ranges go in `GUEST_EGRESS_VIP`, `MOX_IP_START/END`,
   `HAPROXY_IP_START/END`, `PRODUCTION_IP_START/END`, and
   `STAGING_IP_START/END`;
-- each server's public IP, public gateway, netmask/prefix, private NIC
+- each server's public IP, public gateway, prefix length, private NIC
   address, and iDRAC address go in its `config/moxN.conf`;
 - the provider's IPMI VPN URL and credentials are operator access
   information only and are not consumed by these scripts.
