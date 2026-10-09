@@ -14,6 +14,10 @@ Proxmox, SSH, or the registry itself.
 The wire protocol is described by
 [`protocol/bmac-ui-v1.schema.json`](protocol/bmac-ui-v1.schema.json).
 
+## Screenshots
+
+[Here's](../docs/DASHBOARD_SCREENSHOTS.md) what the BMAC Dashboard looks like.
+
 ## What it does
 
 - **Overview pages** for hosts, production VMs, staging VMs, storage, and the
