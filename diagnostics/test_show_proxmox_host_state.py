@@ -233,7 +233,7 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
 
     def write_host_conf(self, pairs) -> None:
         lines = []
-        for pair, (first, second) in enumerate(pairs, start=1):
+        for pair, (first, second) in enumerate(pairs):
             lines += [
                 f"NVME_MIRROR_{pair}_SERIAL_1={first}",
                 f"NVME_MIRROR_{pair}_SERIAL_2={second}",

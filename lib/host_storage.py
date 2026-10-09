@@ -34,7 +34,7 @@ SCHEMA_VERSION = 1
 POOL = "rpool"
 BOOT_UUIDS_FILE = Path("/etc/kernel/proxmox-boot-uuids")
 CRYPTTAB_FILE = Path("/etc/crypttab")
-RPOOL_MAPPER_RE = re.compile(r"^crypt-rpool-(?:a|b|mirror[2-5]-[12])$")
+RPOOL_MAPPER_RE = re.compile(r"^crypt-rpool-(?:a|b|mirror[1-9][0-9]*-[12])$")
 LSBLK_COLUMNS = (
     "NAME,KNAME,TYPE,SIZE,SERIAL,MODEL,WWN,TRAN,FSTYPE,UUID,MOUNTPOINTS"
 )
@@ -1088,7 +1088,7 @@ def render_disk_inventory(layout: dict[str, Any]) -> str:
 def parse_configured(values: Sequence[str]) -> list[tuple[int, int, str]]:
     configured = []
     for value in values:
-        match = re.fullmatch(r"([1-9][0-9]*):([12]):(\S+)", value)
+        match = re.fullmatch(r"([0-4]):([12]):(\S+)", value)
         if match is None:
             raise StorageError(f"invalid --configured-serial value: {value!r}")
         configured.append((int(match.group(1)), int(match.group(2)), match.group(3)))

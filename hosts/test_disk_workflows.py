@@ -283,7 +283,7 @@ elif words[:3] == ["bash", "-s", "--"] and "simulate_disk_failure_and_replacemen
         save()
     elif command == "restore":
         if state.get("sim_restore_console"):
-            print("CONSOLE\t/dev/nvme3n1\tcrypt-rpool-mirror2-1\t/dev/mapper/crypt-rpool-mirror2-1")
+            print("CONSOLE\t/dev/nvme3n1\tcrypt-rpool-mirror1-1\t/dev/mapper/crypt-rpool-mirror1-1")
             raise SystemExit(3)
         state["sim_status"] = ""
         save()
@@ -365,10 +365,10 @@ SHARED_CRYPTTAB = "".join(
     for mapper in (
         "crypt-rpool-a",
         "crypt-rpool-b",
+        "crypt-rpool-mirror1-1",
+        "crypt-rpool-mirror1-2",
         "crypt-rpool-mirror2-1",
         "crypt-rpool-mirror2-2",
-        "crypt-rpool-mirror3-1",
-        "crypt-rpool-mirror3-2",
     )
 )
 NO_STAGING_SNAPSHOTS = "\n".join(
@@ -548,8 +548,8 @@ class DiskWorkflowTest(unittest.TestCase):
         output = completed.stdout
         helper = self.actions("write-helper")
         self.assertEqual(
-            helper, [["write-helper", "/fake/root/app-ha-add-mirror-4", REMOTE_TOOL,
-                      "4", "S6BLANK", "S7USED"]],
+            helper, [["write-helper", "/fake/root/app-ha-add-mirror-3", REMOTE_TOOL,
+                      "3", "S6BLANK", "S7USED"]],
         )
         self.assertIn("MANUAL LUKS ACTION REQUIRED", output)
         self.assertIn("it never passes through this workstation or SSH", output)
@@ -558,18 +558,37 @@ class DiskWorkflowTest(unittest.TestCase):
             tool, ["check-new", "release-disks", "check-new", "luks-check-prepared", "luks-add"]
         )
         self.assertIn("  S7USED (has partitions or signatures)", output)
-        self.assertIn(["tool", "luks-add", "--pair", "4", "S6BLANK", "S7USED"],
+        self.assertIn(["tool", "luks-add", "--pair", "3", "S6BLANK", "S7USED"],
                       self.actions("tool"))
         for member in (1, 2):
-            header = self.artifacts / "mox1" / "luks-headers" / f"rpool-mirror4-{member}.bin"
+            header = self.artifacts / "mox1" / "luks-headers" / f"rpool-mirror3-{member}.bin"
             self.assertEqual(header.read_text(), f"header {member}")
             self.assertEqual(header.stat().st_mode & 0o777, 0o600)
-        self.assertNotIn("/fake/root/app-ha-add-mirror-4", self.fake()["remote_files"])
+        self.assertNotIn("/fake/root/app-ha-add-mirror-3", self.fake()["remote_files"])
         self.assertNotIn("S6BLANK", self.conf.read_text())
         self.assertIn("serial 2:       S7USED", output)
         self.assertIn("gracefully migrate every production guest off mox1", output)
         self.assertFalse(any("reboot" in " ".join(row) for row in self.fake()["actions"]))
         self.assertEqual(self.host_storage_state()["additions"], {})
+
+    def test_add_names_the_mirror_after_the_vdev_number_zfs_assigns(self) -> None:
+        # mirror-4 was decommissioned earlier; ZFS never reuses its number, so
+        # the next mirror added is mirror-5 even though mirror-3 is free.
+        gone = {"path": "/dev/mapper/crypt-rpool-mirror4-1", "mapper": "/dev/mapper/crypt-rpool-mirror4-1",
+                "luks": True, "disk": None, "serial": "S9GONE", "model": None, "disk_size": None}
+        self.seed_host_state(removals=[{
+            "id": "removal-1-mirror-4", "vdev": "mirror-4", "members": [gone],
+            "state": "retired", "requested_at": 1, "updated_at": 2, "notes": [],
+        }])
+        self.update_fake(console_ran=True)
+        self.run_script(ADD, "1\n2\ny\nGO\nGO\ny\n")
+        self.assertEqual(
+            self.actions("write-helper"),
+            [["write-helper", "/fake/root/app-ha-add-mirror-5", REMOTE_TOOL,
+              "5", "S6BLANK", "S7USED"]],
+        )
+        self.assertIn(["tool", "luks-add", "--pair", "5", "S6BLANK", "S7USED"],
+                      self.actions("tool"))
 
     def test_add_records_a_pair_an_earlier_run_added(self) -> None:
         # zpool add succeeded, then the session ended before moxN.conf changed.
@@ -577,7 +596,7 @@ class DiskWorkflowTest(unittest.TestCase):
         members = []
         for disk in layout["unassigned_disks"][:2]:
             members.append({
-                "path": f"/dev/mapper/crypt-rpool-mirror4-{len(members) + 1}",
+                "path": f"/dev/mapper/crypt-rpool-mirror3-{len(members) + 1}",
                 "state": "ONLINE", "device": disk["disk"], "luks": True,
                 "mapper": None, "backing": disk["disk"], "disk": disk["disk"],
                 "serial": disk["serial"], "model": disk["model"],
@@ -586,21 +605,21 @@ class DiskWorkflowTest(unittest.TestCase):
         layout["vdevs"].append(dict(layout["vdevs"][2], name="mirror-3", members=members))
         layout["unassigned_disks"] = layout["unassigned_disks"][2:]
         self.update_fake(layout=layout)
-        self.seed_host_state(additions={"4": {
+        self.seed_host_state(additions={"3": {
             "serials": ["S6BLANK", "S7USED"],
             "capacities": [4000787030016, 4000787030016], "recorded_at": 1,
         }})
         completed = self.run_script(ADD, "")
-        self.assertIn("Mirror slot 4, which an earlier run added to rpool", completed.stdout)
+        self.assertIn("Mirror slot 3, which an earlier run added to rpool", completed.stdout)
         self.assertNotIn("S7USED", self.conf.read_text())
         self.assertEqual(self.host_storage_state()["additions"], {})
         self.assertEqual(self.actions("tool"), [])
 
     def test_add_stops_until_the_console_helper_succeeds(self) -> None:
         completed = self.run_script(ADD, "1\n2\ny\nGO\nGO\nq\n", expected=1)
-        self.assertIn("rerun /fake/root/app-ha-add-mirror-4 at the console", completed.stdout)
+        self.assertIn("rerun /fake/root/app-ha-add-mirror-3 at the console", completed.stdout)
         self.assertNotIn("luks-add", [row[1] for row in self.actions("tool")])
-        self.assertNotIn("NVME_MIRROR_4_SERIAL_1=S6BLANK", self.conf.read_text())
+        self.assertNotIn("NVME_MIRROR_3_SERIAL_1=S6BLANK", self.conf.read_text())
 
     def test_add_refuses_disks_of_different_capacity(self) -> None:
         layout = self.fake()["layout"]
@@ -692,10 +711,10 @@ class DiskWorkflowTest(unittest.TestCase):
     def test_add_resumes_a_prepared_pair(self) -> None:
         layout = self.fake()["layout"]
         layout["luks_mappings"] += [
-            {"mapper": "crypt-rpool-mirror4-1", "backing": "/dev/nvme6n1",
+            {"mapper": "crypt-rpool-mirror3-1", "backing": "/dev/nvme6n1",
              "disk": "/dev/nvme6n1", "serial": "S6BLANK", "size": 4000787030016,
              "in_pool": False},
-            {"mapper": "crypt-rpool-mirror4-2", "backing": "/dev/nvme7n1",
+            {"mapper": "crypt-rpool-mirror3-2", "backing": "/dev/nvme7n1",
              "disk": "/dev/nvme7n1", "serial": "S7USED", "size": 4000787030016,
              "in_pool": False},
         ]
@@ -712,13 +731,13 @@ class DiskWorkflowTest(unittest.TestCase):
         # script retires them, so they must not look like a prepared addition.
         layout = self.completed_removal_layout()
         for row in layout["luks_mappings"]:
-            if row["mapper"].startswith("crypt-rpool-mirror2"):
+            if row["mapper"].startswith("crypt-rpool-mirror1"):
                 self.assertFalse(row["in_pool"])
         self.update_fake(layout=layout, console_ran=True)
         self.record_mirror_1_removal()
         completed = self.run_script(ADD, "1\n2\ny\nGO\nGO\ny\n")
         self.assertNotIn("was prepared by an earlier run", completed.stdout)
-        self.assertIn(["tool", "luks-add", "--pair", "4", "S6BLANK", "S7USED"],
+        self.assertIn(["tool", "luks-add", "--pair", "3", "S6BLANK", "S7USED"],
                       self.actions("tool"))
 
     def test_add_refuses_a_sixth_mirror(self) -> None:
@@ -775,8 +794,8 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertNotIn("/fake/root/luks-header-B.bin", self.fake()["remote_files"])
         conf = self.conf.read_text()
         self.assertNotIn("S8NEWBOOT", conf)
-        self.assertIn("NVME_MIRROR_1_SERIAL_2=S1BOOTB\n", conf)
-        self.assertIn("NVME_MIRROR_1_SERIAL_1=S0BOOTA\n", conf)
+        self.assertIn("NVME_MIRROR_0_SERIAL_2=S1BOOTB\n", conf)
+        self.assertIn("NVME_MIRROR_0_SERIAL_1=S0BOOTA\n", conf)
         self.assertIn("REPLACING A MEMBER (resilver)", output)
         self.assertIn("this script does not wait for it", output)
         self.assertIn("either disk can boot mox1 alone", output)
@@ -811,14 +830,14 @@ class DiskWorkflowTest(unittest.TestCase):
 
     def test_replace_stops_until_the_console_helper_succeeds(self) -> None:
         self.update_fake(
-            layout=degraded_layout("crypt-rpool-mirror2-2", "S3EXTRA2", "S9NEWEXTRA"),
+            layout=degraded_layout("crypt-rpool-mirror1-2", "S3EXTRA2", "S9NEWEXTRA"),
             console_after_checks=5,
         )
         completed = self.run_script(REPLACE, "1\nGO\nGO\nq\n", expected=1)
-        self.assertIn("rerun /fake/root/app-ha-replace-member-2-2 at the console", completed.stdout)
+        self.assertIn("rerun /fake/root/app-ha-replace-member-1-2 at the console", completed.stdout)
         self.assertEqual(
             self.actions("write-helper"),
-            [["write-helper", "/fake/root/app-ha-replace-member-2-2", REMOTE_TOOL, "2-2",
+            [["write-helper", "/fake/root/app-ha-replace-member-1-2", REMOTE_TOOL, "1-2",
               "S9NEWEXTRA"]],
         )
         self.assertNotIn("replace-member", [row[1] for row in self.actions("tool")])
@@ -829,7 +848,7 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertNotIn("boot-esp", [row[1] for row in self.actions("tool")])
         record = self.host_storage_state()["replacements"]["S2EXTRA1"]
         self.assertEqual((record["serial"], record["vdev"]), ("S9NEWEXTRA", "mirror-1"))
-        self.assertIn("NVME_MIRROR_2_SERIAL_2=S3EXTRA2\n", self.conf.read_text())
+        self.assertIn("NVME_MIRROR_1_SERIAL_2=S3EXTRA2\n", self.conf.read_text())
 
     def test_replace_resumes_after_reusing_the_pulled_members_mapping(self) -> None:
         # The console helper closed the pulled disk's leftover crypt-rpool-b,
@@ -867,7 +886,7 @@ class DiskWorkflowTest(unittest.TestCase):
     def test_replace_resumes_a_recorded_disk_after_a_reboot(self) -> None:
         # The console helper encrypted S9NEWEXTRA, then the host rebooted
         # before replace-member: its mapping is closed and it holds LUKS.
-        layout = degraded_layout("crypt-rpool-mirror2-2", "S3EXTRA2", "S9NEWEXTRA")
+        layout = degraded_layout("crypt-rpool-mirror1-2", "S3EXTRA2", "S9NEWEXTRA")
         disk = next(d for d in layout["unassigned_disks"] if d["serial"] == "S9NEWEXTRA")
         disk["fstype"] = "crypto_LUKS"
         self.update_fake(layout=layout, console_after_checks=1)
@@ -888,7 +907,7 @@ class DiskWorkflowTest(unittest.TestCase):
         # An earlier run opened the new member, then stopped before its header
         # backup; preparing it again would refuse the open mapping.
         self.update_fake(
-            layout=degraded_layout("crypt-rpool-mirror2-2", "S3EXTRA2", "S9NEWEXTRA"),
+            layout=degraded_layout("crypt-rpool-mirror1-2", "S3EXTRA2", "S9NEWEXTRA"),
             mapping_open=True, console_after_checks=5,
         )
         self.seed_host_state(replacements={
@@ -928,7 +947,7 @@ class DiskWorkflowTest(unittest.TestCase):
 
     def test_replace_clear_extra_member(self) -> None:
         self.update_fake(
-            layout=make_clear(degraded_layout("crypt-rpool-mirror2-2", "S3EXTRA2", "S9NEWEXTRA"))
+            layout=make_clear(degraded_layout("crypt-rpool-mirror1-2", "S3EXTRA2", "S9NEWEXTRA"))
         )
         completed = self.run_script(REPLACE, "1\nGO\n")
         self.assertEqual(
@@ -941,7 +960,7 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertEqual(self.actions("write-helper"), [])
         conf = self.conf.read_text()
         self.assertNotIn("S9NEWEXTRA", conf)
-        self.assertIn("NVME_MIRROR_2_SERIAL_1=S2EXTRA1\n", conf)
+        self.assertIn("NVME_MIRROR_1_SERIAL_1=S2EXTRA1\n", conf)
         self.assertNotIn("either disk can boot", completed.stdout)
         self.assertNotIn("passphrase", completed.stdout)
 
@@ -961,7 +980,7 @@ class DiskWorkflowTest(unittest.TestCase):
 
     def test_replace_accepts_a_slightly_smaller_disk(self) -> None:
         self.update_fake(layout=make_clear(degraded_layout(
-            "crypt-rpool-mirror2-2", "S3EXTRA2", "S9NEWEXTRA", REPLACEMENT_BYTES,
+            "crypt-rpool-mirror1-2", "S3EXTRA2", "S9NEWEXTRA", REPLACEMENT_BYTES,
             keep_spares=True,
         )))
         completed = self.run_script(REPLACE, "3\nGO\n")
@@ -975,13 +994,13 @@ class DiskWorkflowTest(unittest.TestCase):
 
     def test_replace_leaves_failed_disks_that_are_still_installed(self) -> None:
         status = strip_remove(fixtures.LUKS_STATUS).replace(
-            "\t    /dev/mapper/crypt-rpool-mirror2-2  ONLINE",
-            "\t    /dev/mapper/crypt-rpool-mirror2-2  FAULTED",
+            "\t    /dev/mapper/crypt-rpool-mirror1-2  ONLINE",
+            "\t    /dev/mapper/crypt-rpool-mirror1-2  FAULTED",
         )
         self.update_fake(layout=healthy_layout(status_text=status))
         completed = self.run_script(REPLACE, "")
         self.assertIn(
-            "mirror-1 member /dev/mapper/crypt-rpool-mirror2-2 (disk S3EXTRA2) is FAULTED "
+            "mirror-1 member /dev/mapper/crypt-rpool-mirror1-2 (disk S3EXTRA2) is FAULTED "
             "but still installed",
             completed.stdout,
         )
@@ -1158,10 +1177,10 @@ class DiskWorkflowTest(unittest.TestCase):
         """S3EXTRA2's member of mirror-1 was offlined and its disk erased."""
         leaf = (
             "/dev/disk/by-id/nvme-S3EXTRA2-part1" if clear
-            else "/dev/mapper/crypt-rpool-mirror2-2"
+            else "/dev/mapper/crypt-rpool-mirror1-2"
         )
         status = strip_remove(fixtures.LUKS_STATUS).replace(
-            "\t    /dev/mapper/crypt-rpool-mirror2-2  ONLINE",
+            "\t    /dev/mapper/crypt-rpool-mirror1-2  ONLINE",
             f"\t    {leaf}  OFFLINE",
         )
         assert "OFFLINE" in status
@@ -1233,22 +1252,22 @@ class DiskWorkflowTest(unittest.TestCase):
 
     def test_decommission_luks_vdev_with_an_offlined_member(self) -> None:
         completed = self.decommission_mirror_1(self.offlined_mirror_1_layout())
-        self.assertIn("(LUKS mapping crypt-rpool-mirror2-2)", completed.stdout)
+        self.assertIn("(LUKS mapping crypt-rpool-mirror1-2)", completed.stdout)
         members = self.host_storage_state()["removals"][-1]["members"]
         self.assertEqual([m["serial"] for m in members], ["S2EXTRA1", None])
         self.assertEqual(
             [m["mapper"] for m in members],
-            ["/dev/mapper/crypt-rpool-mirror2-1", "/dev/mapper/crypt-rpool-mirror2-2"],
+            ["/dev/mapper/crypt-rpool-mirror1-1", "/dev/mapper/crypt-rpool-mirror1-2"],
         )
         self.assertTrue(members[1]["luks"])
 
     def test_decommission_luks_vdev_with_a_pulled_member(self) -> None:
-        layout = degraded_layout("crypt-rpool-mirror2-2", "S3EXTRA2", "S8NEW")
+        layout = degraded_layout("crypt-rpool-mirror1-2", "S3EXTRA2", "S8NEW")
         self.decommission_mirror_1(layout)
         members = self.host_storage_state()["removals"][-1]["members"]
         self.assertEqual(members[1]["path"], "8093158935163316232")
         self.assertIsNone(members[1]["serial"])
-        self.assertEqual(members[1]["mapper"], "/dev/mapper/crypt-rpool-mirror2-2")
+        self.assertEqual(members[1]["mapper"], "/dev/mapper/crypt-rpool-mirror1-2")
         self.assertTrue(members[1]["luks"])
 
     def test_decommission_refuses_a_vdev_without_an_online_disk(self) -> None:
@@ -1273,12 +1292,12 @@ class DiskWorkflowTest(unittest.TestCase):
         self.update_fake(actions=[], layout=self.completed_removal_layout())
         completed = self.run_script(INVENTORY, "y\n")
         self.assertIn(
-            "missing member /dev/mapper/crypt-rpool-mirror2-2; its disk was already gone",
+            "missing member /dev/mapper/crypt-rpool-mirror1-2; its disk was already gone",
             completed.stdout,
         )
         self.assertEqual(
             self.retirements(),
-            [["tool", "retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2"]],
+            [["tool", "retire-luks", "crypt-rpool-mirror1-1", "crypt-rpool-mirror1-2"]],
         )
         self.assertIn(["tool", "release-disks", "S2EXTRA1"], self.actions("tool"))
         self.assertEqual(self.host_storage_state()["removals"][-1]["state"], "retired")
@@ -1301,8 +1320,8 @@ class DiskWorkflowTest(unittest.TestCase):
     def completed_removal_layout(self) -> dict:
         status = strip_remove(fixtures.LUKS_STATUS).replace(
             "\t  mirror-1                             ONLINE       0     0     0\n"
-            "\t    /dev/mapper/crypt-rpool-mirror2-1  ONLINE       0     0     0\n"
-            "\t    /dev/mapper/crypt-rpool-mirror2-2  ONLINE       0     0     0\n",
+            "\t    /dev/mapper/crypt-rpool-mirror1-1  ONLINE       0     0     0\n"
+            "\t    /dev/mapper/crypt-rpool-mirror1-2  ONLINE       0     0     0\n",
             "",
         )
         return healthy_layout(status_text=status)
@@ -1321,19 +1340,19 @@ class DiskWorkflowTest(unittest.TestCase):
         self.update_fake(layout=self.completed_removal_layout())
         headers = self.artifacts / "mox1" / "luks-headers"
         headers.mkdir(parents=True)
-        for name in ("rpool-mirror2-1.bin", "rpool-mirror2-2.bin", "rpool-mirror3-1.bin"):
+        for name in ("rpool-mirror1-1.bin", "rpool-mirror1-2.bin", "rpool-mirror2-1.bin"):
             (headers / name).write_text("header")
         completed = self.run_script(INVENTORY, "y\n")
         self.assertEqual(
             self.retirements(),
-            [["tool", "retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2"]],
+            [["tool", "retire-luks", "crypt-rpool-mirror1-1", "crypt-rpool-mirror1-2"]],
         )
         self.assertIn(
             ["tool", "release-disks", "S2EXTRA1", "S3EXTRA2"], self.actions("tool")
         )
         self.assertIn("does not overwrite the data area", completed.stdout)
-        self.assertEqual(sorted(path.name for path in headers.iterdir()), ["rpool-mirror3-1.bin"])
-        self.assertIn("NVME_MIRROR_2_SERIAL_1=S2EXTRA1\n", self.conf.read_text())
+        self.assertEqual(sorted(path.name for path in headers.iterdir()), ["rpool-mirror2-1.bin"])
+        self.assertIn("NVME_MIRROR_1_SERIAL_1=S2EXTRA1\n", self.conf.read_text())
         self.assertEqual(self.host_storage_state()["removals"][0]["state"], "retired")
         output = completed.stdout
         removable = output.split("Disks eligible for safe physical removal:", 1)[1]
@@ -1379,16 +1398,16 @@ class DiskWorkflowTest(unittest.TestCase):
         self.record_mirror_1_removal()
         layout = self.completed_removal_layout()
         layout["luks_mappings"] = [
-            row for row in layout["luks_mappings"] if not row["mapper"].startswith("crypt-rpool-mirror2")
+            row for row in layout["luks_mappings"] if not row["mapper"].startswith("crypt-rpool-mirror1")
         ]
         layout["crypttab"] = [
-            row for row in layout["crypttab"] if not row["mapper"].startswith("crypt-rpool-mirror2")
+            row for row in layout["crypttab"] if not row["mapper"].startswith("crypt-rpool-mirror1")
         ]
         self.update_fake(layout=layout)
         self.run_script(INVENTORY, "y\n")
         self.assertEqual(
             self.retirements(),
-            [["tool", "retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2"]],
+            [["tool", "retire-luks", "crypt-rpool-mirror1-1", "crypt-rpool-mirror1-2"]],
         )
         self.assertEqual(self.host_storage_state()["removals"][0]["state"], "retired")
 
@@ -1485,7 +1504,7 @@ class DiskWorkflowTest(unittest.TestCase):
         completed = self.run_script(SIMULATE, "y\n2\n1\nGO\nGO\n")
         output = completed.stdout
         self.assertIn("2) mirror-1   extra mirror LUKS         disks S2EXTRA1 and S3EXTRA2", output)
-        self.assertIn("failing member:  /dev/mapper/crypt-rpool-mirror2-1", output)
+        self.assertIn("failing member:  /dev/mapper/crypt-rpool-mirror1-1", output)
         self.assertEqual(
             self.actions("simulate"),
             [["simulate", "status", MARKER],
@@ -1493,7 +1512,7 @@ class DiskWorkflowTest(unittest.TestCase):
              ["simulate", "wipe", MARKER]],
         )
         self.assertIn("./hosts/add_replacement_disk.sh --host mox1", output)
-        self.assertIn("still list the erased LUKS UUID of crypt-rpool-mirror2-1", output)
+        self.assertIn("still list the erased LUKS UUID of crypt-rpool-mirror1-1", output)
         self.assertNotIn("boot-mirror ESP", output)
         self.assertEqual(self.actions("tool"), [])
 
@@ -1521,8 +1540,8 @@ class DiskWorkflowTest(unittest.TestCase):
         completed = self.run_script(SIMULATE, "y\n2\n1\nGO\nno\ny\n")
         self.assertIn("Disk S2EXTRA1 was not erased.", completed.stdout)
         self.assertIn(
-            "cryptsetup open /dev/nvme3n1 crypt-rpool-mirror2-1 && "
-            "zpool online rpool /dev/mapper/crypt-rpool-mirror2-1",
+            "cryptsetup open /dev/nvme3n1 crypt-rpool-mirror1-1 && "
+            "zpool online rpool /dev/mapper/crypt-rpool-mirror1-1",
             completed.stdout,
         )
         self.assertEqual([row[1] for row in self.actions("simulate")],
@@ -1537,8 +1556,8 @@ class DiskWorkflowTest(unittest.TestCase):
 
     def test_simulate_finishes_a_pending_simulation(self) -> None:
         self.update_fake(sim_status=(
-            "PENDING\tS2EXTRA1\tmirror-1\t/dev/mapper/crypt-rpool-mirror2-1\t"
-            "crypt-rpool-mirror2-1\textra\t/dev/mapper/crypt-rpool-mirror2-2\tOFFLINE\tyes\n"
+            "PENDING\tS2EXTRA1\tmirror-1\t/dev/mapper/crypt-rpool-mirror1-1\t"
+            "crypt-rpool-mirror1-1\textra\t/dev/mapper/crypt-rpool-mirror1-2\tOFFLINE\tyes\n"
         ))
         completed = self.run_script(SIMULATE, "y\n1\nGO\n")
         self.assertIn("Simulation in progress on mox1", completed.stdout)
@@ -1563,20 +1582,20 @@ class DiskWorkflowTest(unittest.TestCase):
 
 
 MOX1_CONF = """\
-NVME_MIRROR_1_SERIAL_1=S0BOOTA
-NVME_MIRROR_1_SERIAL_2=S1BOOTB
+NVME_MIRROR_0_SERIAL_1=S0BOOTA
+NVME_MIRROR_0_SERIAL_2=S1BOOTB
+NVME_MIRROR_0_CAPACITY_BYTES_1=2000398934016
+NVME_MIRROR_0_CAPACITY_BYTES_2=2000398934016
+NVME_MIRROR_1_SERIAL_1=S2EXTRA1
+NVME_MIRROR_1_SERIAL_2=S3EXTRA2
 NVME_MIRROR_1_CAPACITY_BYTES_1=2000398934016
 NVME_MIRROR_1_CAPACITY_BYTES_2=2000398934016
-NVME_MIRROR_2_SERIAL_1=S2EXTRA1
-NVME_MIRROR_2_SERIAL_2=S3EXTRA2
+NVME_MIRROR_2_SERIAL_1=S4EXTRA3
+NVME_MIRROR_2_SERIAL_2=S5EXTRA4
 NVME_MIRROR_2_CAPACITY_BYTES_1=2000398934016
 NVME_MIRROR_2_CAPACITY_BYTES_2=2000398934016
-NVME_MIRROR_3_SERIAL_1=S4EXTRA3
-NVME_MIRROR_3_SERIAL_2=S5EXTRA4
-NVME_MIRROR_3_CAPACITY_BYTES_1=2000398934016
-NVME_MIRROR_3_CAPACITY_BYTES_2=2000398934016
-#NVME_MIRROR_4_SERIAL_1=
-#NVME_MIRROR_4_SERIAL_2=
+#NVME_MIRROR_3_SERIAL_1=
+#NVME_MIRROR_3_SERIAL_2=
 PROXMOX_IP=10.213.0.11
 PROXMOX_GATEWAY=10.213.0.1
 PROXMOX_PREFIX=24
@@ -1639,9 +1658,9 @@ class DiskWorkflowJsonTest(DiskWorkflowTest):
         self.assertEqual(erase["confirmation_text"], "GO")
         self.assertEqual(erase["severity"], "destructive")
         self.assertEqual(console["type"], "manual_action")
-        self.assertIn("/fake/root/app-ha-add-mirror-4", " ".join(console["instructions"]))
+        self.assertIn("/fake/root/app-ha-add-mirror-3", " ".join(console["instructions"]))
         self.assertTrue(ready["title"].startswith("Start: record the new disks"))
-        self.assertIn(["tool", "luks-add", "--pair", "4", "S6BLANK", "S7USED"], self.actions("tool"))
+        self.assertIn(["tool", "luks-add", "--pair", "3", "S6BLANK", "S7USED"], self.actions("tool"))
         result = run.of("result")[-1]["data"]
         self.assertEqual(result["serial_2"], "S7USED")
         self.assertTrue(any("reboot of mox1" in step["text"] for step in run.of("next_step")))

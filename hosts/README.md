@@ -189,11 +189,12 @@ durable host artifact is the tracked
 `artifacts/used-tailscale-auth-key-sha256` denylist. Its ignored `.lock` file
 only serializes concurrent check-and-append operations.
 
-One through five NVMe mirror pairs may be configured. Pairs 2-5 may have
-gaps once a pair has been decommissioned; pair N always keeps the LUKS names
-`crypt-rpool-mirrorN-1` and `crypt-rpool-mirrorN-2`:
+One through five NVMe mirror pairs may be configured, numbered 0 through 4 to
+match ZFS's own `mirror-0`, `mirror-1`, ... vdev names. Pairs 1-4 may have
+gaps once a pair has been decommissioned; extra pair N always keeps the LUKS
+names `crypt-rpool-mirrorN-1` and `crypt-rpool-mirrorN-2`:
 
-- Mirror 1 is mandatory. The Proxmox installer destroys its two
+- Mirror 0 is mandatory. The Proxmox installer destroys its two
   serial-selected disks, creates the bootable ZFS mirror, and reserves space
   for optional later conversion of each data partition to LUKS2.
 - At the start of each run, choose either iDRAC/Redfish inventory or manual
@@ -203,11 +204,11 @@ gaps once a pair has been decommissioned; pair N always keeps the LUKS names
   allows the members of each pair to differ by at most 1%, in either order.
 - The operator chooses LUKS2 or unencrypted storage before choosing whether
   to run boot tests. The choice is durable and cannot be changed on resume.
-- In LUKS mode, the script degrades and rebuilds mirror 1 one member at a time
+- In LUKS mode, the script degrades and rebuilds mirror 0 one member at a time
   behind `crypt-rpool-a` and `crypt-rpool-b`, preserving both ESPs. Optional
-  mirror pairs 2 through 5 become LUKS2 mirror vdevs on partition 1 of each
+  mirror pairs 1 through 4 become LUKS2 mirror vdevs on partition 1 of each
   disk.
-- In unencrypted mode, mirror 1 remains as installed and optional mirror pairs
+- In unencrypted mode, mirror 0 remains as installed and optional mirror pairs
   are added as unencrypted mirror vdevs on partition 1 of each disk.
 - Every member partition (partition 3 of the boot disks, partition 1 of extra
   disks) ends 1 GiB short of the smaller disk's whole-GiB size, so slightly
@@ -233,9 +234,9 @@ both members of any mirror vdev loses the striped pool. Disk serials, mapper
 identity, pool membership, and interrupted phase records are revalidated
 before destructive post-install work. iDRAC mode obtains live pre-install
 capacity and health; manual mode relies on the operator-attested Live Linux
-inventory for mirror 1 because the automated installer cannot independently
+inventory for mirror 0 because the automated installer cannot independently
 check the configured capacity before erasing its serial-selected disks.
-When selected, the boot drill always uses exactly three reboots: each mirror-1
+When selected, the boot drill always uses exactly three reboots: each mirror-0
 member boots alone in the chosen clear or fully encrypted state, each missing
 member is restored and resilvered, then the healthy final mirror is rebooted.
 The drills can be skipped without changing the storage choice.
@@ -371,8 +372,13 @@ the same host-side code setup uses: `lib/rpool_mirror.sh` (installed per run as
 `/usr/local/sbin/app-ha-rpool-mirror`) for every disk, LUKS, and zpool change,
 `lib/host_storage.py` for a read-only layout, and `lib/storage_state.py` for
 records kept on the host in `/var/lib/app-ha-storage/state.json`. rpool holds
-at most five mirrors, including mirror 1, the boot mirror that holds the ESPs.
-Mirror 1 is never removed.
+at most five mirrors, including mirror 0, the boot mirror that holds the ESPs.
+Mirror 0 is never removed. The 0-4 numbering limit applies only to
+`env/moxN.conf`: ZFS never reuses a top-level vdev number, so after
+`mirror-4` is decommissioned the next mirror added is `mirror-5`. A mirror
+added here takes the number ZFS will give it (one past the highest vdev
+number in rpool or in the host's removal records) and names its LUKS
+mappings after it, for example `crypt-rpool-mirror5-1`.
 
 Each script prompts for a target host, defaults to `mox1`, accepts any
 configured `moxN` through `--host`, and starts by printing the same live disk
@@ -423,15 +429,15 @@ nominal capacity, then run `hosts/add_replacement_disk.sh [--host moxN]`:
    one; it replaces one member per run;
 2. copies the survivor's partition table to the new disk (`sgdisk --replicate`
    from the survivor, new GUIDs, backup GPT moved to the disk's end); for
-   mirror 1 it also formats and registers
+   mirror 0 it also formats and registers
    its ESP with `proxmox-boot-tool` using the survivor's boot loader (grub or
    uefi), drops ESPs of pulled disks, and waits until the new ESP holds the
    same kernels as the survivor's, so either disk can boot the host;
 3. on a LUKS host, writes `/root/app-ha-replace-member-M` (M is `A` or `B` for
-   mirror 1, `N-M` for extra mirrors) and has you run it at the host console.
+   mirror 0, `N-M` for extra mirrors) and has you run it at the host console.
    It asks for `GO` and the shared passphrase, proves it against every rpool
    member still present, closes a leftover mapping of the pulled disk, and
-   encrypts the new disk's member partition (partition 3 on mirror 1,
+   encrypts the new disk's member partition (partition 3 on mirror 0,
    partition 1 otherwise)
    under the pulled member's mapping name. The header backup is copied to
    `hosts/artifacts/moxN/luks-headers/`, keeping the old one as

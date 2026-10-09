@@ -27,10 +27,10 @@ It lists:
 
 Copy these values into that host's env/moxN.conf on your administrator
 workstation before running hosts/add_proxmox_host.sh:
-  - For each rpool mirror (mirror 1 is mandatory and becomes the boot mirror),
+  - For each rpool mirror (mirror 0 is mandatory and becomes the boot mirror),
     pick two NVMe drives whose capacities differ by at most 1% and set
     NVME_MIRROR_<P>_SERIAL_<M> and NVME_MIRROR_<P>_CAPACITY_BYTES_<M>.
-    Setup erases both mirror-1 drives.
+    Setup erases both mirror-0 drives.
   - Set PROXMOX_PUBLIC_MAC to the NIC cabled to the public network and
     PROXMOX_SECONDARY_MAC to the NIC cabled to the private cluster network.
     The LINK column shows which ports have a cable and link.

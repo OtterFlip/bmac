@@ -676,9 +676,10 @@ host-specific unattended ISO with public networking, serial-selected mirror
 1, administrator keys, a temporary setup key, a fresh one-time Tailscale key,
 the public management-port guard, and first-boot Tailscale bootstrap.
 
-One through five NVMe mirror pairs are supported:
+One through five NVMe mirror pairs are supported, numbered 0 through 4 to match
+ZFS's own `mirror-0`, `mirror-1`, ... vdev names:
 
-- Mirror 1 is mandatory and bootable. The Proxmox installer destroys its two
+- Mirror 0 is mandatory and bootable. The Proxmox installer destroys its two
   serial-selected disks, creates the raw ZFS `rpool` mirror and ESPs, and
   deliberately leaves at least 4 GiB after partition 3 for optional LUKS
   conversion.
@@ -691,7 +692,7 @@ One through five NVMe mirror pairs are supported:
   either order, and the pair uses the smaller capacity.
 - Before boot-test selection, the operator chooses whether all configured
   rpool members remain unencrypted or use LUKS2. Both choices are resumable.
-- LUKS conversion degrades mirror 1 one member at a time. The script records a GPT
+- LUKS conversion degrades mirror 0 one member at a time. The script records a GPT
   backup and partition start, detaches the ZFS member, expands partition 3 to
   end 1 GiB short of the smaller boot disk's whole-GiB size (the same byte on
   both disks, whichever is smaller), clears only old ZFS signatures, and prepares LUKS2
@@ -703,10 +704,10 @@ One through five NVMe mirror pairs are supported:
   rebuilt initramfs is proven to unlock it, and it is reattached and
   resilvered with both ESPs refreshed.
 - Selected boot testing uses three reboots in either mode. It boots from each
-  mirror-1 member alone, restoring and resilvering after each simulation, then
+  mirror-0 member alone, restoring and resilvering after each simulation, then
   reboots the healthy final layout. LUKS testing begins only after both members
   are encrypted; it never duplicates the drills against the raw layout.
-- Optional mirror pairs 2 through 5 must be complete. Gaps are allowed, so a
+- Optional mirror pairs 1 through 4 must be complete. Gaps are allowed, so a
   decommissioned pair's entries can be commented out while later pairs keep
   their numbers and LUKS names. Each pair
   is capacity-matched within 1% and added as one new top-level `rpool` mirror
@@ -741,7 +742,7 @@ selected LUKS boot test and restoration completes, the script deletes it and
 verifies it is absent. Subsequent host boots still require one manual
 passphrase entry through the target host console. A mode-`0600` LUKS header backup is
 copied off-host for every member before completion, along with pre-resize GPT
-backups for mirror 1 conversion.
+backups for mirror 0 conversion.
 
 Adding a top-level ZFS vdev expands and stripes the pool and may not be
 reversible. Losing both devices in any one mirror vdev can lose the entire
@@ -1349,7 +1350,7 @@ resumable:
 
 1. **Load and fingerprint inputs.** It strictly loads `cluster.conf`,
    `moxN.conf`, and `secrets.env`; derives fixed addressing; verifies
-   mirror pairs (pair 1 mandatory, later gaps allowed); computes disk-layout
+   mirror pairs (pair 0 mandatory, later gaps allowed); computes disk-layout
    and secret-inclusive setup
    fingerprints; and requires explicit acceptance if stored setup inputs
    changed.
@@ -1357,20 +1358,20 @@ resumable:
    mutation. In manual mode, the workflow validates configured exact byte
    capacities previously gathered by running `hosts/cluster_setup_prereq.sh` in a
    Linux Live environment. Both paths validate serial-selected pairs and enough
-   reserved tail space for mirror-1 LUKS conversion.
+   reserved tail space for mirror-0 LUKS conversion.
 3. **Build host media.** It verifies the source hash; obtains the reviewed
    `proxmox-auto-install-assistant`; creates an unattended answer and
    before-network first-boot script; reserves a never-reused one-time
    Tailscale key digest; and validates/inspects the generated ISO.
 4. **Install on the target host.** The operator attaches the generated ISO
    through iDRAC virtual media or other target-supported boot media, confirms
-   the exact two mirror-1 serials to erase, watches the install and reboot,
+   the exact two mirror-0 serials to erase, watches the install and reboot,
    removes the media, and confirms a visible login prompt. First boot installs
    the public management-port guard, administrator/setup keys, and Tailscale.
 5. **Bootstrap and configure storage.** The workstation reaches only the
    attested Tailscale address with its setup key, verifies host and disk
    identity, installs prerequisites, applies the selected clear or LUKS policy,
-   and adds configured partitioned mirror vdevs. LUKS mode converts mirror 1,
+   and adds configured partitioned mirror vdevs. LUKS mode converts mirror 0,
    verifies the shared passphrase, installs `decrypt_keyctl`, refreshes boot
    metadata, and exports headers. Selected boot drills test each member and
    the restored final state.
@@ -2670,7 +2671,7 @@ lsinitramfs "/boot/initrd.img-$(uname -r)"
 
 Check one expected mapper per configured member, exact serial/backing device,
 correct mirror pairing, `app-ha-rpool` plus
-`luks,initramfs,nofail,keyscript=decrypt_keyctl`, both mirror-1 ESPs, no swap,
+`luks,initramfs,nofail,keyscript=decrypt_keyctl`, both mirror-0 ESPs, no swap,
 healthy pool, and one non-empty off-host header backup per member.
 
 ### Guest and application

@@ -69,8 +69,8 @@ REMOVE_BLOCK = (
 )
 MIRROR_1 = (
     "\t  mirror-1                             ONLINE       0     0     0\n"
-    "\t    /dev/mapper/crypt-rpool-mirror2-1  ONLINE       0     0     0\n"
-    "\t    /dev/mapper/crypt-rpool-mirror2-2  ONLINE       0     0     0\n"
+    "\t    /dev/mapper/crypt-rpool-mirror1-1  ONLINE       0     0     0\n"
+    "\t    /dev/mapper/crypt-rpool-mirror1-2  ONLINE       0     0     0\n"
 )
 EVACUATED_STATUS = fixtures.LUKS_STATUS.replace(REMOVE_BLOCK, "").replace(MIRROR_1, "")
 DEGRADED_STATUS = (
@@ -95,8 +95,8 @@ def removal(state: str = "requested", luks: bool = True) -> dict:
             {"path": f"/dev/mapper/{mapper}", "mapper": mapper if luks else None, "luks": luks,
              "disk": disk, "serial": serial, "model": "Dell Ent NVMe", "disk_size": 2000398934016}
             for mapper, disk, serial in (
-                ("crypt-rpool-mirror2-1", "/dev/nvme2n1", "S2EXTRA1"),
-                ("crypt-rpool-mirror2-2", "/dev/nvme3n1", "S3EXTRA2"),
+                ("crypt-rpool-mirror1-1", "/dev/nvme2n1", "S2EXTRA1"),
+                ("crypt-rpool-mirror1-2", "/dev/nvme3n1", "S3EXTRA2"),
             )
         ],
     }
@@ -147,14 +147,14 @@ class ClassificationTest(unittest.TestCase):
         self.assertEqual(
             [(row["vdev"], row["status"], row["mappers"])
              for row in disk_inventory.pending_removals(layout, state)],
-            [("mirror-1", "needs-retire", ["crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2"])],
+            [("mirror-1", "needs-retire", ["crypt-rpool-mirror1-1", "crypt-rpool-mirror1-2"])],
         )
         host = disk_inventory.summarize_host("mox1", layout, state)
         disks = disks_by_serial(host)
         for serial in ("S2EXTRA1", "S3EXTRA2"):
             self.assertEqual(disks[serial]["status"], "awaiting_finalization")
             self.assertFalse(disks[serial]["removable"])
-            self.assertIn("crypt-rpool-mirror2-1, crypt-rpool-mirror2-2", disks[serial]["detail"])
+            self.assertIn("crypt-rpool-mirror1-1, crypt-rpool-mirror1-2", disks[serial]["detail"])
         problems, steps = disk_inventory.host_attention(host)
         self.assertEqual(
             problems,
@@ -180,13 +180,13 @@ class ClassificationTest(unittest.TestCase):
     def test_interrupted_replacement_and_addition(self) -> None:
         state = storage_state(
             replacements={"S1BOOTB": {"serial": "S6BLANK", "vdev": "mirror-0", "recorded_at": 1}},
-            additions={"4": {"serials": ["S7USED", "S9OTHER"], "capacities": [1, 1], "recorded_at": 1}},
+            additions={"3": {"serials": ["S7USED", "S9OTHER"], "capacities": [1, 1], "recorded_at": 1}},
         )
         host = disk_inventory.summarize_host("mox1", fixtures.luks_layout(), state)
         disks = disks_by_serial(host)
         self.assertEqual(disks["S6BLANK"]["status"], "pending_replacement")
         self.assertEqual(disks["S7USED"]["status"], "pending_addition")
-        self.assertIn("extra mirror 4", disks["S7USED"]["detail"])
+        self.assertIn("extra mirror 3", disks["S7USED"]["detail"])
         problems, steps = disk_inventory.host_attention(host)
         self.assertIn("mox1: disk S6BLANK was prepared for a mirror replacement but never joined rpool",
                       problems)
@@ -275,7 +275,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(
             completed.stdout,
             "removal-1-mirror-1\tmirror-1\tneeds-retire\tS2EXTRA1,S3EXTRA2\t"
-            "crypt-rpool-mirror2-1,crypt-rpool-mirror2-2\n",
+            "crypt-rpool-mirror1-1,crypt-rpool-mirror1-2\n",
         )
 
 

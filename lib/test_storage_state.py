@@ -16,8 +16,8 @@ import storage_state
 
 MEMBERS = [
     {
-        "path": "/dev/mapper/crypt-rpool-mirror2-1",
-        "mapper": "/dev/mapper/crypt-rpool-mirror2-1",
+        "path": "/dev/mapper/crypt-rpool-mirror1-1",
+        "mapper": "/dev/mapper/crypt-rpool-mirror1-1",
         "luks": True,
         "disk": "/dev/nvme2n1",
         "serial": "SERIAL1",
@@ -25,8 +25,8 @@ MEMBERS = [
         "disk_size": 1000,
     },
     {
-        "path": "/dev/mapper/crypt-rpool-mirror2-2",
-        "mapper": "/dev/mapper/crypt-rpool-mirror2-2",
+        "path": "/dev/mapper/crypt-rpool-mirror1-2",
+        "mapper": "/dev/mapper/crypt-rpool-mirror1-2",
         "luks": True,
         "disk": "/dev/nvme3n1",
         "serial": "SERIAL2",
@@ -67,6 +67,16 @@ class StorageStateTest(unittest.TestCase):
             self.assertEqual(
                 state["replacements"]["SURVIVOR"]["serial"], "REPLACEMENT"
             )
+
+    def test_additions_use_extra_mirror_pairs_from_1_without_upper_limit(self) -> None:
+        for pair in (0, -1, True):
+            with self.assertRaisesRegex(storage_state.StateError, "pair must be a positive integer"):
+                storage_state.record_addition(
+                    storage_state.empty_state(), pair, ["SERIAL1", "SERIAL2"], [1000, 1000], 100
+                )
+        state = storage_state.empty_state()
+        storage_state.record_addition(state, 5, ["SERIAL1", "SERIAL2"], [1000, 1000], 100)
+        self.assertIn("5", state["additions"])
 
     def test_removal_may_include_a_member_whose_disk_is_gone(self) -> None:
         state = storage_state.empty_state()

@@ -42,7 +42,9 @@ Adds two new disks to the chosen host's rpool as one new mirror vdev:
   4. prints the new disks' serials and exact byte capacities.
 
 A rerun resumes a mirror whose disks were prepared but not yet added. rpool
-holds at most five mirrors, the boot mirror included.
+holds at most five mirrors, the boot mirror included. ZFS never reuses a
+vdev number, so the new mirror's slot is one past the highest number rpool
+has used, and its LUKS mappings are named after it.
 EOF
 }
 
@@ -134,7 +136,7 @@ leaving = {
 }
 pairs = {}
 for row in layout["luks_mappings"]:
-    match = re.fullmatch(r"crypt-rpool-mirror([2-5])-([12])", row["mapper"])
+    match = re.fullmatch(r"crypt-rpool-mirror([1-9][0-9]*)-([12])", row["mapper"])
     if match and not row["in_pool"] and row["serial"] not in leaving:
         pairs.setdefault(int(match.group(1)), {})[int(match.group(2))] = row
 for pair, members in sorted(pairs.items()):
@@ -171,17 +173,24 @@ import json
 import re
 import sys
 layout = json.load(open(sys.argv[1]))
-used = {int(pair) for pair in json.load(open(sys.argv[2])).get("additions", {})}
-for row in layout["luks_mappings"] + layout["crypttab"]:
-    match = re.fullmatch(r"crypt-rpool-mirror([2-5])-[12]", row["mapper"])
+state = json.load(open(sys.argv[2]))
+# ZFS never reuses a top-level vdev number: a removed vdev stays behind as a
+# hidden indirect vdev, so the new mirror becomes mirror-<highest ever + 1>.
+# The slot names its LUKS mappings after that number.
+seen = {0} | {int(pair) for pair in state.get("additions", {})}
+for name in [vdev["name"] for vdev in layout["vdevs"]] + [row["vdev"] for row in state["removals"]]:
+    match = re.fullmatch(r"mirror-([0-9]+)", name)
     if match:
-        used.add(int(match.group(1)))
-free = [pair for pair in (2, 3, 4, 5) if pair not in used]
-print(free[0] if free else "")
+        seen.add(int(match.group(1)))
+for row in layout["luks_mappings"] + layout["crypttab"]:
+    match = re.fullmatch(r"crypt-rpool-mirror([1-9][0-9]*)-[12]", row["mapper"])
+    if match:
+        seen.add(int(match.group(1)))
+print(max(seen) + 1)
 PY
 )"
-  [[ -n "$PAIR" ]] ||
-    dw_die "extra-mirror slots 2-5 are all in use on $DW_HOST"
+  [[ "$PAIR" =~ ^[1-9][0-9]*$ ]] ||
+    dw_die "could not choose a mirror slot on $DW_HOST"
 
   dw_section "Disks on $DW_HOST that are not part of rpool"
   mapfile -t CANDIDATES < <(python3 - "$LAYOUT" "$STATE" <<'PY'

@@ -488,7 +488,7 @@ import re
 import sys
 layout, vdev_name = sys.argv[1:]
 vdev = next(v for v in json.load(open(layout))["vdevs"] if v["name"] == vdev_name)
-mapper_re = re.compile(r"^/dev/mapper/crypt-rpool-mirror([2-5])-([12])$")
+mapper_re = re.compile(r"^/dev/mapper/crypt-rpool-mirror([1-9][0-9]*)-([12])$")
 installed = [m for m in vdev["members"] if m["serial"]]
 if not any(m["state"] == "ONLINE" for m in installed):
     raise SystemExit("no member of this vdev is an ONLINE disk with a serial, so ZFS has no copy to evacuate")

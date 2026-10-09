@@ -213,9 +213,9 @@ Flags:            Quorate Qdevice
             HOST_ID=mox1
             PROXMOX_FQDN=mox1.example.com
             PROXMOX_IP={shlex.quote(config_value(MOX1_CONFIG, "PROXMOX_IP"))}
-            NVME_MIRROR_1_SERIAL_1=disk-a
-            NVME_MIRROR_1_SERIAL_2=disk-b
-            CONFIGURED_MIRROR_PAIRS=(1)
+            NVME_MIRROR_0_SERIAL_1=disk-a
+            NVME_MIRROR_0_SERIAL_2=disk-b
+            CONFIGURED_MIRROR_PAIRS=(0)
             HARDWARE_INVENTORY_MODE=idrac
             PROXMOX_PUBLIC_MAC=00:11:22:33:44:55
             PROXMOX_SECONDARY_MAC=00:11:22:33:44:66
@@ -305,11 +305,11 @@ Flags:            Quorate Qdevice
             HOST_ID=mox1
             PROXMOX_FQDN=mox1.example.com
             PROXMOX_IP=192.0.2.10
-            NVME_MIRROR_1_SERIAL_1=disk-a
-            NVME_MIRROR_1_SERIAL_2=disk-b
-            NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
-            NVME_MIRROR_1_CAPACITY_BYTES_2=1000204886016
-            CONFIGURED_MIRROR_PAIRS=(1)
+            NVME_MIRROR_0_SERIAL_1=disk-a
+            NVME_MIRROR_0_SERIAL_2=disk-b
+            NVME_MIRROR_0_CAPACITY_BYTES_1=1000204886016
+            NVME_MIRROR_0_CAPACITY_BYTES_2=1000204886016
+            CONFIGURED_MIRROR_PAIRS=(0)
             HARDWARE_INVENTORY_MODE=manual
             PROXMOX_PUBLIC_MAC=00:11:22:33:44:55
             PROXMOX_SECONDARY_MAC=00:11:22:33:44:66
@@ -327,11 +327,11 @@ Flags:            Quorate Qdevice
             HOST_ID=mox1
             PROXMOX_FQDN=mox1.example.com
             PROXMOX_IP=192.0.2.10
-            NVME_MIRROR_1_SERIAL_1=disk-a
-            NVME_MIRROR_1_SERIAL_2=disk-b
-            NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
-            NVME_MIRROR_1_CAPACITY_BYTES_2=1000204886016
-            CONFIGURED_MIRROR_PAIRS=(1 2)
+            NVME_MIRROR_0_SERIAL_1=disk-a
+            NVME_MIRROR_0_SERIAL_2=disk-b
+            NVME_MIRROR_0_CAPACITY_BYTES_1=1000204886016
+            NVME_MIRROR_0_CAPACITY_BYTES_2=1000204886016
+            CONFIGURED_MIRROR_PAIRS=(0 1)
             CONFIGURED_NVME_SERIALS=(disk-a disk-b disk-c disk-d)
             HARDWARE_INVENTORY_MODE=manual
             PROXMOX_PUBLIC_MAC=00:11:22:33:44:55
@@ -362,11 +362,11 @@ Flags:            Quorate Qdevice
             HOST_ID=mox1
             PROXMOX_FQDN=mox1.example.com
             PROXMOX_IP=192.0.2.10
-            NVME_MIRROR_1_SERIAL_1=disk-a
-            NVME_MIRROR_1_SERIAL_2=disk-b
-            NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
-            NVME_MIRROR_1_CAPACITY_BYTES_2=1000204886016
-            CONFIGURED_MIRROR_PAIRS=(1 2)
+            NVME_MIRROR_0_SERIAL_1=disk-a
+            NVME_MIRROR_0_SERIAL_2=disk-b
+            NVME_MIRROR_0_CAPACITY_BYTES_1=1000204886016
+            NVME_MIRROR_0_CAPACITY_BYTES_2=1000204886016
+            CONFIGURED_MIRROR_PAIRS=(0 1)
             CONFIGURED_NVME_SERIALS=(disk-a disk-b disk-c disk-d)
             HARDWARE_INVENTORY_MODE=manual
             PROXMOX_PUBLIC_MAC=00:11:22:33:44:55
@@ -409,14 +409,14 @@ Flags:            Quorate Qdevice
             trap 'rm -rf "$STATE_DIR"' EXIT
             HARDWARE_INVENTORY_MODE=manual
             HOST_SETUP_CONFIG_SHA256=config-hash
-            CONFIGURED_MIRROR_PAIRS=(1 2)
+            CONFIGURED_MIRROR_PAIRS=(0 1)
+            NVME_MIRROR_0_CAPACITY_BYTES_1=2000398934016
+            NVME_MIRROR_0_CAPACITY_BYTES_2=1999998934016
             NVME_MIRROR_1_CAPACITY_BYTES_1=2000398934016
-            NVME_MIRROR_1_CAPACITY_BYTES_2=1999998934016
-            NVME_MIRROR_2_CAPACITY_BYTES_1=2000398934016
-            NVME_MIRROR_2_CAPACITY_BYTES_2=2000398934016
+            NVME_MIRROR_1_CAPACITY_BYTES_2=2000398934016
             discover_hardware
-            [[ "$(read_state mirror-1-minimum-capacity-bytes)" == 1999998934016 ]]
-            [[ "$(read_state mirror-2-minimum-capacity-bytes)" == 2000398934016 ]]
+            [[ "$(read_state mirror-0-minimum-capacity-bytes)" == 1999998934016 ]]
+            [[ "$(read_state mirror-1-minimum-capacity-bytes)" == 2000398934016 ]]
             [[ "$(read_state hardware-verified)" == manual ]]
             [[ "$(read_state zfs-hdsize-gib)" =~ ^[1-9][0-9]*$ ]]
             """
@@ -429,14 +429,14 @@ Flags:            Quorate Qdevice
             trap 'rm -rf "$STATE_DIR"' EXIT
             HARDWARE_INVENTORY_MODE=manual
             HOST_SETUP_CONFIG_SHA256=config-hash
-            CONFIGURED_MIRROR_PAIRS=(1 3)
-            NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
-            NVME_MIRROR_1_CAPACITY_BYTES_2=1000204886016
-            NVME_MIRROR_3_CAPACITY_BYTES_1=4000787030016
-            NVME_MIRROR_3_CAPACITY_BYTES_2=4000787030016
+            CONFIGURED_MIRROR_PAIRS=(0 2)
+            NVME_MIRROR_0_CAPACITY_BYTES_1=1000204886016
+            NVME_MIRROR_0_CAPACITY_BYTES_2=1000204886016
+            NVME_MIRROR_2_CAPACITY_BYTES_1=4000787030016
+            NVME_MIRROR_2_CAPACITY_BYTES_2=4000787030016
             discover_hardware
-            [[ "$(read_state mirror-3-minimum-capacity-bytes)" == 4000787030016 ]]
-            ! has_state mirror-2-minimum-capacity-bytes
+            [[ "$(read_state mirror-2-minimum-capacity-bytes)" == 4000787030016 ]]
+            ! has_state mirror-1-minimum-capacity-bytes
             """
         )
 
@@ -446,9 +446,9 @@ Flags:            Quorate Qdevice
             trap 'rm -rf "$STATE_DIR"' EXIT
             HARDWARE_INVENTORY_MODE=manual
             HOST_SETUP_CONFIG_SHA256=config-hash
-            CONFIGURED_MIRROR_PAIRS=(1)
-            NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
-            NVME_MIRROR_1_CAPACITY_BYTES_2=980000000000
+            CONFIGURED_MIRROR_PAIRS=(0)
+            NVME_MIRROR_0_CAPACITY_BYTES_1=1000204886016
+            NVME_MIRROR_0_CAPACITY_BYTES_2=980000000000
             discover_hardware
             """,
             expected=1,

@@ -111,7 +111,7 @@ _config_initialize_allowlist() {
   for key in "${_PROXMOX_CONFIG_MOX_KEYS[@]}"; do
     _PROXMOX_CONFIG_ALLOWED_SCOPE["$key"]=mox
   done
-  for pair in 1 2 3 4 5; do
+  for pair in 0 1 2 3 4; do
     for member in 1 2; do
       for suffix in SERIAL CAPACITY_BYTES; do
         key="NVME_MIRROR_${pair}_${suffix}_${member}"
@@ -615,7 +615,7 @@ _config_validate_mirror_serials() {
   local pair a_name b_name capacity_a_name capacity_b_name
   local serial capacity
   local -A serials=()
-  for pair in 1 2 3 4 5; do
+  for pair in 0 1 2 3 4; do
     a_name="NVME_MIRROR_${pair}_SERIAL_1"
     b_name="NVME_MIRROR_${pair}_SERIAL_2"
     capacity_a_name="NVME_MIRROR_${pair}_CAPACITY_BYTES_1"
@@ -642,9 +642,9 @@ _config_validate_mirror_serials() {
         done
       fi
     else
-      ((pair == 1)) &&
-        config_die "NVMe mirror 1 is mandatory" && return
-      # Pairs 2-5 may have gaps: decommissioning a mirror comments out its
+      ((pair == 0)) &&
+        config_die "NVMe mirror 0 is mandatory" && return
+      # Pairs 1-4 may have gaps: decommissioning a mirror comments out its
       # entries, and pair N keeps its crypt-rpool-mirrorN-* LUKS names.
       [[ -z "${!capacity_a_name:-}${!capacity_b_name:-}" ]] ||
         config_die "NVMe mirror ${pair} capacities were provided without serials" || return

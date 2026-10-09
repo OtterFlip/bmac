@@ -541,7 +541,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def prepare(self, stdin: str = f"GO\n{PASSPHRASE}\n") -> None:
         self.run_tool(
-            "luks-prepare", "--pair", "2", "--prompt", "NEW1", "NEW2", stdin=stdin,
+            "luks-prepare", "--pair", "1", "--prompt", "NEW1", "NEW2", stdin=stdin,
         )
 
     # -- check-new --------------------------------------------------------
@@ -619,7 +619,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_prepare_proves_passphrase_before_formatting(self) -> None:
         completed = self.run_tool(
-            "luks-prepare", "--pair", "2", "--prompt", "NEW1", "NEW2",
+            "luks-prepare", "--pair", "1", "--prompt", "NEW1", "NEW2",
             stdin=f"GO\nwrong\n{PASSPHRASE}\n",
         )
         self.assertIn("does not unlock existing rpool member crypt-rpool-a", completed.stderr)
@@ -627,12 +627,12 @@ class RpoolMirrorToolTest(unittest.TestCase):
         state = self.state()
         self.assertEqual(state["luks"]["/dev/nvme2n1p1"]["passphrase"], PASSPHRASE)
         self.assertEqual(state["luks"]["/dev/nvme3n1p1"]["passphrase"], PASSPHRASE)
-        self.assertEqual(state["mappers"]["crypt-rpool-mirror2-1"]["device"], "/dev/nvme2n1p1")
-        self.assertEqual(state["mappers"]["crypt-rpool-mirror2-2"]["device"], "/dev/nvme3n1p1")
+        self.assertEqual(state["mappers"]["crypt-rpool-mirror1-1"]["device"], "/dev/nvme2n1p1")
+        self.assertEqual(state["mappers"]["crypt-rpool-mirror1-2"]["device"], "/dev/nvme3n1p1")
         self.assertEqual(state["disks"]["/dev/nvme2n1"]["gpt"], EXTRA_GPT)
         self.assertEqual(state["disks"]["/dev/nvme3n1"]["gpt"], EXTRA_GPT)
         for index in (1, 2):
-            header = self.headers / f"luks-header-mirror2-{index}.bin"
+            header = self.headers / f"luks-header-mirror1-{index}.bin"
             self.assertTrue(header.exists())
             self.assertEqual(header.stat().st_mode & 0o777, 0o600)
         self.assertEqual(
@@ -643,7 +643,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_prepare_changes_nothing_without_the_shared_passphrase(self) -> None:
         completed = self.run_tool(
-            "luks-prepare", "--pair", "2", "--prompt", "NEW1", "NEW2",
+            "luks-prepare", "--pair", "1", "--prompt", "NEW1", "NEW2",
             stdin="GO\nwrong\nstill wrong\n\nagain wrong\n",
             expected=1,
         )
@@ -652,7 +652,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_prepare_requires_go(self) -> None:
         self.run_tool(
-            "luks-prepare", "--pair", "2", "--prompt", "NEW1", "NEW2",
+            "luks-prepare", "--pair", "1", "--prompt", "NEW1", "NEW2",
             stdin="no\n", expected=1,
         )
         self.assertEqual(self.actions(), [])
@@ -670,7 +670,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
         self.setUp_fresh_with_foreign_luks()
         completed = self.run_tool(
-            "luks-prepare", "--pair", "2", "--prompt", "NEW1", "NEW2",
+            "luks-prepare", "--pair", "1", "--prompt", "NEW1", "NEW2",
             stdin=f"GO\n{PASSPHRASE}\n", expected=1,
         )
         self.assertIn("refusing to reuse or erase it", completed.stderr)
@@ -694,17 +694,17 @@ class RpoolMirrorToolTest(unittest.TestCase):
         key_file.write_text(PASSPHRASE)
         key_file.chmod(0o600)
         self.run_tool(
-            "luks-prepare", "--pair", "3", "--key-file", str(key_file),
+            "luks-prepare", "--pair", "2", "--key-file", str(key_file),
             "--expect-bytes", str(DISK_BYTES), "NEW1", "NEW2", stdin="GO\n",
         )
-        self.assertIn("crypt-rpool-mirror3-1", self.state()["mappers"])
-        self.run_tool("luks-check-prepared", "--pair", "3", "NEW1", "NEW2")
+        self.assertIn("crypt-rpool-mirror2-1", self.state()["mappers"])
+        self.run_tool("luks-check-prepared", "--pair", "2", "NEW1", "NEW2")
         state = self.state()
         state["disks"]["/dev/nvme3n1"]["gpt"] = [[1, 2048, MEMBER_END - 8, "8309"]]
         self.write_state(state)
         self.assertIn(
             "do not have the same member partition",
-            self.run_tool("luks-check-prepared", "--pair", "3", "NEW1", "NEW2", expected=1).stderr,
+            self.run_tool("luks-check-prepared", "--pair", "2", "NEW1", "NEW2", expected=1).stderr,
         )
 
     def test_pair_partitions_end_at_the_smaller_disk_in_either_order(self) -> None:
@@ -718,24 +718,24 @@ class RpoolMirrorToolTest(unittest.TestCase):
         self.write_state(state)
         self.prepare()
         self.run_tool(
-            "luks-prepare", "--pair", "3", "--prompt", "NEW3", "NEW4",
+            "luks-prepare", "--pair", "2", "--prompt", "NEW3", "NEW4",
             stdin=f"GO\n{PASSPHRASE}\n",
         )
         disks = self.state()["disks"]
         for disk in ("/dev/nvme2n1", "/dev/nvme3n1", "/dev/nvme4n1", "/dev/nvme5n1"):
             self.assertEqual(disks[disk]["gpt"], [[1, 2048, expected, "8309"]], disk)
-        self.run_tool("luks-check-prepared", "--pair", "2", "NEW1", "NEW2")
-        self.run_tool("luks-check-prepared", "--pair", "3", "NEW3", "NEW4")
+        self.run_tool("luks-check-prepared", "--pair", "1", "NEW1", "NEW2")
+        self.run_tool("luks-check-prepared", "--pair", "2", "NEW3", "NEW4")
 
     # -- luks-add ---------------------------------------------------------
 
     def test_add_uses_shared_crypttab_form_and_verifies_boot_unlock(self) -> None:
         self.prepare()
-        output = self.run_tool("luks-add", "--pair", "2", "NEW1", "NEW2").stdout
+        output = self.run_tool("luks-add", "--pair", "1", "NEW1", "NEW2").stdout
         self.assertIn("shared crypttab form", output)
         lines = self.crypttab.read_text().splitlines()
         self.assertIn(
-            "crypt-rpool-mirror2-1\tUUID=uuid-NEW1\tapp-ha-rpool\t"
+            "crypt-rpool-mirror1-1\tUUID=uuid-NEW1\tapp-ha-rpool\t"
             "luks,initramfs,nofail,keyscript=decrypt_keyctl",
             lines,
         )
@@ -743,19 +743,19 @@ class RpoolMirrorToolTest(unittest.TestCase):
         pool = self.state()["pool"]
         self.assertEqual(
             pool[-1]["members"],
-            ["/dev/mapper/crypt-rpool-mirror2-1", "/dev/mapper/crypt-rpool-mirror2-2"],
+            ["/dev/mapper/crypt-rpool-mirror1-1", "/dev/mapper/crypt-rpool-mirror1-2"],
         )
         order = [row[0] for row in self.actions()]
         self.assertLess(order.index("update-initramfs"), order.index("zpool"))
         self.assertIn(["zpool", "add", "-o", "ashift=12", "rpool", "mirror",
-                       "/dev/mapper/crypt-rpool-mirror2-1",
-                       "/dev/mapper/crypt-rpool-mirror2-2"], self.actions("zpool"))
+                       "/dev/mapper/crypt-rpool-mirror1-1",
+                       "/dev/mapper/crypt-rpool-mirror1-2"], self.actions("zpool"))
 
         # A rerun converges without adding the pair twice.
-        self.run_tool("luks-add", "--pair", "2", "NEW1", "NEW2")
+        self.run_tool("luks-add", "--pair", "1", "NEW1", "NEW2")
         self.assertEqual(len(self.actions("zpool")), 1)
         self.assertEqual(
-            sum(line.startswith("crypt-rpool-mirror2-1") for line in
+            sum(line.startswith("crypt-rpool-mirror1-1") for line in
                 self.crypttab.read_text().splitlines()),
             1,
         )
@@ -766,17 +766,17 @@ class RpoolMirrorToolTest(unittest.TestCase):
             "crypt-rpool-b UUID=boot-b none luks,initramfs,nofail\n"
         )
         self.prepare()
-        self.run_tool("luks-add", "--pair", "2", "NEW1", "NEW2")
+        self.run_tool("luks-add", "--pair", "1", "NEW1", "NEW2")
         self.assertIn(
-            "crypt-rpool-mirror2-2 UUID=uuid-NEW2 none luks,initramfs,nofail",
+            "crypt-rpool-mirror1-2 UUID=uuid-NEW2 none luks,initramfs,nofail",
             self.crypttab.read_text().splitlines(),
         )
 
     def test_add_stops_before_zpool_when_initramfs_would_not_unlock(self) -> None:
         self.prepare()
-        self.update_state(initramfs_drops=["crypt-rpool-mirror2-2"])
-        completed = self.run_tool("luks-add", "--pair", "2", "NEW1", "NEW2", expected=1)
-        self.assertIn("would not unlock crypt-rpool-mirror2-2 at boot", completed.stderr)
+        self.update_state(initramfs_drops=["crypt-rpool-mirror1-2"])
+        completed = self.run_tool("luks-add", "--pair", "1", "NEW1", "NEW2", expected=1)
+        self.assertIn("would not unlock crypt-rpool-mirror1-2 at boot", completed.stderr)
         self.assertEqual(self.actions("zpool"), [])
 
     def test_add_refuses_mixed_ashift_and_mixed_crypttab(self) -> None:
@@ -784,14 +784,14 @@ class RpoolMirrorToolTest(unittest.TestCase):
         self.update_state(pool_ashift=[12, 9])
         self.assertIn(
             "do not share one ashift",
-            self.run_tool("luks-add", "--pair", "2", "NEW1", "NEW2", expected=1).stderr,
+            self.run_tool("luks-add", "--pair", "1", "NEW1", "NEW2", expected=1).stderr,
         )
         self.update_state(pool_ashift=[12])
         with self.crypttab.open("a") as stream:
-            stream.write("crypt-rpool-mirror3-1 UUID=z none luks,initramfs,nofail\n")
+            stream.write("crypt-rpool-mirror2-1 UUID=z none luks,initramfs,nofail\n")
         self.assertIn(
             "mixes shared-unlock and plain",
-            self.run_tool("luks-add", "--pair", "2", "NEW1", "NEW2", expected=1).stderr,
+            self.run_tool("luks-add", "--pair", "1", "NEW1", "NEW2", expected=1).stderr,
         )
         self.assertEqual(self.actions("zpool"), [])
 
@@ -848,45 +848,69 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_retire_closes_removes_and_rebuilds_only_after_removal(self) -> None:
         self.prepare()
-        self.run_tool("luks-add", "--pair", "2", "NEW1", "NEW2")
+        self.run_tool("luks-add", "--pair", "1", "NEW1", "NEW2")
         self.assertIn(
             "still part of rpool",
             self.run_tool(
-                "retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2",
+                "retire-luks", "crypt-rpool-mirror1-1", "crypt-rpool-mirror1-2",
                 expected=1,
             ).stderr,
         )
         # The vdev removal completed: the mirror left the pool.
         self.update_state(pool=self.state()["pool"][:1])
-        self.run_tool("retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2")
+        self.run_tool("retire-luks", "crypt-rpool-mirror1-1", "crypt-rpool-mirror1-2")
         state = self.state()
-        self.assertNotIn("crypt-rpool-mirror2-1", state["mappers"])
-        self.assertNotIn("crypt-rpool-mirror2", self.crypttab.read_text())
+        self.assertNotIn("crypt-rpool-mirror1-1", state["mappers"])
+        self.assertNotIn("crypt-rpool-mirror1", self.crypttab.read_text())
         self.assertIn("crypt-rpool-a", self.crypttab.read_text())
         self.assertFalse(
-            any(line.startswith("crypt-rpool-mirror2") for line in state["initrd_crypttab"])
+            any(line.startswith("crypt-rpool-mirror1") for line in state["initrd_crypttab"])
         )
         # A rerun rebuilds again, since only that proves every ESP is current.
         rebuilds = len(self.actions("update-initramfs"))
-        self.run_tool("retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2")
+        self.run_tool("retire-luks", "crypt-rpool-mirror1-1", "crypt-rpool-mirror1-2")
         self.assertEqual(len(self.actions("update-initramfs")), rebuilds + 1)
         self.assertEqual(self.actions("proxmox-boot-tool")[-1][1], "refresh")
 
     def test_retire_finishes_an_interrupted_initramfs_rebuild(self) -> None:
         self.prepare()
-        self.run_tool("luks-add", "--pair", "2", "NEW1", "NEW2")
+        self.run_tool("luks-add", "--pair", "1", "NEW1", "NEW2")
         stale_initrd = self.state()["initrd_crypttab"]
         self.update_state(pool=self.state()["pool"][:1])
-        self.run_tool("retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2")
+        self.run_tool("retire-luks", "crypt-rpool-mirror1-1", "crypt-rpool-mirror1-2")
         # The first run closed the mappings and edited crypttab, then was
         # interrupted before the initramfs was rebuilt.
         self.update_state(initrd_crypttab=stale_initrd)
         rebuilds = len(self.actions("update-initramfs"))
-        self.run_tool("retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2")
+        self.run_tool("retire-luks", "crypt-rpool-mirror1-1", "crypt-rpool-mirror1-2")
         self.assertEqual(len(self.actions("update-initramfs")), rebuilds + 1)
         self.assertFalse(any(
-            line.startswith("crypt-rpool-mirror2") for line in self.state()["initrd_crypttab"]
+            line.startswith("crypt-rpool-mirror1") for line in self.state()["initrd_crypttab"]
         ))
+
+    def test_extra_pairs_start_at_1_and_follow_zfs_vdev_numbers_past_4(self) -> None:
+        for pair in ("0", "01"):
+            self.assertIn(
+                "--pair must be a positive integer",
+                self.run_tool(
+                    "luks-check-prepared", "--pair", pair, "NEW1", "NEW2", expected=1
+                ).stderr,
+            )
+        self.assertIn(
+            "--member must be A, B, or N-M with N a positive integer",
+            self.run_tool("luks-check-member", "--member", "0-1", "NEW1", expected=1).stderr,
+        )
+        for pair in ("5", "12"):
+            self.assertNotIn(
+                "--pair must be",
+                self.run_tool(
+                    "luks-check-prepared", "--pair", pair, "NEW1", "NEW2", expected=1
+                ).stderr,
+            )
+        self.assertNotIn(
+            "--member must be",
+            self.run_tool("luks-check-member", "--member", "12-2", "NEW1", expected=1).stderr,
+        )
 
     def test_retire_refuses_boot_mirror_and_busy_mapper(self) -> None:
         self.assertIn(
@@ -894,10 +918,10 @@ class RpoolMirrorToolTest(unittest.TestCase):
             self.run_tool("retire-luks", "crypt-rpool-a", expected=1).stderr,
         )
         self.prepare()
-        self.update_state(busy_mappers=["crypt-rpool-mirror2-1"])
+        self.update_state(busy_mappers=["crypt-rpool-mirror1-1"])
         self.assertIn(
             "something still holds it open",
-            self.run_tool("retire-luks", "crypt-rpool-mirror2-1", expected=1).stderr,
+            self.run_tool("retire-luks", "crypt-rpool-mirror1-1", expected=1).stderr,
         )
 
     # -- replacing a pulled member ------------------------------------------
@@ -1154,10 +1178,10 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_extra_member_replacement(self) -> None:
         self.prepare()
-        self.run_tool("luks-add", "--pair", "2", "NEW1", "NEW2")
+        self.run_tool("luks-add", "--pair", "1", "NEW1", "NEW2")
         state = self.state()
         del state["disks"]["/dev/nvme3n1"]
-        del state["mappers"]["crypt-rpool-mirror2-2"]
+        del state["mappers"]["crypt-rpool-mirror1-2"]
         state["pool"][1]["members"][1] = {"path": "5550001112223334445", "state": "UNAVAIL"}
         # The replacement is slightly smaller than the disk it replaces.
         state["disks"]["/dev/nvme4n1"] = {"serial": "NEW3", "size": DISK_BYTES - 512 * MIB}
@@ -1166,41 +1190,41 @@ class RpoolMirrorToolTest(unittest.TestCase):
         self.assertIn(
             "copy the partition table onto disk NEW3 first",
             self.run_tool(
-                "luks-prepare-member", "--member", "2-2", "--prompt", "NEW3",
+                "luks-prepare-member", "--member", "1-2", "--prompt", "NEW3",
                 stdin=f"GO\n{PASSPHRASE}\n", expected=1,
             ).stderr,
         )
         self.assertIn(
             "run copy-partitions first",
             self.run_tool(
-                "replace-member", "--survivor", "NEW1", "--member", "2-2", "NEW3", expected=1
+                "replace-member", "--survivor", "NEW1", "--member", "1-2", "NEW3", expected=1
             ).stderr,
         )
         self.run_tool("copy-partitions", "--survivor", "NEW1", "NEW3")
         self.assertEqual(self.state()["disks"]["/dev/nvme4n1"]["gpt"], EXTRA_GPT)
         self.run_tool(
-            "luks-prepare-member", "--member", "2-2", "--prompt", "NEW3",
+            "luks-prepare-member", "--member", "1-2", "--prompt", "NEW3",
             stdin=f"GO\n{PASSPHRASE}\n",
         )
         self.assertEqual(
-            self.state()["mappers"]["crypt-rpool-mirror2-2"]["device"], "/dev/nvme4n1p1"
+            self.state()["mappers"]["crypt-rpool-mirror1-2"]["device"], "/dev/nvme4n1p1"
         )
         self.assertEqual(
             [row[-1] for row in self.actions("wipefs")], ["/dev/nvme4n1", "/dev/nvme4n1p1"]
         )
-        self.assertTrue((self.headers / "luks-header-mirror2-2.bin").exists())
-        self.run_tool("replace-member", "--survivor", "NEW1", "--member", "2-2", "NEW3")
+        self.assertTrue((self.headers / "luks-header-mirror1-2.bin").exists())
+        self.run_tool("replace-member", "--survivor", "NEW1", "--member", "1-2", "NEW3")
         self.assertEqual(
             [row for row in self.actions("zpool") if row[1] != "labelclear"],
             [["zpool", "replace", "rpool", "5550001112223334445",
-              "/dev/mapper/crypt-rpool-mirror2-2"]],
+              "/dev/mapper/crypt-rpool-mirror1-2"]],
         )
-        self.assertIn("crypt-rpool-mirror2-2\tUUID=uuid-NEW3", self.crypttab.read_text())
+        self.assertIn("crypt-rpool-mirror1-2\tUUID=uuid-NEW3", self.crypttab.read_text())
         self.assertEqual(self.actions("proxmox-boot-tool")[-1][1], "refresh")
         self.assertIn(
             "is an extra-mirror member but BOOTA is a boot-mirror disk",
             self.run_tool(
-                "replace-member", "--survivor", "BOOTA", "--member", "2-2", "NEW3", expected=1
+                "replace-member", "--survivor", "BOOTA", "--member", "1-2", "NEW3", expected=1
             ).stderr,
         )
 
@@ -1316,10 +1340,10 @@ class RpoolMirrorToolTest(unittest.TestCase):
 
     def test_release_erases_only_metadata_of_retired_luks_disks(self) -> None:
         self.prepare()
-        self.run_tool("luks-add", "--pair", "2", "NEW1", "NEW2")
+        self.run_tool("luks-add", "--pair", "1", "NEW1", "NEW2")
         completed = self.run_tool("release-disks", "NEW1", "NEW2", expected=1)
-        self.assertIn("mapping /dev/mapper/crypt-rpool-mirror2-1 is still open", completed.stderr)
-        self.assertIn("mapping /dev/mapper/crypt-rpool-mirror2-2 is still open", completed.stderr)
+        self.assertIn("mapping /dev/mapper/crypt-rpool-mirror1-1 is still open", completed.stderr)
+        self.assertIn("mapping /dev/mapper/crypt-rpool-mirror1-2 is still open", completed.stderr)
         self.assertNotIn("release-disks", completed.stdout)
         # The vdev removal completed, but the mappings were not retired yet.
         state = self.state()
@@ -1336,7 +1360,7 @@ class RpoolMirrorToolTest(unittest.TestCase):
         )
         self.assertEqual(self.actions(), [])
 
-        self.run_tool("retire-luks", "crypt-rpool-mirror2-1", "crypt-rpool-mirror2-2")
+        self.run_tool("retire-luks", "crypt-rpool-mirror1-1", "crypt-rpool-mirror1-2")
         state = self.state()
         state["actions"] = []
         self.write_state(state)

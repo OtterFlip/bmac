@@ -1928,8 +1928,8 @@ class ConfigLoaderTest(unittest.TestCase):
                     "PROXMOX_PREFIX=24",
                     "PROXMOX_PUBLIC_MAC=02:00:00:00:00:10",
                     "PROXMOX_SECONDARY_MAC=02:00:00:00:10:10",
-                    "NVME_MIRROR_1_SERIAL_1=disk-a",
-                    "NVME_MIRROR_1_SERIAL_2=disk-b",
+                    "NVME_MIRROR_0_SERIAL_1=disk-a",
+                    "NVME_MIRROR_0_SERIAL_2=disk-b",
                     "MAX_PROD_VM_COUNT_ON_THIS_HOST=1",
                     "MAX_STAGING_VM_COUNT_ON_THIS_HOST=5",
                     "",
@@ -2075,7 +2075,7 @@ for key in "${!_PROXMOX_CONFIG_ALLOWED_SCOPE[@]}"; do
 done
 load_proxmox_config --host mox10 --require-secrets
 [[ "$MAX_MOX_HOSTS" == 10 ]]
-[[ "$NVME_MIRROR_1_SERIAL_1" == disk-a ]]
+[[ "$NVME_MIRROR_0_SERIAL_1" == disk-a ]]
 [[ "$PROXMOX_FQDN" == mox10.pve.internal ]]
 [[ "$PROD_GUEST_OS_ISO_URL+x" != x ]]
 require_var IDRAC_PASSWORD
@@ -2219,10 +2219,12 @@ done
                 "-c",
                 (
                     'source "$1"; '
-                    "_config_key_allowed mox NVME_MIRROR_5_SERIAL_1; "
-                    "_config_key_allowed mox NVME_MIRROR_5_SERIAL_2; "
-                    "_config_key_allowed mox NVME_MIRROR_5_CAPACITY_BYTES_1; "
-                    "_config_key_allowed mox NVME_MIRROR_5_CAPACITY_BYTES_2; "
+                    "_config_key_allowed mox NVME_MIRROR_0_SERIAL_1; "
+                    "_config_key_allowed mox NVME_MIRROR_0_CAPACITY_BYTES_2; "
+                    "_config_key_allowed mox NVME_MIRROR_4_SERIAL_1; "
+                    "_config_key_allowed mox NVME_MIRROR_4_SERIAL_2; "
+                    "_config_key_allowed mox NVME_MIRROR_4_CAPACITY_BYTES_1; "
+                    "_config_key_allowed mox NVME_MIRROR_4_CAPACITY_BYTES_2; "
                     "_config_key_allowed cluster "
                     "PROD_GUEST_OS_ISO_URL; "
                     "_config_key_allowed cluster "
@@ -2230,7 +2232,8 @@ done
                     "_config_key_allowed cluster "
                     "PROD_GUEST_OS_INSTALL_MODE; "
                     "_config_key_allowed secrets PROXMOX_LUKS_PASSWORD; "
-                    "! _config_key_allowed mox NVME_MIRROR_5_SERIAL1; "
+                    "! _config_key_allowed mox NVME_MIRROR_4_SERIAL1; "
+                    "! _config_key_allowed mox NVME_MIRROR_5_SERIAL_1; "
                     "! _config_key_allowed cluster "
                     "PROD_GUEST_UBUNTU_ISO_FILE_URL"
                 ),
@@ -2271,20 +2274,20 @@ done
     ) -> None:
         original = self.mox.read_text(encoding="utf-8")
         self.mox.write_text(
-            original + "NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016\n",
+            original + "NVME_MIRROR_0_CAPACITY_BYTES_1=1000204886016\n",
             encoding="utf-8",
         )
         completed = self.run_config("--check", "--host", "mox10", expected=1)
         self.assertIn(
-            "must define both NVME_MIRROR_1_CAPACITY_BYTES_1 "
-            "and NVME_MIRROR_1_CAPACITY_BYTES_2",
+            "must define both NVME_MIRROR_0_CAPACITY_BYTES_1 "
+            "and NVME_MIRROR_0_CAPACITY_BYTES_2",
             completed.stderr,
         )
 
         self.mox.write_text(
             original
-            + "NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016\n"
-            + "NVME_MIRROR_1_CAPACITY_BYTES_2=0\n",
+            + "NVME_MIRROR_0_CAPACITY_BYTES_1=1000204886016\n"
+            + "NVME_MIRROR_0_CAPACITY_BYTES_2=0\n",
             encoding="utf-8",
         )
         completed = self.run_config("--check", "--host", "mox10", expected=1)

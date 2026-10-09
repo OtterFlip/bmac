@@ -104,10 +104,10 @@ def conf_slot(survivor, holds_esp):
     """Return the LUKS mapper member and its host-side mirror slot."""
     if survivor["luks"]:
         mapper = (survivor["mapper"] or "").rsplit("/", 1)[-1]
-        match = re.fullmatch(r"crypt-rpool-mirror([2-5])-([12])", mapper)
+        match = re.fullmatch(r"crypt-rpool-mirror([1-9][0-9]*)-([12])", mapper)
         if mapper in ("crypt-rpool-a", "crypt-rpool-b"):
             member = 2 if mapper == "crypt-rpool-a" else 1
-            return "AB"[member - 1], 1, member
+            return "AB"[member - 1], 0, member
         if match:
             pair, member = int(match.group(1)), 3 - int(match.group(2))
             return f"{pair}-{member}", pair, member
@@ -131,7 +131,7 @@ for vdev in layout["vdevs"]:
         spec, pair, slot = conf_slot(survivor, vdev["holds_esp"])
         print("\t".join(str(value) for value in (
             "JOINED", vdev["name"], survivor["serial"], member["serial"],
-            member["disk_size"], spec or "-", pair or "-", slot or "-",
+            member["disk_size"], spec or "-", "-" if pair is None else pair, slot or "-",
         )))
         continue
     if vdev.get("replacing"):
@@ -184,7 +184,7 @@ for vdev in layout["vdevs"]:
     print("\t".join(str(value) for value in (
         kind, vdev["name"], "boot" if vdev["holds_esp"] else "extra",
         survivor["serial"], survivor["disk_size"], gone, spec or "-",
-        pair or "-", member or "-", resume,
+        "-" if pair is None else pair, member or "-", resume,
     )))
 PY
 )" || dw_die "could not analyze the rpool layout of $DW_HOST"

@@ -1187,8 +1187,8 @@ printf '%s\\n' "$ROOT_VOLUME"
                 (env_dir / f"mox{index}.conf").write_text(
                     "\n".join(
                         (
-                            f"NVME_MIRROR_1_SERIAL_1=test-mox{index}-a",
-                            f"NVME_MIRROR_1_SERIAL_2=test-mox{index}-b",
+                            f"NVME_MIRROR_0_SERIAL_1=test-mox{index}-a",
+                            f"NVME_MIRROR_0_SERIAL_2=test-mox{index}-b",
                             f"PROXMOX_IP=10.213.0.{10 + index}",
                             "PROXMOX_GATEWAY=10.213.0.1",
                             "PROXMOX_PREFIX=24",

@@ -10,10 +10,11 @@
 # install it on the host as /usr/local/sbin/app-ha-rpool-mirror.
 #
 # Every subcommand selects disks by serial and re-proves their identity before
-# changing anything. Boot-mirror members A and B use the LUKS mappings
-# crypt-rpool-a and crypt-rpool-b on partition 3; extra mirror pair N uses
-# partition 1 of each disk, with the mappings crypt-rpool-mirrorN-1 and
-# crypt-rpool-mirrorN-2 on an encrypted host.
+# changing anything. Boot-mirror (pair 0) members A and B use the LUKS
+# mappings crypt-rpool-a and crypt-rpool-b on partition 3; extra mirror pair N
+# (N >= 1, normally the number of its ZFS mirror-N vdev) uses partition 1 of
+# each disk, with the mappings crypt-rpool-mirrorN-1 and crypt-rpool-mirrorN-2
+# on an encrypted host.
 #
 # Mirror members never reach the end of their disks. A new pair's member
 # partitions end at the smaller disk's size rounded down to a whole GiB, less
@@ -224,7 +225,7 @@ parse_common() {
     case "$1" in
       --pair)
         (($# >= 2)) || die "--pair requires a value"
-        [[ "$2" =~ ^[2-5]$ ]] || die "--pair must be 2 through 5"
+        [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "--pair must be a positive integer"
         PAIR="$2"
         shift 2
         ;;
@@ -240,8 +241,8 @@ parse_common() {
         ;;
       --member)
         (($# >= 2)) || die "--member requires A, B, or N-M"
-        [[ "$2" =~ ^(A|B|[2-5]-[12])$ ]] ||
-          die "--member must be A, B, or N-M with N 2 through 5 and M 1 or 2"
+        [[ "$2" =~ ^(A|B|[1-9][0-9]*-[12])$ ]] ||
+          die "--member must be A, B, or N-M with N a positive integer and M 1 or 2"
         MEMBER="$2"
         shift 2
         ;;
@@ -970,7 +971,7 @@ command_retire_luks() {
   (($# > 0)) || die "retire-luks requires at least one mapper"
   for mapper in "$@"; do
     # The boot mirror (crypt-rpool-a/b) holds the ESPs and is never retired.
-    [[ "$mapper" =~ ^crypt-rpool-mirror[2-5]-[12]$ ]] ||
+    [[ "$mapper" =~ ^crypt-rpool-mirror[1-9][0-9]*-[12]$ ]] ||
       die "refusing to retire $mapper; only crypt-rpool-mirrorN-M mappings of extra mirrors can be retired"
     ! pool_contains "/dev/mapper/$mapper" ||
       die "$mapper is still part of rpool; wait until its vdev removal completes"

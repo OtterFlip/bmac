@@ -206,8 +206,8 @@ def record_replacement(
 def record_addition(
     state: dict[str, Any], pair: int, serials: Sequence[str], capacities: Sequence[int], now: int
 ) -> None:
-    if pair not in (2, 3, 4, 5):
-        raise StateError("pair must be 2 through 5")
+    if isinstance(pair, bool) or not isinstance(pair, int) or pair < 1:
+        raise StateError("pair must be a positive integer")
     if len(serials) != 2 or len(set(serials)) != 2:
         raise StateError("an addition needs two different disk serials")
     for serial in serials:

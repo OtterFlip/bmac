@@ -460,7 +460,7 @@ load_configuration() {
   load_proxmox_config --host "$SELECTED_HOST" --require-secrets ||
     fail "Could not load cluster.conf, ${SELECTED_HOST}.conf, and secrets.env"
   local required=(
-    NVME_MIRROR_1_SERIAL_1 NVME_MIRROR_1_SERIAL_2
+    NVME_MIRROR_0_SERIAL_1 NVME_MIRROR_0_SERIAL_2
     PROXMOX_IP PROXMOX_GATEWAY PROXMOX_PREFIX PROXMOX_FQDN
     PROXMOX_DNS_SERVER PROXMOX_ADMIN_EMAIL PROXMOX_ROOT_PASSWORD
     PROXMOX_TIMEZONE PROXMOX_COUNTRY PROXMOX_KEYBOARD
@@ -516,9 +516,9 @@ load_configuration() {
   CONFIGURED_MIRROR_PAIRS=()
   EXPECTED_RPOOL_MAPPERS=()
   local pair member serial_name serial capacity_name capacity
-  # Pairs 2-5 may have gaps: decommissioning a mirror comments out its
+  # Pairs 1-4 may have gaps: decommissioning a mirror comments out its
   # entries, and pair N keeps its crypt-rpool-mirrorN-* LUKS names.
-  for pair in 1 2 3 4 5; do
+  for pair in 0 1 2 3 4; do
     serial_name="NVME_MIRROR_${pair}_SERIAL_1"
     [[ -n "${!serial_name:-}" ]] || continue
     CONFIGURED_MIRROR_PAIRS+=("$pair")
@@ -536,7 +536,7 @@ load_configuration() {
       fi
     done
   done
-  [[ "${CONFIGURED_MIRROR_PAIRS[0]:-}" == 1 ]] || fail "NVMe mirror 1 is mandatory"
+  [[ "${CONFIGURED_MIRROR_PAIRS[0]:-}" == 0 ]] || fail "NVMe mirror 0 is mandatory"
   RPOOL_LAYOUT_SHA256="$(
     printf '%s\n' "${CONFIGURED_NVME_SERIALS[@]}" |
       sha256sum | awk '{print $1}'
@@ -961,7 +961,7 @@ discover_hardware() {
     done
 
     local manual_hdsize_gib
-    capacity_1="$(read_state mirror-1-minimum-capacity-bytes)"
+    capacity_1="$(read_state mirror-0-minimum-capacity-bytes)"
     manual_hdsize_gib="$((capacity_1 / 1073741824 - 4))"
     ((manual_hdsize_gib > 0)) || fail "Computed invalid ZFS hdsize"
     ((capacity_1 - manual_hdsize_gib * 1073741824 >= 4 * 1073741824)) ||
@@ -1064,7 +1064,7 @@ discover_hardware() {
   done
 
   local hdsize_gib
-  smaller_bytes="$(read_state mirror-1-minimum-capacity-bytes)"
+  smaller_bytes="$(read_state mirror-0-minimum-capacity-bytes)"
   [[ "$smaller_bytes" =~ ^[0-9]+$ ]] || fail "Could not determine NVMe capacity"
   hdsize_gib="$((smaller_bytes / 1073741824 - 4))"
   ((hdsize_gib > 0)) || fail "Computed invalid ZFS hdsize"
@@ -1148,8 +1148,8 @@ build_iso() {
   HOST_KEY_B64="$(base64 -w0 <"$HOST_KEY")" \
   HOST_KEY_PUB_B64="$(base64 -w0 <"$HOST_KEY_PUB")" \
   ADMIN_1_KEY="$ADMIN_1_PUBLIC_SSH_KEY" ADMIN_2_KEY="$ADMIN_2_PUBLIC_SSH_KEY" \
-  BOOT_SERIAL_1="$NVME_MIRROR_1_SERIAL_1" \
-  BOOT_SERIAL_2="$NVME_MIRROR_1_SERIAL_2" \
+  BOOT_SERIAL_1="$NVME_MIRROR_0_SERIAL_1" \
+  BOOT_SERIAL_2="$NVME_MIRROR_0_SERIAL_2" \
   AUTH_KEY_B64="$auth_key_b64" ZFS_HDSIZE_GIB="$hdsize" \
   python3 3<<<"$root_password_hash" <<'PY'
 import json
@@ -1427,12 +1427,12 @@ scrub_installation_media() {
   shred_secret_file "$HOST_KEY"
 }
 
-# The installer erases only the two mirror-1 disks. A disk that was a raw
+# The installer erases only the two mirror-0 disks. A disk that was a raw
 # (unencrypted) member of an earlier rpool keeps its ZFS label, and the
 # installer cannot rename that old pool once it has overwritten the pool's
-# mirror-1 half, so the first boot finds two pools named rpool.
+# mirror-0 half, so the first boot finds two pools named rpool.
 print_duplicate_rpool_help() {
-  local boot_1="$NVME_MIRROR_1_SERIAL_1" boot_2="$NVME_MIRROR_1_SERIAL_2"
+  local boot_1="$NVME_MIRROR_0_SERIAL_1" boot_2="$NVME_MIRROR_0_SERIAL_2"
   local -a extra_serials=("${CONFIGURED_NVME_SERIALS[@]:2}")
   cat <<EOF
 
@@ -1545,9 +1545,9 @@ print_installation_instructions() {
   printf 'CUSTOM INSTALLER READY - INSTALL THE ISO ON THE HOST NOW\n'
   info "ISO: $output"
   info "Target: $HOST_ID / $PROXMOX_FQDN / $PROXMOX_IP"
-  info "Installer mirror disks that will be destroyed: $NVME_MIRROR_1_SERIAL_1 and $NVME_MIRROR_1_SERIAL_2"
+  info "Installer mirror disks that will be destroyed: $NVME_MIRROR_0_SERIAL_1 and $NVME_MIRROR_0_SERIAL_2"
   if [[ "$HARDWARE_INVENTORY_MODE" == manual ]]; then
-    info "Manually inventoried capacity of each installer disk: ${NVME_MIRROR_1_CAPACITY_BYTES_1} bytes"
+    info "Manually inventoried capacity of each installer disk: ${NVME_MIRROR_0_CAPACITY_BYTES_1} bytes"
     info "The automated installer selects these disks by serial; it cannot independently verify the recorded byte capacities before erasing them."
   fi
   if ((${#CONFIGURED_MIRROR_PAIRS[@]} > 1)); then
@@ -2053,8 +2053,8 @@ REMOTE
   else
     wait_for_host
     remote_apt_script "$PROXMOX_FQDN" "$ADMIN_1_PUBLIC_SSH_KEY" \
-      "$ADMIN_2_PUBLIC_SSH_KEY" "$NVME_MIRROR_1_SERIAL_1" \
-      "$NVME_MIRROR_1_SERIAL_2" <<'REMOTE'
+      "$ADMIN_2_PUBLIC_SSH_KEY" "$NVME_MIRROR_0_SERIAL_1" \
+      "$NVME_MIRROR_0_SERIAL_2" <<'REMOTE'
 set -Eeuo pipefail
 expected_fqdn="$1"
 [[ "$(hostname -f)" == "$expected_fqdn" ]]
@@ -2077,7 +2077,7 @@ for serial in "$4" "$5"; do
   done < <(awk '$1 ~ /^\// { print $1 }' <<<"$pool")
   [[ "$found" == true ]] ||
     {
-      printf 'Installer rpool does not contain configured mirror-1 disk %s\n' "$serial" >&2
+      printf 'Installer rpool does not contain configured mirror-0 disk %s\n' "$serial" >&2
       exit 1
     }
 done
@@ -2234,10 +2234,10 @@ raw_boot_test() {
   local schedule_reboot=false
   state="raw-${survivor}-only-passed"
   if [[ "$survivor" == A ]]; then
-    disabled_serial="$NVME_MIRROR_1_SERIAL_2"
+    disabled_serial="$NVME_MIRROR_0_SERIAL_2"
     disabled_member=B
   else
-    disabled_serial="$NVME_MIRROR_1_SERIAL_1"
+    disabled_serial="$NVME_MIRROR_0_SERIAL_1"
     disabled_member=A
   fi
   active="raw-${survivor}-test-active"
@@ -2316,11 +2316,11 @@ rebuild_luks_member() {
   local raw_present=false mapper_in_pool=false luks_present=false phase_present=false
   local partner_serial
   if [[ "$member" == A ]]; then
-    serial="$NVME_MIRROR_1_SERIAL_1"; mapper=crypt-rpool-a; survivor=B
-    partner_serial="$NVME_MIRROR_1_SERIAL_2"
+    serial="$NVME_MIRROR_0_SERIAL_1"; mapper=crypt-rpool-a; survivor=B
+    partner_serial="$NVME_MIRROR_0_SERIAL_2"
   else
-    serial="$NVME_MIRROR_1_SERIAL_2"; mapper=crypt-rpool-b; survivor=A
-    partner_serial="$NVME_MIRROR_1_SERIAL_1"
+    serial="$NVME_MIRROR_0_SERIAL_2"; mapper=crypt-rpool-b; survivor=A
+    partner_serial="$NVME_MIRROR_0_SERIAL_1"
   fi
   state="luks-${member}-attached"
   prepared_state="luks-${member}-prepared"
@@ -2542,11 +2542,11 @@ encrypted_boot_test() {
   local schedule_reboot=false
   if [[ "$survivor" == A ]]; then
     unavailable=B
-    serial="$NVME_MIRROR_1_SERIAL_2"
+    serial="$NVME_MIRROR_0_SERIAL_2"
     mapper=crypt-rpool-b
   else
     unavailable=A
-    serial="$NVME_MIRROR_1_SERIAL_1"
+    serial="$NVME_MIRROR_0_SERIAL_1"
     mapper=crypt-rpool-a
   fi
   state="encrypted-final-${survivor}-only-passed"
@@ -2681,7 +2681,7 @@ REMOTE
 
 verify_encrypted_mirror() {
   {
-    remote_script "$NVME_MIRROR_1_SERIAL_1" "$NVME_MIRROR_1_SERIAL_2" <<'REMOTE'
+    remote_script "$NVME_MIRROR_0_SERIAL_1" "$NVME_MIRROR_0_SERIAL_2" <<'REMOTE'
 set -Eeuo pipefail
 serials=("$1" "$2")
 mappers=(crypt-rpool-a crypt-rpool-b)
@@ -2909,7 +2909,7 @@ REMOTE
 configure_extra_mirrors() {
   local pair pool configured configured_pair
   pool="$(remote zpool status -P rpool)"
-  for pair in 2 3 4 5; do
+  for pair in 1 2 3 4; do
     configured=false
     for configured_pair in "${CONFIGURED_MIRROR_PAIRS[@]}"; do
       [[ "$configured_pair" != "$pair" ]] || configured=true
@@ -4841,7 +4841,7 @@ final_verify() {
   if [[ "$ENCRYPTION_POLICY" == luks ]]; then
     for pair in "${CONFIGURED_MIRROR_PAIRS[@]}"; do
       for member in 1 2; do
-        if ((pair == 1)); then
+        if ((pair == 0)); then
           if ((member == 1)); then
             header="${HEADER_DIR}/rpool-A.bin"
           else
