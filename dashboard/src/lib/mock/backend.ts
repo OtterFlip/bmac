@@ -405,7 +405,7 @@ export function createMockBackend(): Backend {
 
   return {
     kind: "mock",
-    getAppInfo: async () => ({ name: "BMAC Dashboard", version: __BMAC_VERSION__, protocol_version: 2, history_dir: "~/.local/share/com.beentherevc.bmac.dashboard/runs" }),
+    getAppInfo: async () => ({ name: "BMAC Dashboard", version: __BMAC_VERSION__, protocol_version: 2, history_dir: "~/.local/share/com.btvcorp.bmac.dashboard/runs" }),
     getPlatformInfo: async () => ({ os: "linux", arch: "x86_64", os_family: "debian", os_name: "Ubuntu 24.04.3 LTS", hostname: "workstation" }),
     getRepositoryInfo: async () => ({
       root: settings.repository ?? "", valid: true, problems: [], git_commit: "4b5847a1c0de", git_describe: "v0.2.0-14-g4b5847a", git_branch: "main",

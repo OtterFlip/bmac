@@ -106,9 +106,9 @@ is a type error. `tsconfig.node.json` covers `vite.config.ts`, `scripts/`, and
 the tests, which run under Node.
 
 On first start, choose your BMAC checkout in Settings. Settings live in the
-platform config directory (`~/.config/com.beentherevc.bmac.dashboard/` on
+platform config directory (`~/.config/com.btvcorp.bmac.dashboard/` on
 Linux) and run history in its data directory
-(`~/.local/share/com.beentherevc.bmac.dashboard/runs/`).
+(`~/.local/share/com.btvcorp.bmac.dashboard/runs/`).
 
 On Linux, a build that was not installed from a package (`pnpm app:dev` or a
 bare `target/release` binary) writes a hidden

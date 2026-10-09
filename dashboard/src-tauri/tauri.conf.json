@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "BMAC Dashboard",
-  "identifier": "com.beentherevc.bmac.dashboard",
+  "identifier": "com.btvcorp.bmac.dashboard",
   "build": {
     "beforeDevCommand": "pnpm web:dev",
     "devUrl": "http://localhost:1420",
