@@ -10,7 +10,7 @@ The Overview page summarizes the status of the cluster, enumerating its hosts an
 
 # Hosts
 
-Here you can view your host status as well as add/remove Proxmox hosts to/from your cluster.
+Here you can view your host(s) status as well as add/remove Proxmox hosts to/from your cluster.  The add-host feature here isn't just a vanilla Proxmox host setup - this setups gives you the option to configure the host's disks with full-disk LUKS encryption (the tiny UEFI System Partion is excluded from LUKS encryption).  This means your OS, apps and data are all encrypted at-rest.  Additionally this will ensure that the new host has BMAC's runtime scripts installed, which runtime enables that host to collaborate with the other hosts to support BMAC's features such as the lightweight linked-clones for staging VMs, etc.
 
 <p align="center">
   <img src="../media/BMAC_Dashboard_Hosts.png" width="800">

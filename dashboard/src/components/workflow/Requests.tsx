@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
-import { AlertOctagon, AlertTriangle, ChevronRight, ClipboardCheck, Hand, ListChecks, ShieldAlert, TerminalSquare } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AlertOctagon, AlertTriangle, Check, ChevronRight, ClipboardCheck, Copy, Hand, ListChecks, ShieldAlert, TerminalSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Tooltip } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/inputs";
 import { FieldControl, initialValue, toWire, validateField, type FieldValue } from "./FieldControl";
 import { useStore } from "@/state/store";
 import { cn } from "@/lib/utils";
 import { logs } from "@/state/logs";
+import { toast } from "@/state/toast";
 import type { ConfirmEvent, Field, InputEvent, InputGroupEvent, ManualActionEvent, RequestEvent, RunEvent } from "@/protocol/types";
 
 export function RequestView({ runId, request }: { runId: string; request: RequestEvent }) {
@@ -20,7 +22,9 @@ export function RequestView({ runId, request }: { runId: string; request: Reques
   }
 }
 
-const RECENT_LINES = 40;
+/** Output normally stops at the previous prompt; this only bounds the first
+ *  request of a run, which has no earlier prompt to stop at. */
+const RECENT_LINES = 400;
 
 /** The output the script printed just before asking, which is what a
  *  terminal user would be looking at when answering. */
@@ -45,26 +49,49 @@ function recentOutput(runId: string, requestId: string): string {
 
 function Context({ text, runId, requestId }: { text?: string; runId: string; requestId: string }) {
   const [open, setOpen] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const pre = useRef<HTMLPreElement>(null);
   const fallback = useMemo(() => (text?.trim() ? "" : recentOutput(runId, requestId)), [text, runId, requestId]);
   text = text?.trim() ? text : fallback;
+  useEffect(() => {
+    if (open && pre.current) pre.current.scrollTop = pre.current.scrollHeight;
+  }, [open, text]);
   if (!text?.trim()) return null;
   return (
     <div className="mb-4 overflow-hidden rounded-lg border border-line bg-[#07090c]">
-      <button onClick={() => setOpen(!open)} className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-medium text-fg-subtle hover:text-fg">
-        <ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} />
-        <TerminalSquare className="size-3" />
-        What the script showed
-      </button>
-      {open && <pre className="max-h-52 overflow-auto px-3 pb-2.5 font-mono text-[11.5px] leading-[1.5] text-fg-muted">{text}</pre>}
+      <div className="flex items-center pr-2">
+        <button onClick={() => setOpen(!open)} className="flex min-w-0 flex-1 items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-medium text-fg-subtle hover:text-fg">
+          <ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} />
+          <TerminalSquare className="size-3" />
+          What the script showed
+        </button>
+        <Tooltip content="Copy script output">
+          <button
+            type="button"
+            className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-fg-subtle hover:bg-surface-3 hover:text-fg"
+            onClick={() => {
+              void navigator.clipboard.writeText(text!);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1200);
+            }}
+            aria-label="Copy script output"
+          >
+            {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </Tooltip>
+      </div>
+      {open && <pre ref={pre} className="max-h-80 overflow-auto px-3 pb-2.5 font-mono text-[11.5px] leading-[1.5] text-fg-muted">{text}</pre>}
     </div>
   );
 }
 
-function Shell({ tone, icon, eyebrow, title, description, children }: {
+function Shell({ tone, icon, eyebrow, title, titleAction, description, children }: {
   tone: "info" | "warn" | "danger";
   icon: React.ReactNode;
   eyebrow: string;
   title: string;
+  titleAction?: React.ReactNode;
   description?: string;
   children: React.ReactNode;
 }) {
@@ -82,7 +109,10 @@ function Shell({ tone, icon, eyebrow, title, description, children }: {
           <span className={cn("flex size-6 items-center justify-center rounded-md [&_svg]:size-3.5", chip)}>{icon}</span>
           <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-fg-muted">{eyebrow}</span>
         </div>
-        <h3 className="mt-2 text-[15px] font-semibold tracking-[-0.01em] text-fg">{title}</h3>
+        <div className="mt-2 flex items-start gap-2">
+          <h3 className="min-w-0 flex-1 break-words text-[15px] font-semibold tracking-[-0.01em] text-fg">{title}</h3>
+          {titleAction}
+        </div>
         {description && <p className="mt-1 text-[12.5px] leading-relaxed text-fg-muted">{description}</p>}
       </div>
       <div className="px-4 pb-4">{children}</div>
@@ -248,12 +278,51 @@ function ConfirmRequest({ runId, request }: { runId: string; request: ConfirmEve
   );
 }
 
+/** Matches titles like "Run /root/app-ha-luks-format-A on mox3". */
+const RUN_SCRIPT_TITLE = /^Run (\/\S+) on \S+$/;
+
+const isLinux = /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
+
+function CopyPathButton({ path }: { path: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Tooltip content="Copy script path">
+      <button
+        type="button"
+        className="mt-px flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-fg-subtle hover:bg-surface-3 hover:text-fg"
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(path);
+          } catch {
+            toast.error("Could not copy to the clipboard");
+            return;
+          }
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+          if (isLinux) toast.info("CTRL+SHIFT+V to Paste");
+        }}
+        aria-label="Copy script path"
+      >
+        {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+        {copied ? "Copied" : "Copy"}
+      </button>
+    </Tooltip>
+  );
+}
+
 function ManualActionRequest({ runId, request }: { runId: string; request: ManualActionEvent }) {
   const respond = useStore((s) => s.respond);
   const [done, setDone] = useState<Set<number>>(new Set());
   const [sending, setSending] = useState(false);
+  const scriptPath = RUN_SCRIPT_TITLE.exec(request.title)?.[1];
   return (
-    <Shell tone="warn" icon={<ListChecks />} eyebrow="Manual action required" title={request.title}>
+    <Shell
+      tone="warn"
+      icon={<ListChecks />}
+      eyebrow="Manual action required"
+      title={request.title}
+      titleAction={scriptPath && <CopyPathButton path={scriptPath} />}
+    >
       <Context text={request.context} runId={runId} requestId={request.request_id} />
       <ol className="mb-4 space-y-1.5">
         {request.instructions.map((line, i) => {

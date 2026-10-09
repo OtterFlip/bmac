@@ -384,7 +384,13 @@ of truth; these scripts do not read or update `env/moxN.conf`.
 `hosts/add_new_disk_vdev.sh [--host moxN]`:
 
 1. lists the disks that are not part of rpool, with serials and byte
-   capacities, and asks for two whose capacities differ by at most 1%;
+   capacities, and asks for two whose capacities differ by at most 1%. A new
+   mirror is built only on blank disks: if either chosen disk holds anything
+   (LUKS, partitions, ZFS labels, or filesystem signatures), the script asks
+   to wipe both disks' metadata first (LUKS key slots, ZFS labels, filesystem
+   signatures, and the partition table; the data area is not overwritten).
+   Nothing on a chosen disk is ever reused, even LUKS the shared passphrase
+   opens; declining the wipe stops with nothing changed;
 2. on a LUKS host, writes `/root/app-ha-add-mirror-N` and has you run it at the
    host console. It asks for `GO` and the shared rpool passphrase (hidden),
    proves that passphrase unlocks every existing rpool LUKS member, then

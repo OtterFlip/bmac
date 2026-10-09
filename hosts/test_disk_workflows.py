@@ -154,7 +154,8 @@ elif words[0] == os.environ["APP_HA_REMOTE_RPOOL_MIRROR"]:
             if "--survivor" in options and disk["size"] < required:
                 print(f"ERROR: disk {serial} needs at least {required} bytes", file=sys.stderr)
                 raise SystemExit(1)
-            print(f"{serial}\t{disk['disk']}\t{disk['size']}\tfresh")
+            luks = serial in state.get("luks_disks", [])
+            print(f"{serial}\t{disk['disk']}\t{disk['size']}\t{'luks' if luks else 'fresh'}")
     elif command == "replacement-bytes":
         print(required)
     elif command == "release-disks":
@@ -169,6 +170,8 @@ elif words[0] == os.environ["APP_HA_REMOTE_RPOOL_MIRROR"]:
             else:
                 disk["fstype"] = None
                 disk["partitions_or_holders"] = False
+                if serial in state.get("luks_disks", []):
+                    state["luks_disks"].remove(serial)
                 print(f"Disk {serial} now has no partitions or signatures.")
         save()
         raise SystemExit(1 if failed else 0)
@@ -541,7 +544,7 @@ class DiskWorkflowTest(unittest.TestCase):
 
     def test_add_luks_mirror_via_console_passphrase(self) -> None:
         self.update_fake(console_ran=True)
-        completed = self.run_script(ADD, "1\n2\nGO\nGO\ny\n")
+        completed = self.run_script(ADD, "1\n2\ny\nGO\nGO\ny\n")
         output = completed.stdout
         helper = self.actions("write-helper")
         self.assertEqual(
@@ -551,7 +554,10 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertIn("MANUAL LUKS ACTION REQUIRED", output)
         self.assertIn("it never passes through this workstation or SSH", output)
         tool = [row[1] for row in self.actions("tool")]
-        self.assertEqual(tool, ["check-new", "luks-check-prepared", "luks-add"])
+        self.assertEqual(
+            tool, ["check-new", "release-disks", "check-new", "luks-check-prepared", "luks-add"]
+        )
+        self.assertIn("  S7USED (has partitions or signatures)", output)
         self.assertIn(["tool", "luks-add", "--pair", "4", "S6BLANK", "S7USED"],
                       self.actions("tool"))
         for member in (1, 2):
@@ -591,7 +597,7 @@ class DiskWorkflowTest(unittest.TestCase):
         self.assertEqual(self.actions("tool"), [])
 
     def test_add_stops_until_the_console_helper_succeeds(self) -> None:
-        completed = self.run_script(ADD, "1\n2\nGO\nGO\nq\n", expected=1)
+        completed = self.run_script(ADD, "1\n2\ny\nGO\nGO\nq\n", expected=1)
         self.assertIn("rerun /fake/root/app-ha-add-mirror-4 at the console", completed.stdout)
         self.assertNotIn("luks-add", [row[1] for row in self.actions("tool")])
         self.assertNotIn("NVME_MIRROR_4_SERIAL_1=S6BLANK", self.conf.read_text())
@@ -623,13 +629,65 @@ class DiskWorkflowTest(unittest.TestCase):
         layout["luks_mappings"] = []
         layout["crypttab"] = []
         self.update_fake(layout=layout)
-        completed = self.run_script(ADD, "1\n2\nGO\n")
+        completed = self.run_script(ADD, "1\n2\ny\nGO\n")
         self.assertEqual(
-            [row[1] for row in self.actions("tool")], ["check-new", "clear-add"]
+            [row[1] for row in self.actions("tool")],
+            ["check-new", "release-disks", "check-new", "clear-add"],
         )
         self.assertEqual(self.actions("write-helper"), [])
         self.assertNotIn("S6BLANK", self.conf.read_text())
         self.assertNotIn("reboot", completed.stdout)
+
+    def blank_s7used(self) -> None:
+        layout = self.fake()["layout"]
+        for disk in layout["unassigned_disks"]:
+            if disk["serial"] == "S7USED":
+                disk["fstype"] = None
+                disk["partitions_or_holders"] = False
+        self.update_fake(layout=layout)
+
+    def test_add_wipes_leftover_luks_on_unencrypted_host(self) -> None:
+        self.update_fake(layout=make_clear(self.fake()["layout"]), luks_disks=["S6BLANK"])
+        completed = self.run_script(ADD, "1\n2\ny\nGO\n")
+        self.assertIn("  S6BLANK (LUKS)\n  S7USED (has partitions or signatures)", completed.stdout)
+        self.assertEqual(
+            [row[1:] for row in self.actions("tool")],
+            [["check-new", "S6BLANK", "S7USED"],
+             ["release-disks", "S6BLANK", "S7USED"],
+             ["check-new", "S6BLANK", "S7USED"],
+             ["clear-add", "S6BLANK", "S7USED"]],
+        )
+
+    def test_add_wipes_leftover_luks_on_encrypted_host_instead_of_reusing_it(self) -> None:
+        self.blank_s7used()
+        self.update_fake(console_ran=True, luks_disks=["S6BLANK"])
+        completed = self.run_script(ADD, "1\n2\ny\nGO\nGO\ny\n")
+        self.assertIn("  S6BLANK (LUKS)\n", completed.stdout)
+        self.assertNotIn("S7USED (", completed.stdout)
+        self.assertIn("nothing on them is reused", completed.stdout)
+        self.assertEqual(
+            [row[1] for row in self.actions("tool")],
+            ["check-new", "release-disks", "check-new", "luks-check-prepared", "luks-add"],
+        )
+
+    def test_add_stops_when_the_wipe_is_declined(self) -> None:
+        self.update_fake(luks_disks=["S6BLANK"])
+        completed = self.run_script(ADD, "1\n2\nn\n", expected=1)
+        self.assertIn("not blank and were not wiped; nothing was changed", completed.stderr)
+        self.assertEqual(
+            self.actions("tool"), [["tool", "check-new", "S6BLANK", "S7USED"]]
+        )
+        self.assertEqual(self.actions("write-helper"), [])
+
+    def test_add_does_not_ask_to_wipe_blank_disks(self) -> None:
+        self.blank_s7used()
+        self.update_fake(console_ran=True)
+        completed = self.run_script(ADD, "1\n2\nGO\nGO\ny\n")
+        self.assertNotIn("Existing structures on the chosen disks", completed.stdout)
+        self.assertEqual(
+            [row[1] for row in self.actions("tool")],
+            ["check-new", "luks-check-prepared", "luks-add"],
+        )
 
     def test_add_resumes_a_prepared_pair(self) -> None:
         layout = self.fake()["layout"]
@@ -658,7 +716,7 @@ class DiskWorkflowTest(unittest.TestCase):
                 self.assertFalse(row["in_pool"])
         self.update_fake(layout=layout, console_ran=True)
         self.record_mirror_1_removal()
-        completed = self.run_script(ADD, "1\n2\nGO\nGO\ny\n")
+        completed = self.run_script(ADD, "1\n2\ny\nGO\nGO\ny\n")
         self.assertNotIn("was prepared by an earlier run", completed.stdout)
         self.assertIn(["tool", "luks-add", "--pair", "4", "S6BLANK", "S7USED"],
                       self.actions("tool"))
@@ -1569,13 +1627,15 @@ class DiskWorkflowJsonTest(DiskWorkflowTest):
             ADD,
             {"values": {"first": "1", "second": "2"}},
             {"confirmed": True},
+            {"confirmed": True},
             {"acknowledged": True},
             {"confirmed": True},
         )
         self.assertEqual(run.completed["status"], "success", msg=run.describe())
-        group, erase, console, ready = run.requests
+        group, wipe, erase, console, ready = run.requests
         self.assertEqual(group["type"], "input_group")
         self.assertEqual([f["type"] for f in group["fields"]], ["select", "select"])
+        self.assertIn("Wipe disks S6BLANK and S7USED", json.dumps(wipe))
         self.assertEqual(erase["confirmation_text"], "GO")
         self.assertEqual(erase["severity"], "destructive")
         self.assertEqual(console["type"], "manual_action")
@@ -1608,7 +1668,9 @@ class DiskWorkflowJsonTest(DiskWorkflowTest):
         self.assertEqual(self.actions("tool"), [])
 
     def test_json_declining_the_erase_cancels_the_run(self) -> None:
-        run = self.run_json(ADD, {"values": {"first": "1", "second": "2"}}, {"confirmed": False})
+        run = self.run_json(
+            ADD, {"values": {"first": "1", "second": "2"}}, {"confirmed": True}, {"confirmed": False}
+        )
         self.assertEqual(run.completed["status"], "cancelled", msg=run.describe())
         self.assertEqual([row[1] for row in self.actions("tool")], ["check-new"])
 

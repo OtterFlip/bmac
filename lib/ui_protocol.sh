@@ -673,7 +673,6 @@ bmac_ui_manual_action() {
   BMAC_UI_CONTEXT=""
   bmac_ui__await "$_bui_request" ack
 }
-
 # ---------------------------------------------------------------------------
 # Shorthands for the common prompt shapes. Like every request helper they are
 # for JSON mode only; a script keeps its own terminal prompt for human mode:

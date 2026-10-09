@@ -1427,6 +1427,72 @@ scrub_installation_media() {
   shred_secret_file "$HOST_KEY"
 }
 
+# The installer erases only the two mirror-1 disks. A disk that was a raw
+# (unencrypted) member of an earlier rpool keeps its ZFS label, and the
+# installer cannot rename that old pool once it has overwritten the pool's
+# mirror-1 half, so the first boot finds two pools named rpool.
+print_duplicate_rpool_help() {
+  local boot_1="$NVME_MIRROR_1_SERIAL_1" boot_2="$NVME_MIRROR_1_SERIAL_2"
+  local -a extra_serials=("${CONFIGURED_NVME_SERIALS[@]:2}")
+  cat <<EOF
+
+IF THE FIRST BOOT STOPS AT AN "(initramfs)" PROMPT
+After the installer reboots, the target host console may show this instead of
+a login prompt:
+
+    Message: cannot import 'rpool': more than one matching pool
+    Failed to import pool 'rpool'.
+    Manually import the pool and exit.
+    (initramfs)
+
+Why: the installation itself succeeded. The installer erases only the two
+installer disks ($boot_1 and $boot_2); every other disk
+keeps whatever it held. If another disk was a member of an earlier unencrypted
+rpool (for example an extra mirror from a previous install of this host), it
+still carries a ZFS label for a pool named "rpool". The installer renames an
+old rpool out of the way only if it can still import it, and it cannot: it has
+just overwritten that old pool's installer-disk half. The boot then finds two
+pools named rpool and refuses to guess which one to use. Disks that held LUKS
+are not affected, because their ZFS labels are hidden inside LUKS.
+
+Identify the stale disks. At the (initramfs) prompt run:
+
+    zpool import
+
+It lists two pools named rpool, each with its own id:
+  - The NEW pool has state ONLINE, and its only members are partition 3 of the
+    installer disks: names ending in ${boot_1}-part3 and
+    ${boot_2}-part3. Leave it alone.
+  - The STALE pool usually has state UNAVAIL. It also lists the installer
+    disks, as FAULTED; never clear those, they now belong to the new pool.
+    Every other device it lists (typically ONLINE, often ending in -part1) is
+    a stale disk. Lines named indirect-N are not devices; skip them.
+EOF
+  if ((${#extra_serials[@]} > 0)); then
+    printf '    The stale devices are most likely the extra configured disks: %s.\n' \
+      "${extra_serials[*]}"
+  fi
+  cat <<'EOF'
+
+Clear them. For each stale device, using its name exactly as zpool import
+printed it (names without a leading /dev/ live under /dev/disk/by-id/):
+
+    zpool labelclear -f /dev/disk/by-id/NAME
+
+This erases only the old pool's ZFS labels on that device; nothing on the
+installer disks is touched. Run zpool import again: exactly one rpool, state
+ONLINE, on the two installer disks must remain. Then run:
+
+    zpool import -N rpool
+    exit
+
+The boot continues to the normal login prompt and the first-boot setup runs.
+Then continue with step 5. Later reboots are unaffected, because the stale
+labels are gone. If more than one rpool still remains, do not import either;
+stop and investigate before continuing.
+EOF
+}
+
 installation_gate() {
   if has_state installed; then
     scrub_installation_media
@@ -1435,7 +1501,48 @@ installation_gate() {
   local output operator_hostname
   output="$(read_state prepared-iso)"
   operator_hostname="${TAILSCALE_HOSTNAME:-$HOST_ID}"
-  printf '\nCUSTOM INSTALLER READY\n'
+  local -a steps=()
+  if [[ "$HARDWARE_INVENTORY_MODE" == idrac ]]; then
+    steps+=("Keep the Virtual Console open."
+      "Mount the ISO above as Virtual CD/DVD."
+      "Boot the server once from that virtual media.")
+  else
+    steps+=("Keep the target host console open."
+      "Put the ISO above on bootable media supported by the target host."
+      "Boot the target host once from that media.")
+  fi
+  steps+=("When prompted, select the default \"Install Proxmox VE (Automated)\" option and watch the unattended install through its reboot. If the first boot stops at an \"(initramfs)\" prompt instead of a login prompt, follow IF THE FIRST BOOT STOPS AT AN \"(initramfs)\" PROMPT above."
+    "Remove or unmap the install media when the installed Proxmox login prompt appears."
+    "Before reporting INSTALL COMPLETE, open the Tailscale admin machine list and verify $operator_hostname appeared with tag $TAILSCALE_TAG. If it is absent, the ISO Tailscale bootstrap failed; do not continue. A stale $operator_hostname left there by an earlier install may be deleted, but it is ignored either way: the script only accepts the one online, ${TAILSCALE_TAG}-tagged $operator_hostname that enrolled after this ISO was built.")
+  # The same text is the dashboard request's context, so it shows in full there
+  # instead of whatever fits in the recent output.
+  local instructions_text
+  instructions_text="$(print_installation_instructions "$output" "${steps[@]}")"
+  printf '\n%s\n' "$instructions_text"
+  local prompt="Confirm installation is finished, the login prompt is visible, and step ${#steps[@]} is complete."
+  if bmac_ui_is_json; then
+    local -a instructions=()
+    local step
+    for step in "${steps[@]}"; do
+      instructions+=(--instruction "$step")
+    done
+    # shellcheck disable=SC2034 # Read by bmac_ui_manual_action.
+    BMAC_UI_CONTEXT="$instructions_text"
+    bmac_ui_manual_action --id install_complete --title "$prompt" \
+      "${instructions[@]}" --ack-label "Install complete"
+  else
+    wait_for_exact "$prompt" "INSTALL COMPLETE" true
+  fi
+  write_state installed
+  scrub_installation_media
+}
+
+# print_installation_instructions ISO STEP...
+print_installation_instructions() {
+  local output="$1"
+  shift
+  local -a steps=("$@")
+  printf 'CUSTOM INSTALLER READY - INSTALL THE ISO ON THE HOST NOW\n'
   info "ISO: $output"
   info "Target: $HOST_ID / $PROXMOX_FQDN / $PROXMOX_IP"
   info "Installer mirror disks that will be destroyed: $NVME_MIRROR_1_SERIAL_1 and $NVME_MIRROR_1_SERIAL_2"
@@ -1448,6 +1555,8 @@ installation_gate() {
   fi
   info "Installer public NIC MAC selector: ${PROXMOX_PUBLIC_MAC^^}"
   info "Post-install private NIC MAC selector: ${PROXMOX_SECONDARY_MAC^^}"
+  # Printed before the numbered steps so the steps stay on screen at the prompt.
+  print_duplicate_rpool_help
   printf '\n!!!!!!!!!!!!!!!! DESTRUCTIVE ACTION !!!!!!!!!!!!!!!!\n'
   printf 'Following the installation steps below erases both listed NVMe disks and installs Proxmox on them as a raw ZFS mirror.\n'
   if [[ "$HARDWARE_INVENTORY_MODE" == idrac ]]; then
@@ -1456,32 +1565,14 @@ installation_gate() {
   else
     printf '\nUsing the physical or remote console for the target host:\n'
   fi
-  if [[ "$HARDWARE_INVENTORY_MODE" == idrac ]]; then
-    printf '  1. Keep the Virtual Console open.\n'
-    printf '  2. Mount the ISO above as Virtual CD/DVD.\n'
-    printf '  3. Boot the server once from that virtual media.\n'
-  else
-    printf '  1. Keep the target host console open.\n'
-    printf '  2. Put the ISO above on bootable media supported by the target host.\n'
-    printf '  3. Boot the target host once from that media.\n'
-  fi
-  printf '  4. When prompted, select the default "Install Proxmox VE (Automated)" option and watch the unattended install through its reboot.\n'
-  printf '  5. Remove or unmap the install media when the installed Proxmox login prompt appears.\n'
-  printf '\nBefore reporting INSTALL COMPLETE:\n'
-  printf '  6. Open the Tailscale admin machine list and verify %s appeared with tag %s.\n' \
-    "$operator_hostname" "$TAILSCALE_TAG"
-  printf '     If it is absent, the ISO Tailscale bootstrap failed; do not continue.\n'
-  printf '     A stale %s left there by an earlier install may be deleted, but it is ignored either way: the script only accepts the one online, %s-tagged %s that enrolled after this ISO was built.\n' \
-    "$operator_hostname" "$TAILSCALE_TAG" "$operator_hostname"
+  local index
+  for index in "${!steps[@]}"; do
+    printf '  %d. %s\n' "$((index + 1))" "${steps[index]}"
+  done
   printf '\nNo SSH fingerprint check is needed. This ISO installs an SSH host key generated on this workstation, and every SSH connection this script makes to %s is pinned to it:\n' \
     "$HOST_ID"
   info "Ed25519 $(host_key_fingerprint)"
   printf 'After you confirm, the script asks you to detach the ISO, deletes it, and offers to add that pinned host to this workstation'"'"'s ~/.ssh/config.\n'
-  wait_for_exact \
-    "Confirm installation is finished, the login prompt is visible, and step 6 is complete." \
-    "INSTALL COMPLETE" true
-  write_state installed
-  scrub_installation_media
 }
 
 # Peer HostNames are self-reported, so a name match alone could select a stale

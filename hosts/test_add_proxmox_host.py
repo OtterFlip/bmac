@@ -320,6 +320,88 @@ Flags:            Quorate Qdevice
         self.assertIn("bootable media supported by the target host", completed.stdout)
         self.assertNotIn("iDRAC", completed.stdout)
 
+    def test_installation_gate_explains_duplicate_rpool_recovery(self) -> None:
+        completed = self.run_bash(
+            self.GATE_LAYOUT
+            + """
+            HOST_ID=mox1
+            PROXMOX_FQDN=mox1.example.com
+            PROXMOX_IP=192.0.2.10
+            NVME_MIRROR_1_SERIAL_1=disk-a
+            NVME_MIRROR_1_SERIAL_2=disk-b
+            NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
+            NVME_MIRROR_1_CAPACITY_BYTES_2=1000204886016
+            CONFIGURED_MIRROR_PAIRS=(1 2)
+            CONFIGURED_NVME_SERIALS=(disk-a disk-b disk-c disk-d)
+            HARDWARE_INVENTORY_MODE=manual
+            PROXMOX_PUBLIC_MAC=00:11:22:33:44:55
+            PROXMOX_SECONDARY_MAC=00:11:22:33:44:66
+            printf 'GO\\nGO\\n' | installation_gate
+            """
+        )
+        out = completed.stdout
+        heading = 'IF THE FIRST BOOT STOPS AT AN "(initramfs)" PROMPT'
+        steps = [out.index(f"\n  {number}. ") for number in range(1, 7)]
+        self.assertEqual(steps, sorted(steps))
+        self.assertLess(out.index(heading + "\n"), steps[0])
+        self.assertLess(steps[-1], out.index("No SSH fingerprint check is needed"))
+        self.assertIn("  6. Before reporting INSTALL COMPLETE, open the Tailscale", out)
+        for expected in (
+            "more than one matching pool",
+            "names ending in disk-a-part3 and\n    disk-b-part3",
+            "most likely the extra configured disks: disk-c disk-d.",
+            "zpool labelclear -f /dev/disk/by-id/NAME",
+            "zpool import -N rpool",
+        ):
+            self.assertIn(expected, out)
+
+    def test_json_installation_gate_sends_the_full_instructions_as_context(self) -> None:
+        completed = self.run_bash(
+            self.GATE_LAYOUT
+            + """
+            HOST_ID=mox1
+            PROXMOX_FQDN=mox1.example.com
+            PROXMOX_IP=192.0.2.10
+            NVME_MIRROR_1_SERIAL_1=disk-a
+            NVME_MIRROR_1_SERIAL_2=disk-b
+            NVME_MIRROR_1_CAPACITY_BYTES_1=1000204886016
+            NVME_MIRROR_1_CAPACITY_BYTES_2=1000204886016
+            CONFIGURED_MIRROR_PAIRS=(1 2)
+            CONFIGURED_NVME_SERIALS=(disk-a disk-b disk-c disk-d)
+            HARDWARE_INVENTORY_MODE=manual
+            PROXMOX_PUBLIC_MAC=00:11:22:33:44:55
+            PROXMOX_SECONDARY_MAC=00:11:22:33:44:66
+            bmac_ui_is_json() { return 0; }
+            bmac_ui_manual_action() {
+              printf '%s\\n' "$BMAC_UI_CONTEXT" >"$HOST_ARTIFACTS/context"
+              printf '%s\\n' "$@" >"$HOST_ARTIFACTS/request"
+            }
+            scrub_installation_media() { :; }
+            installation_gate >"$HOST_ARTIFACTS/stdout"
+            has_state installed
+            printf '%s\\n===CONTEXT===\\n' "$(cat "$HOST_ARTIFACTS/stdout")"
+            cat "$HOST_ARTIFACTS/context"
+            printf '===REQUEST===\\n'
+            cat "$HOST_ARTIFACTS/request"
+            """
+        )
+        printed, rest = completed.stdout.split("===CONTEXT===\n", 1)
+        context, request = rest.split("===REQUEST===\n", 1)
+        self.assertTrue(context.startswith("CUSTOM INSTALLER READY - INSTALL THE ISO ON THE HOST NOW\n"))
+        self.assertIn(context.strip(), printed)
+        for expected in (
+            'IF THE FIRST BOOT STOPS AT AN "(initramfs)" PROMPT',
+            "zpool labelclear -f /dev/disk/by-id/NAME",
+            "DESTRUCTIVE ACTION",
+            "  1. Keep the target host console open.",
+            "  6. Before reporting INSTALL COMPLETE",
+            "No SSH fingerprint check is needed",
+        ):
+            self.assertIn(expected, context)
+        self.assertIn("--id\ninstall_complete\n", request)
+        self.assertIn("--instruction\nKeep the target host console open.\n", request)
+        self.assertNotIn("--instruction\n1. ", request)
+
     def test_manual_inventory_allows_pair_capacities_within_one_percent(self) -> None:
         self.run_bash(
             """
@@ -712,7 +794,7 @@ Flags:            Quorate Qdevice
         self.assertIn('remote_script "${CONFIGURED_NVME_SERIALS[@]}"', source)
         self.assertIn("count_a == 1 && count_b == 1 && a != \"\" && a == b", source)
         self.assertIn("verify_clear_mirrors", source)
-        self.assertIn("the login prompt is visible, and step 6 is complete", source)
+        self.assertIn("the login prompt is visible, and step ${#steps[@]} is complete", source)
 
     def test_extra_mirrors_use_the_one_shared_rpool_mirror_tool(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")

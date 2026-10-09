@@ -31,7 +31,9 @@ Usage: hosts/add_new_disk_vdev.sh [--host moxN]
 Adds two new disks to the chosen host's rpool as one new mirror vdev:
 
   1. lists the disks that are not part of rpool and asks for two whose byte
-     capacities differ by at most 1%;
+     capacities differ by at most 1%; if either is not blank (LUKS,
+     partitions, ZFS labels, or filesystem signatures), both must be wiped
+     before anything else happens, and nothing on them is ever reused;
   2. on an encrypted host, has you run a helper at the host console that asks
      for the shared rpool LUKS passphrase, proves it unlocks every existing
      rpool member, and gives each disk one LUKS partition formatted with it;
@@ -289,16 +291,51 @@ PY
   CHECKED="$(dw_tool check-new "$SERIAL_1" "$SERIAL_2")" ||
     dw_die "the chosen disks are not safe to use"
   printf '%s\n' "$CHECKED"
-  if awk -F '\t' '$4 == "luks" { found=1 } END { exit !found }' <<<"$CHECKED"; then
-    [[ "$ENCRYPTION" == luks ]] ||
-      dw_die "a chosen disk already holds LUKS; this unencrypted host will not erase it"
-    printf 'NOTE: a chosen disk already holds LUKS. It is reused only if the shared rpool passphrase opens it; otherwise nothing is changed.\n'
+  # A new vdev is built only on blank disks: anything left on a chosen disk,
+  # LUKS included, is wiped first and never reused.
+  declare -a LEFTOVERS=()
+  for serial in "$SERIAL_1" "$SERIAL_2"; do
+    if awk -F '\t' -v serial="$serial" '$1 == serial && $4 == "luks" { found=1 } END { exit !found }' <<<"$CHECKED"; then
+      LEFTOVERS+=("$serial (LUKS)")
+      continue
+    fi
+    for row in "${CANDIDATES[@]}"; do
+      IFS=$'\t' read -r disk candidate_serial size model contents <<<"$row"
+      if [[ "$candidate_serial" == "$serial" && "$contents" != blank ]]; then
+        LEFTOVERS+=("$serial ($contents)")
+      fi
+    done
+  done
+  WIPE=false
+  WIPE_NOTE=""
+  if ((${#LEFTOVERS[@]} > 0)); then
+    dw_section "Existing structures on the chosen disks"
+    printf 'These chosen disks are not blank:\n'
+    printf '  %s\n' "${LEFTOVERS[@]}"
+    printf 'A new mirror is built only on blank disks; nothing on them is reused. Wiping\n'
+    printf 'removes all metadata from both chosen disks (LUKS key slots, ZFS labels,\n'
+    printf 'filesystem signatures, and the partition table) so they show as blank. It\n'
+    printf 'takes seconds and does not overwrite the data area, but whatever the disks\n'
+    printf 'held becomes unrecoverable. Answering no stops here with nothing changed.\n'
+    prompt_yes "Wipe disks $SERIAL_1 and $SERIAL_2 on $DW_HOST before adding them?" ||
+      dw_die "the chosen disks are not blank and were not wiped; nothing was changed"
+    WIPE=true
+    WIPE_NOTE=" Everything currently on both disks is wiped first."
+  fi
+  if [[ "$ENCRYPTION" == luks ]]; then
+    confirm_exact "ERASE disks $SERIAL_1 and $SERIAL_2 on $DW_HOST, encrypt both with the shared rpool LUKS passphrase (typed at the host console), and add them to rpool as a new mirror.${WIPE_NOTE}" "" destructive
+  else
+    confirm_exact "ERASE disks $SERIAL_1 and $SERIAL_2 on $DW_HOST and add them to its unencrypted rpool as a new mirror.${WIPE_NOTE}" "" destructive
   fi
 
-  if [[ "$ENCRYPTION" == luks ]]; then
-    confirm_exact "ERASE disks $SERIAL_1 and $SERIAL_2 on $DW_HOST, encrypt both with the shared rpool LUKS passphrase (typed at the host console), and add them to rpool as a new mirror." "" destructive
-  else
-    confirm_exact "ERASE disks $SERIAL_1 and $SERIAL_2 on $DW_HOST and add them to its unencrypted rpool as a new mirror." "" destructive
+  if [[ "$WIPE" == true ]]; then
+    dw_section "Wiping the chosen disks on $DW_HOST"
+    dw_tool release-disks "$SERIAL_1" "$SERIAL_2" ||
+      dw_die "the chosen disks could not be wiped; nothing was added to rpool"
+    CHECKED="$(dw_tool check-new "$SERIAL_1" "$SERIAL_2")" ||
+      dw_die "the chosen disks are not safe to use after wiping"
+    ! awk -F '\t' '$4 == "luks" { found=1 } END { exit !found }' <<<"$CHECKED" ||
+      dw_die "a chosen disk still holds LUKS after wiping; nothing was added to rpool"
   fi
 fi
 
