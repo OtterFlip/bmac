@@ -16,7 +16,7 @@ from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 LIB_DIR = SCRIPTS_DIR / "lib"
-SCHEMA = json.loads((SCRIPTS_DIR.parent / "dashboard" / "protocol" / "bmac-ui-v1.schema.json").read_text())
+SCHEMA = json.loads((SCRIPTS_DIR.parent / "dashboard" / "protocol" / "bmac-ui-v2.schema.json").read_text())
 sys.path.insert(0, str(LIB_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -83,7 +83,7 @@ class UiProtocolTest(unittest.TestCase):
         types = [event["type"] for event in run.events]
         self.assertEqual(types[:2], ["protocol", "workflow_started"])
         self.assertEqual(types[-1], "completed")
-        self.assertEqual(run.events[0], {"type": "protocol", "protocol": "bmac-ui", "version": 1})
+        self.assertEqual(run.events[0], {"type": "protocol", "protocol": "bmac-ui", "version": 2})
         self.assertEqual(run.events[1]["workflow"], "demo")
         self.assertEqual(run.events[1]["argv"], ["--flag", "two words"])
         self.assertEqual(run.completed["status"], "success")

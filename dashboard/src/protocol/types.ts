@@ -1,4 +1,4 @@
-// bmac-ui v1 protocol and engine types. These mirror engine/src/protocol.rs,
+// bmac-ui v2 protocol and engine types. These mirror engine/src/protocol.rs,
 // engine/src/history.rs, and engine/src/registry.rs; Rust has already
 // validated every value before it gets here.
 

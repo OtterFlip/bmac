@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://bmac.invalid/protocol/bmac-ui-v1.schema.json",
-  "title": "bmac-ui protocol, version 1",
+  "$id": "https://bmac.invalid/protocol/bmac-ui-v2.schema.json",
+  "title": "bmac-ui protocol, version 2",
   "description": "NDJSON exchanged between a BMAC operator script started with --json (through scripts/utilities/ui_json_run.sh) and the controlling program, normally the BMAC dashboard. Each line of the script's stdout is one Event; each line written to its stdin is one Message. Unknown keys are ignored by readers. The dashboard engine (dashboard/engine/src/protocol.rs) additionally enforces the length and count limits noted here.",
   "oneOf": [
     { "$ref": "#/$defs/Event" },
@@ -124,7 +124,7 @@
       "properties": {
         "type": { "const": "protocol" },
         "protocol": { "const": "bmac-ui" },
-        "version": { "const": 1 },
+        "version": { "const": 2 },
         "bmac_version": { "type": "string" }
       }
     },

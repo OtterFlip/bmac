@@ -378,7 +378,7 @@ export function createMockBackend(): Backend {
     runStore.set(runId, run);
     setTimeout(async () => {
       try {
-        emit(run, { type: "protocol", protocol: "bmac-ui", version: 1 });
+        emit(run, { type: "protocol", protocol: "bmac-ui", version: 2 });
         emit(run, { type: "workflow_started", workflow: workflow.id, run_id: runId, script: workflow.script, argv: args, pid: record.pid ?? undefined, started_at: record.started_at });
         await scenario(run, workflow);
         const running = record.phases.find((p) => p.status === "running");
@@ -405,11 +405,11 @@ export function createMockBackend(): Backend {
 
   return {
     kind: "mock",
-    getAppInfo: async () => ({ name: "BMAC Dashboard", version: __BMAC_VERSION__, protocol_version: 1, history_dir: "~/.local/share/com.beentherevc.bmac.dashboard/runs" }),
+    getAppInfo: async () => ({ name: "BMAC Dashboard", version: __BMAC_VERSION__, protocol_version: 2, history_dir: "~/.local/share/com.beentherevc.bmac.dashboard/runs" }),
     getPlatformInfo: async () => ({ os: "linux", arch: "x86_64", os_family: "debian", os_name: "Ubuntu 24.04.3 LTS", hostname: "workstation" }),
     getRepositoryInfo: async () => ({
       root: settings.repository ?? "", valid: true, problems: [], git_commit: "4b5847a1c0de", git_describe: "v0.2.0-14-g4b5847a", git_branch: "main",
-      git_dirty: false, protocol_version: 1, cluster_conf_present: true, secrets_env_present: true,
+      git_dirty: false, protocol_version: 2, cluster_conf_present: true, secrets_env_present: true,
       cluster_settings: [
         { key: "PROXMOX_CLUSTER_NAME", value: "bmac" }, { key: "PROXMOX_QDEVICE_HOST", value: "qdevice" },
         { key: "PROXMOX_CONTROL_NODE", value: "mox1" }, { key: "MAX_MOX_HOSTS", value: "8" },

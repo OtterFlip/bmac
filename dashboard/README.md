@@ -11,8 +11,9 @@ plans, progress, results, and suggested next steps into native-looking forms
 and dialogs. The scripts remain the authority: the dashboard never talks to
 Proxmox, SSH, or the registry itself.
 
-The wire protocol is described by
-[`protocol/bmac-ui-v1.schema.json`](protocol/bmac-ui-v1.schema.json).
+The wire protocol, which is the call contract between the Dashboard and the
+scripts that it calls, is described by
+[`protocol/bmac-ui-v2.schema.json`](protocol/bmac-ui-v2.schema.json).
 
 ## Screenshots
 

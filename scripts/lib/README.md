@@ -242,8 +242,8 @@ Workstation library shared by `scripts/user_callable/guests/prod/change_prod_vm_
 
 ## `ui_protocol.sh`
 
-Every operator script supports `--json`, which makes it speak the bmac-ui v1
-NDJSON protocol ([`dashboard/protocol/bmac-ui-v1.schema.json`](../../dashboard/protocol/bmac-ui-v1.schema.json))
+Every operator script supports `--json`, which makes it speak the bmac-ui v2
+NDJSON protocol ([`dashboard/protocol/bmac-ui-v2.schema.json`](../../dashboard/protocol/bmac-ui-v2.schema.json))
 instead of drawing a terminal UI. The BMAC dashboard uses it; anything else
 may too. Without `--json` nothing changes: every helper below is silent and
 scripts keep their own terminal prompts.

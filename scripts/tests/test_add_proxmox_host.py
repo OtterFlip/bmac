@@ -173,6 +173,7 @@ Flags:            Quorate Qdevice
               : >"${@: -1}"
             }
             sha256sum() {
+              cat >/dev/null
               printf '%s: OK\\n' "$ARTIFACTS_DIR/tools/assistant.deb"
             }
             dpkg-deb() {

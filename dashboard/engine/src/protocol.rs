@@ -1,4 +1,4 @@
-//! bmac-ui v1 protocol types. Every line a script writes is parsed into
+//! bmac-ui v2 protocol types. Every line a script writes is parsed into
 //! [`WorkflowEvent`] and validated before it reaches the frontend; unknown
 //! keys are dropped and anything that does not fit is rejected.
 
@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::registry::is_identifier;
 
 pub const PROTOCOL_NAME: &str = "bmac-ui";
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT: usize = 64 * 1024;
@@ -600,8 +600,8 @@ mod tests {
 
     #[test]
     fn parses_runner_events() {
-        let event = parse_line(r#"{"type":"protocol","protocol":"bmac-ui","version":1}"#).unwrap();
-        assert_eq!(event, WorkflowEvent::Protocol { protocol: "bmac-ui".into(), version: 1, bmac_version: None });
+        let event = parse_line(r#"{"type":"protocol","protocol":"bmac-ui","version":2}"#).unwrap();
+        assert_eq!(event, WorkflowEvent::Protocol { protocol: "bmac-ui".into(), version: 2, bmac_version: None });
         let event = parse_line(r#"{"type":"log","stream":"stdout","level":"warning","text":"hi","extra":1}"#).unwrap();
         assert!(matches!(event, WorkflowEvent::Log { level: LogLevel::Warning, .. }));
         let event = parse_line(

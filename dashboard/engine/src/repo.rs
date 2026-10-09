@@ -195,7 +195,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let root = validate(&root).expect("the enclosing checkout is a BMAC repository");
         let info = info(&root);
-        assert_eq!(info.protocol_version, Some(1));
+        assert_eq!(info.protocol_version, Some(2));
     }
 
     #[test]

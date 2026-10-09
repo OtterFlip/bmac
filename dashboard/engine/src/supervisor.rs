@@ -2,7 +2,7 @@
 //!
 //! Each script starts as `bash SCRIPT --json ARGS...` (argv, never a shell
 //! string) in its own process group, with its working directory at the
-//! repository root. Its stdout must be bmac-ui v1 NDJSON beginning with a
+//! repository root. Its stdout must be bmac-ui v2 NDJSON beginning with a
 //! `protocol` event; every line is parsed and validated before it is
 //! forwarded. Responses are validated against the outstanding request before
 //! they are written to the script's stdin.

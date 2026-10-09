@@ -3,7 +3,7 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Run one BMAC script in bmac-ui v1 JSON mode. Scripts reach this through
+# Run one BMAC script in bmac-ui v2 JSON mode. Scripts reach this through
 # bmac_ui_bootstrap when they are called with --json; it is not normally run
 # by hand:
 #
@@ -42,7 +42,7 @@ if bmac_ui_is_json; then
 fi
 
 command -v python3 >/dev/null 2>&1 || {
-  printf '{"type":"protocol","protocol":"bmac-ui","version":1}\n'
+  printf '{"type":"protocol","protocol":"%s","version":%s}\n' "$BMAC_UI_PROTOCOL" "$BMAC_UI_PROTOCOL_VERSION"
   printf '{"type":"error","code":"python_missing","message":"python3 is required for JSON mode","recoverable":false}\n'
   printf '{"type":"completed","status":"failed","message":"python3 is required for JSON mode","exit_code":2}\n'
   exit 2

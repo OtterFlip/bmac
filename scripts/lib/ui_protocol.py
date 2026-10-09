@@ -3,7 +3,7 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Workstation half of the bmac-ui v1 JSON protocol.
+"""Workstation half of the bmac-ui v2 JSON protocol.
 
 scripts/utilities/ui_json_run.sh starts two `filter` processes for a script running in JSON
 mode: one for its stdout and one for its stderr. Each turns every line it

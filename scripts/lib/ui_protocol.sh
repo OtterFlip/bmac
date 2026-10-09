@@ -3,7 +3,7 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Shared helpers for the bmac-ui v1 machine interface ("JSON mode").
+# Shared helpers for the bmac-ui v2 machine interface ("JSON mode").
 #
 # Every operator-callable script accepts --json. The script sources this file
 # and calls bmac_ui_bootstrap "$@" before parsing its arguments. With --json
@@ -23,7 +23,7 @@
 # shellcheck disable=SC2034 # Read by callers and by ui_json_run.sh.
 BMAC_UI_PROTOCOL="bmac-ui"
 # shellcheck disable=SC2034
-BMAC_UI_PROTOCOL_VERSION=1
+BMAC_UI_PROTOCOL_VERSION=2
 BMAC_UI_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # Exit status used when the operator cancels a request from the GUI.
