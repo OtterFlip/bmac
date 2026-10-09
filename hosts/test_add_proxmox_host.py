@@ -343,15 +343,15 @@ Flags:            Quorate Qdevice
         heading = 'IF THE FIRST BOOT STOPS AT AN "(initramfs)" PROMPT'
         steps = [out.index(f"\n  {number}. ") for number in range(1, 7)]
         self.assertEqual(steps, sorted(steps))
-        self.assertLess(out.index(heading + "\n"), steps[0])
+        self.assertLess(out.index(heading + "...\n"), steps[0])
         self.assertLess(steps[-1], out.index("No SSH fingerprint check is needed"))
         self.assertIn("  6. Before reporting INSTALL COMPLETE, open the Tailscale", out)
         for expected in (
             "more than one matching pool",
-            "names ending in disk-a-part3 and\n    disk-b-part3",
-            "most likely the extra configured disks: disk-c disk-d.",
+            "NVME_MIRROR_0_SERIAL_2 from your mox1.conf file,",
             "zpool labelclear -f /dev/disk/by-id/NAME",
             "zpool import -N rpool",
+            "zpool status",
         ):
             self.assertIn(expected, out)
 

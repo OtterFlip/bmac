@@ -1432,11 +1432,10 @@ scrub_installation_media() {
 # installer cannot rename that old pool once it has overwritten the pool's
 # mirror-0 half, so the first boot finds two pools named rpool.
 print_duplicate_rpool_help() {
-  local boot_1="$NVME_MIRROR_0_SERIAL_1" boot_2="$NVME_MIRROR_0_SERIAL_2"
-  local -a extra_serials=("${CONFIGURED_NVME_SERIALS[@]:2}")
   cat <<EOF
 
-IF THE FIRST BOOT STOPS AT AN "(initramfs)" PROMPT
+IF THE FIRST BOOT STOPS AT AN "(initramfs)" PROMPT...
+
 After the installer reboots, the target host console may show this instead of
 a login prompt:
 
@@ -1445,51 +1444,41 @@ a login prompt:
     Manually import the pool and exit.
     (initramfs)
 
-Why: the installation itself succeeded. The installer erases only the two
-installer disks ($boot_1 and $boot_2); every other disk
-keeps whatever it held. If another disk was a member of an earlier unencrypted
-rpool (for example an extra mirror from a previous install of this host), it
-still carries a ZFS label for a pool named "rpool". The installer renames an
-old rpool out of the way only if it can still import it, and it cannot: it has
-just overwritten that old pool's installer-disk half. The boot then finds two
-pools named rpool and refuses to guess which one to use. Disks that held LUKS
-are not affected, because their ZFS labels are hidden inside LUKS.
+The Proxmox install only erases and installs to the two disks specified
+by your NVME_MIRROR_0_SERIAL_1 and NVME_MIRROR_0_SERIAL_2 values. All
+other disks are left as-is. After installing the OS and rebooting,
+disks from an older installation were found and their ZFS pool name
+conflicts with our new ZFS pool name. So you must wipe their ZFS labels
+so that the OS can continue to boot.
 
-Identify the stale disks. At the (initramfs) prompt run:
+First list all of the disks by ID so that you can determine which to clear.
+Disregard the status values as they are not relevant until we've cleared
+the disks that aren't part of your new boot mirror set.
 
-    zpool import
+  zpool import
 
-It lists two pools named rpool, each with its own id:
-  - The NEW pool has state ONLINE, and its only members are partition 3 of the
-    installer disks: names ending in ${boot_1}-part3 and
-    ${boot_2}-part3. Leave it alone.
-  - The STALE pool usually has state UNAVAIL. It also lists the installer
-    disks, as FAULTED; never clear those, they now belong to the new pool.
-    Every other device it lists (typically ONLINE, often ending in -part1) is
-    a stale disk. Lines named indirect-N are not devices; skip them.
-EOF
-  if ((${#extra_serials[@]} > 0)); then
-    printf '    The stale devices are most likely the extra configured disks: %s.\n' \
-      "${extra_serials[*]}"
-  fi
-  cat <<'EOF'
+For ALL OF THE DISKS whose names do NOT contain the serial numbers of either
+NVME_MIRROR_0_SERIAL_1 or NVME_MIRROR_0_SERIAL_2 from your ${HOST_ID}.conf file,
+you must clear those disks using their full name shown by the prior command,
+like so (note that tab-completion does work at the initramfs prompt):
 
-Clear them. For each stale device, using its name exactly as zpool import
-printed it (names without a leading /dev/ live under /dev/disk/by-id/):
+  zpool labelclear -f /dev/disk/by-id/NAME
 
-    zpool labelclear -f /dev/disk/by-id/NAME
+  For example:
 
-This erases only the old pool's ZFS labels on that device; nothing on the
-installer disks is touched. Run zpool import again: exactly one rpool, state
-ONLINE, on the two installer disks must remain. Then run:
+  zpool labelclear -f /dev/disk/by-id/nvme-INTEL_SSDPE2KX020T8_PHLJ012345A12P1BGN-part1
 
-    zpool import -N rpool
-    exit
+Now you can complete the import of the new ZFS pool.  This should report no errors.
 
-The boot continues to the normal login prompt and the first-boot setup runs.
-Then continue with step 5. Later reboots are unaffected, because the stale
-labels are gone. If more than one rpool still remains, do not import either;
-stop and investigate before continuing.
+  zpool import -N rpool
+
+Check the status of ZFS.  This should report "No known data errors"
+
+  zpool status
+
+Exit from the initramfs prompt to continue booting the host:
+
+  exit
 EOF
 }
 
