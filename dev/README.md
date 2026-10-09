@@ -13,6 +13,26 @@ directory holds the tools for working on BMAC itself:
 - `run_tests.py` runs the unit suite in parallel on any workstation.
 - `run-tests-in-vm.sh` and `lima-bmac.yaml` run the complete suite on a Mac,
   inside a Debian 13 Lima VM.
+- `VERSION` and `set_version.py` hold and propagate the release version.
+
+## Release version
+
+`dev/VERSION` is the single source of truth for the BMAC release version,
+and each release's Git tag (`v2.0.0`) must match it. To change it:
+
+```bash
+dev/set_version.py 2.1.0   # writes dev/VERSION and every copy
+dev/set_version.py         # reports any copy that disagrees
+```
+
+Cargo and npm cannot read a version from another file, so the tool writes
+the literal version into `dashboard/Cargo.toml`, `dashboard/package.json`,
+and the `bmac-*` entries of `dashboard/Cargo.lock`. Everything else derives
+it at build time: the Tauri bundle uses the Cargo version
+(`tauri.conf.json` deliberately has none), the app reports
+`CARGO_PKG_VERSION`, and `dashboard/vite.config.ts` reads `dev/VERSION` for
+the browser mock. `dev/test_set_version.py` fails the suite if any copy
+drifts. The shell scripts carry no version of their own.
 
 ## Running the tests on any workstation
 

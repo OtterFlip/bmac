@@ -3,7 +3,7 @@ resolver = "2"
 members = ["engine", "src-tauri"]
 
 [workspace.package]
-version = "1.1.0"
+version = "2.0.0"
 edition = "2021"
 # The highest rust-version among locked dependencies (Tauri 2). Raise it when
 # `cargo update` pulls in a crate that needs a newer compiler.

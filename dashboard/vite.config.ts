@@ -1,13 +1,18 @@
 /// <reference types="vitest/config" />
+import { readFileSync } from "node:fs";
 import { fileURLToPath, URL } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 const host = process.env.TAURI_DEV_HOST;
+const bmacVersion = readFileSync(new URL("../dev/VERSION", import.meta.url), "utf8").trim();
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  define: {
+    __BMAC_VERSION__: JSON.stringify(bmacVersion),
+  },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
