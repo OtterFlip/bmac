@@ -1,6 +1,17 @@
 # Shared, non-secret configuration for the complete Proxmox cluster.
 # This file is parsed as literal KEY=VALUE data; do not add shell commands.
 
+# For most deployments, the only values you absolutely must change are these.
+# They're used to define the subnet of the private VLAN between your cluster hosts.
+# If you can use subnet 10.213.0.0/24 on your VLAN then most can stay as-is.
+# You can also tweak the CPU/RAM/Storage value defaults but they can be overridden
+# so they're not essential. The start-end ranges must fall within your VLAN's subnet.
+#   PRIVATE_SUBNET_CIDR, PROXMOX_PRIVATE_BRIDGE, PROXMOX_MIGRATION_NETWORK, DATACENTER_PRIVATE_VLAN_GATEWAY, GUEST_EGRESS_VIP
+#   MOX_IP_START, MOX_IP_END, MOX_REPLICATION_IP_START, MOX_REPLICATION_IP_END, HAPROXY_IP_START, HAPROXY_IP_END
+#   PRODUCTION_IP_START, PRODUCTION_IP_END, STAGING_IP_START, STAGING_IP_END, PROXMOX_ADMIN_EMAIL
+#   PROXMOX_ISO_FILE_PATH, PROXMOX_ISO_FILE_SHA256, PROD_GUEST_OS_ISO_URL, PROD_GUEST_OS_ISO_SHA256
+#   ADMIN_1_PUBLIC_SSH_KEY, ADMIN_2_PUBLIC_SSH_KEY
+
 # Cluster membership supports mox1 through mox10. The control node below
 # (normally mox1) creates the cluster; later hosts join it. Slots freed by
 # removing or purging a host are reused, lowest number first. The external
@@ -98,6 +109,7 @@ PURPOSE_TAG_PREFIX=purpose-
 GUEST_ROLE_HOOK_PATH=local:snippets/app-ha-guest-role-hook.sh
 
 # Root-only cluster registry replicated by pmxcfs.
+# This is a directory on the Proxmox hosts
 CLUSTER_STATE_DIR=/etc/pve/priv/app-ha
 
 # Public ingress:
