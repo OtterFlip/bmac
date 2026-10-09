@@ -951,16 +951,20 @@ bash -n \
   lib/sync_haproxy_routes.sh \
   lib/process_deferred_cleanup.sh
 
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
+dev/run_tests.py \
   hosts/test_add_proxmox_host.py \
   hosts/test_app_ha_guest_role_hook.py \
   hosts/test_host_membership.py \
+  hosts/test_disk_workflows.py \
   guests/prod/test_add_prod_vm.py \
   guests/staging/test_staging_vm.py \
   lib/test_shared_libs.py \
   lib/test_haproxy_routes.py \
-  lib/test_process_deferred_cleanup.py -v
+  lib/test_process_deferred_cleanup.py
 ```
+
+`dev/run_tests.py` runs the tests in parallel; with no arguments it runs the
+whole suite. See [`MAIN_DESIGN.md`](../MAIN_DESIGN.md#tests).
 
 These tests mock destructive Proxmox behavior. They do not replace iDRAC,
 physical-link, quorum, migration, replication, HA, Cloudflare, or full

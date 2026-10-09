@@ -321,16 +321,18 @@ await finalization.
 
 ## Tests
 
+From the repository root, every library test, in parallel:
+
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-  deploy.proxmox.lib.test_shared_libs \
-  deploy.proxmox.lib.test_haproxy_routes \
-  deploy.proxmox.lib.test_process_deferred_cleanup
+dev/run_tests.py lib/test_*.py
 ```
 
-The JSON-mode library, forms, and quick-state tests:
+The JSON-mode library, forms, and quick-state tests alone:
 
 ```bash
-python3 -m unittest lib/test_ui_protocol.py lib/test_ui_json_forms.py lib/test_quick_state.py \
+dev/run_tests.py lib/test_ui_protocol.py lib/test_ui_json_forms.py lib/test_quick_state.py \
   lib/test_disk_inventory.py
 ```
+
+With no arguments `dev/run_tests.py` runs the whole suite. See
+[`MAIN_DESIGN.md`](../MAIN_DESIGN.md#tests).

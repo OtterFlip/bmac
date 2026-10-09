@@ -2735,28 +2735,34 @@ bash -n \
   lib/process_deferred_cleanup.sh
 ```
 
-Run the complete Proxmox unit suite:
+Run the complete unit suite, every tracked `test_*.py`, in parallel:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-  hosts/test_add_proxmox_host.py \
-  hosts/test_app_ha_guest_role_hook.py \
-  guests/prod/test_add_prod_vm.py \
-  guests/prod/test_extend_prod_vm_disk.py \
-  guests/staging/test_staging_vm.py \
-  lib/test_shared_libs.py \
-  lib/test_haproxy_routes.py \
-  lib/test_process_deferred_cleanup.py \
-  lib/test_host_storage.py \
-  lib/test_rpool_mirror.py \
-  lib/test_storage_state.py \
-  hosts/test_disk_workflows.py \
-  diagnostics/test_show_proxmox_host_state.py \
-  diagnostics/test_show_cluster_health.py -v
+dev/run_tests.py
 ```
 
+`dev/run_tests.py` runs each test in its own `python3` process, one worker
+per CPU by default, and prints the tracebacks and output of any failures. On
+a 32-vCPU workstation the suite takes about 12 seconds instead of more than
+three minutes serially; its wall time is bounded by the slowest single test.
+Pass files, modules, or test ids to run only those, `-k PATTERN` to filter
+as `unittest` does, `-j N` to set the worker count, `-f` to stop starting
+tests after the first failure, and `-v` to list every test with its duration
+and the slowest ten. It uses only the Python standard library.
+
+No test may depend on test order or on running alone: each builds its
+fixtures under its own temporary directory, nothing uses `setUpClass` or
+`setUpModule`, and no test writes to the checkout or to a fixed path. A fake
+command that stands in for one fed by a pipe must read its stdin, as the real
+command would; under `set -o pipefail`, a fake that exits without reading can
+make the writer die of `SIGPIPE` when the machine is busy, which surfaces as
+an intermittent failure.
+
+Plain `python3 -m unittest FILE...` still works for any subset and runs it
+serially in one process.
+
 On a Mac, `dev/run-tests-in-vm.sh` runs `bash -n` on every tracked script and
-every tracked `test_*.py` inside a Debian 13 Lima VM; see
+then `dev/run_tests.py` inside a Debian 13 Lima VM; see
 [`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 Coverage by test helper:

@@ -252,15 +252,14 @@ bash -n \
   guests/staging/remove_staging_vm.sh \
   guests/staging/patch_staging_clone.sh
 
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-  guests/staging/test_staging_vm.py -v
-
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-  guests/staging/test_remove_staging_vm.py -v
-
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-  lib/test_shared_libs.py -v
+dev/run_tests.py \
+  guests/staging/test_staging_vm.py \
+  guests/staging/test_remove_staging_vm.py \
+  lib/test_shared_libs.py
 ```
+
+`dev/run_tests.py` runs the tests in parallel; with no arguments it runs the
+whole suite. See [`MAIN_DESIGN.md`](../../MAIN_DESIGN.md#tests).
 
 The tests exercise shell syntax, argv-safe remote execution, offline identity
 and sanitizer rendering, snapshot metadata/refcount invariants, rollback

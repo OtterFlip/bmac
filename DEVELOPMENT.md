@@ -76,13 +76,15 @@ The tests also read two files from your workstation:
   to exist but never read it. Anyone who has used SSH has one; otherwise
   `install -d -m 700 ~/.ssh && install -m 600 /dev/null ~/.ssh/known_hosts`.
 
-For a quick loop while editing, run one module natively:
+For a quick loop while editing, run one module natively, or the whole suite
+with no arguments. `dev/run_tests.py` runs the tests in parallel, one worker
+per CPU (see [`MAIN_DESIGN.md`](MAIN_DESIGN.md#tests)):
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest lib/test_shared_libs.py
+dev/run_tests.py lib/test_shared_libs.py
 ```
 
-A full native run of all 280 tests reports two failures (lifecycle-hook
+A full native run reports two failures (lifecycle-hook
 tests that need GNU `stat -c`) and 41 skips (Proxmox-host-only suites such as
 the deferred-cleanup worker and `lib/rpool_mirror.sh`). Those are the gaps the
 VM closes.
@@ -100,9 +102,10 @@ Apple's Virtualization framework (arm64 on Apple Silicon), 4 vCPUs, 8 GiB of
 RAM, and a sparse 30 GiB disk. Later runs take under a minute.
 
 Each run starts the VM if it is stopped, runs `bash -n` on every tracked
-`*.sh`, then runs every tracked `test_*.py`. Once `env/mox1.conf` exists (see
+`*.sh`, then runs every tracked `test_*.py` in parallel through
+`dev/run_tests.py`, one worker per VM vCPU. Once `env/mox1.conf` exists (see
 above), the expected result is every test passing with nothing skipped. Extra
-arguments go to `unittest`:
+arguments go to `dev/run_tests.py`:
 
 ```bash
 dev/run-tests-in-vm.sh -v -k reservation

@@ -3,12 +3,12 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Run bash -n and the complete unittest suite inside a local Lima VM built
-# from dev/lima-bmac.yaml. The VM is created and started on first use. See
-# DEVELOPMENT.md.
+# Run bash -n and the complete unittest suite, in parallel through
+# dev/run_tests.py, inside a local Lima VM built from dev/lima-bmac.yaml. The
+# VM is created and started on first use. See DEVELOPMENT.md.
 #
 #   dev/run-tests-in-vm.sh                            everything
-#   dev/run-tests-in-vm.sh -v -k reservation          extra unittest args
+#   dev/run-tests-in-vm.sh -v -k reservation          extra dev/run_tests.py args
 #   dev/run-tests-in-vm.sh lib.test_haproxy_routes    specific targets
 #
 # BMAC_LIMA_INSTANCE overrides the instance name (default: bmac).
@@ -59,20 +59,7 @@ mapfile -t scripts <<<"$scripts_list"
 bash -n "${scripts[@]}" </dev/null
 echo "bash -n: ${#scripts[@]} scripts OK"
 
-# Explicit targets look like lib.test_x, lib/test_x.py, or a dotted test id;
-# anything else (-v, -k PATTERN, -f) is passed through with the full suite.
-has_target=false
-for arg in "$@"; do
-  [[ "$arg" == *test_* && ( "$arg" == */* || "$arg" == *.* ) ]] &&
-    has_target=true
-done
-if [[ "$has_target" == true ]]; then
-  exec python3 -m unittest "$@" </dev/null
-fi
-tests_list="$(git_files 'test_*.py' '*/test_*.py')"
-[[ -n "$tests_list" ]] || { echo "ERROR: no tracked test_*.py files" >&2; exit 1; }
-mapfile -t tests <<<"$tests_list"
-exec python3 -m unittest "$@" "${tests[@]}" </dev/null
+exec python3 dev/run_tests.py "$@" </dev/null
 VM
 
 # /tmp is tmpfs on Debian 13; prepare_prod_iso.sh refuses a tmpfs ISO cache.

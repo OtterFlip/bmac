@@ -452,18 +452,11 @@ absence of destructive rollback commands.
 ## Tests
 
 ```bash
-bash -n guests/prod/add_prod_vm.sh
+bash -n guests/prod/add_prod_vm.sh guests/prod/extend_prod_vm_disk.sh \
+  guests/prod/change_prod_vm_placement.sh guests/prod/change_prod_vm_owner.sh
 
-PYTHONDONTWRITEBYTECODE=1 python3 \
-  guests/prod/test_add_prod_vm.py -v
-
-bash -n guests/prod/extend_prod_vm_disk.sh
-
-PYTHONDONTWRITEBYTECODE=1 python3 \
-  guests/prod/test_extend_prod_vm_disk.py -v
-
-bash -n guests/prod/change_prod_vm_placement.sh guests/prod/change_prod_vm_owner.sh
-
-PYTHONDONTWRITEBYTECODE=1 python3 \
-  guests/prod/test_change_prod_vm_placement.py -v
+dev/run_tests.py guests/prod/test_*.py
 ```
+
+`dev/run_tests.py` runs the tests in parallel; with no arguments it runs the
+whole suite. See [`MAIN_DESIGN.md`](../../MAIN_DESIGN.md#tests).

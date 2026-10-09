@@ -439,6 +439,7 @@ class ProductionVmShellTest(unittest.TestCase):
             completed = self.run_sourced(
                 f"""
 openssl() {{
+  cat >/dev/null
   echo "unknown option '-6'" >&2
   return 1
 }}
@@ -453,7 +454,7 @@ main --dry-run
             self.assertFalse(touched.exists())
 
         accepted = self.run_sourced(
-            "openssl() { printf '%s\\n' '$6$appha0probe$synthetic'; }\n"
+            "openssl() { cat >/dev/null; printf '%s\\n' '$6$appha0probe$synthetic'; }\n"
             "require_openssl_sha512_crypt && echo accepted\n"
         )
         self.assertIn("accepted", accepted.stdout)

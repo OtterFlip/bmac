@@ -129,7 +129,7 @@ of a generic one. Delete both files to undo it.
 pnpm test                                 # frontend (vitest)
 pnpm typecheck
 cargo test --manifest-path engine/Cargo.toml
-python3 -m unittest dashboard/test_workflow_registry.py   # from the repository root
+dev/run_tests.py dashboard/test_workflow_registry.py      # from the repository root
 ```
 
 ## Adding a workflow
