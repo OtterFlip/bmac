@@ -14,7 +14,7 @@ Screenshots of the BMAC Dashboard are [here](docs/DASHBOARD_SCREENSHOTS.md).
 
 ## Do I Have to Read All This Crap?
 
-No, it's here as reference - point your favorite chatbot at this page when you have questions about BMAC.  All you really need to do to use BMAC is to satisfy the [prereqs](#prereqs---what-you-need-to-use-bmac), then install the latest v2.0.0+ release's .deb file (coming in a day or two - you can play with the main branch's head if you wanna see what's coming), which installs BMAC's client script engine, and its Dashboard GUI, then follow the guidance on the BMAC Dashboard GUI's Settings page.  It'll walk you through everything you need to do to get your cluster setup from scratch.
+No, it's here as reference - point your favorite chatbot at this page when you have questions about BMAC.  All you really need to do to use BMAC is to satisfy the [prereqs](#prereqs---what-you-need-to-use-bmac), then install the latest v2.0.0+ release's .deb file, which installs BMAC's client script engine, and its Dashboard GUI, then follow the guidance on the BMAC Dashboard GUI's Settings page.  It'll walk you through everything you need to do to get your cluster setup from scratch.
 
 ## Releases
 
@@ -22,11 +22,9 @@ BMAC releases represent tested, known-good points in the project's development a
 
 The current source code on the `main` branch may contain changes that have not yet gone through the complete release testing process. For production use, download the latest release from the [GitHub Releases](https://github.com/OtterFlip/bmac/releases) page.
 
-Each release is provided by GitHub as both `.zip` and `.tar.gz` source archives. BMAC's scripts don't not require a build step - download or extract the release on your x64 Ubuntu administrator workstation and follow the setup instructions below.  However if you want to use the BMAC Dashboard then you'll need to build it following [its instructions](./dashboard/README.md#running-it).
+BMAC [release v1.0.0](https://github.com/OtterFlip/bmac/releases/tag/v1.0.0) was solely the script engine library.
 
-BMAC release v1.0.0 was solely the script engine library.
-
-BMAC release v2.0.0 is coming soon, with a Dashboard GUI interface that exposes all of BMAC's functionality, so you don't need to call any of the scripts directly.  v2.0.0 has breaking changes from v1.0.0, so there's no clean upgrade path between the two.  However given the short timeframe between these it's unlikely anyone is affected. This project has fairly low visibilty at present, so going to great lengths to preserve compatibility between these major versions isn't really necessary or a priority, at this time. That will change as usage grows.
+BMAC [release v2.0.0](https://github.com/OtterFlip/bmac/releases/tag/v2.0.0) added the Dashboard GUI interface that exposes all of BMAC's functionality, so you don't need to call any of the scripts directly - although you can if you want to.  Install the dashboard and script engine with the release's .deb package on an x64 Debian-based distro.  v2.0.0 has breaking changes from v1.0.0, so there's no clean upgrade path between the two.  However given the short timeframe between these it's unlikely anyone is affected. This project has fairly low visibilty at present, so going to great lengths to preserve compatibility between these major versions isn't really necessary or a priority, at this time. That will change as usage grows.
 
 ## BMAC's Features
 
