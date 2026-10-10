@@ -9,6 +9,11 @@ import { AttentionBanner, PageBody, PageHeader } from "@/components/layout/Page"
 import { ExternalButton, SkeletonRows, SourceRefresh, Table, WorkflowTiles, openExternal, proxmoxUrl, useSource } from "./common";
 import { bytes, duration, percent } from "@/lib/format";
 
+const SLOT_STATE_HELP: Record<string, string> = {
+  member: "The cluster registry records this host slot as a joined cluster member.",
+  joining: "The cluster registry has reserved this host slot for a host that is still being added; it becomes a member once the join finishes.",
+};
+
 export function HostsPage() {
   const { data, status, error, nextSteps } = useSource("list_hosts");
   const launchWorkflow = useStore((s) => s.launchWorkflow);
@@ -55,9 +60,21 @@ export function HostsPage() {
                   <td className="whitespace-nowrap text-fg-muted tabular-nums">{h.online ? duration(h.uptime_seconds) : "—"}</td>
                   <td>
                     <div className="flex flex-wrap gap-1">
-                      {h.is_control && <Badge tone="accent">control</Badge>}
-                      {h.is_probe && <Badge>read via</Badge>}
-                      {h.slot_state && h.slot_state !== "active" && <Badge tone="warn">{h.slot_state}</Badge>}
+                      {h.is_control && (
+                        <Tooltip content="The control node: new hosts join the cluster through it, and it holds the cluster-wide lock that serializes changes.">
+                          <span><Badge tone="accent">control</Badge></span>
+                        </Tooltip>
+                      )}
+                      {h.is_probe && (
+                        <Tooltip content="The dashboard read this page's cluster state by connecting to this host over SSH.">
+                          <span><Badge>read via</Badge></span>
+                        </Tooltip>
+                      )}
+                      {h.slot_state && (
+                        <Tooltip content={SLOT_STATE_HELP[h.slot_state] ?? `Registry host slot state: ${h.slot_state}.`}>
+                          <span><Badge tone={h.slot_state === "member" ? "neutral" : "warn"}>{h.slot_state}</Badge></span>
+                        </Tooltip>
+                      )}
                     </div>
                   </td>
                   <td>

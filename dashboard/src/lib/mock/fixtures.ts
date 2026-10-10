@@ -55,7 +55,7 @@ function host(
     memory_total: memTotalGiB * GiB,
     disk_used: 38 * GiB,
     disk_total: 1.7 * TiB,
-    slot_state: "active",
+    slot_state: "member",
     is_control: control,
     is_probe: probe,
     ssh_from_here: true,
