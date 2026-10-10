@@ -294,15 +294,17 @@ pub fn run(platform: &PlatformInfo, repo: Option<&Path>, config: Option<&ConfigL
                     .ok()
                     .and_then(|v| v.get("BackendState").and_then(|s| s.as_str()).map(str::to_string))
                     .unwrap_or_else(|| "unknown".into());
-                with_fix(
+                let mut tailscale = with_fix(
                     check(
                         "tailscale",
                         "Tailscale",
                         if state == "Running" { CheckStatus::Ok } else { CheckStatus::Warning },
                         format!("Backend state: {state}"),
                     ),
-                    "Connect Tailscale so the cluster hosts are reachable.",
-                )
+                    "Connect Tailscale so the cluster hosts are reachable. Login to your Tailscale account in a browser, then run this command.",
+                );
+                tailscale.command = Some("sudo tailscale login".into());
+                tailscale
             }
             None => check("tailscale", "Tailscale", CheckStatus::Warning, "tailscale status did not answer."),
         },
