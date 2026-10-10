@@ -490,6 +490,41 @@ Flags:            Quorate Qdevice
         self.assertIn("--id\ninstall_complete\n", request)
         self.assertIn("--instruction\nKeep the target host console open.\n", request)
         self.assertNotIn("--instruction\n1. ", request)
+        self.assertNotIn("--copy\n", request)
+
+    def test_json_idrac_installation_gate_offers_to_copy_the_iso_path(self) -> None:
+        completed = self.run_bash(
+            self.GATE_LAYOUT
+            + f"""
+            HOST_ID=mox1
+            PROXMOX_FQDN=mox1.example.com
+            PROXMOX_IP=192.0.2.10
+            NVME_MIRROR_0_SERIAL_1=disk-a
+            NVME_MIRROR_0_SERIAL_2=disk-b
+            CONFIGURED_MIRROR_PAIRS=(0)
+            HARDWARE_INVENTORY_MODE=idrac
+            PROXMOX_PUBLIC_MAC=00:11:22:33:44:55
+            PROXMOX_SECONDARY_MAC=00:11:22:33:44:66
+            IDRAC_IP={shlex.quote(TEST_IDRAC_IP)}
+            bmac_ui_is_json() {{ return 0; }}
+            bmac_ui_manual_action() {{
+              printf '%s\\n' "$@" >"$HOST_ARTIFACTS/request"
+            }}
+            scrub_installation_media() {{ :; }}
+            installation_gate >/dev/null
+            printf 'PREPARED=%s\\n' "$prepared"
+            cat "$HOST_ARTIFACTS/request"
+            """
+        )
+        first, request = completed.stdout.split("\n", 1)
+        prepared = first.removeprefix("PREPARED=")
+        self.assertTrue(prepared.endswith("/prepared.iso"))
+        self.assertIn(
+            f"--instruction\nMount the ISO above as Virtual CD/DVD.\n--copy\n{prepared}\n"
+            "--instruction\nBoot the server once from that virtual media.\n",
+            request,
+        )
+        self.assertEqual(request.count("--copy\n"), 1)
 
     def test_manual_inventory_allows_pair_capacities_within_one_percent(self) -> None:
         self.run_bash(

@@ -113,11 +113,13 @@ export interface ConfirmEvent {
   context?: string;
   details?: string[];
 }
+/** A manual action step, optionally with a value the operator can copy. */
+export type Instruction = string | { text: string; copy: string };
 export interface ManualActionEvent {
   type: "manual_action";
   request_id: string;
   title: string;
-  instructions: string[];
+  instructions: Instruction[];
   acknowledge_label?: string;
   context?: string;
 }

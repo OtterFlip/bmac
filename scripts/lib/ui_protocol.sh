@@ -650,17 +650,30 @@ bmac_ui_confirm_go() {
     --severity "$_bui_severity" --text GO --confirm-label Proceed
 }
 
-# bmac_ui_manual_action --title TITLE --instruction LINE... [--id ID]
-#   [--ack-label LABEL]
+# bmac_ui_manual_action --title TITLE --instruction LINE [--copy VALUE]...
+#   [--id ID] [--ack-label LABEL]
 # Wait until the operator acknowledges that they performed the action.
+# --copy gives the preceding instruction a button that copies VALUE, such as
+# a path the operator must paste elsewhere.
 bmac_ui_manual_action() {
-  local _bui_id=manual _bui_title="" _bui_ack="" _bui_request
-  local -a _bui_lines=()
+  local _bui_id=manual _bui_title="" _bui_ack="" _bui_request _bui_last
+  local -a _bui_lines=() _bui_items=()
   while (($#)); do
     case "$1" in
       --id) _bui_id="$2"; shift 2 ;;
       --title) _bui_title="$2"; shift 2 ;;
-      --instruction) _bui_lines+=("$2"); shift 2 ;;
+      --instruction)
+        _bui_lines+=("$2")
+        _bui_items+=("$(bmac_ui_json_string "$2")")
+        shift 2
+        ;;
+      --copy)
+        if ((${#_bui_items[@]})); then
+          _bui_last=$((${#_bui_items[@]} - 1))
+          _bui_items[_bui_last]="$(bmac_ui_json_obj text "${_bui_lines[_bui_last]}" copy "$2")"
+        fi
+        shift 2
+        ;;
       --ack-label) _bui_ack="$2"; shift 2 ;;
       *) shift ;;
     esac
@@ -668,7 +681,7 @@ bmac_ui_manual_action() {
   _bui_request="$(bmac_ui__request_id "$_bui_id")"
   bmac_ui_emit_raw "$(bmac_ui_json_obj type manual_action \
     request_id "$_bui_request" title "${_bui_title:-Manual action required}" \
-    instructions:raw "$(bmac_ui_json_array "${_bui_lines[@]}")" \
+    instructions:raw "$(bmac_ui_json_raw_array "${_bui_items[@]}")" \
     "acknowledge_label?" "$_bui_ack" "context?" "$BMAC_UI_CONTEXT")"
   BMAC_UI_CONTEXT=""
   bmac_ui__await "$_bui_request" ack

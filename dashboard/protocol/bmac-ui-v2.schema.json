@@ -207,7 +207,23 @@
         "type": { "const": "manual_action" },
         "request_id": { "$ref": "#/$defs/Identifier" },
         "title": { "type": "string" },
-        "instructions": { "type": "array", "items": { "type": "string" } },
+        "instructions": {
+          "type": "array",
+          "items": {
+            "description": "One step, as plain text or as text with a value (such as a file path) that the dashboard offers to copy to the clipboard.",
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "required": ["text", "copy"],
+                "properties": {
+                  "text": { "type": "string" },
+                  "copy": { "type": "string" }
+                }
+              }
+            ]
+          }
+        },
         "acknowledge_label": { "type": "string" },
         "context": { "type": "string" }
       }

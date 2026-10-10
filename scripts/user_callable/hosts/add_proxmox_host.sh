@@ -1571,9 +1571,10 @@ installation_gate() {
   output="$(read_state prepared-iso)"
   operator_hostname="${TAILSCALE_HOSTNAME:-$HOST_ID}"
   local -a steps=()
+  local mount_step="Mount the ISO above as Virtual CD/DVD."
   if [[ "$HARDWARE_INVENTORY_MODE" == idrac ]]; then
     steps+=("Keep the Virtual Console open."
-      "Mount the ISO above as Virtual CD/DVD."
+      "$mount_step"
       "Boot the server once from that virtual media.")
   else
     steps+=("Keep the target host console open."
@@ -1594,6 +1595,7 @@ installation_gate() {
     local step
     for step in "${steps[@]}"; do
       instructions+=(--instruction "$step")
+      [[ "$step" != "$mount_step" ]] || instructions+=(--copy "$output")
     done
     # shellcheck disable=SC2034 # Read by bmac_ui_manual_action.
     BMAC_UI_CONTEXT="$instructions_text"

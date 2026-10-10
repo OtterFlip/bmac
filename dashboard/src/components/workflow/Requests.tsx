@@ -283,10 +283,10 @@ const RUN_SCRIPT_TITLE = /^Run (\/\S+) on \S+$/;
 
 const isLinux = /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
 
-function CopyPathButton({ path }: { path: string }) {
+function CopyPathButton({ path, label = "Copy", tooltip = "Copy script path" }: { path: string; label?: string; tooltip?: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <Tooltip content="Copy script path">
+    <Tooltip content={tooltip}>
       <button
         type="button"
         className="mt-px flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-fg-subtle hover:bg-surface-3 hover:text-fg"
@@ -299,12 +299,12 @@ function CopyPathButton({ path }: { path: string }) {
           }
           setCopied(true);
           setTimeout(() => setCopied(false), 1200);
-          if (isLinux) toast.info("CTRL+SHIFT+V to Paste");
+          toast.info("Copied to the clipboard", isLinux ? "Press CTRL+SHIFT+V to paste." : undefined);
         }}
-        aria-label="Copy script path"
+        aria-label={tooltip}
       >
         {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
-        {copied ? "Copied" : "Copy"}
+        {copied ? "Copied" : label}
       </button>
     </Tooltip>
   );
@@ -325,10 +325,18 @@ function ManualActionRequest({ runId, request }: { runId: string; request: Manua
     >
       <Context text={request.context} runId={runId} requestId={request.request_id} />
       <ol className="mb-4 space-y-1.5">
-        {request.instructions.map((line, i) => {
+        {request.instructions.map((instruction, i) => {
           const on = done.has(i);
+          const line = typeof instruction === "string" ? instruction : instruction.text;
+          const copy = typeof instruction === "string" ? undefined : instruction.copy;
           return (
-            <li key={i}>
+            <li
+              key={i}
+              className={cn(
+                "flex items-start gap-2 rounded-lg border pr-2 transition-colors",
+                on ? "border-ok/30 bg-ok/6 text-fg-muted" : "border-line bg-sunken text-fg hover:border-line-strong",
+              )}
+            >
               <button
                 onClick={() => setDone((s) => {
                   const next = new Set(s);
@@ -336,16 +344,18 @@ function ManualActionRequest({ runId, request }: { runId: string; request: Manua
                   else next.add(i);
                   return next;
                 })}
-                className={cn(
-                  "flex w-full items-start gap-3 rounded-lg border px-3 py-2 text-left text-[13px] transition-colors",
-                  on ? "border-ok/30 bg-ok/6 text-fg-muted" : "border-line bg-sunken text-fg hover:border-line-strong",
-                )}
+                className="flex min-w-0 flex-1 items-start gap-3 py-2 pr-1 pl-3 text-left text-[13px]"
               >
                 <span className={cn("mt-px flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold tabular-nums", on ? "border-ok/50 bg-ok/15 text-ok" : "border-line-strong text-fg-subtle")}>
                   {on ? "✓" : i + 1}
                 </span>
                 <span className={cn("selectable leading-relaxed", on && "line-through decoration-fg-subtle/50")}>{line}</span>
               </button>
+              {copy && (
+                <span className="mt-2 shrink-0">
+                  <CopyPathButton path={copy} label="Copy Path" tooltip={`Copy ${copy}`} />
+                </span>
+              )}
             </li>
           );
         })}

@@ -151,6 +151,15 @@ pub struct PlanItem {
     pub description: String,
 }
 
+/// One manual action step: plain text, or text with a value the dashboard
+/// offers to copy to the clipboard.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Instruction {
+    Text(String),
+    WithCopy { text: String, copy: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkflowEvent {
@@ -230,7 +239,7 @@ pub enum WorkflowEvent {
     ManualAction {
         request_id: String,
         title: String,
-        instructions: Vec<String>,
+        instructions: Vec<Instruction>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         acknowledge_label: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -628,6 +637,26 @@ mod tests {
         .unwrap();
         let WorkflowEvent::Input { field, .. } = event else { panic!() };
         assert!(field.sensitive && field.default.is_none());
+    }
+
+    #[test]
+    fn manual_action_instructions_may_carry_a_copy_value() {
+        let event = parse_line(
+            r#"{"type":"manual_action","request_id":"m1","title":"T","instructions":
+              ["Open the console",{"text":"Mount the ISO","copy":"/x/a.iso"}]}"#,
+        )
+        .unwrap();
+        let WorkflowEvent::ManualAction { instructions, .. } = &event else { panic!() };
+        assert_eq!(
+            instructions,
+            &[
+                Instruction::Text("Open the console".into()),
+                Instruction::WithCopy { text: "Mount the ISO".into(), copy: "/x/a.iso".into() },
+            ]
+        );
+        let sent: Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(sent["instructions"], json!(["Open the console", {"text": "Mount the ISO", "copy": "/x/a.iso"}]));
+        assert!(parse_line(r#"{"type":"manual_action","request_id":"m1","title":"T","instructions":[{"copy":"x"}]}"#).is_err());
     }
 
     fn group() -> WorkflowEvent {

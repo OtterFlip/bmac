@@ -211,14 +211,18 @@ class UiProtocolTest(unittest.TestCase):
         run = self.run_script(
             """
             bmac_ui_manual_action --id console --title "Type the passphrase" \\
-              --instruction "Open the console" --instruction "Type it there" --ack-label Done
+              --instruction "Open the console" --instruction "Mount the ISO" --copy '/x/"a".iso' \\
+              --instruction "Type it there" --ack-label Done
             echo after
             """,
             {"acknowledged": True},
         )
         action = run.requests[0]
         self.assertEqual(action["type"], "manual_action")
-        self.assertEqual(action["instructions"], ["Open the console", "Type it there"])
+        self.assertEqual(
+            action["instructions"],
+            ["Open the console", {"text": "Mount the ISO", "copy": '/x/"a".iso'}, "Type it there"],
+        )
         self.assertEqual(action["acknowledge_label"], "Done")
         self.assertEqual(run.completed["status"], "success")
 
