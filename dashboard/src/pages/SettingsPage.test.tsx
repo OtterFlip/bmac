@@ -20,5 +20,6 @@ describe("settings banner", () => {
     await user.click(await screen.findByRole("button", { name: /^Settings/ }));
     expect(await screen.findByText(/Make sure all of the dependencies under "This computer" below are checked off before running workflows/)).toBeInTheDocument();
     expect(screen.queryByText(/Fill in your cluster's values/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/deploy your first host/)).not.toBeInTheDocument();
   }, 15000);
 });

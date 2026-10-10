@@ -99,11 +99,12 @@ const STATE_TEXT: Record<string, string> = {
   "secrets.env": "Passwords. Never shown by the dashboard; edit it in your own editor.",
 };
 
-function ConfigFiles({ dependenciesMissing }: { dependenciesMissing: boolean }) {
+function ConfigFiles({ dependenciesMissing, dependenciesChecked }: { dependenciesMissing: boolean; dependenciesChecked: boolean }) {
   const config = useStore((s) => s.config);
   const refreshConfig = useStore((s) => s.refreshConfig);
   const openConfig = useStore((s) => s.openConfig);
   const firstLaunch = useStore((s) => s.appInfo?.first_launch ?? false);
+  const hostsDetected = useStore((s) => (s.sources.list_hosts.data?.hosts.length ?? 0) > 0);
   useEffect(() => {
     void refreshConfig();
     const onFocus = () => void refreshConfig();
@@ -112,6 +113,7 @@ function ConfigFiles({ dependenciesMissing }: { dependenciesMissing: boolean }) 
   }, [refreshConfig]);
   if (!config) return null;
   const needs = configAttention(config);
+  const awaitingFirstHost = needs.length === 0 && dependenciesChecked && !dependenciesMissing && !hostsDetected;
   const essential = config.files.filter((f) => f.essential);
   const open = async (name?: string) => {
     try {
@@ -138,7 +140,7 @@ function ConfigFiles({ dependenciesMissing }: { dependenciesMissing: boolean }) 
       <Badge tone="ok"><CheckCircle2 /> customized</Badge>
     );
   return (
-    <Card className={cn((needs.length > 0 || dependenciesMissing) && "border-warn/35")}>
+    <Card className={cn((needs.length > 0 || dependenciesMissing || awaitingFirstHost) && "border-warn/35")}>
       <CardHeader
         icon={<FileCog />}
         title="Your configuration"
@@ -167,6 +169,14 @@ function ConfigFiles({ dependenciesMissing }: { dependenciesMissing: boolean }) 
             ) : (
               <span className="font-semibold">{firstLaunch ? "Welcome to BMAC. " : ""}Make sure all of the dependencies under "This computer" below are checked off before running workflows.</span>
             )}
+          </div>
+        </div>
+      )}
+      {awaitingFirstHost && (
+        <div className="flex items-start gap-3 border-b border-warn/20 bg-gradient-to-br from-warn/[0.08] to-transparent px-4 py-3">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warn" />
+          <div className="text-[12.5px] font-semibold leading-relaxed text-fg">
+            When you've finished customizing your config files and password file then deploy your first host using "Add Proxmox host" from the Hosts page.
           </div>
         </div>
       )}
@@ -326,7 +336,7 @@ export function SettingsPage() {
     <>
       <PageHeader title="Settings" />
       <PageBody className="space-y-4">
-        <ConfigFiles dependenciesMissing={dependenciesMissing} />
+        <ConfigFiles dependenciesMissing={dependenciesMissing} dependenciesChecked={preflight.checks !== null} />
         {!repo?.bundled && <Repository />}
         <Preflight {...preflight} />
         <Preferences />
