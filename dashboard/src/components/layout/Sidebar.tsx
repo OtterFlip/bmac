@@ -29,9 +29,9 @@ interface NavItem {
 const NAV: NavItem[] = [
   { id: "dashboard", label: "Dashboard", icon: <Gauge /> },
   { id: "hosts", label: "Hosts", icon: <Server /> },
-  { id: "production", label: "Production", icon: <Boxes /> },
-  { id: "staging", label: "Staging", icon: <FlaskConical /> },
   { id: "storage", label: "Storage", icon: <Database /> },
+  { id: "production", label: "Production VMs", icon: <Boxes /> },
+  { id: "staging", label: "Staging VMs", icon: <FlaskConical /> },
   { id: "qdevice", label: "QDevice", icon: <Scale /> },
   { id: "diagnostics", label: "Diagnostics", icon: <Stethoscope /> },
   { id: "operations", label: "Operations", icon: <History /> },
