@@ -651,10 +651,12 @@ bmac_ui_confirm_go() {
 }
 
 # bmac_ui_manual_action --title TITLE --instruction LINE [--copy VALUE]...
-#   [--id ID] [--ack-label LABEL]
+#   [--run-script HOST PATH] [--id ID] [--ack-label LABEL]
 # Wait until the operator acknowledges that they performed the action.
 # --copy gives the preceding instruction a button that copies VALUE, such as
-# a path the operator must paste elsewhere.
+# a path the operator must paste elsewhere. --run-script marks the preceding
+# instruction as a script the operator must run by hand on HOST: the dashboard
+# emphasizes it, offers to copy PATH, and says the workflow waits on them.
 bmac_ui_manual_action() {
   local _bui_id=manual _bui_title="" _bui_ack="" _bui_request _bui_last
   local -a _bui_lines=() _bui_items=()
@@ -673,6 +675,13 @@ bmac_ui_manual_action() {
           _bui_items[_bui_last]="$(bmac_ui_json_obj text "${_bui_lines[_bui_last]}" copy "$2")"
         fi
         shift 2
+        ;;
+      --run-script)
+        if ((${#_bui_items[@]})); then
+          _bui_last=$((${#_bui_items[@]} - 1))
+          _bui_items[_bui_last]="$(bmac_ui_json_obj text "${_bui_lines[_bui_last]}" copy "${3-}" run_on "${2-}")"
+        fi
+        shift $(($# < 3 ? $# : 3))
         ;;
       --ack-label) _bui_ack="$2"; shift 2 ;;
       *) shift ;;

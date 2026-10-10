@@ -369,8 +369,12 @@ export function createMockBackend(): Backend {
     if (workflow.category === "hosts" || workflow.category === "storage") {
       const ack = await ask(run, {
         type: "manual_action", request_id: "req-4-console", title: "Unlock the new disks at the console",
-        instructions: ["Open the iDRAC virtual console for mox3.", "Type the LUKS passphrase for each new disk when prompted.", "Return here once both disks show as unlocked."],
-        acknowledge_label: "Disks are unlocked",
+        instructions: [
+          "Open the iDRAC virtual console for mox3.",
+          { text: "Log in as root and run this script:", copy: "/root/app-ha-add-mirror-1", run_on: "mox3" },
+          "Type the LUKS passphrase for each new disk when prompted.",
+          "Return here once both disks show as unlocked.",
+        ],
       });
       if (ack.kind !== "acknowledge") throw new Cancelled();
     }

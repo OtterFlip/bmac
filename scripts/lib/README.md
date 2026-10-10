@@ -294,6 +294,9 @@ Requests, which block until the controller answers:
   `bmac_ui_confirm_go`, the JSON form of "Type GO to continue".
 - `bmac_ui_manual_action` for work done outside the controller, such as a
   LUKS passphrase typed at a host console. Secrets never travel this way.
+  When the operator must run a script by hand, pass `--run-script HOST PATH`
+  after its instruction: the dashboard highlights that step, offers to copy
+  the path, and says the workflow waits until they ran it on HOST.
 A declined confirmation followed by a non-zero exit reports the run as
 cancelled rather than failed; answering a later request clears that.
 Cancelling from the controller exits with status 3. `config.sh`, `prod_ha.sh`,

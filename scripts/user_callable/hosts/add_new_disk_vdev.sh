@@ -382,10 +382,10 @@ chmod 0700 "$helper"
   while true; do
     if bmac_ui_is_json; then
       bmac_ui_manual_action --id luks_console --title "Prepare the LUKS members at the $DW_HOST console" \
-        --instruction "At the $DW_HOST console (iDRAC or physical), log in as root and run: $HELPER" \
+        --instruction "At the $DW_HOST console (iDRAC or physical), log in as root and run this script:" \
+        --run-script "$DW_HOST" "$HELPER" \
         --instruction "It asks you to type GO, then for the shared rpool LUKS passphrase. The passphrase is only ever typed at the console; it never passes through this workstation." \
-        --instruction "Continue once it printed \"LUKS members prepared successfully\". Cancel to stop; rerunning this workflow resumes extra mirror $PAIR." \
-        --ack-label "The helper finished"
+        --instruction "Continue once it printed \"LUKS members prepared successfully\". Cancel to stop; rerunning this workflow resumes extra mirror $PAIR."
     else
       printf '\nType GO once the console helper printed "LUKS members prepared successfully" (q to stop): '
       IFS= read -r answer || dw_die "input ended"

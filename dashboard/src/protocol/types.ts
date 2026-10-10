@@ -113,8 +113,9 @@ export interface ConfirmEvent {
   context?: string;
   details?: string[];
 }
-/** A manual action step, optionally with a value the operator can copy. */
-export type Instruction = string | { text: string; copy: string };
+/** A manual action step, optionally with a value the operator can copy.
+ *  run_on names the host where they must run the script whose path is copy. */
+export type Instruction = string | { text: string; copy: string; run_on?: string };
 export interface ManualActionEvent {
   type: "manual_action";
   request_id: string;

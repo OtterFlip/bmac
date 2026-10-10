@@ -1661,7 +1661,9 @@ class DiskWorkflowJsonTest(DiskWorkflowTest):
         self.assertEqual(erase["confirmation_text"], "GO")
         self.assertEqual(erase["severity"], "destructive")
         self.assertEqual(console["type"], "manual_action")
-        self.assertIn("/fake/root/app-ha-add-mirror-3", " ".join(console["instructions"]))
+        script = console["instructions"][0]
+        self.assertEqual((script["copy"], script["run_on"]), ("/fake/root/app-ha-add-mirror-3", "mox1"))
+        self.assertNotIn("acknowledge_label", console)
         self.assertTrue(ready["title"].startswith("Start: record the new disks"))
         self.assertIn(["tool", "luks-add", "--pair", "3", "S6BLANK", "S7USED"], self.actions("tool"))
         result = run.of("result")[-1]["data"]

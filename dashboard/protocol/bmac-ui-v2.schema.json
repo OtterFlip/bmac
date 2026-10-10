@@ -218,7 +218,11 @@
                 "required": ["text", "copy"],
                 "properties": {
                   "text": { "type": "string" },
-                  "copy": { "type": "string" }
+                  "copy": { "type": "string" },
+                  "run_on": {
+                    "description": "The host where the operator must run the script whose path is copy. The dashboard emphasizes this step and makes clear that the workflow waits until they ran it.",
+                    "type": "string"
+                  }
                 }
               }
             ]

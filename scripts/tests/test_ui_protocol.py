@@ -226,6 +226,25 @@ class UiProtocolTest(unittest.TestCase):
         self.assertEqual(action["acknowledge_label"], "Done")
         self.assertEqual(run.completed["status"], "success")
 
+    def test_manual_action_names_a_script_to_run_on_a_host(self) -> None:
+        run = self.run_script(
+            """
+            bmac_ui_manual_action --id console --title "Prepare the disks" \\
+              --instruction "Log in as root and run this script:" --run-script mox3 /root/app-ha-add-mirror-1 \\
+              --instruction "Type GO"
+            """,
+            {"acknowledged": True},
+        )
+        self.assertEqual(
+            run.requests[0]["instructions"],
+            [
+                {"text": "Log in as root and run this script:", "copy": "/root/app-ha-add-mirror-1", "run_on": "mox3"},
+                "Type GO",
+            ],
+        )
+        self.assertNotIn("acknowledge_label", run.requests[0])
+        self.assertEqual(run.completed["status"], "success")
+
     # -- confirmations and outcomes -------------------------------------------
 
     def test_declined_confirm_reports_cancelled(self) -> None:

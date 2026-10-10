@@ -152,12 +152,18 @@ pub struct PlanItem {
 }
 
 /// One manual action step: plain text, or text with a value the dashboard
-/// offers to copy to the clipboard.
+/// offers to copy to the clipboard. `run_on` names the host where the
+/// operator must run the script whose path is `copy`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Instruction {
     Text(String),
-    WithCopy { text: String, copy: String },
+    WithCopy {
+        text: String,
+        copy: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_on: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -643,7 +649,8 @@ mod tests {
     fn manual_action_instructions_may_carry_a_copy_value() {
         let event = parse_line(
             r#"{"type":"manual_action","request_id":"m1","title":"T","instructions":
-              ["Open the console",{"text":"Mount the ISO","copy":"/x/a.iso"}]}"#,
+              ["Open the console",{"text":"Mount the ISO","copy":"/x/a.iso"},
+               {"text":"Run this script:","copy":"/root/helper","run_on":"mox3"}]}"#,
         )
         .unwrap();
         let WorkflowEvent::ManualAction { instructions, .. } = &event else { panic!() };
@@ -651,11 +658,23 @@ mod tests {
             instructions,
             &[
                 Instruction::Text("Open the console".into()),
-                Instruction::WithCopy { text: "Mount the ISO".into(), copy: "/x/a.iso".into() },
+                Instruction::WithCopy { text: "Mount the ISO".into(), copy: "/x/a.iso".into(), run_on: None },
+                Instruction::WithCopy {
+                    text: "Run this script:".into(),
+                    copy: "/root/helper".into(),
+                    run_on: Some("mox3".into()),
+                },
             ]
         );
         let sent: Value = serde_json::to_value(&event).unwrap();
-        assert_eq!(sent["instructions"], json!(["Open the console", {"text": "Mount the ISO", "copy": "/x/a.iso"}]));
+        assert_eq!(
+            sent["instructions"],
+            json!([
+                "Open the console",
+                {"text": "Mount the ISO", "copy": "/x/a.iso"},
+                {"text": "Run this script:", "copy": "/root/helper", "run_on": "mox3"},
+            ])
+        );
         assert!(parse_line(r#"{"type":"manual_action","request_id":"m1","title":"T","instructions":[{"copy":"x"}]}"#).is_err());
     }
 

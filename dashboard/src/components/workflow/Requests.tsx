@@ -315,6 +315,7 @@ function ManualActionRequest({ runId, request }: { runId: string; request: Manua
   const [done, setDone] = useState<Set<number>>(new Set());
   const [sending, setSending] = useState(false);
   const scriptPath = RUN_SCRIPT_TITLE.exec(request.title)?.[1];
+  const runHost = request.instructions.map((i) => (typeof i === "string" ? undefined : i.run_on)).find(Boolean);
   return (
     <Shell
       tone="warn"
@@ -329,12 +330,17 @@ function ManualActionRequest({ runId, request }: { runId: string; request: Manua
           const on = done.has(i);
           const line = typeof instruction === "string" ? instruction : instruction.text;
           const copy = typeof instruction === "string" ? undefined : instruction.copy;
+          const script = typeof instruction !== "string" && !!instruction.run_on;
           return (
             <li
               key={i}
               className={cn(
                 "flex items-start gap-2 rounded-lg border pr-2 transition-colors",
-                on ? "border-ok/30 bg-ok/6 text-fg-muted" : "border-line bg-sunken text-fg hover:border-line-strong",
+                on
+                  ? "border-ok/30 bg-ok/6 text-fg-muted"
+                  : script
+                    ? "border-warn/60 bg-warn/10 text-fg ring-1 ring-warn/25 hover:border-warn/80"
+                    : "border-line bg-sunken text-fg hover:border-line-strong",
               )}
             >
               <button
@@ -346,10 +352,20 @@ function ManualActionRequest({ runId, request }: { runId: string; request: Manua
                 })}
                 className="flex min-w-0 flex-1 items-start gap-3 py-2 pr-1 pl-3 text-left text-[13px]"
               >
-                <span className={cn("mt-px flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold tabular-nums", on ? "border-ok/50 bg-ok/15 text-ok" : "border-line-strong text-fg-subtle")}>
+                <span
+                  className={cn(
+                    "mt-px flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold tabular-nums",
+                    on ? "border-ok/50 bg-ok/15 text-ok" : script ? "border-warn/60 bg-warn/15 text-warn" : "border-line-strong text-fg-subtle",
+                  )}
+                >
                   {on ? "✓" : i + 1}
                 </span>
-                <span className={cn("selectable leading-relaxed", on && "line-through decoration-fg-subtle/50")}>{line}</span>
+                <span className="min-w-0">
+                  <span className={cn("selectable leading-relaxed", script && "font-medium", on && "line-through decoration-fg-subtle/50")}>{line}</span>
+                  {script && copy && (
+                    <code className="selectable mt-1.5 block break-all rounded bg-surface-3 px-2 py-1 font-mono text-[12.5px] text-fg">{copy}</code>
+                  )}
+                </span>
               </button>
               {copy && (
                 <span className="mt-2 shrink-0">
@@ -361,7 +377,14 @@ function ManualActionRequest({ runId, request }: { runId: string; request: Manua
         })}
       </ol>
       <div className="flex items-center justify-end gap-2">
-        <span className="mr-auto text-[12px] text-fg-subtle">The script waits until you continue.</span>
+        {runHost ? (
+          <span className="mr-auto flex items-center gap-1.5 text-[12.5px] font-medium text-warn">
+            <TerminalSquare className="size-3.5 shrink-0" />
+            You must run a script manually on {runHost}
+          </span>
+        ) : (
+          <span className="mr-auto text-[12px] text-fg-subtle">The script waits until you continue.</span>
+        )}
         <Button
           variant="primary"
           size="lg"
@@ -371,7 +394,7 @@ function ManualActionRequest({ runId, request }: { runId: string; request: Manua
             if (!(await respond(runId, request.request_id, { kind: "acknowledge" }))) setSending(false);
           }}
         >
-          {request.acknowledge_label ?? "Done — continue"}
+          {runHost ? "I Ran it Manually" : request.acknowledge_label ?? "Done — continue"}
         </Button>
       </div>
     </Shell>
