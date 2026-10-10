@@ -14,7 +14,7 @@ Screenshots of the BMAC Dashboard are [here](docs/DASHBOARD_SCREENSHOTS.md).
 
 ## Do I Have to Read All This Crap?
 
-No, it's here as reference - point your favorite chatbot at this page when you have questions about BMAC.  All you really need to do to use BMAC is to satisfy the [prereqs](#prereqs---what-you-need-to-use-bmac), then install the latest release's .deb file, which installs BMAC's client script engine, and its Dashboard GUI, then follow the guidance on the BMAC Dashboard GUI's Settings page.  It'll walk you through everything you need to do to get your cluster setup from scratch.
+No, it's here as reference - point your favorite chatbot at this page when you have questions about BMAC.  All you really need to do to use BMAC is to satisfy the [prereqs](#prereqs---what-you-need-to-use-bmac), then install the latest v2.0.0+ release's .deb file, which installs BMAC's client script engine, and its Dashboard GUI, then follow the guidance on the BMAC Dashboard GUI's Settings page.  It'll walk you through everything you need to do to get your cluster setup from scratch.
 
 ## Releases
 
