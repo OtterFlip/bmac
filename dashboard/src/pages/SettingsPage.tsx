@@ -21,7 +21,7 @@ const INTERVALS = [
   { value: "3600", label: "Every hour" },
 ];
 
-function Preflight() {
+function usePreflight() {
   const [checks, setChecks] = useState<PreflightCheck[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
@@ -39,6 +39,12 @@ function Preflight() {
     }
   };
   useEffect(() => void run(), []);
+  return { checks, loading, updatedAt, error, run };
+}
+
+type PreflightState = ReturnType<typeof usePreflight>;
+
+function Preflight({ checks, loading, updatedAt, error, run }: PreflightState) {
   const icon = { ok: <CheckCircle2 className="size-4 text-ok" />, warning: <TriangleAlert className="size-4 text-warn" />, error: <XCircle className="size-4 text-danger" /> };
   return (
     <Card>
@@ -93,7 +99,7 @@ const STATE_TEXT: Record<string, string> = {
   "secrets.env": "Passwords. Never shown by the dashboard; edit it in your own editor.",
 };
 
-function ConfigFiles() {
+function ConfigFiles({ dependenciesMissing }: { dependenciesMissing: boolean }) {
   const config = useStore((s) => s.config);
   const refreshConfig = useStore((s) => s.refreshConfig);
   const openConfig = useStore((s) => s.openConfig);
@@ -132,7 +138,7 @@ function ConfigFiles() {
       <Badge tone="ok"><CheckCircle2 /> customized</Badge>
     );
   return (
-    <Card className={cn(needs.length > 0 && "border-warn/35")}>
+    <Card className={cn((needs.length > 0 || dependenciesMissing) && "border-warn/35")}>
       <CardHeader
         icon={<FileCog />}
         title="Your configuration"
@@ -144,14 +150,23 @@ function ConfigFiles() {
           </>
         }
       />
-      {needs.length > 0 && (
+      {(needs.length > 0 || dependenciesMissing) && (
         <div className="flex items-start gap-3 border-b border-warn/20 bg-gradient-to-br from-warn/[0.08] to-transparent px-4 py-3">
           {firstLaunch ? <PartyPopper className="mt-0.5 size-4 shrink-0 text-warn" /> : <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warn" />}
           <div className="text-[12.5px] leading-relaxed text-fg">
-            <span className="font-semibold">{firstLaunch ? "Welcome to BMAC. " : ""}Fill in your cluster's values before running workflows.</span>{" "}
-            <span className="text-fg-muted">
-              {needs.length === 1 ? "One file is" : `${needs.length} files are`} still missing or identical to the example {needs.length === 1 ? "it starts" : "they start"} from.
-            </span>
+            {needs.length > 0 ? (
+              <>
+                <span className="font-semibold">{firstLaunch ? "Welcome to BMAC. " : ""}Fill in your cluster's values before running workflows.</span>{" "}
+                <span className="text-fg-muted">
+                  {needs.length === 1 ? "One file is" : `${needs.length} files are`} still missing or identical to the example {needs.length === 1 ? "it starts" : "they start"} from.
+                </span>
+                {dependenciesMissing && (
+                  <div className="mt-1 font-semibold">Also make sure all of the dependencies under "This computer" below are checked off.</div>
+                )}
+              </>
+            ) : (
+              <span className="font-semibold">{firstLaunch ? "Welcome to BMAC. " : ""}Make sure all of the dependencies under "This computer" below are checked off before running workflows.</span>
+            )}
           </div>
         </div>
       )}
@@ -305,13 +320,15 @@ export function SettingsPage() {
   const appInfo = useStore((s) => s.appInfo);
   const repo = useStore((s) => s.repo);
   const platform = useStore((s) => s.platform);
+  const preflight = usePreflight();
+  const dependenciesMissing = preflight.checks?.some((c) => !c.config_file && c.status !== "ok") ?? false;
   return (
     <>
       <PageHeader title="Settings" />
       <PageBody className="space-y-4">
-        <ConfigFiles />
+        <ConfigFiles dependenciesMissing={dependenciesMissing} />
         {!repo?.bundled && <Repository />}
-        <Preflight />
+        <Preflight {...preflight} />
         <Preferences />
         <Card>
           <CardHeader icon={<Info />} title="About" />

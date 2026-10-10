@@ -16,6 +16,7 @@ describe("first launch", () => {
     expect(await screen.findByText(/Welcome to BMAC/)).toBeInTheDocument();
     expect(screen.getAllByText("not edited yet")).toHaveLength(4);
     expect(await screen.findByRole("button", { name: /Install Tailscale/ })).toBeInTheDocument();
+    expect(screen.getByText(/Also make sure all of the dependencies under "This computer"/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "mox2.conf" }));
     expect(await screen.findByRole("heading", { name: "Config" })).toBeInTheDocument();
