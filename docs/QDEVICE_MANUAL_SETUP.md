@@ -21,6 +21,10 @@ for an odd Proxmox node count and added for an even node count.
 
 ---
 
+## 0. Prereq
+
+Your QDevice must connect to your Tailscale network with a tag:proxmox-qdevice Auth key. This means you need to configure your Tailscale account for this tag and its associated policies.  Please follow [these instructions](../README.md#instructions-for-tailscale-setup) to configure your Tailscale account.
+
 ## 1. Install Ubuntu
 
 Install a current Ubuntu Server LTS x64 image.
