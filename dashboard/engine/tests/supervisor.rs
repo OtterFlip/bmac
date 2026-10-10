@@ -36,6 +36,8 @@ const REGISTRY: &str = r#"{
   "workflows": [
     {"id":"interactive","title":"Interactive","summary":"s","description":"d","category":"diagnostics",
      "script":"mock/interactive.sh","mode":"mutating","destructive":false,"platforms":["linux","macos"],"params":[]},
+    {"id":"parallel","title":"Parallel","summary":"s","description":"d","category":"hosts",
+     "script":"mock/interactive.sh","mode":"mutating","destructive":false,"concurrent":true,"platforms":["linux","macos"],"params":[]},
     {"id":"long_running","title":"Long","summary":"s","description":"d","category":"diagnostics",
      "script":"mock/long_running.sh","mode":"read_only","destructive":false,"platforms":["linux","macos"],"params":[]},
     {"id":"secret","title":"Secret","summary":"s","description":"d","category":"diagnostics",
@@ -235,6 +237,29 @@ async fn mutating_runs_are_serialized() {
     // Read-only diagnostics may still run alongside.
     let other = f.start("vanishes");
     f.finished(&other).await;
+    f.sup.cancel(&run, false).unwrap();
+    f.finished(&run).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_workflows_run_alongside_only_themselves() {
+    let f = fixture();
+    let first = f.start("parallel");
+    let second = f.start("parallel");
+    assert!(matches!(
+        f.sup.start(&f.root, &f.platform, "interactive", &BTreeMap::new()),
+        Err(bmac_engine::EngineError::Busy(_))
+    ));
+    for run in [&first, &second] {
+        f.sup.cancel(run, false).unwrap();
+        f.finished(run).await;
+    }
+
+    let run = f.start("interactive");
+    assert!(matches!(
+        f.sup.start(&f.root, &f.platform, "parallel", &BTreeMap::new()),
+        Err(bmac_engine::EngineError::Busy(_))
+    ));
     f.sup.cancel(&run, false).unwrap();
     f.finished(&run).await;
 }

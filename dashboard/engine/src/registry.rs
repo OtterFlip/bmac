@@ -95,6 +95,10 @@ pub struct Workflow {
     pub script: String,
     pub mode: WorkflowMode,
     pub destructive: bool,
+    /// A mutating workflow that may run alongside other runs of itself. It
+    /// still never runs alongside a different mutating workflow.
+    #[serde(default)]
+    pub concurrent: bool,
     #[serde(default)]
     pub supports_dry_run: bool,
     pub platforms: Vec<String>,

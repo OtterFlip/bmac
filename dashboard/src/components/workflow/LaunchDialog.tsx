@@ -145,7 +145,14 @@ export function LaunchDialog() {
   const launch = useStore((s) => s.launch);
   const workflow = useStore((s) => (s.launch ? s.workflows[s.launch.workflowId] : undefined));
   const settings = useStore((s) => s.settings);
-  const busy = useStore((s) => Object.values(s.records).find((r) => r.mode === "mutating" && !["succeeded", "failed", "cancelled", "interrupted"].includes(r.status)));
+  const busy = useStore((s) =>
+    Object.values(s.records).find(
+      (r) =>
+        r.mode === "mutating" &&
+        !["succeeded", "failed", "cancelled", "interrupted"].includes(r.status) &&
+        !(workflow?.concurrent && r.workflow_id === workflow.id),
+    ),
+  );
   const closeLaunch = useStore((s) => s.closeLaunch);
   const startRun = useStore((s) => s.startRun);
   const refreshRepo = useStore((s) => s.refreshRepo);

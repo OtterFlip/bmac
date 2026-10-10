@@ -391,7 +391,10 @@ export function createMockBackend(): Backend {
   const start = (workflowId: string, values: Record<string, unknown>): RunRecord => {
     const workflow = workflows.find((w) => w.id === workflowId);
     if (!workflow) throw { code: "unknown_workflow", message: workflowId };
-    if (workflow.mode === "mutating" && [...runs.values()].some((r) => r.record.mode === "mutating")) {
+    if (
+      workflow.mode === "mutating" &&
+      [...runs.values()].some((r) => r.record.mode === "mutating" && !(workflow.concurrent && r.record.workflow_id === workflow.id))
+    ) {
       throw { code: "busy", message: "another operation is already changing the cluster" };
     }
     const { args, summary, target, dryRun } = buildArgs(workflow, values);

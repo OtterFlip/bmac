@@ -184,7 +184,9 @@ impl Supervisor {
 
         let mut runs = self.runs.lock().unwrap();
         if workflow.mode == WorkflowMode::Mutating {
-            if let Some(busy) = runs.values().find(|r| r.record.mode == WorkflowMode::Mutating) {
+            if let Some(busy) = runs.values().find(|r| {
+                r.record.mode == WorkflowMode::Mutating && !(workflow.concurrent && r.record.workflow_id == workflow.id)
+            }) {
                 return Err(EngineError::Busy(busy.record.workflow_title.clone()));
             }
         }

@@ -49,7 +49,9 @@ scripts that it calls, is described by
 - The frontend can only ask the native side to start an allowlisted workflow,
   answer the request a script is waiting on, or cancel. There is no shell,
   SSH, or general file API, and arguments are always passed as argv.
-- Mutating workflows run one at a time. Read-only ones may run alongside.
+- Mutating workflows run one at a time, except that a workflow marked
+  `concurrent` in `engine/workflows.json` (Add Proxmox host) may run
+  alongside other runs of itself. Read-only ones may run alongside.
 - Cancel sends SIGINT to the script's process group, and is refused during
   phases a script marks as not cancellable. A script that exits without a
   `completed` event is reported as failed.

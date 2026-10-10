@@ -96,17 +96,47 @@ PY
   done <<<"$parsed"
 }
 
+# Wait until the background reachability probe PID finishes or SECONDS reaches
+# DEADLINE, and succeed only when it finished and found its host reachable.
+control_probe_reachable() {
+  local pid="$1" deadline="$2"
+  while kill -0 "$pid" 2>/dev/null && ((SECONDS < deadline)); do
+    sleep 0.1
+  done
+  ! kill -0 "$pid" 2>/dev/null && wait "$pid" 2>/dev/null
+}
+
+control_stop_probes() {
+  local pid
+  for pid in "$@"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      pkill -P "$pid" 2>/dev/null || true
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+  wait "$@" 2>/dev/null || true
+}
+
 # Find the lowest-numbered reachable host that belongs to a cluster. Returns 1
 # when no cluster member is reachable and 2 when membership is malformed.
+# Every slot is probed at once, and a slot that has not answered within
+# CONTROL_PROBE_TIMEOUT_SECONDS counts as unreachable, so a workstation with no
+# cluster yet does not wait out each slot's SSH timeout in turn.
 control_find_cluster() {
-  local index node nodes_json
+  local index node nodes_json deadline status=1
+  local -a probes=()
   CONTROL_PROBE_NODE=""
   CONTROL_NODES_JSON=""
   CONTROL_MEMBER_NODES=()
   CONTROL_ONLINE_NODES=()
   for ((index = 1; index <= MAX_MOX_HOSTS; index += 1)); do
+    mox_is_reachable "mox${index}" </dev/null >/dev/null 2>&1 &
+    probes+=("$!")
+  done
+  deadline=$((SECONDS + ${CONTROL_PROBE_TIMEOUT_SECONDS:-15}))
+  for ((index = 1; index <= MAX_MOX_HOSTS; index += 1)); do
     node="mox${index}"
-    mox_is_reachable "$node" || continue
+    control_probe_reachable "${probes[index - 1]}" "$deadline" || continue
     nodes_json="$(
       mox_ssh "$node" bash -c \
         'test -s /etc/pve/corosync.conf && pvesh get /nodes --output-format json' \
@@ -114,10 +144,12 @@ control_find_cluster() {
     )" || continue
     CONTROL_PROBE_NODE="$node"
     CONTROL_NODES_JSON="$nodes_json"
-    control_parse_members || return 2
-    return 0
+    status=0
+    control_parse_members || status=2
+    break
   done
-  return 1
+  control_stop_probes "${probes[@]}"
+  return "$status"
 }
 
 # Read the registry control record through CONTROL_PROBE_NODE. A registry that

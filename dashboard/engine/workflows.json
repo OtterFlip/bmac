@@ -314,6 +314,7 @@
       "script": "scripts/user_callable/hosts/add_proxmox_host.sh",
       "mode": "mutating",
       "destructive": true,
+      "concurrent": true,
       "platforms": ["linux"],
       "requires": { "arch": "x86_64", "os_family": "debian" },
       "platform_note": "Requires a Debian-based Linux x86_64 workstation, because BMAC must build a customized Proxmox installer ISO with Proxmox's amd64-only Debian tool.",

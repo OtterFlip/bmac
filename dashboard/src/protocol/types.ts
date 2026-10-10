@@ -359,6 +359,7 @@ export interface Workflow {
   script: string;
   mode: "read_only" | "mutating";
   destructive: boolean;
+  concurrent?: boolean;
   supports_dry_run?: boolean;
   platforms: string[];
   requires?: { arch?: string; os_family?: string };

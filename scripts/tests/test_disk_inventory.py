@@ -331,7 +331,8 @@ class ListDisksScriptTest(unittest.TestCase):
         commands = (self.root / "fake" / "commands").read_text().splitlines()
         self.assertIn("mox1 python3 - collect", commands)
         self.assertIn("mox1 python3 - show", commands)
-        self.assertFalse(any(line.startswith("mox2 ") for line in commands))
+        # Finding the cluster probes every slot's reachability with `ssh true`.
+        self.assertFalse(any(line.startswith("mox2 ") and line != "mox2 true" for line in commands))
 
     def test_host_filter(self) -> None:
         completed = subprocess.run(
