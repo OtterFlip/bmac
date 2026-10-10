@@ -22,9 +22,9 @@ BMAC releases represent tested, known-good points in the project's development a
 
 The current source code on the `main` branch may contain changes that have not yet gone through the complete release testing process. For production use, download the latest release from the [GitHub Releases](https://github.com/OtterFlip/bmac/releases) page.
 
-BMAC [release v1.0.0](https://github.com/OtterFlip/bmac/releases/tag/v1.0.0) was solely the script engine library.
+BMAC release [v1.0.0](https://github.com/OtterFlip/bmac/releases/tag/v1.0.0) was solely the script engine library.
 
-BMAC [release v2.0.0](https://github.com/OtterFlip/bmac/releases/tag/v2.0.0) added the Dashboard GUI interface that exposes all of BMAC's functionality, so you don't need to call any of the scripts directly - although you can if you want to.  Install the dashboard and script engine with the release's .deb package on an x64 Debian-based distro.  v2.0.0 has breaking changes from v1.0.0, so there's no clean upgrade path between the two.  However given the short timeframe between these it's unlikely anyone is affected. This project has fairly low visibilty at present, so going to great lengths to preserve compatibility between these major versions isn't really necessary or a priority, at this time. That will change as usage grows.
+BMAC release [v2.0.0](https://github.com/OtterFlip/bmac/releases/tag/v2.0.0) added the Dashboard GUI interface that exposes all of BMAC's functionality, so you don't need to call any of the scripts directly - although you can if you want to.  Install the dashboard and script engine with the release's .deb package on an x64 Debian-based distro.  v2.0.0 has breaking changes from v1.0.0, so there's no clean upgrade path between the two.  However given the short timeframe between these it's unlikely anyone is affected. This project has fairly low visibilty at present, so going to great lengths to preserve compatibility between these major versions isn't really necessary or a priority, at this time. That will change as usage grows.
 
 ## BMAC's Features
 
