@@ -64,7 +64,7 @@ function Preflight() {
                     aria-label={`Copy ${c.command}`}
                     onClick={() =>
                       void navigator.clipboard.writeText(c.command!).then(
-                        () => toast.success("Copied to the clipboard"),
+                        () => toast.success("Copied to Clipboard - press CTRL+SHIFT+V to paste"),
                         () => toast.error("Could not copy to the clipboard"),
                       )
                     }
