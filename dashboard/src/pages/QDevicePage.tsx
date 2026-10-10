@@ -4,7 +4,7 @@ import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { EmptyState, KV, StatusPill } from "@/components/status";
 import { PageBody, PageHeader } from "@/components/layout/Page";
-import { SourceRefresh, WorkflowTiles, useSource } from "./common";
+import { QDEVICE_SETUP_URL, SourceRefresh, WorkflowTiles, useSource } from "./common";
 
 export function QDevicePage() {
   const { data, status, error } = useSource("list_hosts");
@@ -68,7 +68,10 @@ export function QDevicePage() {
           </Card>
         </div>
         <h2 className="mb-2.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-fg-subtle">QDevice operations</h2>
-        <WorkflowTiles ids={["add_qdevice", "remove_qdevice", "show_qdevice_state"]} />
+        <WorkflowTiles
+          links={[{ title: "QDevice Setup Prereq", summary: "Prepare the QDevice machine and reach it over Tailscale before adding it.", url: QDEVICE_SETUP_URL }]}
+          ids={["add_qdevice", "remove_qdevice", "show_qdevice_state"]}
+        />
       </PageBody>
     </>
   );

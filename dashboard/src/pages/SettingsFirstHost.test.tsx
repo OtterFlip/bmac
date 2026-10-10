@@ -5,9 +5,9 @@ import { App } from "@/app/App";
 import { setBackend } from "@/lib/api";
 import { createMockBackend } from "@/lib/mock/backend";
 
-// Every config file and dependency is checked off, but no host can be read yet.
+// Every config file and dependency is checked off and the QDevice answers, but no host can be read yet.
 describe("settings first-host hint", () => {
-  it("points to Add Proxmox host when no host is detected", async () => {
+  it("points to Add Proxmox host when no host is detected and the QDevice is accessible", async () => {
     const backend = createMockBackend();
     const listWorkflows = backend.listWorkflows;
     backend.listWorkflows = async () =>
@@ -19,5 +19,7 @@ describe("settings first-host hint", () => {
     expect(await screen.findByText(/deploy your first host using "Add Proxmox host" from the Hosts page/, undefined, { timeout: 3000 })).toBeInTheDocument();
     expect(screen.queryByText(/Fill in your cluster's values/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Make sure all of the dependencies/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/prepare your cluster's QDevice/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Settings!" })).toBeInTheDocument();
   }, 15000);
 });

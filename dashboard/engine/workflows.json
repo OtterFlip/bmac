@@ -139,6 +139,18 @@
       "params": []
     },
     {
+      "id": "check_qdevice_access",
+      "title": "Check QDevice access",
+      "summary": "Whether this workstation reaches the prepared QDevice as root over SSH.",
+      "description": "Checks that ssh root@PROXMOX_QDEVICE_HOST works from this workstation with strict host key checking. Needs no cluster member, so it works before the first Proxmox host is set up. Takes seconds.",
+      "category": "diagnostics",
+      "script": "scripts/user_callable/diagnostics/check_qdevice_access.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": []
+    },
+    {
       "id": "inventory_disks",
       "title": "Inventory disks",
       "summary": "Every physical disk, pool vdev, and disk that is safe to pull.",

@@ -11,7 +11,9 @@ import { FileBrowserDialog } from "@/components/workflow/FileBrowserDialog";
 import { api, errorMessage } from "@/lib/api";
 import { toast } from "@/state/toast";
 import { cn } from "@/lib/utils";
-import type { ConfigFile, PreflightCheck, Settings } from "@/protocol/types";
+import type { ConfigFile, Settings } from "@/protocol/types";
+import { useSettingsAlerts } from "@/state/settingsAlerts";
+import { QDEVICE_SETUP_URL, openExternal } from "./common";
 
 const INTERVALS = [
   { value: "0", label: "Only when I refresh" },
@@ -21,30 +23,10 @@ const INTERVALS = [
   { value: "3600", label: "Every hour" },
 ];
 
-function usePreflight() {
-  const [checks, setChecks] = useState<PreflightCheck[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const run = async () => {
-    setLoading(true);
-    try {
-      setChecks(await api().runPreflight());
-      setUpdatedAt(Date.now());
-      setError(null);
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setLoading(false);
-    }
-  };
-  useEffect(() => void run(), []);
-  return { checks, loading, updatedAt, error, run };
-}
-
-type PreflightState = ReturnType<typeof usePreflight>;
-
-function Preflight({ checks, loading, updatedAt, error, run }: PreflightState) {
+function Preflight() {
+  const { checks, loading, updatedAt, error } = useStore((s) => s.preflight);
+  const run = useStore((s) => s.runPreflight);
+  useEffect(() => void run(), [run]);
   const icon = { ok: <CheckCircle2 className="size-4 text-ok" />, warning: <TriangleAlert className="size-4 text-warn" />, error: <XCircle className="size-4 text-danger" /> };
   return (
     <Card>
@@ -99,12 +81,12 @@ const STATE_TEXT: Record<string, string> = {
   "secrets.env": "Passwords. Never shown by the dashboard; edit it in your own editor.",
 };
 
-function ConfigFiles({ dependenciesMissing, dependenciesChecked }: { dependenciesMissing: boolean; dependenciesChecked: boolean }) {
+function ConfigFiles() {
   const config = useStore((s) => s.config);
   const refreshConfig = useStore((s) => s.refreshConfig);
   const openConfig = useStore((s) => s.openConfig);
   const firstLaunch = useStore((s) => s.appInfo?.first_launch ?? false);
-  const hostsDetected = useStore((s) => (s.sources.list_hosts.data?.hosts.length ?? 0) > 0);
+  const { dependenciesMissing, awaitingQDevice, awaitingFirstHost } = useSettingsAlerts();
   useEffect(() => {
     void refreshConfig();
     const onFocus = () => void refreshConfig();
@@ -113,7 +95,6 @@ function ConfigFiles({ dependenciesMissing, dependenciesChecked }: { dependencie
   }, [refreshConfig]);
   if (!config) return null;
   const needs = configAttention(config);
-  const awaitingFirstHost = needs.length === 0 && dependenciesChecked && !dependenciesMissing && !hostsDetected;
   const essential = config.files.filter((f) => f.essential);
   const open = async (name?: string) => {
     try {
@@ -140,7 +121,7 @@ function ConfigFiles({ dependenciesMissing, dependenciesChecked }: { dependencie
       <Badge tone="ok"><CheckCircle2 /> customized</Badge>
     );
   return (
-    <Card className={cn((needs.length > 0 || dependenciesMissing || awaitingFirstHost) && "border-warn/35")}>
+    <Card className={cn((needs.length > 0 || dependenciesMissing || awaitingQDevice || awaitingFirstHost) && "border-warn/35")}>
       <CardHeader
         icon={<FileCog />}
         title="Your configuration"
@@ -169,6 +150,27 @@ function ConfigFiles({ dependenciesMissing, dependenciesChecked }: { dependencie
             ) : (
               <span className="font-semibold">{firstLaunch ? "Welcome to BMAC. " : ""}Make sure all of the dependencies under "This computer" below are checked off before running workflows.</span>
             )}
+          </div>
+        </div>
+      )}
+      {awaitingQDevice && (
+        <div className="flex items-start gap-3 border-b border-warn/20 bg-gradient-to-br from-warn/[0.08] to-transparent px-4 py-3">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warn" />
+          <div className="text-[12.5px] leading-relaxed text-fg">
+            <span className="font-semibold">
+              Prior to setting up your first Proxmox host, you must prepare your cluster's QDevice, whose sole role is to act as a quorum voter, so it can be the most lightweight node possible, accessible to your cluster via Tailscale.
+            </span>{" "}
+            <span className="text-fg-muted">
+              Follow{" "}
+              <a
+                href={QDEVICE_SETUP_URL}
+                onClick={(e) => (e.preventDefault(), openExternal(QDEVICE_SETUP_URL))}
+                className="font-medium text-accent underline underline-offset-2 hover:text-accent/80"
+              >
+                these instructions
+              </a>{" "}
+              to set it up (this example uses Linode, but of course you can use any VPS of your choice). The manual setup is fairly trivial. When the second Proxmox host joins the cluster, it will automatically perform the remainder of the setup of the QDevice. After your QDevice is accessible via Tailscale then you can add your first Proxmox host from the Hosts page.
+            </span>
           </div>
         </div>
       )}
@@ -330,15 +332,13 @@ export function SettingsPage() {
   const appInfo = useStore((s) => s.appInfo);
   const repo = useStore((s) => s.repo);
   const platform = useStore((s) => s.platform);
-  const preflight = usePreflight();
-  const dependenciesMissing = preflight.checks?.some((c) => !c.config_file && c.status !== "ok") ?? false;
   return (
     <>
       <PageHeader title="Settings" />
       <PageBody className="space-y-4">
-        <ConfigFiles dependenciesMissing={dependenciesMissing} dependenciesChecked={preflight.checks !== null} />
+        <ConfigFiles />
         {!repo?.bundled && <Repository />}
-        <Preflight {...preflight} />
+        <Preflight />
         <Preferences />
         <Card>
           <CardHeader icon={<Info />} title="About" />

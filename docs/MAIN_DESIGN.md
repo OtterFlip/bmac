@@ -202,6 +202,8 @@ Expected to work on macOS, not yet run there against a cluster:
   first macOS run as a test, not as routine;
 - `scripts/user_callable/diagnostics/show_qdevice_state.sh`. Config load, `python3`, and strict SSH;
   covered by unit tests only;
+- `scripts/user_callable/diagnostics/check_qdevice_access.sh`. Config load and one strict SSH
+  connection; covered by fake-SSH unit tests only;
 - `scripts/user_callable/diagnostics/show_cluster_health.sh`. Config load, `python3`, and strict SSH;
   covered by fake-SSH unit tests only;
 - `scripts/user_callable/guests/prod/change_prod_vm_placement.sh` and

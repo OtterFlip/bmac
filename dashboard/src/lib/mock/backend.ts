@@ -227,6 +227,18 @@ export function createMockBackend(): Backend {
     const r = run.record;
     const id = workflow.id;
     const target = r.target ?? "prod2";
+    if (id === "check_qdevice_access") {
+      step(run, "Check SSH to the QDevice");
+      await sleep(run, 200);
+      if (fresh) {
+        await log(run, ["ATTENTION: the QDevice is not accessible: 'ssh root@qdevice' failed: ssh: Could not resolve hostname qdevice.", "Prepare it with docs/QDEVICE_MANUAL_SETUP.md, then check again."], 12);
+        emit(run, { type: "result", data: { configured_host: "qdevice", accessible: false, problem: "'ssh root@qdevice' failed: ssh: Could not resolve hostname qdevice" } });
+      } else {
+        await log(run, ["OK: ssh root@qdevice works from this workstation."], 12);
+        emit(run, { type: "result", data: { configured_host: "qdevice", accessible: true } });
+      }
+      return;
+    }
     if (id.startsWith("list_")) {
       await sleep(run, 300);
       await log(run, [`Reading cluster state through mox1 ...`], 400);

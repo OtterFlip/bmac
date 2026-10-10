@@ -463,6 +463,18 @@ Also verify that the Proxmox nodes can reach the QDevice over Tailscale before c
 
 ## Checking the QDevice
 
+Before the first Proxmox host exists, confirm that this workstation reaches
+the prepared QDevice as root over strict SSH, which the host setup needs:
+
+```bash
+scripts/user_callable/diagnostics/check_qdevice_access.sh
+```
+
+The BMAC Dashboard runs the same check and, until it passes, its Settings page
+points to this guide instead of to adding the first Proxmox host.
+
+Once the cluster exists:
+
 ```bash
 scripts/user_callable/diagnostics/show_qdevice_state.sh
 ```

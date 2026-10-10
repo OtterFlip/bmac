@@ -12,6 +12,10 @@ BMAC, at its heart, is a library of [user-callable scripts](./scripts/user_calla
 
 Screenshots of the BMAC Dashboard are [here](docs/DASHBOARD_SCREENSHOTS.md).
 
+## Do I Have to Read All This Crap?
+
+No, it's here as reference - point your favorite chatbot at this page when you have questions about BMAC.  All you really need to do to use BMAC is to satisfy the [prereqs](#prereqs---what-you-need-to-use-bmac), then install the latest release's .deb file, which installs BMAC's client script engine, and its Dashboard GUI, then follow the guidance on the BMAC Dashboard GUI's Settings page.  It'll walk you through everything you need to do to get your cluster setup from scratch.
+
 ## Releases
 
 BMAC releases represent tested, known-good points in the project's development and are the recommended versions for new installations.
@@ -19,6 +23,10 @@ BMAC releases represent tested, known-good points in the project's development a
 The current source code on the `main` branch may contain changes that have not yet gone through the complete release testing process. For production use, download the latest release from the [GitHub Releases](https://github.com/OtterFlip/bmac/releases) page.
 
 Each release is provided by GitHub as both `.zip` and `.tar.gz` source archives. BMAC's scripts don't not require a build step - download or extract the release on your x64 Ubuntu administrator workstation and follow the setup instructions below.  However if you want to use the BMAC Dashboard then you'll need to build it following [its instructions](./dashboard/README.md#running-it).
+
+BMAC release v1.0.0 was solely the script engine library.
+
+BMAC release v2.0.0 is coming soon, with a Dashboard GUI interface that exposes all of BMAC's functionality, so you don't need to call any of the scripts directly.  v2.0.0 has breaking changes from v1.0.0, so there's no clean upgrade path between the two.  However given the short timeframe between these it's unlikely anyone is affected. This project has fairly low visibilty at present, so going to great lengths to preserve compatibility between these major versions isn't really necessary or a priority, at this time. That will change as usage grows.
 
 ## BMAC's Features
 
@@ -32,14 +40,14 @@ Each release is provided by GitHub as both `.zip` and `.tar.gz` source archives.
 - Dell iDRAC9 IPMI support.  BMAC has been tested on Dell Poweredge R640 'Dual Intel Xeon Gold 6138 40 core/80 thread' hosts at FiberState, and one of the host setup script options is to use iDRAC to simplify hardware discovery. This is not required, and a hardware discovery script is provided in cases where you're using some other type of host.
 - BMAC supports decommissioning disk capacity you no longer need. The disk workflows trim affected guests, force replication, scrub the pool, evacuate an eligible non-boot vdev, finalize its retirement, and identify the exact disks that are safe to remove physically. This can be useful after data has moved elsewhere and a host no longer needs all of its installed capacity.
 
-## What You Need to Use BMAC
+## Prereqs - What You Need to Use BMAC
 
-- 2 servers with UEFI BIOS, each with their own public IP and Internet gateway connection on a primary NIC, and a private network connection between these two servers on a secondary NIC on each (can be a VLAN).  We prefer [FiberState's 'Dedicated Server' option](https://www.fiberstate.com/dedicated-servers) (we have no affiliation, we're just a satisfied customer as FiberState is competitively-priced, particularly if you pay for a year in advance).  These will be your main cluster hosts, hosting the guest VMs which in turn host your webapp(s).  You can add more than 2 servers if you like, but start with 2.
+- 2 servers with UEFI BIOS, each with their own public IP and Internet gateway connection on a primary NIC, and a private network connection between these two servers on a secondary NIC on each (can be a VLAN).  We prefer [FiberState's 'Dedicated Server' option](https://www.fiberstate.com/dedicated-servers) (we have no affiliation, we're just a satisfied customer as FiberState is competitively-priced, particularly if you pay for a year in advance).  These will be your cluster's Proxmox hosts, hosting the guest VMs which in turn host your webapp(s).  You can add more than 2 servers as Proxmox hosts if you like, but start with 2.
 - Each server must have at least two physical NVMe hard disks of the same nominal capacity (their exact byte capacities may differ by up to 1%) for the ESP and OS partitions
-- 1 ultra-cheap VPS host with a public IP address, such as a $5/month Shared CPU Nanode 1GB VPS at Linode.  This node's sole purpose will be to play the role of a QDevice, to vote in your cluster quorum to break tie votes.
-- A developer workstation running a debian-based Linux distro (we made and tested this with x64 Ubuntu) to run BMAC's scripts.  This is required for the host setup scripts, but the prod/staging scritps work on macOS too.
-- A Tailscale account (the free account will work fine)
-- Your app's domain (ex: 'myapp.com'), managed at Cloudflare (not essential, but our guides assume this)
+- 1 ultra-cheap VPS host with a public IP address, such as a $5/month Shared CPU Nanode 1GB VPS at Linode.  This node's sole purpose will be to play the role of a QDevice, to vote in your cluster quorum to break tie votes.  You'll set up this QDevice VPS using [these instructions](docs/QDEVICE_MANUAL_SETUP.md).
+- A developer workstation running a debian-based Linux distro (we made and tested this with x64 Ubuntu) to run BMAC's scripts.  This is required for the host setup scripts, but the prod/staging scripts work on macOS too.
+- A Tailscale account (the free account will work fine), setup like [this](#instructions-for-tailscale-setup).
+- Your app's domain (ex: 'myapp.com'), managed at Cloudflare (not essential, but our guides assume this), setup like [this](#instructions-for-cloudflare-setup).
 
 ## BMAC's Stack
 
@@ -309,6 +317,7 @@ one reachable host and finish in seconds:
 ./scripts/user_callable/diagnostics/list_guests.sh --kind production # registered VMs with HA, replication, and routes
 ./scripts/user_callable/diagnostics/list_replication.sh --guest prod1
 ./scripts/user_callable/diagnostics/list_storage.sh --host mox1      # ZFS pools and Proxmox storage
+./scripts/user_callable/diagnostics/check_qdevice_access.sh          # ssh root@ the QDevice works, even before any host exists
 ```
 
 `list_disks.sh` reads each host directly instead, so it takes a little longer.

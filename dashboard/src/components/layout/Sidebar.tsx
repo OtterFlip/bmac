@@ -15,6 +15,7 @@ import {
 import { useShallow } from "zustand/react/shallow";
 import { configAttention, selectActiveRuns, useStore, type Page } from "@/state/store";
 import { api } from "@/lib/api";
+import { useSettingsAlerts, type SettingsAlerts } from "@/state/settingsAlerts";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { isWaiting } from "@/protocol/types";
@@ -68,7 +69,15 @@ function openDocs(event: MouseEvent) {
   void api().openExternal(DOCUMENTATION_URL);
 }
 
-function FooterNav({ id, label, icon, attention }: { id: Page; label: string; icon: ReactNode; attention?: number }) {
+function settingsTip(alerts: SettingsAlerts) {
+  if (alerts.configNeeds > 0) return "Fill in your config files";
+  if (alerts.dependenciesMissing) return "Install the missing dependencies";
+  if (alerts.awaitingQDevice) return "Prepare your cluster's QDevice";
+  if (alerts.awaitingFirstHost) return "Deploy your first Proxmox host";
+  return undefined;
+}
+
+function FooterNav({ id, label, icon, attention, tip }: { id: Page; label: string; icon: ReactNode; attention?: number; tip?: string }) {
   const page = useStore((s) => s.page);
   const setPage = useStore((s) => s.setPage);
   const on = page === id;
@@ -85,7 +94,7 @@ function FooterNav({ id, label, icon, attention }: { id: Page; label: string; ic
       <span className={on ? "text-accent" : "text-fg-subtle"}>{icon}</span>
       <span className="flex-1 text-left">{label}</span>
       {!!attention && (
-        <Tooltip content={`${attention} config file${attention === 1 ? "" : "s"} still need${attention === 1 ? "s" : ""} your values`} side="right">
+        <Tooltip content={tip} side="right">
           <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-warn/18 px-1.5 text-[10.5px] font-semibold text-warn">!{attention > 1 ? attention : ""}</span>
         </Tooltip>
       )}
@@ -104,6 +113,7 @@ export function Sidebar() {
   const active = useStore(useShallow(selectActiveRuns));
   const waiting = active.filter((r) => isWaiting(r.status)).length;
   const attention = useAttention();
+  const settingsAlerts = useSettingsAlerts();
 
   return (
     <aside className="flex w-[216px] shrink-0 flex-col border-r border-line bg-sunken">
@@ -155,8 +165,14 @@ export function Sidebar() {
         })}
       </nav>
       <div className="space-y-0.5 px-2 pb-2">
-        <FooterNav id="config" label="Config" icon={<FileCog />} attention={configNeeds} />
-        <FooterNav id="settings" label="Settings" icon={<Settings />} />
+        <FooterNav
+          id="config"
+          label="Config"
+          icon={<FileCog />}
+          attention={configNeeds}
+          tip={`${configNeeds} config file${configNeeds === 1 ? "" : "s"} still need${configNeeds === 1 ? "s" : ""} your values`}
+        />
+        <FooterNav id="settings" label="Settings" icon={<Settings />} attention={settingsAlerts.any ? 1 : 0} tip={settingsTip(settingsAlerts)} />
         <div className="mt-2 rounded-lg border border-line bg-surface/60 px-2.5 py-2 text-[11px] leading-relaxed text-fg-subtle">
           {repo?.bundled ? (
             <>

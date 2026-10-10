@@ -6,6 +6,7 @@ import type {
   ConfigListing,
   NextStep,
   PlatformInfo,
+  PreflightCheck,
   RepositoryInfo,
   ResponsePayload,
   RunEvent,
@@ -50,6 +51,13 @@ const emptySource = (): SourceEntry<never> => ({
   nextSteps: [],
 });
 
+export interface PreflightState {
+  checks: PreflightCheck[] | null;
+  loading: boolean;
+  updatedAt: number | null;
+  error: string | null;
+}
+
 export interface LaunchTarget {
   workflowId: string;
   values?: Record<string, unknown>;
@@ -82,8 +90,10 @@ interface State {
   sources: Sources;
   sourceRuns: Record<string, SourceId>;
   historyVersion: number;
+  preflight: PreflightState;
 
   setPage(page: Page): void;
+  runPreflight(): Promise<void>;
   bootstrap(): Promise<void>;
   reloadCatalog(): Promise<void>;
   refreshRepo(): Promise<void>;
@@ -148,8 +158,20 @@ export const useStore = create<State>((set, get) => ({
   sources: Object.fromEntries(SOURCE_IDS.map((id) => [id, emptySource()])) as unknown as Sources,
   sourceRuns: {},
   historyVersion: 0,
+  preflight: { checks: null, loading: false, updatedAt: null, error: null },
 
   setPage: (page) => set({ page }),
+
+  async runPreflight() {
+    if (get().preflight.loading) return;
+    set((s) => ({ preflight: { ...s.preflight, loading: true } }));
+    try {
+      const checks = await api().runPreflight();
+      set({ preflight: { checks, loading: false, updatedAt: Date.now(), error: null } });
+    } catch (error) {
+      set((s) => ({ preflight: { ...s.preflight, loading: false, error: errorMessage(error) } }));
+    }
+  },
 
   async bootstrap() {
     try {
@@ -166,6 +188,7 @@ export const useStore = create<State>((set, get) => ({
       set({ appInfo, platform, settings });
       await get().reloadCatalog();
       await get().refreshConfig();
+      void get().runPreflight();
       // Start on Settings until the essential config files are filled in.
       const config = get().config;
       if (appInfo.first_launch || (config && configAttention(config).length > 0)) set({ page: "settings" });

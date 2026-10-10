@@ -1,5 +1,5 @@
 import { useEffect, type ReactNode } from "react";
-import { ExternalLink, Eye, Play, ShieldAlert, Wrench } from "lucide-react";
+import { BookOpen, ExternalLink, Eye, Play, ShieldAlert, Wrench } from "lucide-react";
 import { useStore, type SourceEntry } from "@/state/store";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -10,6 +10,8 @@ import { cn } from "@/lib/utils";
 import type { SourceId, StateSources } from "@/protocol/state";
 
 const DEFAULT_STALE_MS = 2 * 60 * 1000;
+
+export const QDEVICE_SETUP_URL = "https://github.com/OtterFlip/bmac/blob/main/docs/QDEVICE_MANUAL_SETUP.md";
 
 /** A fast state source. Loads on mount when stale, and on the configured interval. */
 export function useSource<K extends SourceId>(id: K): SourceEntry<StateSources[K]> & { refresh: () => void } {
@@ -102,12 +104,35 @@ export function WorkflowButton({
   return <Tooltip content={tip}>{button}</Tooltip>;
 }
 
+export interface LinkTile {
+  title: string;
+  summary: string;
+  url: string;
+}
+
 /** A tile listing the workflows for one category. Unsupported ones stay visible but disabled. */
-export function WorkflowTiles({ ids, className }: { ids: string[]; className?: string }) {
+export function WorkflowTiles({ ids, links = [], className }: { ids: string[]; links?: LinkTile[]; className?: string }) {
   const workflows = useStore((s) => s.workflows);
   const launchWorkflow = useStore((s) => s.launchWorkflow);
   return (
     <div className={cn("grid grid-cols-[repeat(auto-fill,minmax(250px,1fr))] gap-2.5", className)}>
+      {links.map((l) => (
+        <Tooltip key={l.url} content={l.url}>
+          <button
+            onClick={() => openExternal(l.url)}
+            className="group flex flex-col items-start gap-1.5 rounded-xl border border-line bg-surface px-3.5 py-3 text-left transition-[border-color,background-color] hover:border-line-strong hover:bg-surface-2"
+          >
+            <div className="flex w-full items-center gap-2">
+              <span className="flex size-6 items-center justify-center rounded-md border border-accent/25 bg-accent/10 text-accent [&_svg]:size-3.5">
+                <BookOpen />
+              </span>
+              <span className="flex-1 truncate text-[13px] font-medium text-fg">{l.title}</span>
+              <ExternalLink className="size-3.5 text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100" />
+            </div>
+            <p className="line-clamp-2 text-[12px] leading-relaxed text-fg-subtle">{l.summary}</p>
+          </button>
+        </Tooltip>
+      ))}
       {ids
         .map((id) => workflows[id])
         .filter(Boolean)

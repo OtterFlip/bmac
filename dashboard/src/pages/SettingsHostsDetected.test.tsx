@@ -17,5 +17,7 @@ describe("settings first-host hint", () => {
     expect(await screen.findByText(/Cluster-wide settings every workflow reads/)).toBeInTheDocument();
     expect(await screen.findByText("jq", undefined, { timeout: 3000 })).toBeInTheDocument();
     expect(screen.queryByText(/deploy your first host/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/prepare your cluster's QDevice/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
   }, 15000);
 });

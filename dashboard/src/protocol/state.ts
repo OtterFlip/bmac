@@ -212,13 +212,21 @@ export interface DisksState {
   problems: string[];
 }
 
+/** scripts/user_callable/diagnostics/check_qdevice_access.sh: needs no cluster member. */
+export interface QDeviceAccessState {
+  configured_host?: string;
+  accessible: boolean;
+  problem?: string;
+}
+
 export interface StateSources {
   list_hosts: HostsState;
   list_guests: GuestsState;
   list_replication: ReplicationState;
   list_storage: StorageState;
   list_disks: DisksState;
+  check_qdevice_access: QDeviceAccessState;
 }
 
 export type SourceId = keyof StateSources;
-export const SOURCE_IDS: SourceId[] = ["list_hosts", "list_guests", "list_replication", "list_storage", "list_disks"];
+export const SOURCE_IDS: SourceId[] = ["list_hosts", "list_guests", "list_replication", "list_storage", "list_disks", "check_qdevice_access"];
