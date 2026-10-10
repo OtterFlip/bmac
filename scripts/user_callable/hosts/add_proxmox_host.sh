@@ -84,6 +84,8 @@ REQUESTED_BOOT_TEST_POLICY=""
 HARDWARE_INVENTORY_MODE=""
 HOST_SETUP_CONFIG_SHA256=""
 RPOOL_LAYOUT_SHA256=""
+SOURCE_ISO_DIR="${ARTIFACTS_DIR}/source-iso"
+SOURCE_ISO=""
 declare -a CONFIGURED_MIRROR_PAIRS=()
 declare -a CONFIGURED_NVME_SERIALS=()
 declare -a EXPECTED_RPOOL_MAPPERS=()
@@ -464,6 +466,84 @@ source_iso_is_required() {
   return 0
 }
 
+# Every host is built from the same standard ISO, so it is cached once for all
+# hosts, named after the last component of PROXMOX_ISO_FILE_URL.
+set_source_iso_path() {
+  local iso_file="${PROXMOX_ISO_FILE_URL%%[?#]*}"
+  iso_file="${iso_file##*/}"
+  [[ "$iso_file" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.iso$ ]] ||
+    fail "PROXMOX_ISO_FILE_URL must end in a plain .iso file name: $PROXMOX_ISO_FILE_URL"
+  SOURCE_ISO="${SOURCE_ISO_DIR}/${iso_file}"
+}
+
+source_iso_sha256() {
+  sha256sum -- "$1" | awk '{print tolower($1)}'
+}
+
+# Reuse the cached standard ISO when it matches PROXMOX_ISO_FILE_SHA256;
+# otherwise download it from PROXMOX_ISO_FILE_URL and verify it.
+ensure_source_iso() {
+  local expected="${PROXMOX_ISO_FILE_SHA256,,}" actual partial lock_fd
+  install -d -m 0700 "$SOURCE_ISO_DIR"
+  exec {lock_fd}>"${SOURCE_ISO}.lock"
+  chmod 0600 "${SOURCE_ISO}.lock"
+  flock -x "$lock_fd"
+  if [[ -f "$SOURCE_ISO" && ! -L "$SOURCE_ISO" ]]; then
+    actual="$(source_iso_sha256 "$SOURCE_ISO")"
+    if [[ "$actual" == "$expected" ]]; then
+      info "Reusing the verified standard Proxmox VE ISO $SOURCE_ISO"
+      exec {lock_fd}>&-
+      return 0
+    fi
+    printf 'WARNING: %s does not match PROXMOX_ISO_FILE_SHA256; downloading it again.\n' \
+      "$SOURCE_ISO" >&2
+  fi
+  rm -f -- "$SOURCE_ISO"
+  partial="${SOURCE_ISO}.partial.$$"
+  log "Downloading the standard Proxmox VE ISO"
+  info "From: $PROXMOX_ISO_FILE_URL"
+  info "To:   $SOURCE_ISO"
+  if ! curl --proto '=https' --proto-redir '=https' --fail --location \
+    --retry 5 --retry-delay 3 --retry-all-errors --show-error --progress-bar \
+    --output "$partial" "$PROXMOX_ISO_FILE_URL"; then
+    rm -f -- "$partial"
+    fail "Could not download $PROXMOX_ISO_FILE_URL"
+  fi
+  [[ -f "$partial" && ! -L "$partial" && -s "$partial" ]] || {
+    rm -f -- "$partial"
+    fail "The downloaded Proxmox VE ISO is missing or empty"
+  }
+  actual="$(source_iso_sha256 "$partial")"
+  if [[ "$actual" != "$expected" ]]; then
+    rm -f -- "$partial"
+    fail "Downloaded Proxmox VE ISO SHA-256 mismatch: expected $PROXMOX_ISO_FILE_SHA256, got $actual"
+  fi
+  chmod 0600 "$partial"
+  mv -f -- "$partial" "$SOURCE_ISO"
+  exec {lock_fd}>&-
+}
+
+offer_to_delete_source_iso() {
+  [[ -f "$SOURCE_ISO" ]] || return 0
+  local keep=yes
+  printf '\nThe standard Proxmox VE ISO is no longer needed for %s:\n' "$HOST_ID"
+  info "$SOURCE_ISO"
+  printf 'Keep it to build installation media for future Proxmox hosts without downloading it again.\n'
+  if bmac_ui_is_json; then
+    bmac_ui_choose keep "Keep the standard Proxmox VE ISO for future host installs?" yes \
+      yes "Keep it for future host installs" \
+      no "Delete it; a later host install downloads it again"
+  elif ! prompt_yes_default_yes "Keep the standard Proxmox VE ISO for future Proxmox host installs?"; then
+    keep=no
+  fi
+  if [[ "$keep" == no ]]; then
+    rm -f -- "$SOURCE_ISO"
+    info "Deleted $SOURCE_ISO"
+  else
+    info "Kept $SOURCE_ISO"
+  fi
+}
+
 load_configuration() {
   load_proxmox_config --host "$SELECTED_HOST" --require-secrets ||
     fail "Could not load cluster.conf, ${SELECTED_HOST}.conf, and secrets.env"
@@ -472,7 +552,7 @@ load_configuration() {
     PROXMOX_IP PROXMOX_GATEWAY PROXMOX_PREFIX PROXMOX_FQDN
     PROXMOX_DNS_SERVER PROXMOX_ADMIN_EMAIL PROXMOX_ROOT_PASSWORD
     PROXMOX_TIMEZONE PROXMOX_COUNTRY PROXMOX_KEYBOARD
-    PROXMOX_ISO_FILE_PATH PROXMOX_ISO_FILE_SHA256 PROXMOX_PUBLIC_MAC
+    PROXMOX_ISO_FILE_URL PROXMOX_ISO_FILE_SHA256 PROXMOX_PUBLIC_MAC
     TAILSCALE_HOSTNAME TAILSCALE_TAG
     ADMIN_1_PUBLIC_SSH_KEY ADMIN_2_PUBLIC_SSH_KEY
     PROXMOX_SECONDARY_MAC PROXMOX_SECONDARY_IP MOX_REPLICATION_IP
@@ -494,14 +574,7 @@ load_configuration() {
   )
   local name
   for name in "${required[@]}"; do require_var "$name"; done
-  # Relative paths are anchored at the checkout root (or an installed
-  # Dashboard's config directory), not the caller's cwd.
-  # shellcheck disable=SC2088 # Matching a literal, unexpanded tilde.
-  if [[ "$PROXMOX_ISO_FILE_PATH" == "~/"* ]]; then
-    PROXMOX_ISO_FILE_PATH="${HOME:?HOME is required to expand PROXMOX_ISO_FILE_PATH}/${PROXMOX_ISO_FILE_PATH#"~/"}"
-  elif [[ "$PROXMOX_ISO_FILE_PATH" != /* ]]; then
-    PROXMOX_ISO_FILE_PATH="${PROXMOX_USER_ROOT}/${PROXMOX_ISO_FILE_PATH}"
-  fi
+  set_source_iso_path
   if [[ "$HARDWARE_INVENTORY_MODE" == idrac ]]; then
     for name in IDRAC_IP IDRAC_USER IDRAC_PASSWORD; do require_var "$name"; done
   fi
@@ -684,12 +757,7 @@ preflight() {
     fail "LUKS header artifacts must not be tracked by Git"
 
   if source_iso_is_required; then
-    local iso="$PROXMOX_ISO_FILE_PATH"
-    [[ -f "$iso" ]] || fail "Missing source ISO: $iso"
-    local actual_hash
-    actual_hash="$(sha256sum -- "$iso" | awk '{print $1}')"
-    [[ "${actual_hash,,}" == "${PROXMOX_ISO_FILE_SHA256,,}" ]] ||
-      fail "Source ISO SHA-256 mismatch: expected $PROXMOX_ISO_FILE_SHA256, got $actual_hash"
+    ensure_source_iso
   fi
 
   if [[ ! -f "$SSH_KEY" ]]; then
@@ -1131,7 +1199,7 @@ build_iso() {
   assistant="$(assistant_binary)"
   answer="${GENERATED_DIR}/answer.toml"
   first_boot="${GENERATED_DIR}/first-boot.sh"
-  iso_name="$(basename -- "${PROXMOX_ISO_FILE_PATH%.iso}")"
+  iso_name="$(basename -- "${SOURCE_ISO%.iso}")"
   output="${HOST_ARTIFACTS}/${iso_name}-${HOST_ID}-auto.iso"
   hdsize="$(read_state zfs-hdsize-gib)"
   # Every image gets a new host key: an earlier image may still exist
@@ -1390,7 +1458,8 @@ PY
 
   "$assistant" validate-answer "$answer"
   rm -f "$output"
-  "$assistant" prepare-iso "$PROXMOX_ISO_FILE_PATH" \
+  ensure_source_iso
+  "$assistant" prepare-iso "$SOURCE_ISO" \
     --fetch-from iso --answer-file "$answer" --on-first-boot "$first_boot" --output "$output"
   chmod 0600 "$output"
   sha256sum -- "$output" | tee "${LOG_DIR}/prepared-iso.sha256"
@@ -1406,6 +1475,7 @@ PY
   write_state prepared-iso "$output"
   write_state iso-config-sha256 "$HOST_SETUP_CONFIG_SHA256"
   write_state iso-built
+  offer_to_delete_source_iso
 }
 
 host_key_fingerprint() {

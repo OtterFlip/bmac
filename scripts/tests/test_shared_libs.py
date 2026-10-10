@@ -2261,6 +2261,24 @@ done
             completed.stderr,
         )
 
+    def test_proxmox_iso_url_requires_public_https_iso(self) -> None:
+        with self.cluster.open("a", encoding="utf-8") as handle:
+            handle.write("PROXMOX_ISO_FILE_URL=http://example.test/proxmox.iso\n")
+        completed = self.run_config("--check", "--no-secrets", expected=1)
+        self.assertIn(
+            "PROXMOX_ISO_FILE_URL must be a public HTTPS URL ending in .iso",
+            completed.stderr,
+        )
+
+    def test_retired_proxmox_iso_path_names_its_replacement(self) -> None:
+        with self.cluster.open("a", encoding="utf-8") as handle:
+            handle.write("PROXMOX_ISO_FILE_PATH=~/Downloads/proxmox.iso\n")
+        completed = self.run_config("--check", "--no-secrets", expected=1)
+        self.assertIn(
+            "PROXMOX_ISO_FILE_PATH was replaced by PROXMOX_ISO_FILE_URL",
+            completed.stderr,
+        )
+
     def test_production_install_mode_is_strictly_enumerated(self) -> None:
         with self.cluster.open("a", encoding="utf-8") as handle:
             handle.write("PROD_GUEST_OS_INSTALL_MODE=maybe\n")

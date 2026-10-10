@@ -178,14 +178,21 @@ gateway, proxy, or Tailscale exit node.
 
 ## Host storage and source media
 
-The reviewed bare-metal source is `proxmox-ve_9.2-1.iso`; the configured
-ISO path and SHA-256 in `cluster.conf` must match before media is built. Host
+The reviewed bare-metal source is `proxmox-ve_9.2-1.iso`. Host
 artifacts live under `<config>/artifacts/hosts/` (`config/artifacts/hosts/`
-in a checkout). The setup script creates a host-specific unattended ISO
-directly under `artifacts/hosts/<moxN>/`; its answer and first-boot inputs
-are under that host's `generated/` directory. Setup keys, logs, GPT backups,
-and LUKS headers also remain under the mode-`0700` host artifact tree and
-must never be committed. The only shared durable host artifact is the
+in a checkout). The setup script downloads the standard ISO from
+`PROXMOX_ISO_FILE_URL` in `cluster.conf` to
+`artifacts/hosts/source-iso/<file name>`, shared by every host, and verifies
+it against `PROXMOX_ISO_FILE_SHA256` before media is built; a cached copy
+that matches is reused, and one that does not is downloaded again. After
+building a host's media it asks (default yes) whether to keep the standard
+ISO for future host installs or delete it. The setup script creates a
+host-specific unattended ISO directly under `artifacts/hosts/<moxN>/`; its
+answer and first-boot inputs are under that host's `generated/` directory.
+Setup keys, logs, GPT backups, and LUKS headers also remain under the
+mode-`0700` host artifact tree and must never be committed. Besides the
+standard ISO cache and the auto-install assistant under `tools/`, the only
+shared durable host artifact is the
 `artifacts/hosts/used-tailscale-auth-key-sha256` denylist. Its `.lock` file
 only serializes concurrent check-and-append operations.
 
@@ -310,8 +317,8 @@ The resumable flow:
    public/private MACs, hashes, and a secret-inclusive setup fingerprint.
 2. In iDRAC mode, queries Redfish without mutation. In manual mode, validates
    serials and exact capacities previously gathered with
-   `scripts/user_callable/hosts/cluster_setup_prereq.sh` in a Live Linux environment. It then verifies
-   the source ISO and builds host-specific media containing a fresh one-time,
+   `scripts/user_callable/hosts/cluster_setup_prereq.sh` in a Live Linux environment. It then downloads
+   or reuses and verifies the standard ISO and builds host-specific media containing a fresh one-time,
    non-ephemeral `tag:proxmox-host` Tailscale key and a fresh SSH Ed25519 host
    key generated on the workstation. The first-boot payload installs that host
    key before sshd starts, so every setup SSH connection is pinned to it and no

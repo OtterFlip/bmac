@@ -159,7 +159,7 @@ declare -ag _PROXMOX_CONFIG_CLUSTER_KEYS=(
   HAPROXY_IP_START HAPROXY_IP_END
   PROXMOX_DNS_SERVER PROXMOX_ADMIN_EMAIL
   PROXMOX_TIMEZONE PROXMOX_COUNTRY PROXMOX_KEYBOARD
-  PROXMOX_ISO_FILE_PATH PROXMOX_ISO_FILE_SHA256
+  PROXMOX_ISO_FILE_URL PROXMOX_ISO_FILE_SHA256
   PROD_GUEST_OS_ISO_URL PROD_GUEST_OS_ISO_SHA256
   PROD_GUEST_OS_INSTALL_MODE
   ADMIN_1_PUBLIC_SSH_KEY ADMIN_2_PUBLIC_SSH_KEY
@@ -509,6 +509,8 @@ _config_parse_file() {
       config_die "${file}:${line_number}: expected a literal KEY=VALUE assignment" || return
     key="${BASH_REMATCH[1]}"
     raw="${BASH_REMATCH[2]}"
+    [[ "$key" != PROXMOX_ISO_FILE_PATH ]] ||
+      config_die "${file}:${line_number}: PROXMOX_ISO_FILE_PATH was replaced by PROXMOX_ISO_FILE_URL, the HTTPS download URL of the Proxmox VE installer ISO" || return
     _config_key_allowed "$scope" "$key" ||
       config_die "${file}:${line_number}: unknown or misplaced key ${key}" || return
     [[ -z "${_PROXMOX_CONFIG_SEEN[$key]+x}" ]] ||
@@ -894,8 +896,9 @@ PY
   for name in PROXMOX_ISO_FILE_SHA256 PROD_GUEST_OS_ISO_SHA256; do
     [[ -z "${!name+x}" ]] || _config_validate_sha256 "$name" || return
   done
-  [[ -z "${PROD_GUEST_OS_ISO_URL+x}" ]] ||
-    _config_validate_https_iso_url PROD_GUEST_OS_ISO_URL || return
+  for name in PROXMOX_ISO_FILE_URL PROD_GUEST_OS_ISO_URL; do
+    [[ -z "${!name+x}" ]] || _config_validate_https_iso_url "$name" || return
+  done
   if [[ -n "${PROD_GUEST_OS_INSTALL_MODE+x}" ]]; then
     case "$PROD_GUEST_OS_INSTALL_MODE" in
       ubuntu-autoinstall | manual) ;;

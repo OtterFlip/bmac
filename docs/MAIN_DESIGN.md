@@ -864,6 +864,9 @@ Local artifacts live under `<config>/artifacts/` (in a checkout,
 `config/artifacts/`, which is Git-ignored). They are sensitive even when they
 contain hashes rather than plaintext:
 
+- `artifacts/hosts/source-iso/`: the standard Proxmox VE ISO downloaded from
+  `PROXMOX_ISO_FILE_URL`, shared by every host and kept or deleted at the
+  operator's choice after media is built;
 - `artifacts/hosts/<moxN>/*.iso`: generated host-specific installation media;
 - `artifacts/hosts/<moxN>/generated/`: answer and first-boot input files;
 - `artifacts/hosts/<moxN>/ssh/`: temporary setup key;
@@ -1300,7 +1303,7 @@ The order matters. Do not create guests before host and cluster convergence.
 - Connect the iDRAC/IPMI VPN and Tailscale.
 - Verify the QDevice is independent, patched, reachable by its Tailscale name,
   and reports the one literal Tailscale IPv4 resolved by the workstation.
-- Put the reviewed Proxmox VE 9.2-1 source ISO at its absolute path in
+- Configure the reviewed Proxmox VE 9.2-1 source ISO's HTTPS URL and hash in
   `cluster.conf`. Configure a public HTTPS production guest OS ISO URL, its
   independently reviewed hash, and either `ubuntu-autoinstall` or `manual`
   install mode.

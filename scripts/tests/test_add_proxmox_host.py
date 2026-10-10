@@ -164,6 +164,93 @@ Flags:            Quorate Qdevice
             """
         )
 
+    SOURCE_ISO_LAYOUT = """
+            ARTIFACTS_DIR="$(mktemp -d)"
+            trap 'rm -rf "$ARTIFACTS_DIR"' EXIT
+            SOURCE_ISO_DIR="$ARTIFACTS_DIR/source-iso"
+            PROXMOX_ISO_FILE_URL=https://example.test/iso/proxmox-ve_9.2-1.iso
+            served=good
+            PROXMOX_ISO_FILE_SHA256="$(printf good | sha256sum | awk '{print toupper($1)}')"
+            curl() {
+              local output=""
+              while (($#)); do
+                [[ "$1" == --output ]] && output="$2"
+                shift
+              done
+              printf 'curl\\n' >>"$ARTIFACTS_DIR/curl-calls"
+              printf '%s' "$served" >"$output"
+            }
+            curl_calls() { cat "$ARTIFACTS_DIR/curl-calls" 2>/dev/null | wc -l; }
+            set_source_iso_path
+            """
+
+    def test_source_iso_is_cached_for_every_host_under_its_url_file_name(self) -> None:
+        self.run_bash(
+            self.SOURCE_ISO_LAYOUT
+            + """
+            [[ "$SOURCE_ISO" == "$ARTIFACTS_DIR/source-iso/proxmox-ve_9.2-1.iso" ]]
+            PROXMOX_ISO_FILE_URL='https://example.test/dl/proxmox.iso?mirror=1'
+            set_source_iso_path
+            [[ "$SOURCE_ISO" == "$ARTIFACTS_DIR/source-iso/proxmox.iso" ]]
+            PROXMOX_ISO_FILE_URL='https://example.test/dl/.iso'
+            ( set_source_iso_path ) 2>/dev/null && exit 9
+            exit 0
+            """
+        )
+
+    def test_source_iso_is_downloaded_once_then_reused(self) -> None:
+        self.run_bash(
+            self.SOURCE_ISO_LAYOUT
+            + """
+            ensure_source_iso
+            [[ "$(cat "$SOURCE_ISO")" == good && "$(curl_calls)" == 1 ]]
+            [[ "$(stat -c %a "$SOURCE_ISO")" == 600 ]]
+            ensure_source_iso
+            [[ "$(curl_calls)" == 1 ]]
+            printf corrupt >"$SOURCE_ISO"
+            ensure_source_iso 2>"$ARTIFACTS_DIR/stderr"
+            [[ "$(cat "$SOURCE_ISO")" == good && "$(curl_calls)" == 2 ]]
+            grep -q 'downloading it again' "$ARTIFACTS_DIR/stderr"
+            """
+        )
+
+    def test_source_iso_with_wrong_hash_is_not_kept(self) -> None:
+        completed = self.run_bash(
+            self.SOURCE_ISO_LAYOUT
+            + """
+            served=tampered
+            ensure_source_iso
+            """,
+            expected=1,
+        )
+        self.assertIn("Downloaded Proxmox VE ISO SHA-256 mismatch", completed.stderr)
+        self.run_bash(
+            self.SOURCE_ISO_LAYOUT
+            + """
+            served=tampered
+            ( ensure_source_iso ) >/dev/null 2>&1 && exit 9
+            [[ ! -e "$SOURCE_ISO" ]]
+            [[ -z "$(find "$SOURCE_ISO_DIR" -name '*.partial.*')" ]]
+            """
+        )
+
+    def test_source_iso_is_kept_by_default_after_media_is_built(self) -> None:
+        completed = self.run_bash(
+            self.SOURCE_ISO_LAYOUT
+            + """
+            HOST_ID=mox2
+            ensure_source_iso
+            offer_to_delete_source_iso </dev/null
+            [[ -f "$SOURCE_ISO" ]]
+            printf '\\n' | offer_to_delete_source_iso
+            [[ -f "$SOURCE_ISO" ]]
+            printf 'n\\n' | offer_to_delete_source_iso
+            [[ ! -e "$SOURCE_ISO" ]]
+            """
+        )
+        self.assertEqual(completed.stdout.count("Kept "), 2)
+        self.assertIn("Deleted ", completed.stdout)
+
     def test_downloaded_assistant_checksum_output_does_not_pollute_path(self) -> None:
         self.run_bash(
             """
