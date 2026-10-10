@@ -447,22 +447,7 @@ else:
             msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
         )
 
-    def add_registered_staging(self, index: int = 1) -> None:
-        vmid = 199 + index
-        name = f"stage{index}prod1"
-        snapshot_name = f"stg-base-{name}-260914T220000Z"
-        guid = str(123455 + index)
-        self.registry(
-            "allocate-staging",
-            "--source",
-            "prod1",
-            "--vmid",
-            str(vmid),
-            "--placement",
-            "mox1",
-            "--placement-limit",
-            "5",
-        )
+    def record_staging_snapshot(self, name: str, snapshot_name: str, guid: str) -> None:
         self.registry("update", name, "--state", "snapshotting")
         self.registry(
             "record-staging-snapshot-intent",
@@ -494,6 +479,30 @@ else:
             "--snapshot-volume-guid",
             f"local-zfs:vm-100-disk-0,mox2={guid}",
         )
+
+    def add_registered_staging(
+        self, index: int = 1, share_from: int | None = None
+    ) -> None:
+        vmid = 199 + index
+        name = f"stage{index}prod1"
+        creator = f"stage{share_from}prod1" if share_from else name
+        snapshot_name = f"stg-base-{creator}-260914T220000Z"
+        guid = str(123455 + (share_from or index))
+        self.registry(
+            "allocate-staging",
+            "--source",
+            "prod1",
+            "--vmid",
+            str(vmid),
+            "--placement",
+            "mox1",
+            "--placement-limit",
+            "5",
+        )
+        if share_from:
+            self.registry("share-staging-snapshot", name, "--from", creator)
+        else:
+            self.record_staging_snapshot(name, snapshot_name, guid)
         self.registry("update", name, "--state", "cloning")
         self.registry(
             "update",
@@ -535,13 +544,14 @@ else:
         }
         snapshot = f"rpool/data/vm-100-disk-0@{snapshot_name}"
         clone = f"rpool/data/vm-{vmid}-disk-0"
+        prior_clones = state["zfs"].get(snapshot, {}).get("clones")
         state["zfs"].update(
             {
                 "rpool/data/vm-100-disk-0": {"type": "volume"},
                 snapshot: {
                     "type": "snapshot",
                     "guid": guid,
-                    "clones": clone,
+                    "clones": f"{prior_clones},{clone}" if prior_clones else clone,
                 },
                 clone: {
                     "type": "volume",
@@ -780,6 +790,19 @@ else:
             and ("defer-cleanup" in row or "--routes-disabled" in row)
         )
         self.assertLess(max(stops), first_queue_step)
+        state = self.read_fake_state()
+        for vmid in ("200", "201"):
+            self.assertEqual(state["vms"][vmid]["status"], "stopped")
+        for name in ("stage1prod1", "stage2prod1"):
+            self.assertEqual(self.registry("get", name)["state"], "cleanup_pending")
+
+    def test_staging_guests_sharing_a_snapshot_are_all_evicted(self) -> None:
+        self.add_registered_staging(1)
+        self.add_registered_staging(2, share_from=1)
+        snapshot = self.registry("get", "stage2prod1")["proxmox"]["snapshot"]
+        self.assertEqual(snapshot["name"], "stg-base-stage1prod1-260914T220000Z")
+
+        self.run_hook(100, "pre-start")
         state = self.read_fake_state()
         for vmid in ("200", "201"):
             self.assertEqual(state["vms"][vmid]["status"], "stopped")

@@ -1,4 +1,5 @@
-import { ExternalLink, FlaskConical, KeyRound, Plus, Trash2 } from "lucide-react";
+import { Camera, ExternalLink, FlaskConical, KeyRound, Link2, Plus, Trash2 } from "lucide-react";
+import type { StagingSnapshot } from "@/protocol/state";
 import { useStore } from "@/state/store";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -7,8 +8,32 @@ import { Menu } from "@/components/ui/menu";
 import { EmptyState, StatusPill } from "@/components/status";
 import { AttentionBanner, PageBody, PageHeader } from "@/components/layout/Page";
 import { ExternalButton, SkeletonRows, SourceRefresh, Table, WorkflowTiles, openExternal, useSource } from "./common";
-import { duration } from "@/lib/format";
+import { agoEpoch, dateTime, duration } from "@/lib/format";
 import { vmHealth } from "./ProductionPage";
+
+export function snapshotTaken(snapshot: StagingSnapshot | null | undefined): string {
+  if (!snapshot?.created_at) return "unknown time";
+  return `${dateTime(new Date(snapshot.created_at * 1000).toISOString())} · ${agoEpoch(snapshot.created_at)}`;
+}
+
+function SnapshotCell({ snapshot }: { snapshot: StagingSnapshot | null }) {
+  if (!snapshot) return <span className="text-fg-subtle">—</span>;
+  const shared = snapshot.shared_with.length > 0;
+  return (
+    <div className="min-w-0">
+      <div className="flex items-center gap-1 text-[12px] text-fg-muted" title={snapshot.name}>
+        <Camera className="size-3.5 shrink-0 text-fg-subtle" />
+        <span className="max-w-[220px] truncate font-mono">{snapshot.name}</span>
+      </div>
+      <div className="text-[11px] text-fg-subtle tabular-nums">taken {snapshotTaken(snapshot)}</div>
+      {shared && (
+        <Badge tone="info" className="mt-0.5" title="The snapshot is kept until the last staging VM using it is removed.">
+          <Link2 className="size-3" /> shared with {snapshot.shared_with.join(", ")}
+        </Badge>
+      )}
+    </div>
+  );
+}
 
 export function StagingPage() {
   const guests = useSource("list_guests");
@@ -33,8 +58,8 @@ export function StagingPage() {
         <AttentionBanner problems={g?.problems.filter((p) => p.startsWith("staging")) ?? []} />
         <Card className="mb-4">
           <CardHeader icon={<FlaskConical />} title="Staging VMs" subtitle={g ? `${g.staging.length} registered` : undefined} />
-          <Table head={["VM", "Status", "Copy of", "Runs on", "Address", "Size", ""]}>
-            {!g && guests.status === "loading" && <SkeletonRows cols={7} />}
+          <Table head={["VM", "Status", "Copy of", "Snapshot", "Runs on", "Address", "Size", ""]}>
+            {!g && guests.status === "loading" && <SkeletonRows cols={8} />}
             {g?.staging.map((vm) => (
               <tr key={vm.name}>
                 <td>
@@ -46,6 +71,7 @@ export function StagingPage() {
                   {vm.registry_state && vm.registry_state !== "active" && <Badge tone={vm.registry_state === "failed" ? "danger" : "warn"} className="ml-1">{vm.registry_state.replace(/_/g, " ")}</Badge>}
                 </td>
                 <td className="font-mono text-fg-muted">{vm.source ?? "—"}</td>
+                <td><SnapshotCell snapshot={vm.snapshot ?? null} /></td>
                 <td className="font-mono text-fg-muted">{vm.node ?? "—"}</td>
                 <td>
                   {vm.url ? (

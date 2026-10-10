@@ -1877,11 +1877,50 @@ def validate_registry_invariants(resources: Sequence[dict[str, Any]]) -> None:
         snapshot_key = (source["name"], snapshot["name"])
         prior = staging_snapshot_keys.get(snapshot_key)
         if prior is not None:
-            raise RegistryError(
-                f"staging snapshot {snapshot['name']!r} is shared by "
-                f"{prior} and {resource['name']}; unique snapshots are required"
-            )
+            prior_snapshot = by_name[prior]["proxmox"]["snapshot"]
+            if not (snapshot["verified"] and prior_snapshot["verified"]):
+                raise RegistryError(
+                    f"staging snapshot {snapshot['name']!r} is claimed by "
+                    f"{prior} and {resource['name']} before verification; "
+                    "only a verified snapshot may be shared"
+                )
+            if shared_snapshot_identity(snapshot) != shared_snapshot_identity(
+                prior_snapshot
+            ):
+                raise RegistryError(
+                    f"staging snapshot {snapshot['name']!r} is shared by "
+                    f"{prior} and {resource['name']} with differing metadata"
+                )
+            continue
         staging_snapshot_keys[snapshot_key] = resource["name"]
+
+
+def shared_snapshot_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """The part of a staging snapshot record every sharing resource repeats.
+
+    dependent_resources and refcount describe the one reference a record
+    holds; the snapshot's holders are every staging record naming the same
+    source and snapshot name.
+    """
+
+    return {
+        key: value
+        for key, value in snapshot.items()
+        if key not in {"dependent_resources", "refcount"}
+    }
+
+
+def staging_snapshot_holders(
+    resources: Sequence[dict[str, Any]], source: str, snapshot_name: str
+) -> list[dict[str, Any]]:
+    return [
+        record
+        for record in resources
+        if record["kind"] == "staging"
+        and record["source"] == source
+        and record["proxmox"]["snapshot"] is not None
+        and record["proxmox"]["snapshot"]["name"] == snapshot_name
+    ]
 
 
 def validate_cleanup_record(record: Any) -> None:
@@ -2505,6 +2544,93 @@ def command_record_staging_snapshot(
             raise RegistryError(
                 "staging snapshot dependency may only be recorded while "
                 "snapshotting or replicating"
+            )
+        updated = copy.deepcopy(current)
+        updated["proxmox"]["snapshot"] = metadata
+        updated["updated_at"] = utc_now()
+        updated["revision"] += 1
+        validate_resource(updated, policy)
+        revised_resources = [
+            updated if record["name"] == updated["name"] else record
+            for record in resources
+        ]
+        validate_registry_invariants(revised_resources)
+        atomic_write_json(registry.resource_path(updated["name"]), updated)
+        return updated
+
+
+# A holder in one of these states no longer keeps a shared snapshot alive: its
+# own cleanup may already be deleting it, so no new staging guest may join.
+SNAPSHOT_RELEASING_STATES = {"cleanup_pending", "failed"}
+
+
+def command_share_staging_snapshot(
+    registry: Registry, args: argparse.Namespace
+) -> Any:
+    """Attach a reserved staging resource to another one's verified snapshot."""
+
+    policy = registry.policy()
+    with registry.lock():
+        resources = registry.resources()
+        by_name = {record["name"]: record for record in resources}
+        current = by_name.get(args.name)
+        if current is None:
+            raise RegistryError(f"resource does not exist: {args.name}")
+        donor = by_name.get(args.from_resource)
+        if donor is None:
+            raise RegistryError(f"resource does not exist: {args.from_resource}")
+        if current["kind"] != "staging" or donor["kind"] != "staging":
+            raise RegistryError("snapshots may only be shared between staging resources")
+        if donor["name"] == current["name"]:
+            raise RegistryError("a staging resource cannot share its own snapshot")
+        if donor["source"] != current["source"]:
+            raise RegistryError(
+                f"{donor['name']} is a copy of {donor['source']}, "
+                f"not {current['source']}"
+            )
+        source = by_name.get(current["source"])
+        if source is None or source["kind"] != "production":
+            raise RegistryError("staging snapshot source production resource is missing")
+        snapshot = donor["proxmox"]["snapshot"]
+        if snapshot is None or snapshot["verified"] is not True:
+            raise RegistryError(f"{donor['name']} has no verified snapshot to share")
+        if snapshot["source_volume_id"] != source["proxmox"]["volume_id"]:
+            raise RegistryError(
+                "the shared snapshot's root volume is no longer the production volume"
+            )
+        live_holders = [
+            record["name"]
+            for record in staging_snapshot_holders(
+                resources, source["name"], snapshot["name"]
+            )
+            if record["state"] not in SNAPSHOT_RELEASING_STATES
+        ]
+        if not live_holders:
+            raise RegistryError(
+                f"snapshot {snapshot['name']!r} is being released by its last "
+                "staging guest and can no longer be shared"
+            )
+        metadata = copy.deepcopy(snapshot)
+        metadata["dependent_resources"] = [current["name"]]
+        metadata["refcount"] = 1
+        if current["proxmox"]["snapshot"] == metadata:
+            return current
+        if current["proxmox"]["snapshot"] is not None:
+            raise RegistryError(
+                "staging resource already has a different snapshot dependency"
+            )
+        if (
+            args.expected_revision is not None
+            and current["revision"] != args.expected_revision
+        ):
+            raise RegistryError(
+                f"revision conflict: expected {args.expected_revision}, "
+                f"found {current['revision']}"
+            )
+        if current["state"] != "reserved":
+            raise RegistryError(
+                "a shared snapshot may only be attached to a freshly reserved "
+                "staging resource"
             )
         updated = copy.deepcopy(current)
         updated["proxmox"]["snapshot"] = metadata
@@ -4758,6 +4884,20 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     staging_snapshot.set_defaults(handler=command_record_staging_snapshot)
+
+    share_snapshot = subparsers.add_parser(
+        "share-staging-snapshot",
+        help=(
+            "attach a reserved staging resource to the verified snapshot of "
+            "another staging copy of the same production source"
+        ),
+    )
+    share_snapshot.add_argument("name")
+    share_snapshot.add_argument("--expected-revision", type=int)
+    share_snapshot.add_argument(
+        "--from", dest="from_resource", required=True, metavar="STAGING"
+    )
+    share_snapshot.set_defaults(handler=command_share_staging_snapshot)
 
     update = subparsers.add_parser(
         "update", help="perform a validated resource state/metadata transition"

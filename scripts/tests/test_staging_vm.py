@@ -484,6 +484,80 @@ assert_not_referenced_by_vm
             text,
         )
 
+    def test_snapshot_choice_offers_only_live_snapshots_of_the_source(self) -> None:
+        older = "stg-base-stage1prod1-260914T220000Z"
+        newer = "stg-base-stage3prod1-261001T120000Z"
+
+        def stage(name, state, snapshot, source="prod1", verified=True):
+            return {
+                "kind": "staging",
+                "name": name,
+                "source": source,
+                "index": int(name[5]),
+                "state": state,
+                "proxmox": {
+                    "snapshot": {
+                        "name": snapshot,
+                        "verified": verified,
+                        "source_volume_id": "local-zfs:vm-100-disk-0",
+                    }
+                },
+            }
+
+        resources = [
+            {"kind": "production", "name": "prod1", "index": 1},
+            stage("stage1prod1", "active", older),
+            stage("stage2prod1", "stopped", older),
+            stage("stage3prod1", "active", newer),
+            stage("stage4prod1", "cleanup_pending", "stg-base-stage4prod1-261002T000000Z"),
+            stage("stage5prod1", "snapshotting", "stg-base-stage5prod1-261003T000000Z", verified=False),
+            stage("stage1prod2", "active", "stg-base-stage1prod2-261004T000000Z", source="prod2"),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            (Path(temporary) / "resources.json").write_text(
+                json.dumps(resources), encoding="utf-8"
+            )
+            prelude = f"""
+RUN_DIR={temporary!r}
+SOURCE_NAME=prod1
+SOURCE_VOLUME=local-zfs:vm-100-disk-0
+registry_cmd() {{ return 0; }}
+"""
+            report = 'printf "FROM=%s NAME=%s WITH=%s\\n" "$SNAPSHOT_SHARED_FROM" "$SNAPSHOT_NAME" "$SNAPSHOT_SHARED_WITH"'
+            for answer, expected in {
+                "1": f"FROM=stage3prod1 NAME={newer} WITH=stage3prod1",
+                "2": f"FROM=stage1prod1 NAME={older} WITH=stage1prod1,stage2prod1",
+                "stage2prod1": f"FROM=stage2prod1 NAME={older} WITH=stage1prod1,stage2prod1",
+                "": "FROM= NAME= WITH=",
+                "new": "FROM= NAME= WITH=",
+            }.items():
+                with self.subTest(answer=answer):
+                    completed = self.run_sourced(
+                        CREATE_SCRIPT,
+                        "APP_HA_STAGING_VM_SOURCE_ONLY",
+                        f"{prelude}\nchoose_snapshot_source <<<{answer!r}\n{report}\n",
+                    )
+                    self.assertIn(expected, completed.stdout)
+                    self.assertIn("2026-09-14 22:00:00 UTC", completed.stdout)
+                    self.assertIn("stage1prod1, stage2prod1", completed.stdout)
+                    for hidden in ("stage4prod1", "stage5prod1", "stage1prod2"):
+                        self.assertNotIn(hidden, completed.stdout)
+            for answer in ("stage4prod1", "9"):
+                with self.subTest(answer=answer):
+                    rejected = self.run_sourced(
+                        CREATE_SCRIPT,
+                        "APP_HA_STAGING_VM_SOURCE_ONLY",
+                        f"{prelude}\nchoose_snapshot_source <<<{answer!r}\n",
+                        expected=1,
+                    )
+                    self.assertIn("Snapshot choice must be", rejected.stderr)
+            alone = self.run_sourced(
+                CREATE_SCRIPT,
+                "APP_HA_STAGING_VM_SOURCE_ONLY",
+                f"{prelude}\nSOURCE_NAME=prod3\nchoose_snapshot_source </dev/null\n{report}\n",
+            )
+            self.assertIn("prod3 has no staging VMs yet", alone.stdout)
+
     def test_failure_before_allocation_does_not_claim_resources_were_removed(
         self,
     ) -> None:

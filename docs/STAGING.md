@@ -38,6 +38,12 @@ A lightweight Copy-on-Write linked-clone of the temporary staging snapshot on th
 
 This linked-clone zvol is then mounted on the standby host, and its EXT4 OS file system is patched in order to alter the machine identity (MAC address, IP address, machine ID, etc) so that the new staging VM, based on this linked clone, won't collide on the network with the production VM upon which it is based.  After patching the linked-clone zvol, it's then dismounted from the standby host and then attached to a newly-created staging VM on the standby host.  This new staging VM on the standby host is then started.  It's available on the network and its webapp (the mirror-image of the production webapp including all of its state, database included) is accessible through your browser at a URL like: https://stage1prod1.yourdomain.com
 
+## Several staging VMs from one snapshot
+
+A production VM can have several staging VMs at once (up to `MAX_STAGING_VM_COUNT_ON_THIS_HOST`, 5 by default). When you create another one, `/guests/staging/add_staging_vm.sh` lists the staging VMs that already exist for that production VM, with each one's snapshot and the time it was taken, and asks whether the new staging VM should share one of those snapshots. If you share, Stages 2 and 3 are skipped: the new staging VM is simply another linked clone of the existing snapshot, so it sees exactly the same point-in-time production data as the staging VMs it shares with. Choose `new` to take a fresh snapshot of production instead.
+
+`/guests/staging/remove_staging_vm.sh` removes only the staging VM's own linked clone while any other staging VM still uses its snapshot. The snapshot itself is deleted when the last staging VM using it is removed. `list_guests.sh` and the Dashboard's Staging page show each staging VM's snapshot, when it was taken, and which other staging VMs share it.
+
 If a failover occurs of the production VM, which requires bringing the production machine (ex: `prod1`) online on the standby host, a startup hook script will run before the prod VM is powered on, and this startup hook will ensure that, if there are any active staging VMs running on the standby host, that those staging VMs will be powered off before the prod VM is powered on.  This is a fast operation which ensures that the standby host has all of the RAM and CPU resources needed by the prod VM.  After powering-on the prod VM, any powered-off staging VMs are then automatically removed by this hook script.
 
 <p align="center">

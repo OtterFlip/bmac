@@ -629,6 +629,102 @@ else:
             self.assertEqual(state["zfs"][node], {})
         self.assertEqual(state["snapshot_config"], {})
 
+    def add_snapshot_sharer(self, state: str) -> None:
+        """Register stage2prod1 as a second holder of stage1prod1's snapshot.
+
+        stage1prod1 is already being cleaned up, which share-staging-snapshot
+        refuses, so the record is written the way the registry would store it.
+        """
+        self.registry(
+            "allocate-staging",
+            "--source",
+            "prod1",
+            "--vmid",
+            "201",
+            "--placement",
+            "mox2",
+            "--placement-limit",
+            "5",
+        )
+        snapshot = self.registry("get", "stage1prod1")["proxmox"]["snapshot"]
+        path = self.state_dir / "resources" / "stage2prod1.json"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["proxmox"]["snapshot"] = dict(
+            snapshot, dependent_resources=["stage2prod1"], refcount=1
+        )
+        path.write_text(json.dumps(record), encoding="utf-8")
+        if state != "reserved":
+            self.registry("update", "stage2prod1", "--state", state)
+
+    def test_shared_snapshot_is_kept_while_another_staging_guest_uses_it(
+        self,
+    ) -> None:
+        self.add_snapshot_sharer("reserved")
+        first = self.run_helper("mox1")
+        self.assertIn("is still shared by stage2prod1", first.stderr)
+        self.run_helper("mox2")
+
+        rows = self.action_rows()
+        self.assertFalse(any(row[:3] == ["pvesh", "mox1", "delete"] for row in rows))
+        self.assertFalse(any(row[0] == "zfs" and "destroy" in row for row in rows))
+        state = self.read_fake_state()
+        self.assertIn(
+            "stg-base-stage1prod1-260914T220000Z", state["snapshot_config"]
+        )
+        self.assertEqual(len(state["zfs"]["mox2"]), 2)
+        names = {row["name"] for row in self.registry("list")}
+        self.assertNotIn("stage1prod1", names)
+        self.assertIn("stage2prod1", names)
+
+    def test_shared_snapshot_waits_for_every_releasing_holder_clone(self) -> None:
+        self.add_snapshot_sharer("cleanup_pending")
+        queued = self.registry(
+            "defer-cleanup",
+            "--resource",
+            "stage2prod1",
+            "--node",
+            "mox2",
+            "--action",
+            "destroy-volume",
+            "--target",
+            "local-zfs:vm-201-disk-0",
+            "--reason",
+            "test clone cleanup",
+        )
+        waiting = self.run_helper("mox1")
+        self.assertIn(
+            "waiting for the linked clones of stage2prod1", waiting.stderr
+        )
+        self.assertFalse(
+            any(row[:3] == ["pvesh", "mox1", "delete"] for row in self.action_rows())
+        )
+
+        subprocess.run(
+            [
+                str(REGISTRY_SOURCE),
+                "--state-dir",
+                str(self.state_dir),
+                "reconcile",
+                "--observed",
+                "-",
+                "--apply",
+            ],
+            input=json.dumps(
+                {
+                    "schema_version": 1,
+                    "cleanup_completed": [queued["cleanup"]["id"]],
+                }
+            ),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.run_helper("mox1")
+        self.assertTrue(
+            any(row[:3] == ["pvesh", "mox1", "delete"] for row in self.action_rows())
+        )
+        self.assertEqual(self.read_fake_state()["snapshot_config"], {})
+
     def test_offline_source_leaves_snapshot_pending(self) -> None:
         state = self.read_fake_state()
         state["nodes"]["mox1"] = "offline"

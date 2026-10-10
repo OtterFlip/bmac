@@ -377,7 +377,7 @@ if (
     or snapshot["dependent_resources"] != [stage["name"]]
     or snapshot["refcount"] != 1
     or not re.fullmatch(
-        rf"stg-base-{re.escape(stage['name'])}-[A-Za-z0-9._-]+",
+        rf"stg-base-stage[1-9][0-9]*{re.escape(source['name'])}-[A-Za-z0-9._-]+",
         snapshot_name,
     )
     or snapshot_name.startswith("__replicate_")
@@ -424,12 +424,14 @@ validate_storage_dependency() {
 import json
 import sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
-for key in ("name", "volume", "snapshot", "snapshot_guid", "source_volume"):
+for key in (
+    "source_name", "volume", "snapshot", "snapshot_guid", "source_volume"
+):
     sys.stdout.buffer.write(str(row[key]).encode() + b"\0")
 PY
   )
   ((${#fields[@]} == 5)) || return 1
-  local name="${fields[0]}" volume="${fields[1]}" snapshot="${fields[2]}"
+  local source_name="${fields[0]}" volume="${fields[1]}" snapshot="${fields[2]}"
   local expected_guid="${fields[3]}" source_volume="${fields[4]}"
   local clone_dataset clone_path source_dataset source_path origin guid clones
 
@@ -440,7 +442,8 @@ PY
   clone_path="${clone_fields[1]}"
   source_dataset="${source_fields[0]}"
   source_path="${source_fields[1]}"
-  [[ -n "$source_path" && "$snapshot" =~ ^stg-base-"$name"-[A-Za-z0-9._-]+$ &&
+  [[ -n "$source_path" &&
+    "$snapshot" =~ ^stg-base-stage[1-9][0-9]*"$source_name"-[A-Za-z0-9._-]+$ &&
     "$snapshot" != __replicate_* ]] || return 1
   zfs_object_exists "$clone_dataset" || return 1
   [[ "$(zfs list -Hp -o type "$clone_dataset")" == volume ]] || return 1

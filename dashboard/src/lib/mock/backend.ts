@@ -280,6 +280,23 @@ export function createMockBackend(): Backend {
       });
       if (source.kind === "cancel") throw new Cancelled();
       const values = source.kind === "values" ? String(source.values.source) : "prod1";
+      if (values === "prod1") {
+        step(run, "Check existing staging VMs");
+        await log(run, [
+          "Existing staging VMs based on prod1:",
+          "  #   SNAPSHOT                                 TAKEN                    STAGING VMS",
+          "  1   stg-base-stage1prod1-261010T040000Z      2026-10-10 04:00:00 UTC  stage1prod1, stage2prod1",
+        ], 40);
+        const snapshot = await ask(run, {
+          type: "input", request_id: "req-1b-snapshot", title: "Snapshot for the new staging VM",
+          field: { id: "choice", type: "select", label: "Snapshot for the new staging VM", required: true, sensitive: false, disabled: false, default: "new",
+            options: [
+              { value: "new", label: "Take a new snapshot of prod1 now" },
+              { value: "1", label: "Share the snapshot of stage1prod1, stage2prod1 (stg-base-stage1prod1-261010T040000Z, taken 2026-10-10 04:00:00 UTC)" },
+            ] },
+        });
+        if (snapshot.kind === "cancel") throw new Cancelled();
+      }
       step(run, "Choose resources");
       const group: RequestEvent = {
         type: "input_group", request_id: "req-2-resources", title: "Staging VM resources", layout: "form",

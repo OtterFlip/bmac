@@ -298,9 +298,9 @@ validate_staging_volume_for_config_removal() {
   mapfile -d '' -t fields < <(
     staging_storage_fields "$resource_file" "$volume"
   )
-  ((${#fields[@]} == 5)) || return 1
-  local name="${fields[1]}" source_volume="${fields[2]}"
-  local snapshot="${fields[3]}" expected_guid="${fields[4]}"
+  ((${#fields[@]} == 6)) || return 1
+  local source_volume="${fields[2]}"
+  local snapshot="${fields[3]}" expected_guid="${fields[4]}" source="${fields[5]}"
   local target_dataset target_path source_dataset origin guid
   mapfile -t target_fields < <(safe_zvol_dataset "$volume") || return 1
   ((${#target_fields[@]} == 2)) || return 1
@@ -311,7 +311,7 @@ validate_staging_volume_for_config_removal() {
   mapfile -t source_fields < <(safe_zvol_dataset "$source_volume") || return 1
   ((${#source_fields[@]} == 2)) || return 1
   source_dataset="${source_fields[0]}"
-  [[ "$snapshot" =~ ^stg-base-"$name"-[A-Za-z0-9._-]+$ &&
+  [[ "$snapshot" =~ ^stg-base-stage[1-9][0-9]*"$source"-[A-Za-z0-9._-]+$ &&
     "$snapshot" != __replicate_* ]] || return 1
   origin="$(zfs get -Hp -o value origin "$target_dataset")" || return 1
   [[ "$origin" == "${source_dataset}@${snapshot}" ]] || return 1
@@ -459,8 +459,9 @@ values = (
     snapshot["source_volume_id"],
     snapshot["name"],
     snapshot["guids"].get(sys.argv[3], ""),
+    source_name,
 )
-if not values[-1]:
+if not values[4]:
     raise SystemExit("snapshot lacks a GUID for the cleanup node")
 for value in values:
     sys.stdout.buffer.write(str(value).encode() + b"\0")
@@ -473,9 +474,9 @@ destroy_volume_action() {
   mapfile -d '' -t fields < <(
     staging_storage_fields "$resource_file" "$target"
   ) || return 75
-  ((${#fields[@]} == 5)) || return 75
+  ((${#fields[@]} == 6)) || return 75
   local vmid="${fields[0]}" name="${fields[1]}" source_volume="${fields[2]}"
-  local snapshot="${fields[3]}" expected_guid="${fields[4]}"
+  local snapshot="${fields[3]}" expected_guid="${fields[4]}" source="${fields[5]}"
   local target_dataset target_path source_dataset origin guid
 
   ! qm status "$vmid" >/dev/null 2>&1 || {
@@ -494,7 +495,7 @@ destroy_volume_action() {
   mapfile -t source_fields < <(safe_zvol_dataset "$source_volume") || return 75
   ((${#source_fields[@]} == 2)) || return 75
   source_dataset="${source_fields[0]}"
-  [[ "$snapshot" =~ ^stg-base-"$name"-[A-Za-z0-9._-]+$ &&
+  [[ "$snapshot" =~ ^stg-base-stage[1-9][0-9]*"$source"-[A-Za-z0-9._-]+$ &&
     "$snapshot" != __replicate_* ]] || return 75
   origin="$(zfs get -Hp -o value origin "$target_dataset")" || return 75
   [[ "$origin" == "${source_dataset}@${snapshot}" ]] || {
@@ -535,15 +536,18 @@ PY
 
 snapshot_cleanup_fields() {
   local resource_id="$1" target="$2"
-  local resources_json
+  local resources_json cleanup_json
   resources_json="$(registry list --record-type resources)" || return 1
-  python3 - "$resource_id" "$target" "$LOCAL_NODE" "$resources_json" <<'PY'
+  cleanup_json="$(registry list --record-type cleanup)" || return 1
+  python3 - "$resource_id" "$target" "$LOCAL_NODE" "$resources_json" \
+    "$cleanup_json" <<'PY'
 import json
 import re
 import sys
 
 resource_id, target, node = sys.argv[1:4]
 rows = json.loads(sys.argv[4])
+cleanup = json.loads(sys.argv[5])
 matches = [row for row in rows if row["id"] == resource_id]
 if len(matches) != 1:
     raise SystemExit("cleanup resource is absent or ambiguous")
@@ -566,14 +570,41 @@ if len(sources) != 1:
     raise SystemExit("production source is absent or ambiguous")
 source = sources[0]
 name = snapshot["name"]
+creator = re.fullmatch(
+    rf"stg-base-(stage[1-9][0-9]*{re.escape(source['name'])})-[A-Za-z0-9._-]+",
+    name,
+)
 if (
     snapshot["source_resource"] != source["name"]
     or snapshot["source_volume_id"] != source["proxmox"]["volume_id"]
-    or not re.fullmatch(rf"stg-base-{re.escape(stage['name'])}-[A-Za-z0-9._-]+", name)
+    or creator is None
     or name.startswith("__replicate_")
     or target != f"vm-{source['vmid']}@{name}"
 ):
     raise SystemExit("snapshot cleanup target differs from registry dependency")
+# Every other staging record naming this snapshot holds a reference to it.
+# One that is not itself being cleaned up keeps the snapshot alive; one that
+# is must first lose its linked clone, wherever that clone lives.
+holders = [
+    row
+    for row in rows
+    if row["id"] != resource_id
+    and row["kind"] == "staging"
+    and row["source"] == source["name"]
+    and row["proxmox"]["snapshot"] is not None
+    and row["proxmox"]["snapshot"]["name"] == name
+]
+in_use = sorted(row["name"] for row in holders if row["state"] != "cleanup_pending")
+releasing = {row["id"]: row["name"] for row in holders if row["state"] == "cleanup_pending"}
+clone_pending = sorted(
+    {
+        releasing[record["resource_id"]]
+        for record in cleanup
+        if record["resource_id"] in releasing
+        and record["state"] == "pending"
+        and record["action"] in {"destroy-vm", "destroy-volume"}
+    }
+)
 values = (
     stage["name"],
     stage["vmid"],
@@ -584,6 +615,9 @@ values = (
     "\x1f".join(snapshot["source_volume_ids"]),
     json.dumps(snapshot["volume_guids"], sort_keys=True, separators=(",", ":")),
     "yes" if snapshot["verified"] else "no",
+    creator.group(1),
+    ",".join(in_use),
+    ",".join(clone_pending),
 )
 for value in values:
     sys.stdout.buffer.write(str(value).encode() + b"\0")
@@ -620,12 +654,12 @@ PY
 }
 
 snapshot_config_presence() {
-  local source_node="$1" source_vmid="$2" snapshot="$3" staging_name="$4"
+  local source_node="$1" source_vmid="$2" snapshot="$3" creator="$4"
   local rows
   rows="$(pvesh get \
     "/nodes/${source_node}/qemu/${source_vmid}/snapshot" \
     --output-format json)" || return 1
-  python3 - "$snapshot" "$staging_name" "$rows" <<'PY'
+  python3 - "$snapshot" "$creator" "$rows" <<'PY'
 import json
 import sys
 
@@ -676,12 +710,14 @@ delete_snapshot_action() {
   mapfile -d '' -t fields < <(
     snapshot_cleanup_fields "$resource_id" "$target"
   ) || return 75
-  ((${#fields[@]} == 9)) || return 75
-  local staging_name="${fields[0]}" staging_vmid="${fields[1]}"
+  ((${#fields[@]} == 12)) || return 75
+  local staging_name="${fields[0]}"
   local source_name="${fields[2]}" source_vmid="${fields[3]}"
   local snapshot="${fields[4]}" staging_volume="${fields[5]}"
   IFS=$'\x1f' read -r -a source_volumes <<<"${fields[6]}"
   local volume_guids_json="${fields[7]}" verified="${fields[8]}"
+  local creator="${fields[9]}" in_use_by="${fields[10]}"
+  local clone_pending_for="${fields[11]}"
   local source_node presence source_volume source_dataset snapshot_dataset
   local expected_guid guid clones
   local delete_result
@@ -700,6 +736,14 @@ delete_snapshot_action() {
       log "$cleanup_id: linked clone still exists; retaining source snapshot"
       return 75
     fi
+  fi
+  if [[ -n "$in_use_by" ]]; then
+    log "$cleanup_id: $source_name@$snapshot is still shared by ${in_use_by//,/, }; released only the reference held by $staging_name"
+    return 0
+  fi
+  if [[ -n "$clone_pending_for" ]]; then
+    log "$cleanup_id: waiting for the linked clones of ${clone_pending_for//,/, } before deleting shared snapshot $snapshot"
+    return 75
   fi
 
   ((${#source_volumes[@]} > 0)) || return 75
@@ -742,7 +786,7 @@ PY
   }
   presence="$(
     snapshot_config_presence \
-      "$source_node" "$source_vmid" "$snapshot" "$staging_name"
+      "$source_node" "$source_vmid" "$snapshot" "$creator"
   )" || return 75
   case "$presence" in
     present)
@@ -761,7 +805,7 @@ PY
       fi
       [[ "$(
         snapshot_config_presence \
-          "$source_node" "$source_vmid" "$snapshot" "$staging_name"
+          "$source_node" "$source_vmid" "$snapshot" "$creator"
       )" == absent ]] || return 75
       ;;
     absent) ;;

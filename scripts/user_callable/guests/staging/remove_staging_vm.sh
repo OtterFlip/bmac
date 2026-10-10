@@ -35,6 +35,8 @@ SOURCE_VMID=""
 SOURCE_OWNER=""
 SOURCE_PURPOSE=""
 SNAPSHOT_NAME=""
+SNAPSHOT_SHARED_WITH=""
+SNAPSHOT_ALSO_RELEASING=""
 ROUTES_ENABLED=0
 LIVE_PRESENT=0
 SSH_ALIAS=""
@@ -63,10 +65,12 @@ Usage: remove_staging_vm.sh [--dry-run] [stageNprodN]
 
 With no resource argument, lists registered staging guests and prompts for one.
 Permanently removes the selected guest's route, QEMU VM and VM-owned disks,
-linked clone, and the one exact source-owned snapshot created for that staging
-guest. It then verifies that replication removed copies of that same snapshot
-from every production placement node. No other production snapshot is touched,
-and production itself is never stopped or destroyed.
+and linked clone. When no other staging guest shares its source snapshot, that
+one exact snapshot is deleted too, and replication is verified to have removed
+its copies from every production placement node. A snapshot another staging
+guest still uses is kept; it is deleted when its last staging guest is removed.
+No other production snapshot is touched, and production itself is never
+stopped or destroyed.
 
 Options:
   --dry-run  Validate and print the complete destruction plan without changes.
@@ -163,13 +167,27 @@ rows = [
 rows.sort(key=lambda row: (row.get("source", ""), row.get("index", 0)))
 if not rows:
     raise SystemExit("no registered staging guests exist")
-print("  NAME                 SOURCE     NODE     STATE       DOMAIN")
+def snapshot_of(row):
+    snapshot = (row.get("proxmox") or {}).get("snapshot")
+    return snapshot.get("name") if isinstance(snapshot, dict) else None
+users = {}
+for row in rows:
+    if snapshot_of(row):
+        users.setdefault((row.get("source"), snapshot_of(row)), []).append(row["name"])
+print("  NAME                 SOURCE     NODE     STATE       SNAPSHOT                                 DOMAIN")
 for row in rows:
     placement = row.get("placement") or ["?"]
+    snapshot = snapshot_of(row) or "-"
+    others = [
+        name for name in users.get((row.get("source"), snapshot), [])
+        if name != row["name"]
+    ]
+    if others:
+        snapshot += f" (shared with {', '.join(others)})"
     print(
         f"  {row['name']:<20} {str(row.get('source', '?')):<10} "
         f"{str(placement[0]):<8} {str(row.get('state', '?')):<11} "
-        f"{row.get('domains', {}).get('primary', '?')}"
+        f"{snapshot:<40} {row.get('domains', {}).get('primary', '?')}"
     )
 PY
   )" || die "No registered staging guest is available for destruction"
@@ -332,6 +350,14 @@ if targets != set(source_placement) - {source_owner}:
 job_ids = [str(row.get("id", "")) for row in jobs]
 if any(not re.fullmatch(r"[1-9][0-9]{2,8}-[0-9]+", value) for value in job_ids):
     raise SystemExit("source replication job identity is unsafe")
+sharing = [
+    row for row in resources
+    if row.get("kind") == "staging"
+    and row.get("name") != name
+    and row.get("source") == source["name"]
+    and isinstance((row.get("proxmox") or {}).get("snapshot"), dict)
+    and row["proxmox"]["snapshot"].get("name") == snapshot["name"]
+]
 
 values = (
     stage["id"],
@@ -351,12 +377,14 @@ values = (
     ",".join(source_volumes),
     stage["domains"]["primary"],
     ",".join(sorted(online, key=lambda value: int(value[3:]))),
+    ",".join(row["name"] for row in sharing if row.get("state") != "cleanup_pending"),
+    ",".join(row["name"] for row in sharing if row.get("state") == "cleanup_pending"),
 )
 for value in values:
     sys.stdout.buffer.write(str(value).encode() + b"\0")
 PY
   ) || die "Staging destruction preflight failed"
-  ((${#fields[@]} == 17)) || die "Could not parse destruction plan"
+  ((${#fields[@]} == 19)) || die "Could not parse destruction plan"
   RESOURCE_ID="${fields[0]}"
   RESOURCE_REVISION="${fields[1]}"
   RESOURCE_STATE="${fields[2]}"
@@ -374,6 +402,37 @@ PY
   IFS=',' read -r -a SOURCE_VOLUMES <<<"${fields[14]}"
   STAGING_DOMAIN="${fields[15]}"
   IFS=',' read -r -a CLUSTER_NODES <<<"${fields[16]}"
+  SNAPSHOT_SHARED_WITH="${fields[17]}"
+  SNAPSHOT_ALSO_RELEASING="${fields[18]}"
+}
+
+snapshot_taken_label() {
+  local stamp="${1##*-}"
+  if [[ "$stamp" =~ ^([0-9]{2})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z$ ]]; then
+    printf '20%s-%s-%s %s:%s:%s UTC\n' "${BASH_REMATCH[@]:1:6}"
+  else
+    printf 'unknown time\n'
+  fi
+}
+
+# Prints the staging guests that still reference the removed guest's snapshot
+# once its cleanup has finished; empty means the snapshot was deleted.
+remaining_snapshot_users() {
+  local resources
+  resources="$(registry_cmd list 2>/dev/null)" || return 1
+  python3 - "$resources" "$SOURCE_NAME" "$SNAPSHOT_NAME" <<'PY'
+import json
+import sys
+
+rows = json.loads(sys.argv[1])
+print(",".join(
+    row["name"] for row in rows
+    if row.get("kind") == "staging"
+    and row.get("source") == sys.argv[2]
+    and isinstance((row.get("proxmox") or {}).get("snapshot"), dict)
+    and row["proxmox"]["snapshot"].get("name") == sys.argv[3]
+))
+PY
 }
 
 validate_live_vm() {
@@ -529,7 +588,7 @@ queue_cleanup_plan() {
       --node "$node" \
       --action delete-snapshot \
       --target "vm-${SOURCE_VMID}@${SNAPSHOT_NAME}" \
-      --reason "operator requested deletion of this staging guest snapshot" \
+      --reason "operator released this staging guest's snapshot; deleted once no staging guest shares it" \
       >/dev/null ||
       die "Could not queue exact snapshot cleanup on $node"
   done
@@ -709,13 +768,27 @@ main() {
   info "Resource: $RESOURCE_NAME / VMID $VMID / state $RESOURCE_STATE"
   info "Source: $SOURCE_NAME (VMID $SOURCE_VMID; owner $SOURCE_OWNER)"
   info "Staging node/clone: $STAGING_NODE / $STAGING_VOLUME"
-  info "Snapshot: $SNAPSHOT_NAME on ${SOURCE_PLACEMENT[*]}"
+  local snapshot_taken snapshot_scope
+  snapshot_taken="$(snapshot_taken_label "$SNAPSHOT_NAME")"
+  info "Snapshot: $SNAPSHOT_NAME (taken $snapshot_taken) on ${SOURCE_PLACEMENT[*]}"
+  if [[ -n "$SNAPSHOT_SHARED_WITH" ]]; then
+    info "Snapshot is shared with: ${SNAPSHOT_SHARED_WITH//,/, } (it will be kept)"
+    snapshot_scope="its linked clone; the snapshot it shares with ${SNAPSHOT_SHARED_WITH//,/, } is kept"
+  else
+    snapshot_scope="its linked clone, and its source snapshot $SNAPSHOT_NAME"
+  fi
+  [[ -z "$SNAPSHOT_ALSO_RELEASING" ]] ||
+    info "Also releasing this snapshot: ${SNAPSHOT_ALSO_RELEASING//,/, }"
   info "Domain/route enabled: $STAGING_DOMAIN / $ROUTES_ENABLED"
   info "Live VM present: $LIVE_PRESENT"
   bmac_ui_plan_begin "Destroy $RESOURCE_NAME" "Validated against the live cluster; nothing has changed yet."
   bmac_ui_plan_item remove "$RESOURCE_NAME" "VMID $VMID, state $RESOURCE_STATE, on $STAGING_NODE"
   bmac_ui_plan_item remove "linked clone" "$STAGING_VOLUME"
-  bmac_ui_plan_item remove "source snapshot" "$SNAPSHOT_NAME of $SOURCE_NAME on ${SOURCE_PLACEMENT[*]}"
+  if [[ -n "$SNAPSHOT_SHARED_WITH" ]]; then
+    bmac_ui_plan_item keep "source snapshot" "$SNAPSHOT_NAME of $SOURCE_NAME (taken $snapshot_taken) is still used by ${SNAPSHOT_SHARED_WITH//,/, }"
+  else
+    bmac_ui_plan_item remove "source snapshot" "$SNAPSHOT_NAME of $SOURCE_NAME (taken $snapshot_taken) on ${SOURCE_PLACEMENT[*]}"
+  fi
   bmac_ui_plan_item remove "route" "$STAGING_DOMAIN (enabled: $ROUTES_ENABLED)"
   bmac_ui_plan_item keep "$SOURCE_NAME" "The production source VM (VMID $SOURCE_VMID) is not changed"
   BMAC_UI_DRY_RUN="$DRY_RUN" bmac_ui_plan_end
@@ -727,18 +800,18 @@ main() {
     return 0
   fi
 
-  printf '\nTHIS PERMANENTLY DESTROYS %s, ITS LINKED CLONE, AND ITS ONE EXACT SOURCE SNAPSHOT.\n' \
-    "$RESOURCE_NAME"
+  printf '\nTHIS PERMANENTLY DESTROYS %s AND %s.\n' \
+    "$RESOURCE_NAME" "${snapshot_scope^^}"
   local confirmation
   if bmac_ui_is_json; then
     bmac_ui_group_begin destroy "Destroy $RESOURCE_NAME?" \
-      "This permanently destroys $RESOURCE_NAME, its linked clone, and its one exact source snapshot."
+      "This permanently destroys $RESOURCE_NAME and ${snapshot_scope}."
     bmac_ui_group_add SSH_ALIAS --id ssh_alias --label "Workstation SSH alias to remove after success" \
       --default "$RESOURCE_NAME" --required --pattern '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'
     bmac_ui_group_request
     SSH_ALIAS="${SSH_ALIAS:-$RESOURCE_NAME}"
     bmac_ui_confirm --id destroy --severity critical --title "Destroy $RESOURCE_NAME?" \
-      --message "This permanently destroys $RESOURCE_NAME, its linked clone, and its one exact source snapshot. Afterward the SSH alias $SSH_ALIAS is removed from this workstation." \
+      --message "This permanently destroys $RESOURCE_NAME and ${snapshot_scope}. Afterward the SSH alias $SSH_ALIAS is removed from this workstation." \
       --confirm-label "Destroy $RESOURCE_NAME" --text "DESTROY ${RESOURCE_NAME}" &&
       confirmation="DESTROY ${RESOURCE_NAME}" || confirmation=""
   else
@@ -779,11 +852,22 @@ main() {
   wait_for_durable_cleanup
   remove_workstation_alias
 
+  local still_used_by snapshot_deleted=false
+  still_used_by="$(remaining_snapshot_users)" ||
+    still_used_by="$SNAPSHOT_SHARED_WITH"
   log "Staging VM destruction complete"
   info "Destroyed resource: $RESOURCE_NAME (former VMID $VMID)"
-  info "Removed route, VM disks, linked clone, $SNAPSHOT_NAME and its replicated copies, and registry metadata."
+  if [[ -n "$still_used_by" ]]; then
+    info "Removed route, VM disks, linked clone, and registry metadata."
+    info "Kept snapshot $SNAPSHOT_NAME; it is still used by ${still_used_by//,/, }."
+  else
+    snapshot_deleted=true
+    info "Removed route, VM disks, linked clone, $SNAPSHOT_NAME and its replicated copies, and registry metadata."
+  fi
   bmac_ui_step_done
-  bmac_ui_result destroyed "$RESOURCE_NAME" former_vmid "$VMID" source "$SOURCE_NAME"
+  bmac_ui_result destroyed "$RESOURCE_NAME" former_vmid "$VMID" source "$SOURCE_NAME" \
+    snapshot "$SNAPSHOT_NAME" snapshot_deleted:bool "$snapshot_deleted" \
+    snapshot_still_used_by "${still_used_by//,/, }"
 }
 
 if [[ "${APP_HA_REMOVE_STAGING_SOURCE_ONLY:-0}" != 1 ]]; then

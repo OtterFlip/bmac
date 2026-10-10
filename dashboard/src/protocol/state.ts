@@ -76,9 +76,19 @@ export interface ProductionRow extends GuestCommon {
   };
 }
 
+export interface StagingSnapshot {
+  name: string;
+  /** Epoch seconds from the UTC stamp in the snapshot name; null if absent. */
+  created_at: number | null;
+  verified: boolean;
+  /** Other staging VMs cloned from this snapshot; it is deleted with the last one. */
+  shared_with: string[];
+}
+
 export interface StagingRow extends GuestCommon {
   source: string | null;
   url: string | null;
+  snapshot: StagingSnapshot | null;
 }
 
 export interface GuestsState {

@@ -1104,6 +1104,85 @@ class RegistryCliTest(unittest.TestCase):
         )
         self.assertIn("differs between nodes", mismatched.stderr)
 
+    def test_verified_staging_snapshot_is_shared_only_while_a_holder_is_live(
+        self,
+    ) -> None:
+        self.allocate_prod()
+        self.run_registry(
+            "update", "prod1", "--state", "provisioning",
+            "--owner-node", "mox1", "--volume-id", "local-zfs:vm-100-disk-0",
+        )
+        self.run_registry(
+            "update", "prod1", "--state", "stopped",
+            "--ha-nodes", "mox1,mox2", "--replication-targets", "mox2",
+        )
+        for vmid in ("200", "201", "202"):
+            self.run_registry(
+                "allocate-staging", "--source", "prod1", "--vmid", vmid,
+                "--placement", "mox2", "--placement-limit", "5",
+            )
+        snapshot = "stg-base-stage1prod1-260914T220000Z"
+        self.run_registry("update", "stage1prod1", "--state", "snapshotting")
+        self.run_registry(
+            "record-staging-snapshot-intent", "stage1prod1",
+            "--snapshot-name", snapshot, "--snapshot-owner-node", "mox1",
+            "--source-volume-id", "local-zfs:vm-100-disk-0",
+            "--snapshotted-volume-id", "local-zfs:vm-100-disk-0",
+        )
+        _, unverified = self.run_registry(
+            "share-staging-snapshot", "stage2prod1", "--from", "stage1prod1",
+            expected=1,
+        )
+        self.assertIn("no verified snapshot", unverified.stderr)
+        donor, _ = self.run_registry(
+            "record-staging-snapshot", "stage1prod1",
+            "--snapshot-name", snapshot, "--snapshot-owner-node", "mox1",
+            "--source-volume-id", "local-zfs:vm-100-disk-0",
+            "--snapshot-guid", "mox1=123456", "--snapshot-guid", "mox2=123456",
+            "--snapshot-volume-guid", "local-zfs:vm-100-disk-0,mox1=123456",
+            "--snapshot-volume-guid", "local-zfs:vm-100-disk-0,mox2=123456",
+        )
+
+        shared, _ = self.run_registry(
+            "share-staging-snapshot", "stage2prod1", "--from", "stage1prod1"
+        )
+        metadata = shared["proxmox"]["snapshot"]
+        self.assertEqual(metadata["dependent_resources"], ["stage2prod1"])
+        self.assertEqual(metadata["refcount"], 1)
+        self.assertEqual(
+            {k: v for k, v in metadata.items() if k != "dependent_resources"},
+            {
+                k: v
+                for k, v in donor["proxmox"]["snapshot"].items()
+                if k != "dependent_resources"
+            },
+        )
+        retry, _ = self.run_registry(
+            "share-staging-snapshot", "stage2prod1", "--from", "stage1prod1"
+        )
+        self.assertEqual(retry["revision"], shared["revision"])
+
+        self.run_registry("update", "stage3prod1", "--state", "snapshotting")
+        _, not_reserved = self.run_registry(
+            "share-staging-snapshot", "stage3prod1", "--from", "stage1prod1",
+            expected=1,
+        )
+        self.assertIn("freshly reserved", not_reserved.stderr)
+        self.run_registry("update", "stage3prod1", "--state", "failed")
+        self.run_registry("release", "stage3prod1")
+        self.run_registry(
+            "allocate-staging", "--source", "prod1", "--vmid", "203",
+            "--placement", "mox2", "--placement-limit", "5",
+        )
+
+        for name in ("stage1prod1", "stage2prod1"):
+            self.run_registry("update", name, "--state", "cleanup_pending")
+        _, released = self.run_registry(
+            "share-staging-snapshot", "stage3prod1", "--from", "stage2prod1",
+            expected=1,
+        )
+        self.assertIn("being released by its last staging guest", released.stderr)
+
     def test_deferred_cleanup_is_idempotent_and_blocks_reuse(self) -> None:
         allocated = self.allocate_prod()
         arguments = [

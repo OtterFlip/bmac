@@ -932,6 +932,24 @@ for resource in sorted(
         f"{route_counts.get(resource['name'], 0):>6} {placement}"
     )
 
+snapshot_users = {}
+for resource in resources:
+    snapshot = (resource.get("proxmox") or {}).get("snapshot")
+    if resource["kind"] == "staging" and isinstance(snapshot, dict):
+        key = (resource["source"], snapshot["name"])
+        snapshot_users.setdefault(key, []).append(resource["name"])
+if snapshot_users:
+    print("\nSTAGING SOURCE SNAPSHOTS:")
+    print(f"  {'SOURCE':<8} {'SNAPSHOT':<40} {'TAKEN':<20} STAGING VMS")
+    for (source, name), users in sorted(snapshot_users.items()):
+        stamp = name.rsplit("-", 1)[-1]
+        taken = (
+            f"20{stamp[0:2]}-{stamp[2:4]}-{stamp[4:6]} {stamp[7:9]}:{stamp[9:11]} UTC"
+            if len(stamp) == 14 and stamp[6] == "T" and stamp.endswith("Z")
+            else "unknown"
+        )
+        print(f"  {source:<8} {name:<40} {taken:<20} {', '.join(sorted(users))}")
+
 registered_vmids = {int(row["vmid"]) for row in resources}
 unexpected = [
     row for row in live

@@ -1757,6 +1757,14 @@ Creation then:
    purpose tags, generic lifecycle hook, QGA, `onboot=0`, and no HA resource.
    The cloned data disk is still unattached.
 
+When the source already has staging guests, the operator may instead share
+one of their verified snapshots. Steps 1 through 5 then become one
+`share-staging-snapshot` registry call, which refuses once every existing user
+of that snapshot is `cleanup_pending` or `failed`, followed by a fresh check
+of every recorded ZFS GUID. The deferred-cleanup worker keeps a shared
+snapshot while any other user is not being cleaned up, and otherwise waits for
+the other users' clones to be destroyed before deleting it.
+
 The production owner is rechecked throughout. Owner movement during the
 guarded window aborts and starts rollback.
 
@@ -2083,7 +2091,11 @@ MiB, always larger than `disk_gib`, and changed only through
 `update --disk-bytes`, which allows growth only. Staging records keep the
 source's `disk_gib`. A staging snapshot additionally records
 source resource, root and all snapshotted volumes, original owner, root and
-per-volume GUID maps, verification flag, sole dependent, and refcount 1.
+per-volume GUID maps, verification flag, sole dependent, and refcount 1. The
+dependent and refcount describe that record's own reference: several staging
+records may name one verified snapshot of the same source when their copies of
+the metadata are identical, and the snapshot is deleted only after the last of
+them has lost its clone.
 
 Writers: only registry mutations write them. Production/staging creators call
 allocate/update/snapshot commands; the lifecycle hook disables routes and

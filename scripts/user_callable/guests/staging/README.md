@@ -45,7 +45,9 @@ jobs, or makes a node lacking the exact snapshot GUID a replication source
 while the clone exists. Teardown must destroy every dependent clone before
 deleting the production snapshot and must replicate the deletion everywhere.
 The later production-start cleanup item must honor the dependency/refcount
-metadata recorded by this script.
+metadata recorded by this script. Several staging guests can share one
+snapshot (see "Sharing a snapshot between staging guests" below); it is
+deleted only after the last of their clones is gone.
 
 The VM snapshot requires a responsive QEMU guest agent and refuses a source
 that disables guest-agent filesystem freezing, but this is not an
@@ -143,6 +145,44 @@ The mutating workflow is fail-closed:
 
 Production owner movement during the guarded creation window aborts the
 operation and invokes rollback.
+
+## Sharing a snapshot between staging guests
+
+A production source can have several staging guests. When the chosen source
+already has staging guests, the script lists them with their snapshot names
+and the UTC time each snapshot was taken, then asks whether the new guest
+should share one of those snapshots or take a new one. Answer with the listed
+`#`, the name of a staging guest that uses the snapshot, or `new`.
+
+When a snapshot is shared, steps 1 through 5 above are replaced by one
+registry command, `share-staging-snapshot NAME --from STAGING`. It copies the
+verified snapshot metadata from the other guest onto the fresh reservation. It
+refuses when every guest already using the snapshot is `cleanup_pending` or
+`failed`, because that snapshot may already be being deleted. The script then
+proves again that every snapshotted volume has its recorded ZFS GUID on every
+placement node, and the remaining steps (clone, patch, attach, route, start)
+are unchanged. A failed creation that had attached to a shared snapshot never
+deletes it; it only releases its own reference.
+
+Each staging record keeps its own full copy of the snapshot metadata, and its
+`dependent_resources` and `refcount` describe that one record's reference.
+The snapshot's holders are every staging record that names the same source
+and snapshot. The registry accepts several holders only when the snapshot is
+verified and every copy of the metadata is identical.
+
+`remove_staging_vm.sh` shows whether the snapshot is shared before it asks for
+confirmation. It always queues the same per-node `delete-snapshot` records, and
+the cleanup worker decides when it runs:
+
+- If another holder is not itself being cleaned up, the snapshot is kept and
+  only this guest's reference is released.
+- If every other holder is `cleanup_pending`, the worker waits until their
+  queued VM and clone destruction has finished, then deletes the snapshot.
+- If there is no other holder, the snapshot is deleted as before.
+
+Deciding at deletion time means two removals that run together still delete
+the snapshot exactly once, and a removal and a new share that run together
+never delete a snapshot that a new clone depends on.
 
 ## Offline patch gate
 

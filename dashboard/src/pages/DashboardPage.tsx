@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState, Meter, RunStatusIcon, Skeleton, StatusPill, useNow, type Health } from "@/components/status";
 import { AttentionBanner, PageBody, PageHeader } from "@/components/layout/Page";
 import { ExternalButton, SourceRefresh, proxmoxUrl, useSource } from "./common";
-import { ago, bytes, elapsed, percent, plural } from "@/lib/format";
+import { ago, agoEpoch, bytes, elapsed, percent, plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { NextStep } from "@/protocol/types";
 
@@ -174,7 +174,13 @@ export function DashboardPage() {
                 <div key={vm.name} className="flex items-center gap-3 px-4 py-2.5">
                   <StatusPill health={vmHealth(vm.live_status)}>{vm.live_status}</StatusPill>
                   <span className="font-mono text-[12.5px] font-medium text-fg">{vm.name}</span>
-                  <span className="min-w-0 flex-1 truncate text-[12px] text-fg-subtle">{vm.source ? `copy of ${vm.source}` : ""}</span>
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-fg-subtle" title={vm.snapshot?.name}>
+                    {[
+                      vm.source && `copy of ${vm.source}`,
+                      vm.snapshot?.created_at && `snapshot ${agoEpoch(vm.snapshot.created_at)}`,
+                      vm.snapshot?.shared_with.length && `shared with ${vm.snapshot.shared_with.join(", ")}`,
+                    ].filter(Boolean).join(" · ")}
+                  </span>
                   {vm.url && <ExternalButton url={vm.url} />}
                 </div>
               ))}

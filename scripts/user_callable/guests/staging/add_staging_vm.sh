@@ -70,9 +70,12 @@ CLONE_DATASET=""
 CLONE_PATH=""
 SNAPSHOT_NAME=""
 SNAPSHOT_GUID=""
+SNAPSHOT_SHARED_FROM=""
+SNAPSHOT_SHARED_WITH=""
 
 REGISTRY_RESERVED=false
 SNAPSHOT_MAY_EXIST=false
+SNAPSHOT_ATTACHED=false
 CLONE_MAY_EXIST=false
 VM_MAY_EXIST=false
 DISK_ATTACHED=false
@@ -115,6 +118,10 @@ Run from an administrator workstation. The script lists production registry
 resources, prompts for a source prodN, selects a standby of its live HA owner
 (prompting when more than one is eligible), and creates one stopped
 stageNprodN staging VM.
+
+When the source already has staging VMs, the script lists them with their
+snapshots and offers to share one of those snapshots instead of taking a new
+one. A shared snapshot is deleted only when its last staging VM is removed.
 
 Options:
   --dry-run                       Perform live read-only validation and show
@@ -1125,6 +1132,111 @@ PY
   )" || die "Could not select a free candidate VMID"
 }
 
+snapshot_taken_label() {
+  local stamp="${1##*-}"
+  if [[ "$stamp" =~ ^([0-9]{2})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z$ ]]; then
+    printf '20%s-%s-%s %s:%s:%s UTC\n' "${BASH_REMATCH[@]:1:6}"
+  else
+    printf 'unknown time\n'
+  fi
+}
+
+# One line per snapshot that existing staging copies of the source can share:
+# snapshot name, then a comma-separated list of the staging VMs using it.
+list_shareable_snapshots() {
+  python3 - "${RUN_DIR}/resources.json" "$SOURCE_NAME" "$SOURCE_VOLUME" <<'PY'
+import json
+import sys
+
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+source, source_volume = sys.argv[2:]
+users = {}
+for row in sorted(rows, key=lambda value: value.get("index", 0)):
+    snapshot = (row.get("proxmox") or {}).get("snapshot")
+    if (
+        row.get("kind") != "staging"
+        or row.get("source") != source
+        or row.get("state") in {"cleanup_pending", "failed"}
+        or not isinstance(snapshot, dict)
+        or snapshot.get("verified") is not True
+        or snapshot.get("source_volume_id") != source_volume
+    ):
+        continue
+    users.setdefault(snapshot["name"], []).append(row["name"])
+for name in sorted(users, key=lambda value: value.rsplit("-", 1)[-1], reverse=True):
+    print(f"{name}\t{','.join(users[name])}")
+PY
+}
+
+choose_snapshot_source() {
+  CURRENT_PHASE="checking existing staging VMs of the source"
+  local listing
+  listing="$(list_shareable_snapshots)" ||
+    die "Could not inspect the existing staging VMs of $SOURCE_NAME"
+  if [[ -z "$listing" ]]; then
+    info "$SOURCE_NAME has no staging VMs yet; a new snapshot will be taken"
+    return 0
+  fi
+  if ! registry_cmd share-staging-snapshot --help >/dev/null 2>&1; then
+    warn "The installed cluster runtime cannot share staging snapshots; run update_cluster_runtime.sh to enable it. A new snapshot will be taken."
+    return 0
+  fi
+
+  local -a snapshots=() users=()
+  local snapshot users_csv index
+  while IFS=$'\t' read -r snapshot users_csv; do
+    snapshots+=("$snapshot")
+    users+=("$users_csv")
+  done <<<"$listing"
+
+  printf '\nExisting staging VMs based on %s:\n' "$SOURCE_NAME"
+  printf '  %-3s %-40s %-24s %s\n' "#" SNAPSHOT TAKEN "STAGING VMS"
+  for index in "${!snapshots[@]}"; do
+    printf '  %-3s %-40s %-24s %s\n' "$((index + 1))" "${snapshots[index]}" \
+      "$(snapshot_taken_label "${snapshots[index]}")" "${users[index]//,/, }"
+  done
+
+  local choice
+  if bmac_ui_is_json; then
+    local -a options=(new "Take a new snapshot of $SOURCE_NAME now")
+    for index in "${!snapshots[@]}"; do
+      options+=(
+        "$((index + 1))"
+        "Share the snapshot of ${users[index]//,/, } (${snapshots[index]}, taken $(snapshot_taken_label "${snapshots[index]}"))"
+      )
+    done
+    bmac_ui_choose choice "Snapshot for the new staging VM" new "${options[@]}"
+  else
+    prompt_with_default choice \
+      "Share the snapshot of an existing staging VM? Enter its # or name, or 'new' for a fresh snapshot" \
+      new
+  fi
+  choice="${choice:-new}"
+  [[ "${choice,,}" != new ]] || {
+    info "A new snapshot of $SOURCE_NAME will be taken"
+    return 0
+  }
+
+  local selected="" donor=""
+  if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && ((choice <= ${#snapshots[@]})); then
+    selected=$((choice - 1))
+    donor="${users[selected]%%,*}"
+  else
+    for index in "${!snapshots[@]}"; do
+      if [[ ",${users[index]}," == *",${choice},"* ]]; then
+        selected="$index"
+        donor="$choice"
+      fi
+    done
+  fi
+  [[ -n "$selected" ]] ||
+    die "Snapshot choice must be 'new', a listed #, or a listed staging VM"
+  SNAPSHOT_SHARED_FROM="$donor"
+  SNAPSHOT_SHARED_WITH="${users[selected]}"
+  SNAPSHOT_NAME="${snapshots[selected]}"
+  info "The new staging VM will share $SNAPSHOT_NAME (taken $(snapshot_taken_label "$SNAPSHOT_NAME")) with ${SNAPSHOT_SHARED_WITH//,/, }"
+}
+
 collect_request() {
   local source_default
   source_default="$(
@@ -1165,6 +1277,7 @@ PY
   parse_selected_source "$SOURCE_NAME" ||
     die "Invalid production source selection"
   validate_live_source_and_ha
+  choose_snapshot_source
   load_replication_jobs_and_choose_standby
   verify_source_vm_contract
   query_next_vmid
@@ -1231,9 +1344,11 @@ PY
 # validated as a whole. Sets the same globals the terminal prompts do.
 collect_options_json() {
   local cores memory start jump domain link_down sanitizer normalized
-  local sanitizer_supplied="$SANITIZER_FILE"
+  local sanitizer_supplied="$SANITIZER_FILE" snapshot_note="a new snapshot"
+  [[ -z "$SNAPSHOT_SHARED_FROM" ]] ||
+    snapshot_note="the snapshot shared with ${SNAPSHOT_SHARED_WITH//,/, }"
   bmac_ui_group_begin staging_options "Staging VM options" \
-    "Clone of $SOURCE_NAME on $STAGING_NODE. Leave the FQDN blank to use the lowest free number (currently stage${STAGING_CANDIDATE_INDEX}${SOURCE_NAME}.${SOURCE_PRIMARY_DOMAIN})."
+    "Clone of $SOURCE_NAME from ${snapshot_note} on $STAGING_NODE. Leave the FQDN blank to use the lowest free number (currently stage${STAGING_CANDIDATE_INDEX}${SOURCE_NAME}.${SOURCE_PRIMARY_DOMAIN})."
   [[ -n "$CORES_OVERRIDE" ]] ||
     bmac_ui_group_add cores --id cores --type integer --label "vCPU cores" \
       --default "$STAGING_VM_CORES" --min 1 --required
@@ -1323,6 +1438,14 @@ PY
   info "Domain: $STAGING_DOMAIN"
   info "Source/owner: $SOURCE_NAME / $SOURCE_OWNER"
   info "Standby: $STAGING_NODE"
+  local snapshot_plan="new" snapshot_taken=""
+  if [[ -n "$SNAPSHOT_SHARED_FROM" ]]; then
+    snapshot_plan="$SNAPSHOT_NAME"
+    snapshot_taken="$(snapshot_taken_label "$SNAPSHOT_NAME")"
+    info "Snapshot: share $SNAPSHOT_NAME (taken $snapshot_taken) with ${SNAPSHOT_SHARED_WITH//,/, }"
+  else
+    info "Snapshot: a new snapshot of $SOURCE_NAME will be taken"
+  fi
   info "Compute: ${STAGING_VM_CORES} vCPU / $((STAGING_VM_MEMORY_MB / 1024)) GiB RAM"
   info "Start after creation: $START_AFTER_CREATION"
   info "Set up workstation jump SSH: $SETUP_WORKSTATION_JUMP_SSH"
@@ -1334,7 +1457,9 @@ PY
   fi
   bmac_ui_step_done
   bmac_ui_result name "$STAGING_NAME" ip "$STAGING_IP" vmid "$STAGING_VMID" \
-    domain "$STAGING_DOMAIN" source "$SOURCE_NAME" standby "$STAGING_NODE" reserved:bool false
+    domain "$STAGING_DOMAIN" source "$SOURCE_NAME" standby "$STAGING_NODE" \
+    snapshot "$snapshot_plan" snapshot_taken "$snapshot_taken" \
+    snapshot_shared_with "${SNAPSHOT_SHARED_WITH//,/, }" reserved:bool false
   bmac_ui_next_step "Create $STAGING_NAME for real; the identity is reserved only then." \
     --workflow add_staging_vm --arg dry_run=false
 }
@@ -1412,7 +1537,9 @@ PY
   )" || die "Registry did not return a fresh staging allocation"
   parse_staging_resource "$resource"
   REGISTRY_RESERVED=true
-  SNAPSHOT_NAME="stg-base-${STAGING_NAME}-$(date -u +%y%m%dT%H%M%SZ)"
+  if [[ -z "$SNAPSHOT_SHARED_FROM" ]]; then
+    SNAPSHOT_NAME="stg-base-${STAGING_NAME}-$(date -u +%y%m%dT%H%M%SZ)"
+  fi
   [[ "$SNAPSHOT_NAME" =~ ^[A-Za-z][A-Za-z0-9._-]{0,39}$ &&
     "$SNAPSHOT_NAME" != __replicate_* ]] ||
     die "Derived staging snapshot name is unsafe or exceeds Proxmox's 40-character limit"
@@ -1656,6 +1783,71 @@ verify_snapshot_guids() {
   )" || die "Could not record the verified staging snapshot dependency"
   parse_staging_resource "$recorded"
   registry_update_stage --state cloning
+}
+
+# The registry refuses to attach when every other user of the snapshot is
+# already being removed, so a snapshot that cleanup may be deleting is never
+# reused. The ZFS GUIDs are then re-proved on every placement node.
+attach_shared_snapshot() {
+  CURRENT_PHASE="attaching the shared staging-base snapshot"
+  require_source_unchanged
+  local recorded
+  recorded="$(
+    registry_cmd share-staging-snapshot "$STAGING_NAME" \
+      --expected-revision "$STAGING_REVISION" \
+      --from "$SNAPSHOT_SHARED_FROM"
+  )" || die "Could not share the snapshot of $SNAPSHOT_SHARED_FROM"
+  SNAPSHOT_ATTACHED=true
+  parse_staging_resource "$recorded"
+  verify_shared_snapshot_guids "${RUN_DIR}/staging-resource.json"
+  registry_update_stage --state cloning
+}
+
+verify_shared_snapshot_guids() {
+  CURRENT_PHASE="verifying the shared snapshot on every placement node"
+  local resource_path="$1" expected volume node guid dataset observed
+  local selected_dataset=""
+  expected="$(
+    python3 - "$resource_path" "$SNAPSHOT_NAME" "$SOURCE_VOLUME" \
+      "$(IFS=,; printf '%s' "${SOURCE_VOLUMES[*]}")" \
+      "$(IFS=,; printf '%s' "${SOURCE_PLACEMENT[*]}")" <<'PY'
+import json
+import sys
+
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+name, root_volume, volumes_csv, placement_csv = sys.argv[2:]
+snapshot = row["proxmox"]["snapshot"]
+if not isinstance(snapshot, dict) or snapshot.get("verified") is not True:
+    raise SystemExit("shared snapshot metadata is not verified")
+if snapshot["name"] != name:
+    raise SystemExit("registry attached a different snapshot than the one chosen")
+if snapshot["source_volume_id"] != root_volume:
+    raise SystemExit("the production root volume changed since the snapshot was taken")
+if set(snapshot["source_volume_ids"]) != set(volumes_csv.split(",")):
+    raise SystemExit("the production disks changed since the snapshot was taken")
+for volume in snapshot["source_volume_ids"]:
+    for node in placement_csv.split(","):
+        guid = snapshot["volume_guids"].get(volume, {}).get(node)
+        if not guid:
+            raise SystemExit(f"shared snapshot has no recorded GUID for {volume} on {node}")
+        print(f"{volume}\t{node}\t{guid}")
+PY
+  )" || die "The shared snapshot no longer matches the production VM"
+  while IFS=$'\t' read -r volume node guid; do
+    dataset="$(volume_dataset_on_node "$node" "$volume")" ||
+      die "Could not resolve $volume on $node"
+    observed="$(
+      node_exec "$node" zfs get -Hp -o value guid "${dataset}@${SNAPSHOT_NAME}"
+    )" || die "Shared snapshot $SNAPSHOT_NAME for $volume is absent on $node"
+    [[ "$observed" == "$guid" ]] ||
+      die "Shared snapshot $SNAPSHOT_NAME for $volume on $node differs from the registry"
+    if [[ "$volume" == "$SOURCE_VOLUME" ]]; then
+      SNAPSHOT_GUID="$guid"
+      [[ "$node" != "$STAGING_NODE" ]] || selected_dataset="$dataset"
+    fi
+  done <<<"$expected"
+  [[ -n "$SNAPSHOT_GUID" && "$selected_dataset" == "$SOURCE_DATASET" ]] ||
+    die "Could not verify the shared root snapshot on $STAGING_NODE"
 }
 
 clone_snapshot_locally() {
@@ -2601,7 +2793,10 @@ record_deferred_rollback_cleanup() {
       --reason "staging creation rollback could not prove clone destruction" \
       >/dev/null 2>&1 || true
   fi
-  if [[ "$SNAPSHOT_MAY_EXIST" == true && -n "$SNAPSHOT_NAME" ]]; then
+  # A shared snapshot's cleanup releases only this reference unless every
+  # other user is gone by the time the worker runs.
+  if [[ ("$SNAPSHOT_MAY_EXIST" == true || "$SNAPSHOT_ATTACHED" == true) &&
+    -n "$SNAPSHOT_NAME" ]]; then
     for node in "${SOURCE_PLACEMENT[@]}"; do
       if ! is_configured_cluster_node "$node"; then
         warn "Skipping stale snapshot cleanup node absent from pvesh /nodes: $node"
@@ -2652,7 +2847,11 @@ rollback_failed_creation() {
     warn "No staging resources had been allocated; no rollback actions were needed."
     return 0
   fi
-  warn "Rolling back newly-created staging resources; production is never started or modified beyond its staging snapshot."
+  if [[ -n "$SNAPSHOT_SHARED_FROM" ]]; then
+    warn "Rolling back newly-created staging resources; the shared snapshot $SNAPSHOT_NAME and production are not changed."
+  else
+    warn "Rolling back newly-created staging resources; production is never started or modified beyond its staging snapshot."
+  fi
   local storage_ok=true snapshot_ok=true registry_ok=true route_ok=true
   remove_staging_vm_and_clone || storage_ok=false
   if [[ "$storage_ok" == true ]]; then
@@ -2709,6 +2908,8 @@ rollback_failed_creation() {
   if [[ "$storage_ok" != true || "$snapshot_ok" != true ||
     "$registry_ok" != true || "$route_ok" != true ]]; then
     warn "Rollback was incomplete. The registry record was retained when needed for cleanup."
+  elif [[ -n "$SNAPSHOT_SHARED_FROM" ]]; then
+    warn "Rollback removed the VM, clone, and registry allocation; the shared source snapshot $SNAPSHOT_NAME was kept."
   else
     warn "Rollback removed the VM, clone, source snapshot, and registry allocation."
   fi
@@ -2752,7 +2953,10 @@ print_completion() {
   status="$(node_exec "$STAGING_NODE" qm status "$STAGING_VMID")"
   log "Staging VM creation complete"
   info "Resource: $STAGING_NAME (VMID $STAGING_VMID)"
-  info "Source snapshot: ${SOURCE_NAME}@${SNAPSHOT_NAME}"
+  info "Source snapshot: ${SOURCE_NAME}@${SNAPSHOT_NAME} (taken $(snapshot_taken_label "$SNAPSHOT_NAME"))"
+  if [[ -n "$SNAPSHOT_SHARED_FROM" ]]; then
+    info "Snapshot is shared with: ${SNAPSHOT_SHARED_WITH//,/, }"
+  fi
   info "Tracked snapshot volumes: ${SOURCE_VOLUMES[*]}"
   info "Root snapshot GUID: $SNAPSHOT_GUID on ${SOURCE_PLACEMENT[*]}"
   info "Linked clone: $STAGING_NODE / $STAGING_VOLUME"
@@ -2770,6 +2974,8 @@ print_completion() {
   bmac_ui_step_done
   bmac_ui_result name "$STAGING_NAME" vmid "$STAGING_VMID" ip "$STAGING_IP" \
     url "https://${STAGING_DOMAIN}" source "$SOURCE_NAME" node "$STAGING_NODE" \
+    snapshot "$SNAPSHOT_NAME" snapshot_taken "$(snapshot_taken_label "$SNAPSHOT_NAME")" \
+    snapshot_shared_with "${SNAPSHOT_SHARED_WITH//,/, }" \
     status "${status#status: }"
   [[ -n "$SANITIZER_FILE" ]] ||
     bmac_ui_next_step "Review production-derived data, credentials, and jobs in $STAGING_NAME before using it; no sanitizer was injected."
@@ -2796,9 +3002,13 @@ main() {
   reconcile_source_registry_owner
   reserve_staging
   preflight_reserved_identity
-  create_source_snapshot
-  trigger_and_wait_for_replication
-  verify_snapshot_guids
+  if [[ -n "$SNAPSHOT_SHARED_FROM" ]]; then
+    attach_shared_snapshot
+  else
+    create_source_snapshot
+    trigger_and_wait_for_replication
+    verify_snapshot_guids
+  fi
   clone_snapshot_locally
   create_unattached_vm
   patch_clone_offline

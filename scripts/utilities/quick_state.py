@@ -16,6 +16,7 @@ KIND is hosts, guests, replication, or storage.
 """
 
 import argparse
+import calendar
 import json
 import os
 import re
@@ -466,6 +467,54 @@ def first_ha(report, sid):
     return None
 
 
+STAGING_SNAPSHOT_STAMP_RE = re.compile(r"-([0-9]{6}T[0-9]{6}Z)$")
+
+
+def staging_snapshot(resource, resources):
+    """The source snapshot a staging VM was cloned from.
+
+    created_at comes from the UTC stamp add_staging_vm.sh puts at the end of
+    every snapshot name. shared_with lists the other staging VMs cloned from
+    the same snapshot; the snapshot is deleted only with the last of them.
+    """
+    snapshot = (resource.get("proxmox") or {}).get("snapshot")
+    if not isinstance(snapshot, dict) or not snapshot.get("name"):
+        return None
+    name = snapshot["name"]
+    created_at = None
+    match = STAGING_SNAPSHOT_STAMP_RE.search(name)
+    if match:
+        try:
+            created_at = calendar.timegm(
+                time.strptime(match.group(1), "%y%m%dT%H%M%SZ")
+            )
+        except ValueError:
+            created_at = None
+    shared_with = sorted(
+        (
+            row.get("name")
+            for row in resources
+            if row.get("kind") == "staging"
+            and row.get("name") != resource.get("name")
+            and row.get("source") == resource.get("source")
+            and ((row.get("proxmox") or {}).get("snapshot") or {}).get("name") == name
+        ),
+        key=lambda value: str(value),
+    )
+    return {
+        "name": name,
+        "created_at": created_at,
+        "verified": snapshot.get("verified") is True,
+        "shared_with": shared_with,
+    }
+
+
+def snapshot_taken_text(epoch):
+    if epoch is None:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(epoch))
+
+
 def render_guests(report, args, ui):
     now = report.get("collected_at") or int(time.time())
     problems = []
@@ -553,6 +602,7 @@ def render_guests(report, args, ui):
             entry.update({
                 "source": resource.get("source"),
                 "url": f"https://{common['domain']}" if common["domain"] else None,
+                "snapshot": staging_snapshot(resource, report.get("resources") or []),
             })
             staging.append(entry)
             if entry["registry_state"] in ("cleanup_pending", "failed"):
@@ -602,10 +652,14 @@ def render_guests(report, args, ui):
         heading("STAGING VMS")
         if staging:
             table(
-                ["NAME", "VMID", "SOURCE", "REGISTRY", "LIVE", "NODE", "IP", "URL"],
+                ["NAME", "VMID", "SOURCE", "REGISTRY", "LIVE", "NODE", "IP", "URL",
+                 "SNAPSHOT", "TAKEN", "SHARED WITH"],
                 [
                     [row["name"], row["vmid"], row["source"], row["registry_state"],
-                     row["live_status"], row["node"] or "-", row["ip"], row["url"] or "-"]
+                     row["live_status"], row["node"] or "-", row["ip"], row["url"] or "-",
+                     (row["snapshot"] or {}).get("name") or "-",
+                     snapshot_taken_text((row["snapshot"] or {}).get("created_at")),
+                     ", ".join((row["snapshot"] or {}).get("shared_with") or []) or "-"]
                     for row in staging
                 ],
             )

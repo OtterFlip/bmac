@@ -180,6 +180,35 @@ class QuickStateTest(unittest.TestCase):
         self.assertEqual(filtered["production"], [])
         self.assertNotIn("PRODUCTION VMS", self.render_terminal("guests", GUESTS_REPORT, "--kind-filter", "staging"))
 
+    def test_staging_rows_surface_their_snapshot_and_who_shares_it(self) -> None:
+        shared = "stg-base-stage1prod1-261010T040000Z"
+        report = json.loads(json.dumps(GUESTS_REPORT))
+        report["resources"][1]["proxmox"] = {"snapshot": {"name": shared, "verified": True}}
+        report["resources"].append(
+            {"kind": "staging", "index": 2, "name": "stage2prod1", "vmid": 202, "state": "stopped",
+             "ip": "10.1.0.52", "placement": ["mox2"], "source": "prod1",
+             "domains": {"primary": "stage2prod1.example.com"},
+             "proxmox": {"snapshot": {"name": shared, "verified": True}}}
+        )
+        report["resources"].append(
+            {"kind": "staging", "index": 3, "name": "stage3prod1", "vmid": 203, "state": "reserved",
+             "ip": "10.1.0.53", "placement": ["mox2"], "source": "prod1",
+             "domains": {"primary": "stage3prod1.example.com"}, "proxmox": {"snapshot": None}}
+        )
+        summary, _, _ = self.render_json("guests", report)
+        rows = {row["name"]: row for row in summary["staging"]}
+        self.assertEqual(
+            rows["stage1prod1"]["snapshot"],
+            {"name": shared, "created_at": 1791604800, "verified": True,
+             "shared_with": ["stage2prod1"]},
+        )
+        self.assertEqual(rows["stage2prod1"]["snapshot"]["shared_with"], ["stage1prod1"])
+        self.assertIsNone(rows["stage3prod1"]["snapshot"])
+
+        text = self.render_terminal("guests", report, "--kind-filter", "staging")
+        self.assertIn(shared, text)
+        self.assertIn("2026-10-10 04:00 UTC", text)
+
     def test_replication_filter_by_guest(self) -> None:
         summary, steps, _ = self.render_json("replication", GUESTS_REPORT, "--guest", "prod1")
         self.assertEqual([job["id"] for job in summary["jobs"]], ["101-0"])

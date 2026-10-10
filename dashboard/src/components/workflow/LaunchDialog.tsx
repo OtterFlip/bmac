@@ -19,7 +19,7 @@ function useKnownNames() {
     return {
       host: (hosts?.hosts ?? []).map((h) => ({ value: h.name, label: h.name, help: h.online ? `online${h.is_control ? " · control node" : ""}` : "offline" })),
       production: (guests?.production ?? []).map((g) => ({ value: g.name, label: g.name, help: [g.domain, g.node && `on ${g.node}`, g.live_status].filter(Boolean).join(" · ") })),
-      staging: (guests?.staging ?? []).map((g) => ({ value: g.name, label: g.name, help: [g.source && `from ${g.source}`, g.node && `on ${g.node}`, g.live_status].filter(Boolean).join(" · ") })),
+      staging: (guests?.staging ?? []).map((g) => ({ value: g.name, label: g.name, help: [g.source && `from ${g.source}`, g.node && `on ${g.node}`, g.live_status, g.snapshot?.shared_with.length ? `snapshot shared with ${g.snapshot.shared_with.join(", ")}` : null].filter(Boolean).join(" · ") })),
       freeHostSlots: freeHostSlots(repo?.host_configs ?? [], (hosts?.hosts ?? []).map((h) => h.name), max),
     };
   }, [hosts, guests, repo]);

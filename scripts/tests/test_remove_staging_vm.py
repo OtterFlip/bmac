@@ -95,6 +95,33 @@ select_resource {shlex.quote(json.dumps(resources))}
             )
         )
 
+    def test_shared_snapshot_is_reported_in_listing_and_after_cleanup(self) -> None:
+        shared = {"snapshot": {"name": "stg-base-stage1prod1-261010T040000Z"}}
+        resources = [
+            {"kind": "staging", "name": name, "source": "prod1", "index": index,
+             "state": "active", "placement": ["mox2"],
+             "domains": {"primary": f"{name}.example.com"}, "proxmox": shared}
+            for index, name in ((1, "stage1prod1"), (2, "stage2prod1"))
+        ]
+        completed = self.run_sourced(
+            f"""
+RESOURCE_NAME=stage1prod1
+select_resource {shlex.quote(json.dumps(resources))}
+SOURCE_NAME=prod1
+SNAPSHOT_NAME=stg-base-stage1prod1-261010T040000Z
+registry_cmd() {{ printf '%s\\n' {shlex.quote(json.dumps(resources[1:]))}; }}
+echo "USERS=$(remaining_snapshot_users)"
+registry_cmd() {{ printf '[]\\n'; }}
+echo "AFTER_LAST=$(remaining_snapshot_users)"
+echo "TAKEN=$(snapshot_taken_label "$SNAPSHOT_NAME")"
+"""
+        )
+        self.assertIn("(shared with stage2prod1)", completed.stdout)
+        self.assertIn("(shared with stage1prod1)", completed.stdout)
+        self.assertIn("USERS=stage2prod1\n", completed.stdout)
+        self.assertIn("AFTER_LAST=\n", completed.stdout)
+        self.assertIn("TAKEN=2026-10-10 04:00:00 UTC", completed.stdout)
+
     CLEANUP_ROW = {
         "name": "stage1prod1",
         "id": "11111111-2222-4333-8444-555555555555",
