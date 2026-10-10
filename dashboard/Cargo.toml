@@ -21,7 +21,8 @@ thiserror = "2"
 libc = "0.2"
 dirs = "7"
 
+# Keep LTO thin and codegen-units at its default: fat LTO or a single codegen
+# unit runs the final optimization of the whole app on one core.
 [profile.release]
-lto = true
-codegen-units = 1
+lto = "thin"
 strip = true

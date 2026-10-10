@@ -19,9 +19,9 @@
     "test": "vitest run",
     "tauri": "tauri",
     "app:dev": "node scripts/check-toolchain.mjs --app && tauri dev",
-    "app:build": "node scripts/check-toolchain.mjs --app && tauri build",
-    "app:build:appimage": "node scripts/check-toolchain.mjs --app && tauri build --bundles appimage",
-    "app:build:rpm": "node scripts/check-toolchain.mjs --app && tauri build --bundles rpm"
+    "app:build": "node scripts/check-toolchain.mjs --app && tauri build -- --locked",
+    "app:build:appimage": "node scripts/check-toolchain.mjs --app && tauri build --bundles appimage -- --locked",
+    "app:build:rpm": "node scripts/check-toolchain.mjs --app && tauri build --bundles rpm -- --locked"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.1",
