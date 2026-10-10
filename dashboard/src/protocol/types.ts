@@ -380,6 +380,9 @@ export interface PlatformInfo {
 
 export interface RepositoryInfo {
   root: string;
+  /** The scripts bundled with an installed dashboard rather than a checkout. */
+  bundled: boolean;
+  config_dir: string;
   valid: boolean;
   problems: string[];
   git_commit: string | null;
@@ -398,6 +401,8 @@ export interface AppInfo {
   version: string;
   protocol_version: number;
   history_dir: string;
+  installed: boolean;
+  first_launch: boolean;
 }
 
 export interface Settings {
@@ -405,6 +410,7 @@ export interface Settings {
   refresh_interval_seconds: number;
   notifications: boolean;
   default_dry_run: boolean;
+  seeded_version: string | null;
 }
 
 export interface PreflightCheck {
@@ -413,6 +419,44 @@ export interface PreflightCheck {
   status: "ok" | "warning" | "error";
   detail: string;
   fix?: string;
+  /** The config file this check is about. */
+  config_file?: string;
+  link?: { label: string; url: string };
+  /** A shell command that installs what is missing. */
+  command?: string;
+  /** One sentence on what BMAC uses this for. */
+  purpose?: string;
+}
+
+export type ConfigFileKind = "config" | "example" | "secret";
+export type ConfigFileState = "missing" | "unchanged" | "customized" | "no_example";
+
+export interface ConfigFile {
+  name: string;
+  kind: ConfigFileKind;
+  present: boolean;
+  essential: boolean;
+  example: string | null;
+  user_file: string | null;
+  state: ConfigFileState | null;
+  size: number | null;
+  modified: string | null;
+}
+
+export interface ConfigListing {
+  dir: string;
+  default_dir: string;
+  /** Only an installed dashboard's config directory can move. */
+  relocatable: boolean;
+  problem: string | null;
+  files: ConfigFile[];
+}
+
+export interface ConfigText {
+  name: string;
+  text: string;
+  revision: string;
+  read_only: boolean;
 }
 
 export interface DirEntry {

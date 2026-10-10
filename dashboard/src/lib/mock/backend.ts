@@ -19,11 +19,28 @@ import type {
   WorkflowInfo,
 } from "@/protocol/types";
 import { disksState, guestsState, hostsState, replicationState, storageState } from "./fixtures";
+import { createMockConfig } from "./config";
 
 // dev/VERSION, substituted by vite.config.ts.
 declare const __BMAC_VERSION__: string;
 
 const workflows = (registry as { workflows: Workflow[] }).workflows;
+
+/** Mirrors `purpose` in engine/src/preflight.rs. */
+const PURPOSES: Record<string, string> = {
+  platform: "BMAC's workflows run from a Linux or macOS workstation.",
+  repository: "Holds the workflow scripts the dashboard runs.",
+  bash: "Every BMAC workflow is a Bash script.",
+  python3: "The scripts use it for config validation, address math, and JSON handling.",
+  ssh: "All work on the cluster's hosts and guests happens over SSH.",
+  ssh_agent: "Lets the scripts use your passphrase-protected SSH key without asking for it.",
+  flock: "Keeps two setups from changing the cluster, or reusing a Tailscale key, at the same time.",
+  curl: "Talks to iDRAC and downloads the Proxmox install assistant during host setup.",
+  jq: "Reads the JSON that iDRAC, Tailscale, and the cluster return.",
+  xorriso: "Builds each host's custom unattended Proxmox installer ISO.",
+  "dpkg-deb": "Unpacks Proxmox's auto-install assistant, which prepares the installer ISO.",
+  tailscale: "The workstation reaches the hosts and QDevice over your tailnet.",
+};
 
 class Cancelled extends Error {}
 
@@ -95,7 +112,10 @@ export function createMockBackend(): Backend {
   const finished: RunRecord[] = [];
   const eventListeners = new Set<(runId: string, events: RunEvent[]) => void>();
   const recordListeners = new Set<(record: RunRecord) => void>();
-  let settings: Settings = { repository: "/home/operator/src/bmac", refresh_interval_seconds: 0, notifications: true, default_dry_run: true };
+  let settings: Settings = { repository: null, refresh_interval_seconds: 0, notifications: true, default_dry_run: true, seeded_version: __BMAC_VERSION__ };
+  const fresh = typeof location !== "undefined" && new URLSearchParams(location.search).has("fresh");
+  const config = createMockConfig(fresh);
+  const bundle = "/usr/lib/BMAC_Dashboard";
 
   const notify = (run: MockRun) => {
     const copy = structuredClone(run.record);
@@ -405,40 +425,51 @@ export function createMockBackend(): Backend {
 
   return {
     kind: "mock",
-    getAppInfo: async () => ({ name: "BMAC Dashboard", version: __BMAC_VERSION__, protocol_version: 2, history_dir: "~/.local/share/com.btvcorp.bmac.dashboard/runs" }),
+    getAppInfo: async () => ({
+      name: "BMAC Dashboard", version: __BMAC_VERSION__, protocol_version: 2, history_dir: "~/.local/share/com.btvcorp.bmac.dashboard/runs",
+      installed: true, first_launch: fresh,
+    }),
     getPlatformInfo: async () => ({ os: "linux", arch: "x86_64", os_family: "debian", os_name: "Ubuntu 24.04.3 LTS", hostname: "workstation" }),
     getRepositoryInfo: async () => ({
-      root: settings.repository ?? "", valid: true, problems: [], git_commit: "4b5847a1c0de", git_describe: "v0.2.0-14-g4b5847a", git_branch: "main",
-      git_dirty: false, protocol_version: 2, cluster_conf_present: true, secrets_env_present: true,
+      root: bundle, bundled: true, config_dir: config.dir, valid: true, problems: [], git_commit: null, git_describe: null, git_branch: null,
+      git_dirty: null, protocol_version: 2, cluster_conf_present: true, secrets_env_present: true,
       cluster_settings: [
         { key: "PROXMOX_CLUSTER_NAME", value: "bmac" }, { key: "PROXMOX_QDEVICE_HOST", value: "qdevice" },
         { key: "PROXMOX_CONTROL_NODE", value: "mox1" }, { key: "MAX_MOX_HOSTS", value: "8" },
       ],
       host_configs: ["mox1", "mox2", "mox3", "mox4", "mox6"],
     }),
-    setRepository: async (path) => {
-      settings = { ...settings, repository: path };
-      return (await createMockBackend().getRepositoryInfo())!;
+    setRepository: async () => {
+      throw { code: "invalid_argument", message: "An installed dashboard always uses its bundled scripts." };
     },
     getSettings: async () => settings,
-    updateSettings: async (next) => (settings = { ...next, repository: settings.repository }),
+    updateSettings: async (next) => (settings = { ...next, repository: settings.repository, seeded_version: settings.seeded_version }),
     listWorkflows: async () =>
       workflows.map((w): WorkflowInfo => ({ ...w, available: true })),
     runPreflight: async () => {
       await new Promise((r) => setTimeout(r, 500));
       const checks: PreflightCheck[] = [
         { id: "platform", label: "Workstation", status: "ok", detail: "Ubuntu 24.04.3 LTS on x86_64" },
-        { id: "repository", label: "BMAC repository", status: "ok", detail: settings.repository ?? "" },
+        { id: "repository", label: "BMAC scripts", status: "ok", detail: `Bundled with the dashboard in ${bundle}` },
         { id: "bash", label: "Bash 4.4+", status: "ok", detail: "/usr/bin/bash (5.2.21(1)-release)" },
         { id: "python3", label: "Python 3.9+", status: "ok", detail: "python3 3.12" },
         { id: "ssh", label: "OpenSSH client", status: "ok", detail: "/usr/bin/ssh" },
         { id: "ssh_agent", label: "SSH agent", status: "ok", detail: "SSH_AUTH_SOCK is set." },
         { id: "flock", label: "flock", status: "ok", detail: "Available for host and QDevice workflows." },
-        { id: "tailscale", label: "Tailscale", status: "ok", detail: "Backend state: Running" },
-        { id: "cluster_conf", label: "config/cluster.conf", status: "ok", detail: "Present." },
-        { id: "secrets_env", label: "config/secrets.env", status: "ok", detail: "Present (its contents are never read by the dashboard)." },
+        { id: "curl", label: "curl", status: "ok", detail: "/usr/bin/curl" },
+        fresh
+          ? { id: "jq", label: "jq", status: "warning", detail: "Not found; adding or removing a host and adding a QDevice need it.", command: "sudo apt install jq" }
+          : { id: "jq", label: "jq", status: "ok", detail: "/usr/bin/jq" },
+        fresh
+          ? { id: "xorriso", label: "xorriso", status: "warning", detail: "Not found; adding a host needs it to build the installer image.", command: "sudo apt install xorriso" }
+          : { id: "xorriso", label: "xorriso", status: "ok", detail: "/usr/bin/xorriso" },
+        { id: "dpkg-deb", label: "dpkg-deb", status: "ok", detail: "/usr/bin/dpkg-deb" },
+        fresh
+          ? { id: "tailscale", label: "Tailscale", status: "warning", detail: "The tailscale CLI was not found on PATH.", link: { label: "Install Tailscale", url: "https://tailscale.com/docs/install/linux" } }
+          : { id: "tailscale", label: "Tailscale", status: "ok", detail: "Backend state: Running" },
+        ...config.checks(),
       ];
-      return checks;
+      return checks.map((c) => (PURPOSES[c.id] ? { ...c, purpose: PURPOSES[c.id] } : c));
     },
     startWorkflow: async (id, values) => start(id, values),
     respond: async (runId, requestId, payload) => {
@@ -501,11 +532,18 @@ export function createMockBackend(): Backend {
           symlink: false, hidden: name.startsWith("."),
         })),
         shortcuts: [
-          { label: "Home", path: "/home/operator" }, { label: "BMAC repository", path: "/home/operator/src/bmac" },
+          { label: "Home", path: "/home/operator" }, { label: "BMAC config", path: config.dir },
           { label: "Downloads", path: "/home/operator/Downloads" }, { label: "Computer", path: "/" },
         ],
       };
     },
+    getConfigListing: async () => config.listing(),
+    readConfigFile: async (name) => config.read(name),
+    readConfigExample: async (name) => config.readExample(name),
+    writeConfigFile: async (name, text, revision) => config.write(name, text, revision),
+    createConfigFromExample: async (example) => config.createFromExample(example),
+    openConfigLocation: async () => {},
+    relocateConfig: async (path) => config.relocate(path),
     exportRunLog: async (runId) => `/home/operator/Downloads/bmac-${runStore.get(runId)?.record.workflow_id ?? "run"}.log`,
     revealExported: async () => {},
     openExternal: async (url) => {

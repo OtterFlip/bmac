@@ -18,11 +18,14 @@ pub struct Settings {
     pub notifications: bool,
     /// Pre-select the dry-run option for workflows that have one.
     pub default_dry_run: bool,
+    /// The dashboard version that last brought an installed config directory
+    /// up to date with its bundled examples.
+    pub seeded_version: Option<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { repository: None, refresh_interval_seconds: 0, notifications: true, default_dry_run: true }
+        Self { repository: None, refresh_interval_seconds: 0, notifications: true, default_dry_run: true, seeded_version: None }
     }
 }
 

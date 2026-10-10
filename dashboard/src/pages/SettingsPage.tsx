@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, FolderGit2, FolderOpen, Info, SlidersHorizontal, Stethoscope, TriangleAlert, XCircle } from "lucide-react";
-import { useStore } from "@/state/store";
+import { ArrowRight, CheckCircle2, Copy, CopyPlus, ExternalLink, FileCog, FolderGit2, FolderOpen, Info, PartyPopper, SlidersHorizontal, Stethoscope, TriangleAlert, XCircle } from "lucide-react";
+import { configAttention, useStore } from "@/state/store";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -11,7 +11,7 @@ import { FileBrowserDialog } from "@/components/workflow/FileBrowserDialog";
 import { api, errorMessage } from "@/lib/api";
 import { toast } from "@/state/toast";
 import { cn } from "@/lib/utils";
-import type { PreflightCheck, Settings } from "@/protocol/types";
+import type { ConfigFile, PreflightCheck, Settings } from "@/protocol/types";
 
 const INTERVALS = [
   { value: "0", label: "Only when I refresh" },
@@ -45,16 +45,156 @@ function Preflight() {
       <CardHeader icon={<Stethoscope />} title="This computer" subtitle="What the scripts need to run from here" actions={<RefreshControl updatedAt={updatedAt} loading={loading} error={error} onRefresh={() => void run()} label="Check again" />} />
       <div className="divide-y divide-line/70">
         {!checks && [0, 1, 2, 3].map((i) => <div key={i} className="px-4 py-3"><Skeleton className="w-1/2" /></div>)}
-        {checks?.map((c) => (
+        {checks?.filter((c) => !c.config_file).map((c) => (
           <div key={c.id} className="flex items-start gap-3 px-4 py-2.5">
             <span className="mt-0.5">{icon[c.status]}</span>
             <div className="min-w-0 flex-1">
-              <div className="text-[13px] text-fg">{c.label}</div>
+              <div className="text-[13px] text-fg">
+                {c.label}
+                {c.purpose && <span className="ml-2 text-[12px] text-fg-muted">{c.purpose}</span>}
+              </div>
               <div className="selectable text-[12px] text-fg-subtle">{c.detail}</div>
               {c.fix && c.status !== "ok" && <div className="selectable mt-1 font-mono text-[11.5px] text-fg-muted">{c.fix}</div>}
+              {c.command && c.status !== "ok" && (
+                <div className="mt-1.5 flex max-w-md items-center gap-2 rounded-md border border-line bg-sunken/60 py-1 pl-2.5 pr-1">
+                  <code className="selectable min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg">{c.command}</code>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-label={`Copy ${c.command}`}
+                    onClick={() =>
+                      void navigator.clipboard.writeText(c.command!).then(
+                        () => toast.success("Copied to the clipboard"),
+                        () => toast.error("Could not copy to the clipboard"),
+                      )
+                    }
+                  >
+                    <Copy /> Copy
+                  </Button>
+                </div>
+              )}
             </div>
+            {c.link && c.status !== "ok" && (
+              <Button size="sm" variant="primary" className="mt-0.5 shrink-0" onClick={() => void api().openExternal(c.link!.url)}>
+                <ExternalLink /> {c.link.label}
+              </Button>
+            )}
           </div>
         ))}
+      </div>
+    </Card>
+  );
+}
+
+const STATE_TEXT: Record<string, string> = {
+  "cluster.conf": "Cluster-wide settings every workflow reads.",
+  "mox1.conf": "The cluster's first host.",
+  "mox2.conf": "The cluster's second host.",
+  "secrets.env": "Passwords. Never shown by the dashboard; edit it in your own editor.",
+};
+
+function ConfigFiles() {
+  const config = useStore((s) => s.config);
+  const refreshConfig = useStore((s) => s.refreshConfig);
+  const openConfig = useStore((s) => s.openConfig);
+  const firstLaunch = useStore((s) => s.appInfo?.first_launch ?? false);
+  useEffect(() => {
+    void refreshConfig();
+    const onFocus = () => void refreshConfig();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshConfig]);
+  if (!config) return null;
+  const needs = configAttention(config);
+  const essential = config.files.filter((f) => f.essential);
+  const open = async (name?: string) => {
+    try {
+      await api().openConfigLocation(name ?? null);
+    } catch (e) {
+      toast.error("Could not open it", errorMessage(e));
+    }
+  };
+  const create = async (file: ConfigFile) => {
+    try {
+      const created = await api().createConfigFromExample(file.example!);
+      await refreshConfig();
+      toast.success(`Created ${created}`, `A copy of ${file.example}. Fill in your own values.`);
+    } catch (e) {
+      toast.error("Could not create the file", errorMessage(e));
+    }
+  };
+  const status = (f: ConfigFile) =>
+    f.state === "missing" ? (
+      <Badge tone={f.name === "cluster.conf" ? "danger" : "warn"}>missing</Badge>
+    ) : f.state === "unchanged" ? (
+      <Badge tone="warn">not edited yet</Badge>
+    ) : (
+      <Badge tone="ok"><CheckCircle2 /> customized</Badge>
+    );
+  return (
+    <Card className={cn(needs.length > 0 && "border-warn/35")}>
+      <CardHeader
+        icon={<FileCog />}
+        title="Your configuration"
+        subtitle={<span className="selectable font-mono">{config.dir}</span>}
+        actions={
+          <>
+            <Button size="sm" onClick={() => void open()}><FolderOpen /> Open folder</Button>
+            <Button size="sm" onClick={() => openConfig()}>Config page <ArrowRight /></Button>
+          </>
+        }
+      />
+      {needs.length > 0 && (
+        <div className="flex items-start gap-3 border-b border-warn/20 bg-gradient-to-br from-warn/[0.08] to-transparent px-4 py-3">
+          {firstLaunch ? <PartyPopper className="mt-0.5 size-4 shrink-0 text-warn" /> : <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warn" />}
+          <div className="text-[12.5px] leading-relaxed text-fg">
+            <span className="font-semibold">{firstLaunch ? "Welcome to BMAC. " : ""}Fill in your cluster's values before running workflows.</span>{" "}
+            <span className="text-fg-muted">
+              {needs.length === 1 ? "One file is" : `${needs.length} files are`} still missing or identical to the example {needs.length === 1 ? "it starts" : "they start"} from.
+            </span>
+          </div>
+        </div>
+      )}
+      <div className="divide-y divide-line/70">
+        {essential.map((f) => {
+          const attention = f.state === "missing" || f.state === "unchanged";
+          return (
+            <div key={f.name} className={cn("flex items-center gap-3 px-4 py-2.5", attention && "bg-warn/[0.03]")}>
+              <span className="mt-0.5 self-start">
+                {f.state === "missing" ? <XCircle className={cn("size-4", f.name === "cluster.conf" ? "text-danger" : "text-warn")} /> : attention ? <TriangleAlert className="size-4 text-warn" /> : <CheckCircle2 className="size-4 text-ok" />}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  {f.kind === "secret" ? (
+                    <button className="font-mono text-[13px] text-fg underline-offset-2 hover:text-accent hover:underline" onClick={() => void open()} title="Show the folder that contains it">
+                      {f.name}
+                    </button>
+                  ) : (
+                    <button className="font-mono text-[13px] text-fg underline-offset-2 hover:text-accent hover:underline" onClick={() => openConfig(f.name)}>
+                      {f.name}
+                    </button>
+                  )}
+                  {status(f)}
+                </div>
+                <div className="text-[12px] text-fg-subtle">{STATE_TEXT[f.name]}</div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                {f.state === "missing" && f.example && (
+                  <Button size="sm" variant={attention ? "primary" : "secondary"} onClick={() => void create(f)}><CopyPlus /> Create from example</Button>
+                )}
+                {f.state !== "missing" && f.kind === "secret" && (
+                  <>
+                    <Button size="sm" variant={attention ? "primary" : "secondary"} onClick={() => void open(f.name)}><ExternalLink /> Open in editor</Button>
+                    <Button size="sm" variant="ghost" onClick={() => void open()}><FolderOpen /> Folder</Button>
+                  </>
+                )}
+                {f.state !== "missing" && f.kind !== "secret" && (
+                  <Button size="sm" variant={attention ? "primary" : "ghost"} onClick={() => openConfig(f.name)}>Edit <ArrowRight /></Button>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </Card>
   );
@@ -103,8 +243,6 @@ function Repository() {
               ["Version", <span key="v" className="font-mono">{repo.git_describe ?? repo.git_commit ?? "unknown"}{repo.git_dirty && <Badge tone="warn" className="ml-2">uncommitted changes</Badge>}</span>],
               ["Branch", <span key="b" className="font-mono">{repo.git_branch ?? "—"}</span>],
               ["Protocol", repo.protocol_version ? `bmac-ui v${repo.protocol_version}` : "unknown"],
-              ["cluster.conf", repo.cluster_conf_present ? "present" : <span key="c" className="text-warn">missing</span>],
-              ["secrets.env", repo.secrets_env_present ? "present (never read by the dashboard)" : <span key="s" className="text-warn">missing</span>],
               ...repo.cluster_settings.map((c) => [c.key, <span key={c.key} className="font-mono">{c.value}</span>] as [string, React.ReactNode]),
             ]}
           />
@@ -165,12 +303,14 @@ function Preferences() {
 
 export function SettingsPage() {
   const appInfo = useStore((s) => s.appInfo);
+  const repo = useStore((s) => s.repo);
   const platform = useStore((s) => s.platform);
   return (
     <>
       <PageHeader title="Settings" />
       <PageBody className="space-y-4">
-        <Repository />
+        <ConfigFiles />
+        {!repo?.bundled && <Repository />}
         <Preflight />
         <Preferences />
         <Card>
@@ -180,6 +320,8 @@ export function SettingsPage() {
               items={[
                 ["Dashboard", `${appInfo?.name ?? "BMAC Dashboard"} ${appInfo?.version ?? ""}`],
                 ["Protocol", appInfo ? `bmac-ui v${appInfo.protocol_version}` : "—"],
+                ["Scripts", <span key="s" className="selectable font-mono text-[12px]">{repo ? `${repo.root}${repo.bundled ? " (bundled)" : ""}` : "—"}</span>],
+                ["Documentation", <Button key="d" variant="link" size="sm" onClick={() => void api().openExternal("https://github.com/OtterFlip/bmac")}>github.com/OtterFlip/bmac</Button>],
                 ["Platform", platform ? `${platform.os_name ?? platform.os} · ${platform.arch}${platform.hostname ? ` · ${platform.hostname}` : ""}` : "—"],
                 ["Run history", <span key="h" className={cn("selectable font-mono text-[12px]")}>{appInfo?.history_dir ?? "—"}</span>],
               ]}

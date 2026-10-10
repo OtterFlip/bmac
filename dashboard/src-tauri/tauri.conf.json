@@ -1,6 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "BMAC Dashboard",
+  "productName": "BMAC_Dashboard",
+  "mainBinaryName": "bmac-dashboard",
   "identifier": "com.btvcorp.bmac.dashboard",
   "build": {
     "beforeDevCommand": "pnpm web:dev",
@@ -26,7 +27,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "deb"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "Control panel for BMAC Proxmox clusters",
     "icon": [
@@ -35,6 +38,49 @@
       "icons/128x128.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "bundle-resources/": ""
+    },
+    "homepage": "https://github.com/OtterFlip/bmac",
+    "linux": {
+      "deb": {
+        "depends": [
+          "bash (>= 4.4)",
+          "python3 (>= 3.9)",
+          "openssh-client",
+          "openssl",
+          "curl",
+          "jq",
+          "util-linux",
+          "iproute2",
+          "coreutils",
+          "tar"
+        ],
+        "recommends": [
+          "git",
+          "xorriso"
+        ],
+        "desktopTemplate": "linux/bmac-dashboard.desktop"
+      },
+      "rpm": {
+        "depends": [
+          "bash >= 4.4",
+          "python3 >= 3.9",
+          "openssh-clients",
+          "openssl",
+          "curl",
+          "jq",
+          "util-linux",
+          "iproute",
+          "coreutils",
+          "tar"
+        ],
+        "desktopTemplate": "linux/bmac-dashboard.desktop"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
   }
 }

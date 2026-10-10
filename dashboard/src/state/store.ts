@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { api, errorMessage, initBackend } from "@/lib/api";
 import type {
   AppInfo,
+  ConfigFile,
+  ConfigListing,
   NextStep,
   PlatformInfo,
   RepositoryInfo,
@@ -25,6 +27,7 @@ export type Page =
   | "qdevice"
   | "diagnostics"
   | "operations"
+  | "config"
   | "settings";
 
 export interface SourceEntry<T> {
@@ -60,6 +63,9 @@ interface State {
   platform: PlatformInfo | null;
   repo: RepositoryInfo | null;
   settings: Settings | null;
+  config: ConfigListing | null;
+  /** The file the config page should show, set when another page links to it. */
+  configFocus: string | null;
   workflows: Record<string, WorkflowInfo>;
   workflowOrder: string[];
 
@@ -81,6 +87,9 @@ interface State {
   bootstrap(): Promise<void>;
   reloadCatalog(): Promise<void>;
   refreshRepo(): Promise<void>;
+  refreshConfig(): Promise<void>;
+  /** Show the config page, optionally with one file selected. */
+  openConfig(name?: string | null): void;
   openLaunch(workflowId: string, values?: Record<string, unknown>): void;
   closeLaunch(): void;
   startRun(workflowId: string, values: Record<string, unknown>, opts?: { focus?: boolean }): Promise<RunRecord | null>;
@@ -122,6 +131,8 @@ export const useStore = create<State>((set, get) => ({
   platform: null,
   repo: null,
   settings: null,
+  config: null,
+  configFocus: null,
   workflows: {},
   workflowOrder: [],
   page: "dashboard",
@@ -154,6 +165,10 @@ export const useStore = create<State>((set, get) => ({
       ]);
       set({ appInfo, platform, settings });
       await get().reloadCatalog();
+      await get().refreshConfig();
+      // Start on Settings until the essential config files are filled in.
+      const config = get().config;
+      if (appInfo.first_launch || (config && configAttention(config).length > 0)) set({ page: "settings" });
       const [active, history] = await Promise.all([backend.getActiveRuns(), backend.getRunHistory(200)]);
       const records: Record<string, RunRecord> = {};
       for (const r of [...history, ...active]) records[r.run_id] = r;
@@ -202,6 +217,16 @@ export const useStore = create<State>((set, get) => ({
       /* keep the last known repository info */
     }
   },
+
+  async refreshConfig() {
+    try {
+      set({ config: await api().getConfigListing() });
+    } catch {
+      set({ config: null });
+    }
+  },
+
+  openConfig: (name = null) => set({ page: "config", configFocus: name }),
 
   openLaunch: (workflowId, values) => set({ launch: { workflowId, values } }),
   closeLaunch: () => set({ launch: null }),
@@ -369,3 +394,7 @@ export const selectActiveRuns = (s: State) =>
   Object.values(s.records)
     .filter((r) => !isTerminal(r.status))
     .sort((a, b) => a.started_at.localeCompare(b.started_at));
+
+/** Essential config files that are missing or still identical to their example. */
+export const configAttention = (config: ConfigListing): ConfigFile[] =>
+  config.files.filter((f) => f.essential && (f.state === "missing" || f.state === "unchanged"));

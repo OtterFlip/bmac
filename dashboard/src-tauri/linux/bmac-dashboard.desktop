@@ -1,0 +1,11 @@
+[Desktop Entry]
+Categories={{categories}}
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Exec={{exec}}
+StartupWMClass=bmac-dashboard
+Icon={{icon}}
+Name=BMAC Dashboard
+Terminal=false
+Type=Application

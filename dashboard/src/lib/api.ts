@@ -1,5 +1,7 @@
 import type {
   AppInfo,
+  ConfigListing,
+  ConfigText,
   DirListing,
   EngineError,
   PlatformInfo,
@@ -35,6 +37,15 @@ export interface Backend {
   getRunDetails(runId: string): Promise<RunDetails>;
   deleteRun(runId: string): Promise<void>;
   browseDirectory(path?: string | null): Promise<DirListing>;
+  getConfigListing(): Promise<ConfigListing>;
+  readConfigFile(name: string): Promise<ConfigText>;
+  readConfigExample(name: string): Promise<ConfigText>;
+  /** `revision` is what the editor loaded, or null when creating the file. */
+  writeConfigFile(name: string, text: string, revision: string | null): Promise<ConfigText>;
+  createConfigFromExample(example: string): Promise<string>;
+  /** Open the config directory, or one file in it, with the operator's own apps. */
+  openConfigLocation(name?: string | null): Promise<void>;
+  relocateConfig(path: string, moveFiles: boolean): Promise<ConfigListing>;
   exportRunLog(runId: string): Promise<string>;
   revealExported(path: string): Promise<void>;
   openExternal(url: string): Promise<void>;
@@ -93,6 +104,13 @@ async function createTauriBackend(): Promise<Backend> {
     getRunDetails: (runId) => invoke("get_run_details", { runId }),
     deleteRun: (runId) => invoke("delete_run", { runId }),
     browseDirectory: (path) => invoke("browse_directory", { path: path ?? null }),
+    getConfigListing: () => invoke("get_config_listing"),
+    readConfigFile: (name) => invoke("read_config_file", { name }),
+    readConfigExample: (name) => invoke("read_config_example", { name }),
+    writeConfigFile: (name, text, revision) => invoke("write_config_file", { name, text, revision }),
+    createConfigFromExample: (example) => invoke("create_config_from_example", { example }),
+    openConfigLocation: (name) => invoke("open_config_location", { name: name ?? null }),
+    relocateConfig: (path, moveFiles) => invoke("relocate_config", { path, moveFiles }),
     exportRunLog: (runId) => invoke("export_run_log", { runId }),
     revealExported: (path) => invoke("reveal_exported", { path }),
     openExternal: (url) => invoke("open_external", { url }),

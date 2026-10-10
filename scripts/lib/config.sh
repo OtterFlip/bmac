@@ -39,17 +39,105 @@ fi
 # This tree is the git root. Older checkouts nested it under deploy/proxmox/.
 PROXMOX_REPO_ROOT="$PROXMOX_DEPLOY_DIR"
 
-# Tests may point the parser at synthetic files. Production callers always use
-# config/ next to this library and cannot redirect the loader through an inherited
-# value.
+# The BMAC Dashboard package installs scripts/ read-only next to a
+# bmac-installed marker. Its user files then live in the Dashboard's settings
+# directory, or wherever the one-line config-location file there points.
+PROXMOX_INSTALLED_LAYOUT=0
+if [[ "${PROXMOX_LIB_DIR}" == */scripts/lib && -f "${PROXMOX_DEPLOY_DIR}/bmac-installed" ]]; then
+  PROXMOX_INSTALLED_LAYOUT=1
+fi
+
+# Runs while this file is sourced, before config_die exists.
+_config_installed_dir() {
+  local settings_dir pointer location="" problem=""
+  settings_dir="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/com.btvcorp.bmac.dashboard"
+  pointer="${settings_dir}/config-location"
+  if [[ -e "$pointer" || -L "$pointer" ]]; then
+    if [[ ! -f "$pointer" || -L "$pointer" || ! -O "$pointer" ]]; then
+      problem="must be a regular file owned by you"
+    elif [[ -n "$(find "$pointer" -maxdepth 0 -perm /022)" ]]; then
+      problem="must not be writable by other users"
+    elif ! { IFS= read -r location <"$pointer" || [[ -n "$location" ]]; }; then
+      problem="could not be read"
+    elif [[ "$location" != /* || "$location" == *$'\r'* ]]; then
+      problem="must hold one absolute directory path"
+    fi
+  fi
+  if [[ -n "$problem" ]]; then
+    printf 'ERROR: %s %s\n' "$pointer" "$problem" >&2
+    return 1
+  fi
+  printf '%s\n' "${location:-${settings_dir}/config}"
+}
+
+# Tests may point the parser at synthetic files. Production callers use
+# config/ next to this library, or for an installed Dashboard the directory
+# above, and cannot redirect the loader through an inherited value.
 if [[ "${APP_HA_CONFIG_TEST_MODE:-0}" == 1 ]]; then
   PROXMOX_CONFIG_DIR="${APP_HA_CONFIG_DIR:?APP_HA_CONFIG_DIR is required in test mode}"
+elif ((PROXMOX_INSTALLED_LAYOUT)); then
+  PROXMOX_CONFIG_DIR="$(_config_installed_dir)" || {
+    # shellcheck disable=SC2317 # exit is the executable-script fallback.
+    return 1 2>/dev/null || exit 1
+  }
 else
   PROXMOX_CONFIG_DIR="${PROXMOX_DEPLOY_DIR}/config"
+fi
+# Relative paths in the configuration are anchored here: the checkout root,
+# or the config directory of an installed Dashboard.
+if ((PROXMOX_INSTALLED_LAYOUT)); then
+  PROXMOX_USER_ROOT="$PROXMOX_CONFIG_DIR"
+else
+  PROXMOX_USER_ROOT="$PROXMOX_REPO_ROOT"
 fi
 
 PROXMOX_CLUSTER_CONFIG="${PROXMOX_CONFIG_DIR}/cluster.conf"
 PROXMOX_SECRETS_CONFIG="${PROXMOX_CONFIG_DIR}/secrets.env"
+
+# Workstation artifacts (setup state, LUKS headers, per-run files) for hosts,
+# production VMs, and staging VMs.
+PROXMOX_ARTIFACTS_DIR="${PROXMOX_CONFIG_DIR}/artifacts"
+
+# Print why a workflow must not start while a checkout still has a non-empty
+# artifacts directory where older versions kept it, beside the scripts, so a
+# host's LUKS headers and setup state are never silently left behind. Prints
+# nothing when there is none. KIND is hosts, prod, or staging. Callers:
+#   problem="$(config_legacy_artifacts_problem hosts)"
+#   [[ -z "$problem" ]] || die "$problem"
+config_legacy_artifacts_problem() {
+  local kind legacy
+  [[ "${APP_HA_CONFIG_TEST_MODE:-0}" != 1 ]] || return 0
+  for kind in "$@"; do
+    case "$kind" in
+      hosts) legacy="${PROXMOX_REPO_ROOT}/scripts/user_callable/hosts/artifacts" ;;
+      prod | staging) legacy="${PROXMOX_REPO_ROOT}/scripts/user_callable/guests/${kind}/artifacts" ;;
+      *) continue ;;
+    esac
+    if [[ -d "$legacy" && -n "$(ls -A -- "$legacy" 2>/dev/null)" ]]; then
+      printf "Artifacts now live in %s/%s. Move the old directory there first: mkdir -p '%s' && mv '%s' '%s/%s'\n" \
+        "$PROXMOX_ARTIFACTS_DIR" "$kind" "$PROXMOX_ARTIFACTS_DIR" "$legacy" "$PROXMOX_ARTIFACTS_DIR" "$kind"
+      return 0
+    fi
+  done
+}
+
+# Fail unless Git ignores PATH. A checkout must keep secrets and artifacts out
+# of Git; an installed Dashboard's config directory is checked only when it
+# happens to sit inside a Git work tree.
+config_require_git_ignored() {
+  local path="$1" what="$2" dir
+  dir="$(dirname -- "$path")"
+  while [[ ! -d "$dir" ]]; do dir="$(dirname -- "$dir")"; done
+  if ((PROXMOX_INSTALLED_LAYOUT == 0)); then
+    require_command git || return
+    dir="$PROXMOX_REPO_ROOT"
+  elif ! command -v git >/dev/null 2>&1 ||
+    [[ "$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" != true ]]; then
+    return 0
+  fi
+  git -C "$dir" check-ignore -q -- "$path" ||
+    config_die "${what} is not ignored by Git: ${path}"
+}
 
 declare -Ag _PROXMOX_CONFIG_SEEN=()
 declare -Ag _PROXMOX_CONFIG_ORIGIN=()
@@ -967,9 +1055,7 @@ load_proxmox_config() {
       }
       _config_parse_file "$PROXMOX_SECRETS_CONFIG" secrets 1 || return
       if [[ "${APP_HA_CONFIG_TEST_MODE:-0}" != 1 ]]; then
-        require_command git || return
-        git -C "$PROXMOX_REPO_ROOT" check-ignore -q -- "$PROXMOX_SECRETS_CONFIG" ||
-          config_die "Secret configuration is not ignored by Git: ${PROXMOX_SECRETS_CONFIG}" || return
+        config_require_git_ignored "$PROXMOX_SECRETS_CONFIG" "Secret configuration" || return
       fi
       ((xtrace_was_on == 0)) || set -x
     elif [[ "$secrets_mode" == required ]]; then
@@ -1169,7 +1255,8 @@ Usage:
   config.sh --check [--host moxN] [--require-secrets | --no-secrets]
   source config.sh; load_proxmox_config [--host moxN] [--require-secrets]
 
-Strictly parses config/cluster.conf, an optional selected
+Strictly parses cluster.conf in the config directory (config/ in a checkout,
+~/.config/com.btvcorp.bmac.dashboard/config/ for an installed Dashboard), an optional selected
 moxN.conf, and the Git-ignored secrets.env. It never evaluates configuration
 as shell code and never prints secret values.
 

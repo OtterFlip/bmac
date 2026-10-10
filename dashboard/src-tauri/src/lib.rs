@@ -1,7 +1,8 @@
 //! Tauri shell for the BMAC dashboard. Every command here is narrow: the
 //! webview can start only allowlisted workflows with typed values, answer the
 //! request a script is waiting on, and read run history. There is no shell,
-//! SSH, or general file read/write API.
+//! SSH, or general file read/write API: the config page reaches only the
+//! BMAC config files by name, through bmac_engine::config.
 
 #[cfg(target_os = "linux")]
 mod desktop_entry;
@@ -12,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bmac_engine::browse::{self, Listing};
+use bmac_engine::config::{self, ConfigListing, ConfigLocation, ConfigText};
 use bmac_engine::history::{RunDetails, RunEvent, RunRecord, RunStatus};
 use bmac_engine::platform::PlatformInfo;
 use bmac_engine::preflight::{self, Check};
@@ -36,7 +38,12 @@ struct AppState {
     platform: PlatformInfo,
     settings: Mutex<Settings>,
     settings_path: PathBuf,
+    /// Running from an installed package with its bundled scripts, rather
+    /// than from a checkout.
+    installed: bool,
+    first_launch: bool,
     repo: Mutex<Option<PathBuf>>,
+    config: Mutex<Option<ConfigLocation>>,
     exported: Mutex<HashSet<PathBuf>>,
     quitting: Mutex<bool>,
 }
@@ -48,6 +55,23 @@ impl AppState {
             .unwrap()
             .clone()
             .ok_or_else(|| EngineError::Repository("select a BMAC checkout in Settings".into()))
+    }
+
+    fn config(&self) -> Result<ConfigLocation> {
+        self.config
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| EngineError::Repository("select a BMAC checkout in Settings".into()))
+    }
+
+    fn places(&self) -> Vec<(&'static str, PathBuf)> {
+        let mut places = Vec::new();
+        if !self.installed {
+            places.extend(self.repo.lock().unwrap().clone().map(|r| ("BMAC repository", r)));
+        }
+        places.extend(self.config.lock().unwrap().as_ref().map(|c| ("BMAC config", c.dir.clone())));
+        places
     }
 }
 
@@ -106,6 +130,8 @@ struct AppInfo {
     version: &'static str,
     protocol_version: u32,
     history_dir: String,
+    installed: bool,
+    first_launch: bool,
 }
 
 #[tauri::command]
@@ -115,6 +141,8 @@ fn get_app_info(state: State<'_, AppState>) -> AppInfo {
         version: env!("CARGO_PKG_VERSION"),
         protocol_version: PROTOCOL_VERSION,
         history_dir: state.supervisor.history().dir().display().to_string(),
+        installed: state.installed,
+        first_launch: state.first_launch,
     }
 }
 
@@ -125,13 +153,19 @@ fn get_platform_info(state: State<'_, AppState>) -> PlatformInfo {
 
 #[tauri::command]
 fn get_repository_info(state: State<'_, AppState>) -> Option<RepositoryInfo> {
-    state.repo.lock().unwrap().as_deref().map(repo::info)
+    let root = state.repo.lock().unwrap().clone()?;
+    let config = state.config.lock().unwrap().clone().unwrap_or_else(|| ConfigLocation::checkout(&root));
+    Some(repo::info(&root, &config))
 }
 
 #[tauri::command]
 fn set_repository(state: State<'_, AppState>, path: String) -> Result<RepositoryInfo> {
+    if state.installed {
+        return Err(EngineError::InvalidArgument("An installed dashboard always uses its bundled scripts.".into()));
+    }
     let root = repo::validate(std::path::Path::new(&path))?;
-    let info = repo::info(&root);
+    let config = ConfigLocation::checkout(&root);
+    let info = repo::info(&root, &config);
     if !info.valid {
         return Err(EngineError::Repository(info.problems.join("; ")));
     }
@@ -139,6 +173,7 @@ fn set_repository(state: State<'_, AppState>, path: String) -> Result<Repository
     settings.repository = Some(root.display().to_string());
     settings.save(&state.settings_path)?;
     *state.repo.lock().unwrap() = Some(root);
+    *state.config.lock().unwrap() = Some(config);
     Ok(info)
 }
 
@@ -150,9 +185,9 @@ fn get_settings(state: State<'_, AppState>) -> Settings {
 #[tauri::command]
 fn update_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings> {
     let mut current = state.settings.lock().unwrap();
-    let repository = current.repository.clone();
     let mut next = settings.sanitized();
-    next.repository = repository;
+    next.repository = current.repository.clone();
+    next.seeded_version = current.seeded_version.clone();
     next.save(&state.settings_path)?;
     *current = next.clone();
     Ok(next)
@@ -168,7 +203,8 @@ fn list_workflows(state: State<'_, AppState>) -> Vec<WorkflowInfo> {
 async fn run_preflight(state: State<'_, AppState>) -> Result<Vec<Check>> {
     let platform = state.platform.clone();
     let repo = state.repo.lock().unwrap().clone();
-    tokio::task::spawn_blocking(move || preflight::run(&platform, repo.as_deref()))
+    let config = state.config.lock().unwrap().clone();
+    tokio::task::spawn_blocking(move || preflight::run(&platform, repo.as_deref(), config.as_ref()))
         .await
         .map_err(|e| EngineError::Io(e.to_string()))
 }
@@ -221,8 +257,62 @@ fn delete_run(state: State<'_, AppState>, run_id: String) -> Result<()> {
 
 #[tauri::command]
 fn browse_directory(state: State<'_, AppState>, path: Option<String>) -> Result<Listing> {
-    let repo = state.repo.lock().unwrap().clone();
-    browse::list(path.as_deref(), repo.as_deref())
+    browse::list(path.as_deref(), &state.places())
+}
+
+#[tauri::command]
+fn get_config_listing(state: State<'_, AppState>) -> Result<ConfigListing> {
+    Ok(config::list(&state.config()?))
+}
+
+#[tauri::command]
+fn read_config_file(state: State<'_, AppState>, name: String) -> Result<ConfigText> {
+    config::read(&state.config()?, &name)
+}
+
+#[tauri::command]
+fn read_config_example(state: State<'_, AppState>, name: String) -> Result<ConfigText> {
+    config::read_example(&state.config()?, &name)
+}
+
+#[tauri::command]
+fn write_config_file(state: State<'_, AppState>, name: String, text: String, revision: Option<String>) -> Result<ConfigText> {
+    config::write(&state.config()?, &name, &text, revision.as_deref())
+}
+
+#[tauri::command]
+fn create_config_from_example(state: State<'_, AppState>, example: String) -> Result<String> {
+    config::create_from_example(&state.config()?, &example)
+}
+
+/// Open the config directory in the file manager, or one of its files in the
+/// operator's default application (how secrets.env is edited).
+#[tauri::command]
+fn open_config_location(app: AppHandle, state: State<'_, AppState>, name: Option<String>) -> Result<()> {
+    let path = config::openable(&state.config()?, name.as_deref())?;
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|e| EngineError::Io(e.to_string()))
+}
+
+/// Move an installed dashboard's config directory, optionally taking its
+/// files along. Refused while anything runs, since scripts hold paths in it.
+#[tauri::command]
+async fn relocate_config(state: State<'_, AppState>, path: String, move_files: bool) -> Result<ConfigListing> {
+    if !state.supervisor.active_runs().is_empty() {
+        return Err(EngineError::Busy("wait for running operations to finish before moving the config directory".into()));
+    }
+    let current = state.config()?;
+    let next = tokio::task::spawn_blocking(move || -> Result<ConfigLocation> {
+        let next = config::relocate(&current, &path, move_files)?;
+        config::seed(&next)?;
+        Ok(next)
+    })
+    .await
+    .map_err(|e| EngineError::Io(e.to_string()))??;
+    let listing = config::list(&next);
+    *state.config.lock().unwrap() = Some(next);
+    Ok(listing)
 }
 
 #[tauri::command]
@@ -312,8 +402,40 @@ pub fn run() {
             let config_dir = app.path().app_config_dir()?;
             let data_dir = app.path().app_data_dir()?;
             let settings_path = config_dir.join("settings.json");
-            let settings = Settings::load(&settings_path);
-            let repo = initial_repo(&settings);
+            let first_launch = !settings_path.exists();
+            let mut settings = Settings::load(&settings_path);
+            // A binary inside a checkout (pnpm app:dev, target/release) drives
+            // that checkout; otherwise an installed package drives its bundle.
+            let in_checkout = std::env::current_exe().ok().and_then(|exe| repo::checkout_containing(&exe));
+            let bundle = app
+                .path()
+                .resource_dir()
+                .ok()
+                .filter(|dir| repo::is_bundle(dir) && repo::validate(dir).is_ok());
+            let installed = in_checkout.is_none() && bundle.is_some();
+            let (repo, config) = match bundle.filter(|_| installed) {
+                Some(bundle) => {
+                    let config = ConfigLocation::installed(&bundle, &config_dir);
+                    let version = env!("CARGO_PKG_VERSION");
+                    if settings.seeded_version.as_deref() != Some(version) {
+                        match config::seed(&config) {
+                            Ok(_) => {
+                                settings.seeded_version = Some(version.to_string());
+                                if let Err(error) = settings.save(&settings_path) {
+                                    eprintln!("bmac-dashboard: could not save settings: {error}");
+                                }
+                            }
+                            Err(error) => eprintln!("bmac-dashboard: could not prepare {}: {error}", config.dir.display()),
+                        }
+                    }
+                    (Some(bundle), Some(config))
+                }
+                None => {
+                    let repo = initial_repo(&settings);
+                    let config = repo.as_deref().map(ConfigLocation::checkout);
+                    (repo, config)
+                }
+            };
             let history = bmac_engine::history::History::open(data_dir.join("runs"))?;
             let sink = Arc::new(TauriSink { app: app.handle().clone() });
             let supervisor = Supervisor::new(
@@ -327,7 +449,10 @@ pub fn run() {
                 platform: PlatformInfo::detect(),
                 settings: Mutex::new(settings),
                 settings_path,
+                installed,
+                first_launch,
                 repo: Mutex::new(repo),
+                config: Mutex::new(config),
                 exported: Mutex::new(HashSet::new()),
                 quitting: Mutex::new(false),
             });
@@ -360,6 +485,13 @@ pub fn run() {
             get_run_details,
             delete_run,
             browse_directory,
+            get_config_listing,
+            read_config_file,
+            read_config_example,
+            write_config_file,
+            create_config_from_example,
+            open_config_location,
+            relocate_config,
             export_run_log,
             reveal_exported,
             open_external,

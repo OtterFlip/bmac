@@ -226,10 +226,12 @@ hm_verify_qdevice_access() {
 # Take the same control-plane lock host setup takes: a workstation flock plus
 # a lease on LOCK_HOST held by a coprocess until hm_release_control_plane_lock.
 hm_acquire_control_plane_lock() {
-  local lock_host="$1" lock_file="${REPO_ROOT}/scripts/user_callable/hosts/artifacts/cluster-control-plane.lock"
-  local remote_lock_command status="" destination
+  local lock_host="$1" lock_file="${PROXMOX_ARTIFACTS_DIR}/hosts/cluster-control-plane.lock"
+  local remote_lock_command status="" destination legacy_artifacts
   hm_valid_node "$lock_host" || die "Invalid control-plane lock host: $lock_host"
-  install -d -m 0700 "${REPO_ROOT}/scripts/user_callable/hosts/artifacts"
+  legacy_artifacts="$(config_legacy_artifacts_problem hosts)"
+  [[ -z "$legacy_artifacts" ]] || die "$legacy_artifacts"
+  install -d -m 0700 "$PROXMOX_ARTIFACTS_DIR" "${PROXMOX_ARTIFACTS_DIR}/hosts"
   exec {HM_LOCK_FILE_FD}>"$lock_file"
   chmod 0600 "$lock_file"
   info "Waiting for exclusive cluster membership changes..."
@@ -424,10 +426,13 @@ print(removed)
   info "Removed $node from cluster SSH authorized_keys and known_hosts"
 }
 
-# Rename scripts/user_callable/hosts/artifacts/NODE so a future host in the slot starts fresh.
+# Rename artifacts/hosts/NODE in the config directory so a future host in the
+# slot starts fresh.
 hm_archive_host_artifacts() {
-  local node="$1" source destination
-  source="${REPO_ROOT}/scripts/user_callable/hosts/artifacts/${node}"
+  local node="$1" source destination legacy_artifacts
+  legacy_artifacts="$(config_legacy_artifacts_problem hosts)"
+  [[ -z "$legacy_artifacts" ]] || die "$legacy_artifacts"
+  source="${PROXMOX_ARTIFACTS_DIR}/hosts/${node}"
   [[ -e "$source" ]] || return 0
   [[ -d "$source" && ! -L "$source" ]] ||
     die "Refusing to archive unexpected path $source"

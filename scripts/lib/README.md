@@ -15,6 +15,17 @@ order:
 2. the selected `config/moxN.conf`, when requested
 3. optional Git-ignored `config/secrets.env`
 
+In a checkout the config directory is `<checkout>/config`. When the scripts
+run from the installed Dashboard package (a `bmac-installed` marker next to
+`scripts/`), it is `~/.config/com.btvcorp.bmac.dashboard/config`, or the
+absolute path in the pointer file `config-location` beside it when that file
+is a regular file owned by the user and not group- or world-writable.
+`PROXMOX_CONFIG_DIR` holds the result and `PROXMOX_ARTIFACTS_DIR` is
+`$PROXMOX_CONFIG_DIR/artifacts`. `config_legacy_artifacts_problem` reports a
+non-empty pre-move `scripts/user_callable/.../artifacts` directory with the
+command that moves it, and `config_require_git_ignored` enforces Git-ignore
+only where Git applies.
+
 It rejects unknown, misplaced, and duplicate keys; symlinks in any path
 component; world-writable non-secret files; and any `secrets.env` mode other
 than `0600`. Tracked `cluster.conf` / `moxN.conf` may be group-writable
@@ -222,7 +233,7 @@ Workstation library shared by `scripts/user_callable/hosts/remove_proxmox_host.s
 - the control-plane lock that host setup also takes;
 - `pvecm delnode` with a wait for the node to leave;
 - removal of the node directory and of the host's cluster-wide SSH trust;
-- archiving of `scripts/user_callable/hosts/artifacts/moxN`;
+- archiving of `config/artifacts/hosts/moxN`;
 - choice of a new control node;
 - the reinstall follow-up list.
 

@@ -6,8 +6,5 @@ config/*.cer
 cluster_state.txt
 __pycache__/
 artifacts/
-!scripts/user_callable/hosts/artifacts/
-scripts/user_callable/hosts/artifacts/*
-scripts/user_callable/hosts/artifacts/used-tailscale-auth-key-sha256
-scripts/user_callable/hosts/artifacts/used-tailscale-auth-key-sha256.lock
+config/artifacts/
 log/*

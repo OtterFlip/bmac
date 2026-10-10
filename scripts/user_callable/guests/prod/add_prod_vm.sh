@@ -669,14 +669,17 @@ preflight_workstation() {
     require_command_local "$command_name"
   done
 
-  [[ ! -L "${SCRIPT_DIR}/artifacts" ]] ||
+  local legacy_artifacts
+  legacy_artifacts="$(config_legacy_artifacts_problem prod)"
+  [[ -z "$legacy_artifacts" ]] || die "$legacy_artifacts"
+  [[ ! -L "$PROXMOX_ARTIFACTS_DIR" && ! -L "${PROXMOX_ARTIFACTS_DIR}/prod" ]] ||
     die "The production artifacts path may not be a symlink"
-  install -d -m 0700 "${SCRIPT_DIR}/artifacts"
-  [[ -d "${SCRIPT_DIR}/artifacts" ]] ||
+  install -d -m 0700 "$PROXMOX_ARTIFACTS_DIR" "${PROXMOX_ARTIFACTS_DIR}/prod"
+  [[ -d "${PROXMOX_ARTIFACTS_DIR}/prod" ]] ||
     die "Could not create the production artifacts directory"
-  RUN_DIR="${SCRIPT_DIR}/artifacts/run-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  RUN_DIR="${PROXMOX_ARTIFACTS_DIR}/prod/run-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   install -d -m 0700 "$RUN_DIR"
-  chmod 0700 "${SCRIPT_DIR}/artifacts" "$RUN_DIR"
+  chmod 0700 "${PROXMOX_ARTIFACTS_DIR}/prod" "$RUN_DIR"
 }
 
 select_coordinator_and_nodes() {

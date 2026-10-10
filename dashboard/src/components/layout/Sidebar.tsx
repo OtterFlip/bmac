@@ -1,8 +1,9 @@
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import {
   Activity,
   Boxes,
   Database,
+  FileCog,
   FlaskConical,
   Gauge,
   History,
@@ -12,7 +13,8 @@ import {
   Stethoscope,
 } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
-import { selectActiveRuns, useStore, type Page } from "@/state/store";
+import { configAttention, selectActiveRuns, useStore, type Page } from "@/state/store";
+import { api } from "@/lib/api";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { isWaiting } from "@/protocol/types";
@@ -59,10 +61,44 @@ function useAttention() {
   );
 }
 
+const DOCUMENTATION_URL = "https://github.com/OtterFlip/bmac";
+
+function openDocs(event: MouseEvent) {
+  event.preventDefault();
+  void api().openExternal(DOCUMENTATION_URL);
+}
+
+function FooterNav({ id, label, icon, attention }: { id: Page; label: string; icon: ReactNode; attention?: number }) {
+  const page = useStore((s) => s.page);
+  const setPage = useStore((s) => s.setPage);
+  const on = page === id;
+  return (
+    <button
+      onClick={() => setPage(id)}
+      aria-current={on ? "page" : undefined}
+      className={cn(
+        "relative flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] [&_svg]:size-4",
+        on ? "bg-surface-3 text-fg" : "text-fg-muted hover:bg-surface-2 hover:text-fg",
+      )}
+    >
+      {on && <span className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full bg-accent" />}
+      <span className={on ? "text-accent" : "text-fg-subtle"}>{icon}</span>
+      <span className="flex-1 text-left">{label}</span>
+      {!!attention && (
+        <Tooltip content={`${attention} config file${attention === 1 ? "" : "s"} still need${attention === 1 ? "s" : ""} your values`} side="right">
+          <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-warn/18 px-1.5 text-[10.5px] font-semibold text-warn">!{attention > 1 ? attention : ""}</span>
+        </Tooltip>
+      )}
+    </button>
+  );
+}
+
 export function Sidebar() {
   const page = useStore((s) => s.page);
   const setPage = useStore((s) => s.setPage);
   const repo = useStore((s) => s.repo);
+  const appInfo = useStore((s) => s.appInfo);
+  const configNeeds = useStore((s) => (s.config ? configAttention(s.config).length : 0));
   const backendKind = useStore((s) => s.backendKind);
   const clusterName = useStore((s) => s.sources.list_hosts.data?.cluster.name ?? s.repo?.cluster_settings.find((c) => c.key === "PROXMOX_CLUSTER_NAME")?.value);
   const active = useStore(useShallow(selectActiveRuns));
@@ -72,9 +108,15 @@ export function Sidebar() {
   return (
     <aside className="flex w-[216px] shrink-0 flex-col border-r border-line bg-sunken">
       <div className="flex h-[60px] items-center gap-2.5 px-4">
-        <img src="/bmac.svg" alt="" className="size-8 rounded-[9px]" />
+        <a href={DOCUMENTATION_URL} onClick={openDocs} tabIndex={-1} aria-hidden className="shrink-0">
+          <img src="/bmac.svg" alt="" className="size-8 rounded-[9px] transition-transform duration-150 hover:scale-105" />
+        </a>
         <div className="min-w-0">
-          <div className="text-[14px] font-semibold tracking-[-0.01em] text-fg">BMAC</div>
+          <Tooltip content="BMAC documentation on GitHub" side="right">
+            <a href={DOCUMENTATION_URL} onClick={openDocs} className="text-[14px] font-semibold tracking-[-0.01em] text-fg underline-offset-4 hover:text-accent hover:underline">
+              BMAC
+            </a>
+          </Tooltip>
           <div className="truncate text-[11.5px] text-fg-subtle">{clusterName ? `cluster ${clusterName}` : "Control panel"}</div>
         </div>
       </div>
@@ -113,24 +155,25 @@ export function Sidebar() {
         })}
       </nav>
       <div className="space-y-0.5 px-2 pb-2">
-        <button
-          onClick={() => setPage("settings")}
-          className={cn(
-            "flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] [&_svg]:size-4",
-            page === "settings" ? "bg-surface-3 text-fg" : "text-fg-muted hover:bg-surface-2 hover:text-fg",
-          )}
-        >
-          <Settings className={page === "settings" ? "text-accent" : "text-fg-subtle"} />
-          Settings
-        </button>
+        <FooterNav id="config" label="Config" icon={<FileCog />} attention={configNeeds} />
+        <FooterNav id="settings" label="Settings" icon={<Settings />} />
         <div className="mt-2 rounded-lg border border-line bg-surface/60 px-2.5 py-2 text-[11px] leading-relaxed text-fg-subtle">
-          <div className="truncate font-mono text-fg-muted" title={repo?.root}>
-            {repo ? repo.root.split("/").slice(-2).join("/") : "No repository"}
-          </div>
-          <div className="truncate">
-            {repo?.git_describe ?? repo?.git_commit ?? "—"}
-            {repo?.git_branch ? ` · ${repo.git_branch}` : ""}
-          </div>
+          {repo?.bundled ? (
+            <>
+              <div className="truncate text-fg-muted">BMAC {appInfo?.version ?? ""}</div>
+              <div className="truncate">Installed package</div>
+            </>
+          ) : (
+            <>
+              <div className="truncate font-mono text-fg-muted" title={repo?.root}>
+                {repo ? repo.root.split("/").slice(-2).join("/") : "No repository"}
+              </div>
+              <div className="truncate">
+                {repo?.git_describe ?? repo?.git_commit ?? "—"}
+                {repo?.git_branch ? ` · ${repo.git_branch}` : ""}
+              </div>
+            </>
+          )}
           {backendKind === "mock" && <div className="mt-1 font-medium text-warn">Browser preview · simulated data</div>}
         </div>
       </div>

@@ -645,9 +645,6 @@ class StagingDryRunTest(unittest.TestCase):
     def test_dry_run_reads_live_state_without_mutation_or_secret_export(
         self,
     ) -> None:
-        artifacts = STAGING_DIR / "artifacts"
-        artifacts_preexisted = artifacts.exists()
-        runs_before = set(artifacts.glob("run-*")) if artifacts.exists() else set()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config_dir = root / "config"
@@ -972,11 +969,9 @@ else:
                 "qm set",
             ):
                 self.assertNotIn(mutation, calls_text)
-
-        runs_after = set(artifacts.glob("run-*")) if artifacts.exists() else set()
-        self.assertEqual(runs_after - runs_before, set(), "dry run leaked artifacts")
-        if not artifacts_preexisted and artifacts.exists():
-            artifacts.rmdir()
+            self.assertEqual(
+                sorted((config_dir / "artifacts").rglob("run-*")), [], "dry run leaked artifacts"
+            )
 
 
 if __name__ == "__main__":

@@ -612,11 +612,10 @@ Flags:            Quorate Qdevice
             'output="${ARTIFACTS_DIR}/${iso_name}-${HOST_ID}-auto.iso"',
             source,
         )
+        self.assertIn('used_file="${ARTIFACTS_DIR}/used-tailscale-auth-key-sha256"', source)
+        self.assertIn('ARTIFACTS_DIR="${PROXMOX_ARTIFACTS_DIR}/hosts"', source)
         ignore = HOSTS_DIR.parents[2].joinpath(".gitignore").read_text(encoding="utf-8")
-        self.assertNotIn("\nartifacts/used-tailscale-auth-key-sha256\n", ignore)
-        self.assertIn("artifacts/used-tailscale-auth-key-sha256.lock", ignore)
-        ledger = SCRIPT.parent / "artifacts" / "used-tailscale-auth-key-sha256"
-        self.assertTrue(ledger.is_file())
+        self.assertIn("\nconfig/artifacts/\n", ignore)
 
     def test_first_node_prepares_qdevice_without_violating_vote_parity(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")

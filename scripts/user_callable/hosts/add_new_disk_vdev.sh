@@ -402,8 +402,8 @@ chmod 0700 "$helper"
   HEADER_DIR="${DW_ARTIFACTS_DIR}/${DW_HOST}/luks-headers"
   install -d -m 0700 "$HEADER_DIR"
   if [[ "${APP_HA_DISK_TEST_MODE:-0}" != 1 ]]; then
-    git -C "$DW_REPO_ROOT" check-ignore -q -- "${HEADER_DIR}/rpool-mirror${PAIR}-1.bin" ||
-      dw_die "LUKS header backups under $HEADER_DIR are not ignored by Git"
+    config_require_git_ignored "${HEADER_DIR}/rpool-mirror${PAIR}-1.bin" "LUKS header backups" ||
+      dw_die "LUKS header backups under $HEADER_DIR must not be tracked by Git"
   fi
   for member in 1 2; do
     local_header="${HEADER_DIR}/rpool-mirror${PAIR}-${member}.bin"

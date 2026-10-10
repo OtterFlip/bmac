@@ -256,7 +256,7 @@ something else, set `BMAC_LIMA_INSTANCE` to another name.
   (`vmOpts.vz.rosetta`) or an emulated x86_64 Lima VM (`vmType: qemu`,
   `arch: x86_64`; slow, but workable for a command-line tool). Whichever is
   used must also reach Tailscale and the
-  provider's IPMI VPN and hold `config/secrets.env` and `scripts/user_callable/hosts/artifacts/`
+  provider's IPMI VPN and hold `config/secrets.env` and `config/artifacts/`
   under the loader's ownership and mode checks. This VM sets up none of that.
 - **The VM has no cluster access.** It has no Tailscale, SSH agent, or
   pinned host keys. Run the `scripts/user_callable/guests/` and

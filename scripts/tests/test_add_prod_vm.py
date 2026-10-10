@@ -1122,9 +1122,6 @@ printf '%s\\n' "$ROOT_VOLUME"
                 self.assertIn(message, invalid.stderr)
 
     def test_dry_run_uses_live_reads_without_remote_mutation(self) -> None:
-        artifacts = PROD_DIR / "artifacts"
-        artifacts_preexisted = artifacts.exists()
-        runs_before = set(artifacts.glob("run-*")) if artifacts.exists() else set()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config_dir = root / "config"
@@ -1306,11 +1303,9 @@ else:
                 "ha-manager add",
             ):
                 self.assertNotIn(mutation, calls_text)
-
-        runs_after = set(artifacts.glob("run-*")) if artifacts.exists() else set()
-        self.assertEqual(runs_after - runs_before, set(), "dry run leaked artifacts")
-        if not artifacts_preexisted and artifacts.exists():
-            artifacts.rmdir()
+            self.assertEqual(
+                sorted((config_dir / "artifacts").rglob("run-*")), [], "dry run leaked artifacts"
+            )
 
     def test_live_mutations_are_guarded_and_no_destructive_rollback_exists(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")

@@ -9,7 +9,8 @@ umask 077
 
 # Destructive, resumable bare-metal setup for one app-ha Proxmox host.
 # All local state, logs, generated media, SSH keys, GPT backups, and LUKS
-# headers stay below ./artifacts. Re-run the script to resume after a reboot.
+# headers stay below artifacts/hosts in the config directory. Re-run the
+# script to resume after a reboot.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
@@ -25,8 +26,6 @@ RPOOL_MIRROR_TOOL=/usr/local/sbin/app-ha-rpool-mirror
 PROD_ISO_BUILDER_SOURCE="${SCRIPT_DIR}/../../host_runtime/build_ubuntu_autoinstall.py"
 PROD_ISO_PREPARER_SOURCE="${SCRIPT_DIR}/../../host_runtime/prepare_prod_iso.sh"
 CANONICAL_GUEST_ROLE_HOOK_SOURCE="${REPO_ROOT}/scripts/host_runtime/app-ha-guest-role-hook.sh"
-CLUSTER_CONFIG_SOURCE="${SCRIPT_DIR}/../../../config/cluster.conf"
-ARTIFACTS_DIR="${SCRIPT_DIR}/artifacts"
 
 [[ -f "$CONFIG_LIB" ]] || {
   printf 'ERROR: Missing Proxmox configuration library: %s\n' "$CONFIG_LIB" >&2
@@ -34,6 +33,8 @@ ARTIFACTS_DIR="${SCRIPT_DIR}/artifacts"
 }
 # shellcheck source=../../lib/config.sh
 source "$CONFIG_LIB"
+CLUSTER_CONFIG_SOURCE="$PROXMOX_CLUSTER_CONFIG"
+ARTIFACTS_DIR="${PROXMOX_ARTIFACTS_DIR}/hosts"
 CONTROL_LIB="${SCRIPT_DIR}/../../lib/cluster_control.sh"
 [[ -f "$CONTROL_LIB" ]] || {
   printf 'ERROR: Missing cluster control-node library: %s\n' "$CONTROL_LIB" >&2
@@ -310,7 +311,7 @@ for row in json.loads(sys.argv[1]):
       [[ -n "$recommended" ]] || recommended="$node"
     fi
     config="no config/${node}.conf"
-    [[ ! -f "${SCRIPT_DIR}/../../../config/${node}.conf" ]] || config="config/${node}.conf"
+    [[ ! -f "${PROXMOX_CONFIG_DIR}/${node}.conf" ]] || config="config/${node}.conf"
     printf '  %-6s %-44s %s\n' "$node" "$state" "$config"
   done
   if ((status != 0)); then
@@ -320,7 +321,7 @@ for row in json.loads(sys.argv[1]):
   [[ -n "$recommended" ]] ||
     fail "Every host slot through mox${MAX_MOX_HOSTS} is in use"
   printf '\nRecommended host slot: %s\n' "$recommended"
-  [[ -f "${SCRIPT_DIR}/../../../config/${recommended}.conf" ]] ||
+  [[ -f "${PROXMOX_CONFIG_DIR}/${recommended}.conf" ]] ||
     printf 'Create config/%s.conf with that host'"'"'s values before continuing with it.\n' \
       "$recommended"
   printf 'To resume an interrupted setup, enter that host instead.\n'
@@ -328,7 +329,7 @@ for row in json.loads(sys.argv[1]):
     local -a options=()
     for ((index = 1; index <= MAX_MOX_HOSTS; index += 1)); do
       node="mox${index}"
-      [[ -f "${SCRIPT_DIR}/../../../config/${node}.conf" ]] || continue
+      [[ -f "${PROXMOX_CONFIG_DIR}/${node}.conf" ]] || continue
       state="free"
       if control_list_contains "$node" "${CONTROL_MEMBER_NODES[@]}"; then
         state="cluster member"
@@ -340,7 +341,7 @@ for row in json.loads(sys.argv[1]):
     done
     ((${#options[@]} > 0)) || fail "Create config/${recommended}.conf with that host's values first"
     bmac_ui_choose SELECTED_HOST "Host to configure (recommended: $recommended)" \
-      "$([[ -f "${SCRIPT_DIR}/../../../config/${recommended}.conf" ]] && printf '%s' "$recommended")" \
+      "$([[ -f "${PROXMOX_CONFIG_DIR}/${recommended}.conf" ]] && printf '%s' "$recommended")" \
       "${options[@]}"
   else
     read -r -p "Host to configure [${recommended}]: " SELECTED_HOST
@@ -388,7 +389,7 @@ parse_args() {
   fi
   mox_index "$SELECTED_HOST" >/dev/null ||
     fail "--host must be mox1 through mox10"
-  [[ -f "${SCRIPT_DIR}/../../../config/${SELECTED_HOST}.conf" ]] ||
+  [[ -f "${PROXMOX_CONFIG_DIR}/${SELECTED_HOST}.conf" ]] ||
     fail "Missing config/${SELECTED_HOST}.conf"
 }
 
@@ -493,12 +494,13 @@ load_configuration() {
   )
   local name
   for name in "${required[@]}"; do require_var "$name"; done
-  # Relative paths are anchored at the repo root, not the caller's cwd.
+  # Relative paths are anchored at the checkout root (or an installed
+  # Dashboard's config directory), not the caller's cwd.
   # shellcheck disable=SC2088 # Matching a literal, unexpanded tilde.
   if [[ "$PROXMOX_ISO_FILE_PATH" == "~/"* ]]; then
     PROXMOX_ISO_FILE_PATH="${HOME:?HOME is required to expand PROXMOX_ISO_FILE_PATH}/${PROXMOX_ISO_FILE_PATH#"~/"}"
   elif [[ "$PROXMOX_ISO_FILE_PATH" != /* ]]; then
-    PROXMOX_ISO_FILE_PATH="${REPO_ROOT}/${PROXMOX_ISO_FILE_PATH}"
+    PROXMOX_ISO_FILE_PATH="${PROXMOX_USER_ROOT}/${PROXMOX_ISO_FILE_PATH}"
   fi
   if [[ "$HARDWARE_INVENTORY_MODE" == idrac ]]; then
     for name in IDRAC_IP IDRAC_USER IDRAC_PASSWORD; do require_var "$name"; done
@@ -590,6 +592,7 @@ PY
   HOST_KEY="${SSH_DIR}/${HOST_ID}_ssh_host_ed25519_key"
   HOST_KEY_PUB="${HOST_KEY}.pub"
   KNOWN_HOSTS="${STATE_DIR}/known_hosts"
+  install -d -m 0700 "$PROXMOX_ARTIFACTS_DIR" "$ARTIFACTS_DIR"
   mkdir -p "$LOG_DIR" "$STATE_DIR" "$GENERATED_DIR" "$SSH_DIR" "$HEADER_DIR"
   chmod 0700 "$HOST_ARTIFACTS" "$LOG_DIR" "$STATE_DIR" "$GENERATED_DIR" "$SSH_DIR" "$HEADER_DIR"
   has_state admin-ssh-enabled && USE_ADMIN_SSH=1
@@ -638,7 +641,7 @@ PY
 
 preflight() {
   require_command curl jq openssl ssh scp ssh-keygen ssh-keyscan sha256sum python3 \
-    ip tailscale git awk base64 flock shred
+    ip tailscale awk base64 flock shred
   if source_iso_is_required; then
     require_command xorriso dpkg-deb
   fi
@@ -675,10 +678,10 @@ preflight() {
     info "$HOST_ID is already enrolled in Tailscale; reusing the recorded installation state."
   fi
 
-  git -C "$REPO_ROOT" check-ignore -q "${GENERATED_DIR}/answer.toml" ||
-    fail "Generated secret artifacts are not ignored by Git"
-  git -C "$REPO_ROOT" check-ignore -q "${HEADER_DIR}/probe" ||
-    fail "LUKS header artifacts are not ignored by Git"
+  config_require_git_ignored "${GENERATED_DIR}/answer.toml" "Generated secret artifacts" ||
+    fail "Generated secret artifacts must not be tracked by Git"
+  config_require_git_ignored "${HEADER_DIR}/probe" "LUKS header artifacts" ||
+    fail "LUKS header artifacts must not be tracked by Git"
 
   if source_iso_is_required; then
     local iso="$PROXMOX_ISO_FILE_PATH"
@@ -5008,6 +5011,9 @@ REMOTE
 }
 
 main() {
+  local legacy_artifacts
+  legacy_artifacts="$(config_legacy_artifacts_problem hosts)"
+  [[ -z "$legacy_artifacts" ]] || fail "$legacy_artifacts"
   cat <<'EOF'
 
 NOTE: During storage setup, cryptsetup may print messages like:

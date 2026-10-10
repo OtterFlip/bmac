@@ -415,7 +415,7 @@ offers the remaining hosts (answer `q` to stop there).
 
 ## Failure and resume behavior
 
-Temporary local request material lives under `scripts/user_callable/guests/prod/artifacts` with
+Temporary local request material lives under `<config>/artifacts/prod` with
 directory mode `0700` and files at `0600`; it is removed on exit. Remote
 request files are mode `0600` below `/run` and are removed after the build or
 by cleanup. A known-unattached per-VM ISO is removed after a failed run. If an

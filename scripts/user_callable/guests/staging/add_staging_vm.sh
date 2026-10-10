@@ -422,11 +422,14 @@ preflight_workstation() {
   if [[ -n "$SANITIZER_FILE" ]]; then
     validate_sanitizer_file
   fi
-  [[ ! -L "${SCRIPT_DIR}/artifacts" ]] ||
+  local legacy_artifacts
+  legacy_artifacts="$(config_legacy_artifacts_problem staging)"
+  [[ -z "$legacy_artifacts" ]] || die "$legacy_artifacts"
+  [[ ! -L "$PROXMOX_ARTIFACTS_DIR" && ! -L "${PROXMOX_ARTIFACTS_DIR}/staging" ]] ||
     die "The staging artifacts path may not be a symlink"
-  install -d -m 0700 "${SCRIPT_DIR}/artifacts"
-  chmod 0700 "${SCRIPT_DIR}/artifacts"
-  RUN_DIR="${SCRIPT_DIR}/artifacts/run-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  install -d -m 0700 "$PROXMOX_ARTIFACTS_DIR" "${PROXMOX_ARTIFACTS_DIR}/staging"
+  chmod 0700 "${PROXMOX_ARTIFACTS_DIR}/staging"
+  RUN_DIR="${PROXMOX_ARTIFACTS_DIR}/staging/run-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   install -d -m 0700 "$RUN_DIR"
 }
 

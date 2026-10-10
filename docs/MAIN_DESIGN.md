@@ -670,9 +670,8 @@ voters alive/voting and, for an even cluster, exactly one healthy QDevice vote.
 
 ## Host storage, LUKS, and mirrors
 
-The reviewed source is `proxmox-ve_9.2-1.iso`, verified against
-[`scripts/user_callable/hosts/artifacts/proxmox-ve_9.2-1.iso.SHA256.txt`](../scripts/user_callable/hosts/artifacts/proxmox-ve_9.2-1.iso.SHA256.txt)
-and the exact SHA-256 in `cluster.conf`. The host workflow creates a
+The reviewed source is `proxmox-ve_9.2-1.iso`, verified against the exact
+SHA-256 in `cluster.conf`. The host workflow creates a
 host-specific unattended ISO with public networking, serial-selected mirror
 1, administrator keys, a temporary setup key, a fresh one-time Tailscale key,
 the public management-port guard, and first-boot Tailscale bootstrap.
@@ -765,6 +764,35 @@ data without `source` or `eval`, in this order when each layer is requested:
 2. `config/moxN.conf`: selected host hardware and public/private identity;
 3. local `config/secrets.env`: allowed secrets only, when required.
 
+The config directory depends on how BMAC is run:
+
+- From a checkout (dev): always `<checkout>/config`.
+- From the installed Dashboard package: the scripts live under
+  `/usr/lib/BMAC_Dashboard/scripts`, next to a `bmac-installed` marker, and
+  the config directory defaults to
+  `~/.config/com.btvcorp.bmac.dashboard/config` (respecting
+  `XDG_CONFIG_HOME`). When the operator moves it from the Dashboard's Config
+  page, the Dashboard writes the absolute path to the one-line pointer file
+  `~/.config/com.btvcorp.bmac.dashboard/config-location`. Both the scripts and
+  the Dashboard ignore a pointer that is not a regular file owned by the
+  user, is group- or world-writable, or does not hold exactly one absolute
+  path. No environment variable is involved.
+
+The package ships only the `*_dot_*` examples (under
+`/usr/lib/BMAC_Dashboard/config`). The Dashboard copies them into the config
+directory as `cluster.conf`, `mox1.conf`, `mox2.conf`, and `secrets.env`
+(mode `0600`) the first time each package version starts, and only when a
+file does not already exist; it never overwrites the operator's files.
+Uninstalling leaves the config directory alone. Settings and the Config page
+warn about each of those four files while it is missing or still
+byte-identical to its example. The Dashboard compares `secrets.env` in
+process and never displays or returns its contents. It only opens the file
+in the operator's own editor or shows its folder.
+
+A checkout's config files must be Git-ignored where the scripts check it;
+outside a checkout that check applies only when the config directory itself
+sits inside a Git work tree.
+
 `config/moxN.conf` is setup input only: initial host setup and retries before
 setup completes. Post-setup disk and diagnostic workflows load cluster policy
 only and use the target host's live state as authoritative.
@@ -832,26 +860,30 @@ The Tailscale enrollment secret is deliberately not file-backed:
 `PROXMOX_LUKS_PASSWORD` is file-backed only in `config/secrets.env` and in the
 short-lived on-host file described above. It is never embedded in an ISO.
 
-Local artifacts are sensitive even when they contain hashes rather than
-plaintext:
+Local artifacts live under `<config>/artifacts/` (in a checkout,
+`config/artifacts/`, which is Git-ignored). They are sensitive even when they
+contain hashes rather than plaintext:
 
-- `scripts/user_callable/hosts/artifacts/<moxN>/*.iso`: generated host-specific installation media;
-- `scripts/user_callable/hosts/artifacts/<moxN>/generated/`: answer and first-boot input files;
-- `scripts/user_callable/hosts/artifacts/<moxN>/ssh/`: temporary setup key;
-- `scripts/user_callable/hosts/artifacts/<moxN>/state/`: resumable phase evidence and host key;
-- `scripts/user_callable/hosts/artifacts/<moxN>/logs/`: install, storage, quorum, and verification
+- `artifacts/hosts/<moxN>/*.iso`: generated host-specific installation media;
+- `artifacts/hosts/<moxN>/generated/`: answer and first-boot input files;
+- `artifacts/hosts/<moxN>/ssh/`: temporary setup key;
+- `artifacts/hosts/<moxN>/state/`: resumable phase evidence and host key;
+- `artifacts/hosts/<moxN>/logs/`: install, storage, quorum, and verification
   evidence;
-- `scripts/user_callable/hosts/artifacts/<moxN>/luks-headers/`: LUKS headers and GPT backups;
-- `scripts/user_callable/guests/prod/artifacts/` and `scripts/user_callable/guests/staging/artifacts/`: mode-`0700`
-  ephemeral creator workspaces.
+- `artifacts/hosts/<moxN>/luks-headers/`: LUKS headers and GPT backups;
+- `artifacts/prod/` and `artifacts/staging/`: mode-`0700` ephemeral creator
+  workspaces.
 
-These per-host trees are Git-ignored. The shared
-`scripts/user_callable/hosts/artifacts/used-tailscale-auth-key-sha256` digest denylist is
-intentionally tracked so key reuse remains blocked across workstations and
-fresh checkouts. Its ignored `.lock` file prevents concurrent setup processes
-from both passing the check-before-append operation. Back up host recovery
-material separately, encrypted, and with access controls. Git ignore is not a
-backup or security boundary.
+The `artifacts/hosts/used-tailscale-auth-key-sha256` digest denylist blocks
+reuse of an exposed Tailscale key on this workstation; its `.lock` file
+prevents concurrent setup processes from both passing the check-before-append
+operation. Back up host recovery material separately, encrypted, and with
+access controls. Git ignore is not a backup or security boundary.
+
+Earlier versions kept these trees under
+`scripts/user_callable/{hosts,guests/prod,guests/staging}/artifacts`. The
+scripts refuse to run while one of those legacy directories is non-empty and
+print the exact `mkdir -p ... && mv ...` command that moves it into place.
 
 ## The main workflows
 
@@ -1252,10 +1284,9 @@ only the allowed setup/console secrets at mode `0600`. All workflows depend on
 `scripts/lib/config.sh`; never source these files directly, commit secret values, or
 copy secrets into pmxcfs.
 
-`scripts/user_callable/hosts/artifacts/` contains the reviewed source-ISO checksum and ignored
-per-host generated media, state, logs, setup keys, GPT backups, and LUKS header
-backups. Keep those sensitive recovery artifacts off Git and back them up
-securely.
+`<config>/artifacts/hosts/` contains per-host generated media, state, logs,
+setup keys, GPT backups, and LUKS header backups. Keep those sensitive
+recovery artifacts off Git and back them up securely.
 
 ## Required operational sequence
 

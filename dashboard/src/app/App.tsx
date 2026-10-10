@@ -18,6 +18,7 @@ import { QDevicePage } from "@/pages/QDevicePage";
 import { DiagnosticsPage } from "@/pages/DiagnosticsPage";
 import { OperationsPage } from "@/pages/OperationsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
+import { ConfigPage } from "@/pages/ConfigPage";
 
 const PAGES: Record<Page, () => React.JSX.Element> = {
   dashboard: DashboardPage,
@@ -28,6 +29,7 @@ const PAGES: Record<Page, () => React.JSX.Element> = {
   qdevice: QDevicePage,
   diagnostics: DiagnosticsPage,
   operations: OperationsPage,
+  config: ConfigPage,
   settings: SettingsPage,
 };
 
@@ -80,7 +82,7 @@ export function App() {
         <div className="flex min-h-0 flex-1">
           <Sidebar />
           <main key={page} className="flex min-w-0 flex-1 flex-col animate-fade-in">
-            {!repoValid && page !== "settings" && <NoRepository />}
+            {!repoValid && page !== "settings" && page !== "config" && <NoRepository />}
             <PageView />
           </main>
           {panelOpen && <WorkflowPanel />}

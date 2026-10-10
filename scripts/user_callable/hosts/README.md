@@ -178,15 +178,15 @@ gateway, proxy, or Tailscale exit node.
 
 ## Host storage and source media
 
-The reviewed bare-metal source is `proxmox-ve_9.2-1.iso`; its checksum is
-tracked in `artifacts/proxmox-ve_9.2-1.iso.SHA256.txt` and the configured
-absolute ISO path/hash must match before media is built. The setup script
-creates a host-specific unattended ISO directly under `artifacts/<moxN>/`;
-its answer and first-boot inputs are under that host's `generated/` directory.
-Setup keys, logs, GPT backups, and LUKS headers also remain under the
-mode-`0700` host artifact tree and must never be committed. The only shared
-durable host artifact is the tracked
-`artifacts/used-tailscale-auth-key-sha256` denylist. Its ignored `.lock` file
+The reviewed bare-metal source is `proxmox-ve_9.2-1.iso`; the configured
+ISO path and SHA-256 in `cluster.conf` must match before media is built. Host
+artifacts live under `<config>/artifacts/hosts/` (`config/artifacts/hosts/`
+in a checkout). The setup script creates a host-specific unattended ISO
+directly under `artifacts/hosts/<moxN>/`; its answer and first-boot inputs
+are under that host's `generated/` directory. Setup keys, logs, GPT backups,
+and LUKS headers also remain under the mode-`0700` host artifact tree and
+must never be committed. The only shared durable host artifact is the
+`artifacts/hosts/used-tailscale-auth-key-sha256` denylist. Its `.lock` file
 only serializes concurrent check-and-append operations.
 
 One through five NVMe mirror pairs may be configured, numbered 0 through 4 to
@@ -407,7 +407,7 @@ of truth; these scripts do not read or update `config/moxN.conf`.
    gives each disk one partition, formats both as LUKS2 with it, and opens them as
    `crypt-rpool-mirrorN-1` and `-2`. The passphrase is typed only at the
    console; setup's temporary key file no longer exists by then;
-3. copies both LUKS header backups to `scripts/user_callable/hosts/artifacts/moxN/luks-headers/`
+3. copies both LUKS header backups to `config/artifacts/hosts/moxN/luks-headers/`
    as `rpool-mirrorN-1.bin` and `-2.bin`, keeping any earlier backup under
    the same name (from a previous run or a pair N that was since
    decommissioned) as `.replaced-<time>`;
@@ -444,7 +444,7 @@ nominal capacity, then run `scripts/user_callable/hosts/add_replacement_disk.sh 
    encrypts the new disk's member partition (partition 3 on mirror 0,
    partition 1 otherwise)
    under the pulled member's mapping name. The header backup is copied to
-   `scripts/user_callable/hosts/artifacts/moxN/luks-headers/`, keeping the old one as
+   `config/artifacts/hosts/moxN/luks-headers/`, keeping the old one as
    `.replaced-<time>`;
 4. records the new member in crypttab and proves the rebuilt initramfs unlocks
    it, rechecks that both boot ESPs are in sync, then runs `zpool replace`
@@ -815,7 +815,7 @@ unreachable, so a rerun finishes it as a forced removal.
    cluster-wide SSH trust. It re-adds the QDevice only for an even remaining
    count.
 5. It records membership, frees the slot, resynchronizes HAProxy routes,
-   archives `scripts/user_callable/hosts/artifacts/moxN` as `moxN.retired-<timestamp>`, offers to
+   archives `config/artifacts/hosts/moxN` as `moxN.retired-<timestamp>`, offers to
    update `PROXMOX_CONTROL_NODE`, and lists the manual cleanup: Tailscale
    device, `known_hosts`, `config/moxN.conf`, and Cloudflare.
 

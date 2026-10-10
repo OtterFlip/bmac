@@ -23,7 +23,18 @@ chmod 600 config/secrets.env
 Your copies are Git-ignored and must be owned by you (or root). The scripts
 refuse a `secrets.env` whose mode is not exactly `0600`, and any
 world-writable `.conf`. Read the comments at the top of each template before
-filling it in.
+filling it in. The Dashboard's Config page can edit the `.conf` files and
+compare them with their templates; it never shows `secrets.env`.
+
+The scripts write their working files (generated ISOs, setup state, logs,
+LUKS header backups) under `config/artifacts/`, which is Git-ignored. Back
+it up securely.
+
+This directory is used when BMAC runs from a checkout. The installed
+Dashboard package keeps the same files in
+`~/.config/com.btvcorp.bmac.dashboard/config/` instead (or wherever you move
+it from the Config page), and creates your copies from the templates on
+first start.
 
 ## Treat your copies as read-only (one tiny exception below)
 

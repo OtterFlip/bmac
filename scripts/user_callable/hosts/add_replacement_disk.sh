@@ -430,8 +430,8 @@ chmod 0700 "$helper"
   install -d -m 0700 "$HEADER_DIR"
   LOCAL_HEADER="${HEADER_DIR}/${HEADER_NAME}"
   if [[ "${APP_HA_DISK_TEST_MODE:-0}" != 1 ]]; then
-    git -C "$DW_REPO_ROOT" check-ignore -q -- "$LOCAL_HEADER" ||
-      dw_die "LUKS header backups under $HEADER_DIR are not ignored by Git"
+    config_require_git_ignored "$LOCAL_HEADER" "LUKS header backups" ||
+      dw_die "LUKS header backups under $HEADER_DIR must not be tracked by Git"
   fi
   if [[ -e "$LOCAL_HEADER" ]]; then
     # The previous file belongs to the pulled disk; keep it for the record.

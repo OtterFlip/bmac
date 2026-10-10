@@ -43,7 +43,8 @@ pub struct Listing {
     pub shortcuts: Vec<Shortcut>,
 }
 
-pub fn shortcuts(repo: Option<&Path>) -> Vec<Shortcut> {
+/// PLACES are labeled BMAC directories, such as the checkout or the config directory.
+pub fn shortcuts(places: &[(&str, PathBuf)]) -> Vec<Shortcut> {
     let mut list = Vec::new();
     let mut push = |label: &str, path: Option<PathBuf>| {
         if let Some(path) = path.filter(|p| p.is_dir()) {
@@ -51,7 +52,9 @@ pub fn shortcuts(repo: Option<&Path>) -> Vec<Shortcut> {
         }
     };
     push("Home", dirs::home_dir());
-    push("BMAC repository", repo.map(Path::to_path_buf));
+    for (label, path) in places {
+        push(label, Some(path.clone()));
+    }
     push("Desktop", dirs::desktop_dir());
     push("Documents", dirs::document_dir());
     push("Downloads", dirs::download_dir());
@@ -59,7 +62,7 @@ pub fn shortcuts(repo: Option<&Path>) -> Vec<Shortcut> {
     list
 }
 
-pub fn list(path: Option<&str>, repo: Option<&Path>) -> Result<Listing> {
+pub fn list(path: Option<&str>, places: &[(&str, PathBuf)]) -> Result<Listing> {
     let start = match path.filter(|p| !p.trim().is_empty()) {
         Some(p) => PathBuf::from(p),
         None => dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
@@ -107,7 +110,7 @@ pub fn list(path: Option<&str>, repo: Option<&Path>) -> Result<Listing> {
         path: dir.display().to_string(),
         entries,
         truncated,
-        shortcuts: shortcuts(repo),
+        shortcuts: shortcuts(places),
     })
 }
 
@@ -150,11 +153,11 @@ mod tests {
         std::fs::create_dir(dir.path().join("zdir")).unwrap();
         std::fs::write(dir.path().join("a.iso"), b"1234").unwrap();
         std::fs::write(dir.path().join(".hidden"), b"").unwrap();
-        let listing = list(Some(dir.path().to_str().unwrap()), None).unwrap();
+        let listing = list(Some(dir.path().to_str().unwrap()), &[]).unwrap();
         let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["zdir", ".hidden", "a.iso"]);
         assert_eq!(listing.entries[2].size, Some(4));
         assert!(listing.entries[1].hidden);
-        assert!(list(Some("relative"), None).is_err());
+        assert!(list(Some("relative"), &[]).is_err());
     }
 }

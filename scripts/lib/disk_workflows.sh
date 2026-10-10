@@ -25,7 +25,7 @@ if [[ "${APP_HA_DISK_TEST_MODE:-0}" == 1 ]]; then
 else
   DW_REMOTE_TOOL=/usr/local/sbin/app-ha-rpool-mirror
   DW_REMOTE_ROOT=/root
-  DW_ARTIFACTS_DIR="${DW_REPO_ROOT}/scripts/user_callable/hosts/artifacts"
+  DW_ARTIFACTS_DIR=""
 fi
 DW_HOST=""
 DW_RUN_DIR=""
@@ -63,6 +63,12 @@ dw_init() {
   # shellcheck source=config.sh
   source "$DW_CONFIG_LIB"
   load_proxmox_config --no-secrets >/dev/null || dw_die "cluster configuration is invalid"
+  if [[ -z "$DW_ARTIFACTS_DIR" ]]; then
+    local legacy_artifacts
+    legacy_artifacts="$(config_legacy_artifacts_problem hosts)"
+    [[ -z "$legacy_artifacts" ]] || dw_die "$legacy_artifacts"
+    DW_ARTIFACTS_DIR="${PROXMOX_ARTIFACTS_DIR}/hosts"
+  fi
   DW_RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/${DW_SCRIPT_NAME%.sh}.XXXXXX")"
   chmod 0700 "$DW_RUN_DIR"
   trap 'rm -rf -- "$DW_RUN_DIR"' EXIT

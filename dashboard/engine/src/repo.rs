@@ -1,9 +1,11 @@
-//! Locating and validating the BMAC checkout the dashboard drives.
+//! Locating and validating the BMAC scripts the dashboard drives: a checkout
+//! in development, or the copy bundled with an installed dashboard.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::config::ConfigLocation;
 use crate::error::{EngineError, Result};
 use crate::platform::command_output;
 
@@ -20,9 +22,8 @@ const MARKERS: &[&str] = &[
     "scripts/user_callable/hosts/add_proxmox_host.sh",
 ];
 
-/// Non-secret `config/cluster.conf` settings shown in the dashboard. Nothing
-/// else is read from config/: secrets.env is only checked for existence, and
-/// `moxN.conf` files are only listed by name.
+/// Non-secret cluster.conf settings shown in the dashboard. The config page
+/// can open the `*.conf` files; secrets.env is only compared with its example.
 const CLUSTER_KEYS: &[&str] = &[
     "PROXMOX_CLUSTER_NAME",
     "PROXMOX_QDEVICE_HOST",
@@ -40,6 +41,9 @@ pub struct ClusterSetting {
 #[derive(Debug, Clone, Serialize)]
 pub struct RepositoryInfo {
     pub root: String,
+    /// True for the scripts bundled with an installed dashboard.
+    pub bundled: bool,
+    pub config_dir: String,
     pub valid: bool,
     pub problems: Vec<String>,
     pub git_commit: Option<String>,
@@ -50,7 +54,7 @@ pub struct RepositoryInfo {
     pub cluster_conf_present: bool,
     pub secrets_env_present: bool,
     pub cluster_settings: Vec<ClusterSetting>,
-    /// Hosts with an `config/<host>.conf`, such as `mox3`, in numeric order.
+    /// Hosts with a `<host>.conf` in the config directory, such as `mox3`, in numeric order.
     pub host_configs: Vec<String>,
 }
 
@@ -85,17 +89,24 @@ pub fn discover() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         starts.push(exe);
     }
-    for start in starts {
-        for dir in start.ancestors() {
-            if let Ok(root) = validate(dir) {
-                return Some(root);
-            }
-        }
-    }
-    None
+    starts.iter().find_map(|start| checkout_containing(start))
 }
 
-pub fn info(root: &Path) -> RepositoryInfo {
+/// The checkout that PATH is in, if any. Copies of the installed bundle, such
+/// as the one a development build keeps under dashboard/target, are skipped.
+pub fn checkout_containing(path: &Path) -> Option<PathBuf> {
+    path.ancestors().filter(|dir| !is_bundle(dir)).find_map(|dir| validate(dir).ok())
+}
+
+/// The installed bundle is marked by this file beside scripts/; a checkout
+/// never has one. scripts/lib/config.sh checks the same marker.
+pub const INSTALLED_MARKER: &str = "bmac-installed";
+
+pub fn is_bundle(root: &Path) -> bool {
+    root.join(INSTALLED_MARKER).is_file()
+}
+
+pub fn info(root: &Path, config: &ConfigLocation) -> RepositoryInfo {
     let mut problems = Vec::new();
     let valid = match validate(root) {
         Ok(_) => true,
@@ -104,13 +115,17 @@ pub fn info(root: &Path) -> RepositoryInfo {
             false
         }
     };
+    let bundled = is_bundle(root);
     let git = |args: &[&str]| {
+        if bundled {
+            return None;
+        }
         let mut full = vec!["-C", root.to_str().unwrap_or(".")];
         full.extend_from_slice(args);
         command_output("git", &full)
     };
     let git_commit = git(&["rev-parse", "--short=12", "HEAD"]);
-    let git_dirty = git_commit.as_ref().map(|_| {
+    let git_dirty = git_commit.as_ref().filter(|_| !bundled).map(|_| {
         std::process::Command::new("git")
             .args(["-C", root.to_str().unwrap_or("."), "status", "--porcelain", "--untracked-files=no"])
             .output()
@@ -129,12 +144,14 @@ pub fn info(root: &Path) -> RepositoryInfo {
             crate::protocol::PROTOCOL_VERSION
         ));
     }
-    let cluster_conf = root.join("config/cluster.conf");
+    let cluster_conf = config.dir.join("cluster.conf");
     let cluster_settings = std::fs::read_to_string(&cluster_conf)
         .map(|text| cluster_settings(&text))
         .unwrap_or_default();
     RepositoryInfo {
         root: root.display().to_string(),
+        bundled,
+        config_dir: config.dir.display().to_string(),
         valid: valid && problems.is_empty(),
         problems,
         git_describe: git(&["describe", "--tags", "--always", "--dirty"]),
@@ -143,9 +160,9 @@ pub fn info(root: &Path) -> RepositoryInfo {
         git_dirty,
         protocol_version,
         cluster_conf_present: cluster_conf.is_file(),
-        secrets_env_present: root.join("config/secrets.env").is_file(),
+        secrets_env_present: config.dir.join("secrets.env").is_file(),
         cluster_settings,
-        host_configs: host_configs(&root.join("config")),
+        host_configs: host_configs(&config.dir),
     }
 }
 
@@ -194,8 +211,9 @@ mod tests {
     fn this_checkout_validates() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let root = validate(&root).expect("the enclosing checkout is a BMAC repository");
-        let info = info(&root);
+        let info = info(&root, &ConfigLocation::checkout(&root));
         assert_eq!(info.protocol_version, Some(2));
+        assert!(!info.bundled);
     }
 
     #[test]

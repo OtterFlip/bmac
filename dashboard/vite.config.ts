@@ -17,6 +17,8 @@ export default defineConfig({
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
       "@registry": fileURLToPath(new URL("./engine/workflows.json", import.meta.url)),
+      // The real config examples, shown by the browser preview's config page.
+      "@config-examples": fileURLToPath(new URL("../config", import.meta.url)),
     },
   },
   clearScreen: false,
@@ -25,6 +27,7 @@ export default defineConfig({
     strictPort: true,
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
+    fs: { allow: [".", "../config"] },
     watch: { ignored: ["**/src-tauri/**", "**/engine/**", "**/target/**"] },
   },
   build: {

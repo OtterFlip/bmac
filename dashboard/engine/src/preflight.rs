@@ -5,6 +5,7 @@ use std::process::Command;
 
 use serde::Serialize;
 
+use crate::config::{self, ConfigLocation, FileState};
 use crate::platform::{command_output, PlatformInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -23,6 +24,43 @@ pub struct Check {
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<String>,
+    /// The config file this check is about, for linking to the config page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<CheckLink>,
+    /// A shell command that installs what is missing, offered for copying.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// One sentence on what BMAC uses this for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<&'static str>,
+}
+
+fn purpose(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "platform" => "BMAC's workflows run from a Linux or macOS workstation.",
+        "repository" => "Holds the workflow scripts the dashboard runs.",
+        "bash" => "Every BMAC workflow is a Bash script.",
+        "python3" => "The scripts use it for config validation, address math, and JSON handling.",
+        "ssh" => "All work on the cluster's hosts and guests happens over SSH.",
+        "ssh_agent" => "Lets the scripts use your passphrase-protected SSH key without asking for it.",
+        "openssl" => "Hashes the root passwords set on new VMs.",
+        "flock" => "Keeps two setups from changing the cluster, or reusing a Tailscale key, at the same time.",
+        "curl" => "Talks to iDRAC and downloads the Proxmox install assistant during host setup.",
+        "jq" => "Reads the JSON that iDRAC, Tailscale, and the cluster return.",
+        "xorriso" => "Builds each host's custom unattended Proxmox installer ISO.",
+        "dpkg-deb" => "Unpacks Proxmox's auto-install assistant, which prepares the installer ISO.",
+        "tailscale" => "The workstation reaches the hosts and QDevice over your tailnet.",
+        "config_dir" => "Where your cluster.conf, host files, and secrets.env live.",
+        _ => return None,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckLink {
+    pub label: &'static str,
+    pub url: &'static str,
 }
 
 /// Directories searched ahead of PATH. A desktop app launched from a macOS
@@ -71,7 +109,19 @@ pub fn find_bash() -> Option<PathBuf> {
 }
 
 fn check(id: &'static str, label: &'static str, status: CheckStatus, detail: impl Into<String>) -> Check {
-    Check { id, label, status, detail: detail.into(), fix: None }
+    Check { id, label, status, detail: detail.into(), fix: None, config_file: None, link: None, command: None, purpose: purpose(id) }
+}
+
+/// A warning-level check for a command-line tool that some workflows need.
+fn tool_check(program: &'static str, needed_by: &str, install: &str) -> Check {
+    match which(program) {
+        Some(path) => check(program, program, CheckStatus::Ok, path.display().to_string()),
+        None => {
+            let mut missing = check(program, program, CheckStatus::Warning, format!("Not found; {needed_by}."));
+            missing.command = Some(install.to_string());
+            missing
+        }
+    }
 }
 
 fn with_fix(mut check: Check, fix: impl Into<String>) -> Check {
@@ -81,7 +131,42 @@ fn with_fix(mut check: Check, fix: impl Into<String>) -> Check {
     check
 }
 
-pub fn run(platform: &PlatformInfo, repo: Option<&Path>) -> Vec<Check> {
+fn config_check(config: &ConfigLocation, name: &'static str) -> Check {
+    let (id, why) = match name {
+        "cluster.conf" => ("cluster_conf", "every cluster workflow needs it"),
+        "secrets.env" => ("secrets_env", "creating hosts and VMs needs it"),
+        "mox1.conf" => ("mox1_conf", "setting up the cluster's first host needs it"),
+        _ => ("mox2_conf", "setting up the cluster's second host needs it"),
+    };
+    let example = config::example_for(name).unwrap_or_default();
+    let secret = name.ends_with(".env");
+    let (status, detail, fix) = match config::file_state(config, name) {
+        FileState::Missing => (
+            if name == "cluster.conf" { CheckStatus::Error } else { CheckStatus::Warning },
+            format!("Missing; {why}."),
+            format!("Create it from {example} on the Config page."),
+        ),
+        FileState::Unchanged => (
+            CheckStatus::Warning,
+            format!("Still identical to {example}; fill in your own values."),
+            if secret {
+                format!("Open {name} in your editor, fill it in, and keep it private (chmod 600).")
+            } else {
+                format!("Edit {name} on the Config page.")
+            },
+        ),
+        FileState::Customized | FileState::NoExample => (
+            CheckStatus::Ok,
+            if secret { "Customized (its contents are never shown by the dashboard).".into() } else { "Customized.".into() },
+            String::new(),
+        ),
+    };
+    let mut result = with_fix(check(id, name, status, detail), fix);
+    result.config_file = Some(name.to_string());
+    result
+}
+
+pub fn run(platform: &PlatformInfo, repo: Option<&Path>, config: Option<&ConfigLocation>) -> Vec<Check> {
     let mut checks = Vec::new();
     let macos = platform.os == "macos";
 
@@ -96,8 +181,15 @@ pub fn run(platform: &PlatformInfo, repo: Option<&Path>) -> Vec<Check> {
     });
 
     checks.push(match repo {
+        Some(root) if crate::repo::is_bundle(root) => {
+            let label = "BMAC scripts";
+            match crate::repo::validate(root) {
+                Ok(_) => check("repository", label, CheckStatus::Ok, format!("Bundled with the dashboard in {}", root.display())),
+                Err(error) => with_fix(check("repository", label, CheckStatus::Error, error.to_string()), "Reinstall the BMAC Dashboard package."),
+            }
+        }
         Some(root) => {
-            let info = crate::repo::info(root);
+            let info = crate::repo::info(root, &ConfigLocation::checkout(root));
             if info.valid {
                 check("repository", "BMAC repository", CheckStatus::Ok, info.root)
             } else {
@@ -184,6 +276,17 @@ pub fn run(platform: &PlatformInfo, repo: Option<&Path>) -> Vec<Check> {
         });
     }
 
+    checks.push(tool_check(
+        "curl",
+        "adding a host and some diagnostics need it",
+        if macos { "brew install curl" } else { "sudo apt install curl" },
+    ));
+    if platform.os == "linux" {
+        checks.push(tool_check("jq", "adding or removing a host and adding a QDevice need it", "sudo apt install jq"));
+        checks.push(tool_check("xorriso", "adding a host needs it to build the installer image", "sudo apt install xorriso"));
+        checks.push(tool_check("dpkg-deb", "adding a host needs it to unpack the Proxmox install assistant", "sudo apt install dpkg"));
+    }
+
     checks.push(match which("tailscale") {
         Some(path) => match command_output(path.to_str().unwrap_or("tailscale"), &["status", "--json"]) {
             Some(text) => {
@@ -203,30 +306,43 @@ pub fn run(platform: &PlatformInfo, repo: Option<&Path>) -> Vec<Check> {
             }
             None => check("tailscale", "Tailscale", CheckStatus::Warning, "tailscale status did not answer."),
         },
-        None => check("tailscale", "Tailscale", CheckStatus::Warning, "The tailscale CLI was not found on PATH."),
+        None => {
+            let mut missing = check("tailscale", "Tailscale", CheckStatus::Warning, "The tailscale CLI was not found on PATH.");
+            missing.link = Some(CheckLink {
+                label: "Install Tailscale",
+                url: if macos { "https://tailscale.com/download/mac" } else { "https://tailscale.com/docs/install/linux" },
+            });
+            missing
+        }
     });
 
-    if let Some(root) = repo {
-        let conf = root.join("config/cluster.conf").is_file();
-        checks.push(with_fix(
-            check(
-                "cluster_conf",
-                "config/cluster.conf",
-                if conf { CheckStatus::Ok } else { CheckStatus::Error },
-                if conf { "Present." } else { "Missing; every cluster workflow needs it." },
-            ),
-            "Copy config/cluster_dot_conf to config/cluster.conf and fill it in.",
-        ));
-        let secrets = root.join("config/secrets.env").is_file();
-        checks.push(with_fix(
-            check(
-                "secrets_env",
-                "config/secrets.env",
-                if secrets { CheckStatus::Ok } else { CheckStatus::Warning },
-                if secrets { "Present (its contents are never read by the dashboard)." } else { "Missing; creating hosts and VMs needs it." },
-            ),
-            "Copy config/secrets_dot_env to config/secrets.env, fill it in, and chmod 600 it.",
-        ));
+    if let Some(config) = config {
+        if let Some(problem) = &config.problem {
+            checks.push(with_fix(
+                check("config_dir", "Config directory", CheckStatus::Error, problem.clone()),
+                "Choose the config directory again on the Config page.",
+            ));
+        }
+        for name in config::ESSENTIAL {
+            checks.push(config_check(config, name));
+        }
     }
     checks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_tools_warn_with_an_install_command() {
+        let missing = tool_check("bmac-no-such-tool", "nothing needs it", "sudo apt install nothing");
+        assert_eq!(missing.status, CheckStatus::Warning);
+        assert_eq!(missing.detail, "Not found; nothing needs it.");
+        assert_eq!(missing.command.as_deref(), Some("sudo apt install nothing"));
+
+        let present = tool_check("sh", "scripts need it", "unused");
+        assert_eq!(present.status, CheckStatus::Ok);
+        assert!(present.command.is_none());
+    }
 }

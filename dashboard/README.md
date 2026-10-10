@@ -37,6 +37,12 @@ scripts that it calls, is described by
   in History, and each run's terminal-equivalent command can be copied.
 - **Next steps** a script suggests are listed with the result. Those that name
   a workflow can be launched directly with the suggested values.
+- **Config** (above Settings in the menu) lists `cluster.conf`, every
+  `moxN.conf`, `secrets.env`, and the read-only `*_dot_*` examples, with an
+  editor (undo/redo, find, compare with the example, save). For an installed
+  package it can also move the config directory, optionally taking the files
+  along. Settings warns about each essential file that is missing or still
+  identical to its example.
 
 ## Safety model
 
@@ -49,8 +55,12 @@ scripts that it calls, is described by
   `completed` event is reported as failed.
 - Secret field values (passwords, Tailscale auth keys) go only to the
   script's stdin. They are redacted from history and logs, and never used as
-  defaults. The dashboard checks that `config/secrets.env` exists but never reads
-  it.
+  defaults. The dashboard compares `secrets.env` with its example in process
+  to warn when it is unedited, but never displays it or sends its contents to
+  the frontend; it can only open it in your own editor or show its folder.
+- Config file reads and writes are limited to the known file names in the
+  config directory. Writes are atomic, create files at mode `0600`, and are
+  refused if the file changed on disk since it was loaded.
 - LUKS passphrases are never entered in the dashboard; the scripts ask you to
   type them at the host console.
 - Workflows the scripts support only on Linux (adding or removing a host or
@@ -67,8 +77,17 @@ npm install -g pnpm@12   # once per nvm Node install; packageManager in package.
 pnpm install
 pnpm dev             # browser preview at http://127.0.0.1:1420 with a mock backend
 pnpm app:dev         # the desktop app against a real repository checkout
-pnpm app:build       # release bundles under target/release/bundle/
+pnpm app:build       # release .deb under target/release/bundle/deb/
+pnpm app:build:rpm       # opt-in: .rpm
+pnpm app:build:appimage  # opt-in: AppImage
 ```
+
+The build stages `scripts/` (without tests, caches, or artifacts), the
+`config/*_dot_*` examples, and a `bmac-installed` marker into
+`src-tauri/bundle-resources/`, and the package installs them under
+`/usr/lib/BMAC_Dashboard/`. The `.deb` depends on the tools the scripts use
+(`bash`, `python3`, `openssh-client`, `openssl`, `curl`, `jq`, ...) and
+recommends `git` and `xorriso`.
 
 The browser preview runs entirely on fixtures in `src/lib/mock/`, so you can
 try every screen, including destructive confirmations, without a cluster.
@@ -105,10 +124,27 @@ the Tauri WebKit window and gets no Node types, so `process` or `require` there
 is a type error. `tsconfig.node.json` covers `vite.config.ts`, `scripts/`, and
 the tests, which run under Node.
 
-On first start, choose your BMAC checkout in Settings. Settings live in the
-platform config directory (`~/.config/com.btvcorp.bmac.dashboard/` on
-Linux) and run history in its data directory
-(`~/.local/share/com.btvcorp.bmac.dashboard/runs/`).
+Settings live in the platform config directory
+(`~/.config/com.btvcorp.bmac.dashboard/` on Linux) and run history in its data
+directory (`~/.local/share/com.btvcorp.bmac.dashboard/runs/`).
+
+The app works in one of two modes:
+
+- **Dev**: the executable is inside a BMAC checkout (`pnpm app:dev`, or a
+  binary under `target/`), or no bundled scripts are present. It uses the
+  checkout's `scripts/` and `config/`; on first start without a checkout, choose
+  one in Settings. The config directory is fixed to `<checkout>/config`.
+- **Installed**: the bundled scripts under `/usr/lib/BMAC_Dashboard/` are used,
+  and the config directory defaults to
+  `~/.config/com.btvcorp.bmac.dashboard/config/`. Moving it from the Config
+  page records the new path in `~/.config/com.btvcorp.bmac.dashboard/config-location`,
+  which the scripts read too. A package cannot write into home directories, so
+  the first start of each version copies any missing `cluster.conf`,
+  `mox1.conf`, `mox2.conf`, and `secrets.env` from the bundled examples; it
+  never overwrites existing files.
+
+The app opens on Settings on first launch and whenever a config file still
+needs attention.
 
 On Linux, a build that was not installed from a package (`pnpm app:dev` or a
 bare `target/release` binary) writes a hidden
@@ -123,7 +159,9 @@ of a generic one. Delete both files to undo it.
 | --- | --- |
 | `engine/` | Rust: protocol parsing and validation, the run supervisor, history, the workflow registry, preflight checks |
 | `engine/workflows.json` | The workflow allowlist: scripts, parameters, and how they map to flags. Compiled into the app |
+| `engine/src/config.rs` | Config directory location, file listing and state, guarded read/write, seeding, and relocation |
 | `src-tauri/` | The Tauri shell that exposes the engine to the frontend as a narrow command set |
+| `src-tauri/build.rs` | Stages the bundled scripts and examples into `src-tauri/bundle-resources/` (ignored) |
 | `src/` | React frontend |
 | `mock-scripts/` | Small protocol scripts used by the engine tests |
 

@@ -19,11 +19,21 @@
     "test": "vitest run",
     "tauri": "tauri",
     "app:dev": "node scripts/check-toolchain.mjs --app && tauri dev",
-    "app:build": "node scripts/check-toolchain.mjs --app && tauri build"
+    "app:build": "node scripts/check-toolchain.mjs --app && tauri build",
+    "app:build:appimage": "node scripts/check-toolchain.mjs --app && tauri build --bundles appimage",
+    "app:build:rpm": "node scripts/check-toolchain.mjs --app && tauri build --bundles rpm"
   },
   "dependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/legacy-modes": "^6.5.5",
+    "@codemirror/merge": "^6.12.2",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.14",
     "@fontsource-variable/inter": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@lezer/highlight": "^1.2.5",
     "@radix-ui/react-checkbox": "^1.3.12",
     "@radix-ui/react-dialog": "^1.2.0",
     "@radix-ui/react-dropdown-menu": "^2.1.25",
