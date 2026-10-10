@@ -2871,8 +2871,16 @@ configure_extra_mirror() {
         fail "The configured disks for extra mirror $pair are not safe to format"
       if awk -F '\t' '$4 == "luks" { found=1 } END { exit !found }' <<<"$luks_probe"; then
         confirm_exact \
-          "At least one serial-selected disk for extra mirror $pair already contains LUKS. Confirm that it belongs to this interrupted setup before adopting it; non-LUKS members will be erased." \
-          "ADOPT OR FORMAT EXTRA MIRROR ${pair}"
+          "At least one serial-selected disk for extra mirror $pair already contains LUKS. Erase all metadata from both disks, including LUKS key slots, ZFS labels, filesystem signatures, and partition tables, before creating the new encrypted mirror. Nothing on either disk will be reused, and their former contents will become unrecoverable." \
+          "ERASE AND FORMAT EXTRA MIRROR ${pair}"
+        remote "$RPOOL_MIRROR_TOOL" release-disks "$serial_1" "$serial_2" ||
+          fail "Could not erase the existing structures from extra mirror $pair"
+        luks_probe="$(remote "$RPOOL_MIRROR_TOOL" check-new "${size_args[@]}" \
+          "$serial_1" "$serial_2")" ||
+          fail "The configured disks for extra mirror $pair are not safe to format after erasing them"
+        if awk -F '\t' '$4 == "luks" { found=1 } END { exit !found }' <<<"$luks_probe"; then
+          fail "At least one disk for extra mirror $pair still contains LUKS after it was erased"
+        fi
       else
         confirm_exact \
           "Erase the two serial-selected disks for extra mirror $pair, give each one LUKS partition, and prepare them for an rpool mirror vdev. These disks receive no ESP." \
@@ -2913,7 +2921,7 @@ REMOTE
 
   run_target_helper "$helper" \
     "both encrypted members of extra mirror ${pair} were prepared" \
-    "Prepare extra mirror $pair on disks $serial_1 and $serial_2: fresh disks are erased, partitioned, and formatted as LUKS2 with the shared passphrase; LUKS from an earlier run of this step is reused. Both members are opened and their headers backed up."
+    "Prepare extra mirror $pair on disks $serial_1 and $serial_2: the disks were made blank before this helper was created, then partitioned and formatted as LUKS2 with the shared passphrase. LUKS created by an interrupted run of this helper is reused. Both members are opened and their headers backed up."
 
   remote "$RPOOL_MIRROR_TOOL" luks-check-prepared --pair "$pair" \
     "$serial_1" "$serial_2" ||

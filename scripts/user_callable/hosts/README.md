@@ -214,7 +214,10 @@ names `crypt-rpool-mirrorN-1` and `crypt-rpool-mirrorN-2`:
 - In LUKS mode, the script degrades and rebuilds mirror 0 one member at a time
   behind `crypt-rpool-a` and `crypt-rpool-b`, preserving both ESPs. Optional
   mirror pairs 1 through 4 become LUKS2 mirror vdevs on partition 1 of each
-  disk.
+  disk. Pre-existing LUKS on either disk of an optional pair causes both
+  disks' metadata to be erased after confirmation; setup never adopts LUKS
+  from an earlier installation. LUKS created by an interrupted helper from
+  the current setup attempt remains resumable.
 - In unencrypted mode, mirror 0 remains as installed and optional mirror pairs
   are added as unencrypted mirror vdevs on partition 1 of each disk.
 - Every member partition (partition 3 of the boot disks, partition 1 of extra

@@ -717,7 +717,10 @@ ZFS's own `mirror-0`, `mirror-1`, ... vdev names:
   vdev. Each disk gets one GPT partition (partition 1) that ends 1 GiB short of
   the smaller disk's whole-GiB size. In LUKS mode those partitions use names
   `crypt-rpool-mirror<P>-<M>`; in clear mode they remain unencrypted. Extra
-  mirrors have no ESP.
+  mirrors have no ESP. Host setup never adopts pre-existing LUKS on an extra
+  pair: after explicit confirmation it erases both disks' metadata before
+  creating fresh containers. Only LUKS created by an interrupted helper from
+  that setup attempt is reused for resume.
 - Because no member reaches the end of its disk, a replacement disk only has to
   hold the survivor's partition table (same logical sector size, at least the
   last partition's end plus 1 MiB), so a slightly smaller disk of the same

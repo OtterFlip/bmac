@@ -982,6 +982,31 @@ Flags:            Quorate Qdevice
         ):
             self.assertIn(call, source)
 
+    def test_setup_erases_preexisting_luks_before_preparing_an_extra_mirror(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        extra = source[source.index("configure_extra_mirror() {") : source.index("configure_raw_extra_mirror() {")]
+        luks_branch = extra[
+            extra.index("if awk -F '\\t' '$4 == \"luks\"") :
+            extra.index("      else\n", extra.index("if awk -F '\\t' '$4 == \"luks\""))
+        ]
+        self.assertIn(
+            'release-disks "$serial_1" "$serial_2"',
+            luks_branch,
+        )
+        self.assertIn(
+            "Nothing on either disk will be reused",
+            luks_branch,
+        )
+        self.assertIn(
+            "not safe to format after erasing them",
+            luks_branch,
+        )
+        self.assertNotIn("adopting it", extra)
+        self.assertLess(
+            extra.index('release-disks "$serial_1" "$serial_2"'),
+            extra.index('remote_script "$helper"'),
+        )
+
     def test_boot_member_luks_uses_the_shared_rpool_mirror_tool(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         # The same member LUKS code serves scripts/user_callable/hosts/add_replacement_disk.sh.
