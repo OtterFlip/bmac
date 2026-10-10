@@ -111,7 +111,7 @@ export function StagingPage() {
           {!g && guests.status !== "loading" && <EmptyState icon={<FlaskConical />} title="Guest state not loaded" body={guests.error ?? "Refresh to read the cluster."} />}
         </Card>
         <h2 className="mb-2.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-fg-subtle">Staging operations</h2>
-        <WorkflowTiles ids={["add_staging_vm", "remove_staging_vm"]} />
+        <WorkflowTiles ids={["add_staging_vm", "setup_jump_ssh_access", "remove_staging_vm"]} />
       </PageBody>
     </>
   );

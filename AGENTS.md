@@ -30,6 +30,8 @@ dev/run_tests.py -k reservation                            # filter by test name
   `SIGPIPE` failures under `set -o pipefail` on a busy machine.
 - If a test fails only under parallel runs, fix the test's race rather than
   serializing it.
+- When running the full test suite, run it unsandboxed, otherwise you'll get
+  errors due to: denied permissions, no pty devices, and timing tests.
 
 See the Tests section of [`docs/MAIN_DESIGN.md`](docs/MAIN_DESIGN.md#tests) for
 details, and [`dev/README.md`](dev/README.md) for running the complete
