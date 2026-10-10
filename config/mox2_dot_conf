@@ -10,6 +10,12 @@
 # execution and retries after an incomplete setup. After setup succeeds, the
 # host itself is authoritative; later scripts neither read nor update this file.
 
+# The key name and value must be separated by an '=' character with no
+# additional space.  If the value contains spaces then enclose it in single-
+# quotes, like so:
+#   VALID_SYNTAX_EXAMPLE='This key value pair has valid syntax'
+#   INVALID_SYNTAX_EXAMPLE = This key value pair has invalid syntax
+
 # IDRAC_IP is optional and is required only when add_proxmox_host.sh is run
 # with iDRAC/Redfish inventory (the script prompts for this choice).
 #IDRAC_IP=10.20.30.2

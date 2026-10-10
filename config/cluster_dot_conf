@@ -1,6 +1,12 @@
 # Shared, non-secret configuration for the complete Proxmox cluster.
 # This file is parsed as literal KEY=VALUE data; do not add shell commands.
 
+# The key name and value must be separated by an '=' character with no
+# additional space.  If the value contains spaces then enclose it in single-
+# quotes, like so:
+#   VALID_SYNTAX_EXAMPLE='This key value pair has valid syntax'
+#   INVALID_SYNTAX_EXAMPLE = This key value pair has invalid syntax
+
 # For most deployments, the only values you absolutely must change are these.
 # They're used to define the subnet of the private VLAN between your cluster hosts.
 # If you can use subnet 10.213.0.0/24 on your VLAN then most can stay as-is.
