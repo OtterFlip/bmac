@@ -41,14 +41,31 @@ pub const DEFAULT_SOURCE_ISO: (&str, &str) = (
 );
 /// The Dashboard's port.
 pub const DASHBOARD_PORT: u16 = 8443;
-/// Lab machines join the tailnet under this prefix, which is how the lab
-/// tells its own devices apart when it removes them (`lab/README.md`).
-pub const LAB_TAILSCALE_PREFIX: &str = "bmaclab-";
+/// Lab machines join the tailnet under a prefix, which is how a lab tells
+/// its own devices apart when it removes them (`lab/README.md`). Each lab
+/// has its own, passed in this variable, so two labs never share a name.
+pub const LAB_TAILSCALE_PREFIX_VAR: &str = "BMAC_LAB_TAILSCALE_PREFIX";
+const LAB_TAILSCALE_PREFIX: &str = "bmaclab-";
+
+/// The lab's tailnet prefix.
+///
+/// # Panics
+///
+/// If the variable is not lowercase letters, digits and hyphens ending in
+/// a hyphen; only lab builds call this.
+pub fn lab_tailscale_prefix() -> String {
+    let prefix = std::env::var(LAB_TAILSCALE_PREFIX_VAR).unwrap_or_else(|_| LAB_TAILSCALE_PREFIX.to_string());
+    let valid = prefix.ends_with('-')
+        && prefix.len() > 1
+        && prefix.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    assert!(valid, "{LAB_TAILSCALE_PREFIX_VAR} must be lowercase letters, digits and hyphens ending in a hyphen");
+    prefix
+}
 
 /// The host's name on the tailnet.
 pub fn tailscale_name(host: HostSlot) -> String {
     if cfg!(feature = "lab") {
-        format!("{LAB_TAILSCALE_PREFIX}{host}")
+        format!("{}{host}", lab_tailscale_prefix())
     } else {
         host.to_string()
     }

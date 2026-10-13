@@ -57,6 +57,9 @@ def sata_pair(form: dict) -> list[str]:
 
 
 LAYOUT = {"data_kind": "mirror", "data": sata_pair, "encryption": "luks2"}
+# mox3 as a successful run leaves it: an encrypted one-host cluster with a
+# SATA data mirror, set up. Later scenarios start from it (see staged).
+STAGE = "m7-first-host"
 
 SERIAL_CONSOLE = r"""
 set -e
@@ -134,8 +137,40 @@ def console_check(lab, vm, password: str) -> bool:
     return True
 
 
+def unlock_at_boot(lab, vm, passphrase: str, prompts: list[str] | None = None) -> None:
+    """Types the passphrase at vm's console when its next boot asks for it.
+    The lab starts a new QEMU when the guest restarts, so the console
+    closes once on the way down and is reopened for the new boot."""
+    deadline = time.monotonic() + BOOT_TIMEOUT
+    while True:
+        try:
+            with Console(lab.paths.console(vm.name)) as console:
+                prompt = console.expect(UNLOCK_PROMPT, timeout=max(1.0, deadline - time.monotonic()))
+                if prompts is not None:
+                    prompts.append(prompt.group(0))
+                # askpass can discard what arrives before it turns echo
+                # off, so a passphrase typed too soon is lost without a
+                # word; typing it again is what an operator would do.
+                for _ in range(3):
+                    time.sleep(1)
+                    console.line(passphrase)
+                    try:
+                        answer = console.expect(r"set up successfully|No key available", timeout=30)
+                    except ConsoleTimeout:
+                        continue
+                    if answer.group(0) != "set up successfully":
+                        raise AssertionError("the passphrase was refused at boot")
+                    return
+                raise AssertionError("the boot never took the passphrase")
+        except OSError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.2)
+
+
 def then(host) -> None:
     s, lab, vm = host.s, host.lab, host.vm
+    failed = s.failed
     passphrase = tokens.token_urlsafe(24)
 
     before = boot_id(host)
@@ -190,35 +225,9 @@ def then(host) -> None:
             console.expect(r"Stored for the setup job", timeout=30)
             console.line("exit")
 
-    def unlock_at_boot() -> None:
-        # The lab starts a new QEMU when the guest restarts, so the console
-        # closes once on the way down and is reopened for the new boot.
-        deadline = time.monotonic() + BOOT_TIMEOUT
+    def unlock() -> None:
         try:
-            while True:
-                try:
-                    with Console(lab.paths.console(vm.name)) as console:
-                        prompt = console.expect(UNLOCK_PROMPT, timeout=max(1.0, deadline - time.monotonic()))
-                        prompts.append(prompt.group(0))
-                        # askpass can discard what arrives before it turns
-                        # echo off, so a passphrase typed too soon is lost
-                        # without a word; typing it again is what an
-                        # operator would do.
-                        for _ in range(3):
-                            time.sleep(1)
-                            console.line(passphrase)
-                            try:
-                                answer = console.expect(r"set up successfully|No key available", timeout=30)
-                            except ConsoleTimeout:
-                                continue
-                            if answer.group(0) != "set up successfully":
-                                raise AssertionError("the passphrase was refused at boot")
-                            return
-                        raise AssertionError("the boot never took the passphrase")
-                except OSError:
-                    if time.monotonic() > deadline:
-                        raise
-                    time.sleep(0.2)
+            unlock_at_boot(lab, vm, passphrase, prompts)
         except Exception as e:
             unlock_failures.append(f"{type(e).__name__}: {e}")
 
@@ -255,7 +264,7 @@ def then(host) -> None:
                             enter_passphrase()
                             reply = {"kind": "acknowledge"}
                         elif form["kind"] == "manual_action" and title.endswith("before it restarts"):
-                            watcher = threading.Thread(target=unlock_at_boot, daemon=True)
+                            watcher = threading.Thread(target=unlock, daemon=True)
                             watcher.start()
                             watchers.append(watcher)
                             time.sleep(1)
@@ -351,6 +360,10 @@ def then(host) -> None:
 
     s.check("the host has left setup mode", lambda: wait_for(left_setup))
 
+    if s.failed == failed:
+        host.unlock = lambda: unlock_at_boot(lab, vm, passphrase)
+        host.save_stage(STAGE, live=lab.can_save_live(vm), extra={"luks_passphrase": passphrase})
+
 
 def wait_for(test, timeout: float = 180) -> bool:
     """Whether `test` holds within `timeout`, trying again while bmacd
@@ -370,3 +383,9 @@ def wait_for(test, timeout: float = 180) -> bool:
 
 def run(s) -> None:
     m6.install(s, LAYOUT, then)
+
+
+def staged(s, then_) -> None:
+    """Runs then_ on mox3 as this scenario leaves it (STAGE), building the
+    stage first if it isn't saved."""
+    m6.staged(s, STAGE, then, then_, layout=LAYOUT, unlock=unlock_at_boot)

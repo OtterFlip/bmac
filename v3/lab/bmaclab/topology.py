@@ -94,6 +94,9 @@ class Topology:
     source: Path
     tailnet_prefix: str
     reserved_tailnet_names: frozenset[str]
+    # The NVMe disks are attached as SCSI disks with the same serials, so
+    # QEMU can save the VMs live (it can't save a running NVMe controller).
+    nvme_as_scsi: bool = False
 
     def tailnet_name(self, vm: Vm) -> str:
         """The only name a lab VM may use on a real tailnet."""
@@ -276,6 +279,9 @@ def parse(data: dict, source: Path) -> Topology:
     if not isinstance(reserved, list) or not all(isinstance(r, str) and r for r in reserved):
         raise TopologyError("[lab]: reserved_tailnet_names must be a list of names")
     reserved_names = frozenset(r.lower() for r in reserved)
+    nvme_as_scsi = lab.get("nvme_as_scsi", False)
+    if not isinstance(nvme_as_scsi, bool):
+        raise TopologyError("[lab]: nvme_as_scsi must be true or false")
     for vm in vms:
         tailnet_name = f"{tailnet_prefix}{vm.name}"
         if tailnet_name in reserved_names:
@@ -297,14 +303,35 @@ def parse(data: dict, source: Path) -> Topology:
         source=source,
         tailnet_prefix=tailnet_prefix,
         reserved_tailnet_names=reserved_names,
+        nvme_as_scsi=nvme_as_scsi,
     )
 
 
+def _merged(base: dict, overlay: dict) -> dict:
+    merged = dict(base)
+    for key, value in overlay.items():
+        merged[key] = _merged(base[key], value) if isinstance(value, dict) and isinstance(base.get(key), dict) else value
+    return merged
+
+
 def load(path: Path) -> Topology:
-    try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as error:
-        raise TopologyError(f"{path} does not exist") from error
-    except tomllib.TOMLDecodeError as error:
-        raise TopologyError(f"{path}: {error}") from error
+    """Reads a topology. One whose [lab] names a `base` topology (relative
+    to it) is that topology with its own tables merged over it."""
+    def read(file: Path) -> dict:
+        try:
+            return tomllib.loads(file.read_text(encoding="utf-8"))
+        except FileNotFoundError as error:
+            raise TopologyError(f"{file} does not exist") from error
+        except tomllib.TOMLDecodeError as error:
+            raise TopologyError(f"{file}: {error}") from error
+
+    data = read(path)
+    base = data.get("lab", {}).pop("base", None)
+    if base is not None:
+        if not isinstance(base, str) or not base:
+            raise TopologyError("[lab]: base must name a topology file")
+        under = read(path.parent / base)
+        if "base" in under.get("lab", {}):
+            raise TopologyError(f"{base}: a base topology can't have a base of its own")
+        data = _merged(under, data)
     return parse(data, path)

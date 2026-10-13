@@ -136,8 +136,14 @@ def answer_toml(topology: Topology, vm: Vm, hashed_password: str, public_key: st
         "[disk-setup]",
         'filesystem = "zfs"',
         'filter-match = "any"',
-        f"filter.ID_SERIAL_SHORT = {_toml(nvme[0].serial)}",
-        f"filter.ID_SERIAL = {_toml('*' + nvme[1].serial + '*')}",
+        *([
+            # A SCSI disk with a WWN reports it as ID_SERIAL; its serial is
+            # ID_SCSI_SERIAL, and only the boot disks' start with <VM>N.
+            f"filter.ID_SCSI_SERIAL = {_toml(nvme[0].serial[:len(vm.name) + 1] + '*')}",
+        ] if topology.nvme_as_scsi else [
+            f"filter.ID_SERIAL_SHORT = {_toml(nvme[0].serial)}",
+            f"filter.ID_SERIAL = {_toml('*' + nvme[1].serial + '*')}",
+        ]),
         'zfs.raid = "raid1"',
         "",
         "[first-boot]",

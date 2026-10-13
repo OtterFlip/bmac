@@ -115,18 +115,38 @@ fails. `lab/lab scenario NAME` exits 0 only when every check passed.
 
 A stage is a VM saved by a scenario once it reached a state that took long
 to reach, so later runs of a scenario that builds on it start there
-instead. The VM is shut down for the save and boots when restored; QEMU
-can't save a running NVMe controller ("non-migratable device"), so live
-snapshots aren't used. The disks keep qcow2 snapshots named `stage-NAME`,
+instead (`m6.staged`). The disks keep qcow2 snapshots named `stage-NAME`,
 and the VM's folder keeps its firmware store with a copy of the
 Deployer's working files and the run's made-up root password. The host
-keeps its tailnet device. A restored stage gets the current bmacd package. `BMAC_LAB_FRESH=1` ignores every stage, and
-installing the VM anew drops its stages. `lab/lab rebuild` drops them with
-the disks.
+keeps its tailnet device. A restored stage gets the current bmacd package.
+`BMAC_LAB_FRESH=1` builds the stage again, installing the VM anew drops its
+stages, and `lab/lab rebuild` drops them with the disks.
 
-| Stage | VM | Saved by | State |
-|---|---|---|---|
-| `m7-one-host-cluster` | mox3 | `m7_join` | NVMe boot mirror, no data pool or encryption, setup finished without boot drills, a one-host cluster whose bmacd issues join bundles |
+How a stage is saved depends on the lab. QEMU can't save a running NVMe
+controller ("non-migratable device"), so in the NVMe lab (`lab.toml`) the
+VM is shut down for the save and boots when restored. `lab-scsi.toml` is
+the same topology (its own name, ports, multicast group, MACs, and tailnet
+prefix `bmacscsi-`) with `nvme_as_scsi = true`, which attaches the NVMe
+disks as SCSI disks with the same serials. There a stage is saved live
+(QMP `snapshot-save`, the memory in the first disk) and restored with
+`snapshot-load` before the VM runs, so it resumes where it was in seconds,
+past its boot's VLAN carrier delay; the scenario then sets the guest's
+clock. Both labs run at the same time:
+
+```bash
+lab/lab --config lab/lab-scsi.toml create          # once
+lab/lab --config lab/lab-scsi.toml scenario m7_join # iterate here
+lab/lab scenario m7_join &                         # final: both at once
+lab/lab --config lab/lab-scsi.toml scenario m7_join
+```
+
+A VM's stages share its tailnet name, so they form one chain: each builds
+on the one before, and a scenario that needs a VM differently set up adds a
+stage after the chain's last rather than a second one beside it.
+
+| Stage | VM | Saved by | Used by | State |
+|---|---|---|---|---|
+| `m7-first-host` | mox3 | `m7_storage`, when every check passes | `m7_join` | boot mirror and SATA data mirror, all LUKS2 (the run's made-up passphrase is kept with the stage and typed at the console when an NVMe-lab restore boots), setup finished, an encrypted one-host cluster whose bmacd issues join bundles |
 
 ## A cluster running bmacd
 

@@ -78,19 +78,34 @@ installed and set up, a cluster formed), save the VMs at that stage and let
 later runs start from it, so work on what comes after doesn't repeat the
 stage each time. Watch for these: whenever a scenario spends many minutes
 reaching a state before the part being worked on, save that state as a
-stage. Save one with `Installed.save_stage` once the stage's checks pass.
-Every VM, the appliance and the QDevice included, is shut down for the
-save and boots when restored, so an encrypted host would wait for its LUKS
-passphrase. (QEMU's live snapshots aren't used: its NVMe emulation can't
-be saved while running.) Pass the stage's name to
-`m6.install(..., stage=...)`, which restores it, installs the current bmacd
-package on it, and runs the rest. A stage keeps the host's tailnet device,
-and installing that VM anew drops its stages. Save the hosts of a cluster
-together, one after another while nothing is changing, so they agree with
-each other when restored. `BMAC_LAB_FRESH=1` ignores every stage. As with the boot
-drills, once the later part passes from a stage, run the whole scenario
-once from scratch before reporting the work as finished. The stages saved
-so far are listed in [`lab/README.md`](lab/README.md#stages).
+stage. `m6.staged(s, STAGE, build, then)` does this: it installs the
+host, runs `build` to reach the stage, saves it, and runs `then`; later
+runs restore the stage, install the current bmacd package on it, and run
+only `then`. A stage keeps the host's tailnet device, installing that VM
+anew drops its stages, and `BMAC_LAB_FRESH=1` builds the stage again.
+Because a VM's stages share its tailnet name, they form a chain: build the
+next stage on the last one (`m7_join` starts from `m7_storage`'s
+`m7-first-host`), and never repeat a long scenario that a stage already
+covers.
+
+There are two labs, and they run at the same time:
+
+- the NVMe lab (`lab/lab.toml`), whose hosts have NVMe boot disks like the
+  real servers. QEMU can't save a running NVMe controller, so a stage is
+  saved with the host shut down and boots when restored (an encrypted host
+  then waits for its LUKS passphrase);
+- the SCSI lab (`lab/lab --config lab/lab-scsi.toml`), the same topology
+  with the boot disks attached as SCSI. Its stages are saved live and
+  resume in seconds, running, with the guest's clock set to now.
+
+Iterate on the SCSI lab: each failed try restores the live stage and goes
+again. For the final runs, run the scenario on both labs concurrently, so
+the change is proved from each lab's stage, NVMe included. When a change
+touches what a stage itself covers, run with `BMAC_LAB_FRESH=1` on both
+labs, which proves the stage from scratch and saves it again. Save the
+hosts of a cluster together, one after another while nothing is changing,
+so they agree with each other when restored. The stages saved so far are
+listed in [`lab/README.md`](lab/README.md#stages).
 
 v2's `dev/run_tests.py` also collects every committed `test_*.py` under
 `v3/`, and runs it from the repository root. So a v3 Python test must find

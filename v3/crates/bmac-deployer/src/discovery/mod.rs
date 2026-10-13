@@ -165,7 +165,7 @@ fn random_hex(bytes: usize) -> Result<String, String> {
 /// `bmac-discover-<random>`; in a lab build, under the lab prefix.
 pub fn discovery_name(suffix: &str) -> String {
     if cfg!(feature = "lab") {
-        format!("{}discover-{suffix}", crate::hostiso::LAB_TAILSCALE_PREFIX)
+        format!("{}discover-{suffix}", crate::hostiso::lab_tailscale_prefix())
     } else {
         format!("bmac-discover-{suffix}")
     }

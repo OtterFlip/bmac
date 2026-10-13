@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import io
 import json
@@ -90,6 +91,15 @@ class AnswerFileTest(unittest.TestCase):
         self.assertEqual(answer["disk-setup"]["filter"]["ID_SERIAL"], f"*{nvme[1].serial}*")
         self.assertEqual(answer["network"]["filter"]["ID_NET_NAME_MAC"], "*" + self.mox2.nic("uplink").mac.replace(":", ""))
         self.assertEqual(answer["first-boot"], {"source": "from-iso", "ordering": "before-network"})
+
+    def test_the_scsi_lab_finds_its_boot_disks_by_scsi_serial(self) -> None:
+        topology = load(LAB / "lab-scsi.toml")
+        mox2 = topology.vm("mox2")
+        answer = tomllib.loads(provision.answer_toml(topology, mox2, HASH, KEY))
+        pattern = answer["disk-setup"]["filter"]["ID_SCSI_SERIAL"]
+        self.assertEqual(list(answer["disk-setup"]["filter"]), ["ID_SCSI_SERIAL"])
+        matched = [d.bus for d in mox2.disks if fnmatch.fnmatchcase(d.serial, pattern)]
+        self.assertEqual(matched, ["nvme", "nvme"])
 
     def test_first_boot_script_addresses_both_private_nics_and_parses(self) -> None:
         script = provision.first_boot_script(self.topology, self.mox2)

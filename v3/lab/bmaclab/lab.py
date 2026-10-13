@@ -25,6 +25,7 @@ from .topology import Topology, Vm
 SNAPSHOT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 INSTALL_TIMEOUT = 45 * 60
 BOOT_TIMEOUT = 10 * 60
+STAGE_TIMEOUT = 10 * 60
 # The links an operator (or a scenario) can hold down.
 LINKS = ("uplink", "mgmt", "vlan")
 
@@ -117,7 +118,9 @@ class Lab:
             raise LabError("the carrier delay must be from 0 to 3600 seconds")
         self.paths.carrier_delay(vm.name).write_text(f"{seconds}\n")
 
-    def start(self, vms: list[Vm], media: Path | None = None, no_reboot: bool = False) -> None:
+    def start(self, vms: list[Vm], media: Path | None = None, no_reboot: bool = False, stage: str | None = None) -> None:
+        """Starts vms; with stage, each resumes from that live stage instead
+        of booting."""
         self.require_created()
         self.require_tools()
         assert self.firmware is not None
@@ -133,11 +136,14 @@ class Lab:
                 subprocess.run(args, check=True, capture_output=True, text=True)
             except subprocess.CalledProcessError as error:
                 raise LabError(f"QEMU did not start {vm.name}: {error.stderr.strip()}") from error
-            with Qmp(self.paths.qmp(vm.name)) as monitor:
+            with Qmp(self.paths.qmp(vm.name), timeout=30 if stage else 10) as monitor:
+                if stage:
+                    self._snapshot_job(monitor, vm, "snapshot-load", f"stage-{stage}")
                 for network in LINKS:
                     if vm.nic(network) and self.paths.link_held(vm.name, network).exists():
                         monitor.command("set_link", name=f"nic-{network}", up=False)
-                delay = self.carrier_delay(vm)
+                # A resumed VM was already past its boot's carrier delay.
+                delay = None if stage else self.carrier_delay(vm)
                 if delay and not self.paths.link_held(vm.name, "vlan").exists():
                     monitor.command("set_link", name="nic-vlan", up=False)
                     self.paths.carrier_until(vm.name).write_text(f"{time.time() + delay}\n")
@@ -378,14 +384,46 @@ class Lab:
         folder = self.paths.vm(vm.name) / "stages"
         return sorted(p.name for p in folder.iterdir() if (p / "stage.json").exists()) if folder.exists() else []
 
-    def save_stage(self, vm: Vm, name: str, files: Path, meta: dict) -> None:
+    def can_save_live(self, vm: Vm) -> bool:
+        """QEMU can't save a running NVMe controller."""
+        return self.topology.nvme_as_scsi or all(disk.bus != "nvme" for disk in vm.disks)
+
+    def _snapshot_job(self, monitor: Qmp, vm: Vm, kind: str, tag: str) -> None:
+        """Runs QMP's snapshot-save, -load, or -delete over vm's disks, with
+        the VM's memory in the first. The firmware store is raw, so it is
+        left out and copied beside the stage instead."""
+        nodes = {d["device"]: d["inserted"]["node-name"] for d in monitor.command("query-block") if d.get("inserted")}
+        devices = [nodes[f"d-{disk.id}"] for disk in vm.disks]
+        job = f"{kind}-{vm.name}"
+        arguments: dict = {"job-id": job, "tag": tag, "devices": devices}
+        if kind != "snapshot-delete":
+            arguments["vmstate"] = devices[0]
+        monitor.command(kind, **arguments)
+        deadline = time.monotonic() + STAGE_TIMEOUT
+        while True:
+            state = next((j for j in monitor.command("query-jobs") if j["id"] == job), None)
+            if state is not None and state["status"] == "concluded":
+                monitor.command("job-dismiss", id=job)
+                if state.get("error"):
+                    raise LabError(f"{kind} of {vm.name}: {state['error']}")
+                return
+            if time.monotonic() > deadline:
+                raise LabError(f"{kind} of {vm.name} did not finish within {STAGE_TIMEOUT} seconds")
+            time.sleep(0.5)
+
+    def save_stage(self, vm: Vm, name: str, files: Path, meta: dict, live: bool = False) -> None:
         """Saves vm's disks and firmware store, a copy of files, and meta as
         stage name. Unlike a checkpoint it outlives the scenario, so a later
-        run can start from it with restore_stage. A running VM is shut down
-        for the save and started again."""
+        run can start from it with restore_stage. A live stage is saved
+        while vm runs, its memory with it; otherwise a running vm is shut
+        down for the save and started again."""
         tag = f"stage-{name}"
         self._check_snapshot_name(tag)
-        restart = self.running(vm)
+        if live and not self.running(vm):
+            raise LabError(f"{vm.name} must be running to save it live")
+        if live and not self.can_save_live(vm):
+            raise LabError(f"{vm.name} has NVMe disks, which QEMU can't save live; use a topology with nvme_as_scsi")
+        restart = self.running(vm) and not live
         if restart:
             self.stop([vm])
             if self.running(vm):
@@ -393,35 +431,46 @@ class Lab:
         folder = self._stage_dir(vm, name)
         shutil.rmtree(folder, ignore_errors=True)
         folder.mkdir(parents=True, mode=0o700)
-        for disk in vm.disks:
-            path = str(self.paths.disk(disk))
-            if tag in self._disk_snapshots(path):
-                provision.run(["qemu-img", "snapshot", "-d", tag, path])
-            provision.run(["qemu-img", "snapshot", "-c", tag, path])
+        if live:
+            with Qmp(self.paths.qmp(vm.name), timeout=30) as monitor:
+                with contextlib.suppress(LabError):
+                    self._snapshot_job(monitor, vm, "snapshot-delete", tag)
+                self._snapshot_job(monitor, vm, "snapshot-save", tag)
+        else:
+            for disk in vm.disks:
+                path = str(self.paths.disk(disk))
+                if tag in self._disk_snapshots(path):
+                    provision.run(["qemu-img", "snapshot", "-d", tag, path])
+                provision.run(["qemu-img", "snapshot", "-c", tag, path])
         shutil.copyfile(self.paths.vars(vm.name), folder / "vars.fd")
         shutil.copytree(files, folder / "files", symlinks=True)
         fd = os.open(folder / "stage.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as out:
-            json.dump({**meta, "name": name, "taken": time.time()}, out)
-        self.log(f"Stage {name} of {vm.name} saved")
+            json.dump({**meta, "name": name, "taken": time.time(), "live": live}, out)
+        self.log(f"Stage {name} of {vm.name} saved" + (" live" if live else ""))
         if restart:
             self.start([vm])
 
     def restore_stage(self, vm: Vm, name: str, files: Path) -> dict:
-        """Puts vm back as stage name left it, powered off, with its files
-        copied back to files. The stage is kept."""
+        """Puts vm back as stage name left it, with its files copied back to
+        files, and keeps the stage. A live stage is running again where it
+        was, its clock still at the save's time (the caller sets it); any
+        other is powered off."""
         meta = self.stage(vm, name)
         if meta is None:
             raise LabError(f"{vm.name} has no stage named {name!r}")
         self.kill(vm)
         folder = self._stage_dir(vm, name)
-        for disk in vm.disks:
-            provision.run(["qemu-img", "snapshot", "-a", f"stage-{name}", str(self.paths.disk(disk))])
         shutil.copyfile(folder / "vars.fd", self.paths.vars(vm.name))
         shutil.rmtree(files, ignore_errors=True)
         shutil.copytree(folder / "files", files, symlinks=True)
         for stale in (self.paths.carrier_until(vm.name), *(self.paths.link_held(vm.name, n) for n in LINKS)):
             stale.unlink(missing_ok=True)
+        if meta.get("live"):
+            self.start([vm], stage=name)
+        else:
+            for disk in vm.disks:
+                provision.run(["qemu-img", "snapshot", "-a", f"stage-{name}", str(self.paths.disk(disk))])
         self.log(f"Restored {vm.name} to stage {name}")
         return meta
 

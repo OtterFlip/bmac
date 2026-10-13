@@ -27,6 +27,7 @@ import ssl
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from bmaclab import tailnet
@@ -58,9 +59,9 @@ class TaskFailed(Exception):
 class Task:
     """The driver process: task events in, answers out."""
 
-    def __init__(self, argv: list[str], log: Path) -> None:
+    def __init__(self, argv: list[str], log: Path, env: dict[str, str] | None = None) -> None:
         self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=log.open("w"), text=True, bufsize=1)
+                                        stderr=log.open("w"), text=True, bufsize=1, env=env)
         self.lines: queue.Queue[dict | None] = queue.Queue()
         threading.Thread(target=self._read, daemon=True).start()
 
@@ -156,16 +157,23 @@ class Installed:
         self.password, self.host_name = password, host_name
         # The stage the host was restored from instead of installed, if any.
         self.reused = reused
+        # The stages saved from this host.
+        self.saved: list[str] = []
+        # Types an encrypted root's passphrase at the console during a boot.
+        self.unlock: Callable[[], None] | None = None
 
-    def save_stage(self, name: str) -> None:
-        """Shuts the host down, saves it as stage name for later runs to
-        start from (see install's stage), and starts it again. A restored
-        stage boots, so an encrypted root would wait for its passphrase."""
-        self.s.note(f"saving {self.vm.name} as stage {name}")
-        self.lab.save_stage(self.vm, name, self.work, {"password": self.password, "package_sha256": package_digest()})
-        self.lab.wait_ssh(self.vm, BOOT_TIMEOUT)
+    def save_stage(self, name: str, live: bool = False, extra: dict | None = None) -> None:
+        """Saves the host as stage name for later runs to start from (see
+        staged), with extra in its record. A live stage keeps running; any
+        other is shut down for the save and started again."""
+        self.s.note(f"saving {self.vm.name} as stage {name}" + (" live" if live else ""))
+        meta = {"password": self.password, "package_sha256": package_digest(), **(extra or {})}
+        with booting(self.s, None if live else self.unlock):
+            self.lab.save_stage(self.vm, name, self.work, meta, live=live)
+        self.saved.append(name)
+        # The guard drops SSH on the public address, so only the tailnet reaches it.
         self.s.require(f"{self.host_name} answers SSH on the tailnet after its stage was saved",
-                       lambda: wait_until(lambda: self.on_host("true") == ""))
+                       lambda: wait_until(lambda: self.on_host("true") == "", BOOT_TIMEOUT))
 
     def ssh_args(self, extra: list[str] | None = None) -> list[str]:
         return ["ssh", "-F", str(self.work / "ssh" / "config"), "-o", "BatchMode=yes",
@@ -181,6 +189,41 @@ class Installed:
 
 def run(s) -> None:
     install(s)
+
+
+def boot_serials(vm) -> list[str]:
+    """The disks the boot mirror goes on: the topology's NVMe disks, however
+    they are attached."""
+    return [disk.serial for disk in vm.disks if disk.bus == "nvme"]
+
+
+@contextlib.contextmanager
+def booting(s, unlock: Callable[[], None] | None):
+    """Runs unlock alongside the block, which boots the host, so the
+    passphrase is typed when the boot asks for it."""
+    if unlock is None:
+        yield
+        return
+    failures: list[str] = []
+
+    def run() -> None:
+        try:
+            unlock()
+        except Exception as e:  # reported below
+            failures.append(f"{type(e).__name__}: {e}")
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    yield
+    thread.join(BOOT_TIMEOUT)
+    s.require(f"the boot was unlocked ({'; '.join(failures) or 'ok'})", not failures and not thread.is_alive())
+
+
+def is_boot_disk(vm, option: dict) -> bool:
+    """Whether a disk choice is one of the boot disks. A SCSI disk with a
+    WWN gets its by-id name, and maybe its reported serial, from the WWN."""
+    text = f"{option['value']} {option['label']}"
+    return any(disk.serial in text or disk.wwn[2:] in text for disk in vm.disks if disk.bus == "nvme")
 
 
 def wait_until(test, timeout: float = 180) -> bool:
@@ -204,10 +247,54 @@ def package_digest() -> str:
     return hashlib.sha256(package().read_bytes()).hexdigest()
 
 
-def reuse(s, vm, stage: str, work: Path, host_name: str, then) -> None:
+def work_dir(lab, vm) -> Path:
+    return lab.paths.images.parent / ("m6" if vm.name == "mox3" else f"m6-{vm.name}")
+
+
+def preflight(s) -> dict:
+    lab = s.lab
+    keys = tailnet.read_secrets(lab.secrets)
+    for name in (HOST_KEY, DISCOVERY_KEY, tailnet.API_KEY, tailnet.ADMIN_EMAIL):
+        s.require(f"lab/secrets.env has {name}", lambda: keys.get(name))
+    s.require("the API key and this workstation are on the lab's Tailscale account", lambda: lab.tailscale() and True)
+    s.require("the development bmacd package is built (dev/build_deb.py)", lambda: list(PACKAGES.glob("bmacd_*.deb")))
+    return keys
+
+
+def staged(s, stage: str, build, then, layout: dict = NVME_MIRROR, vm_name: str = "mox3",
+           unlock: Callable | None = None) -> None:
+    """Installs vm, runs `build(installed)` to reach the stage, saves the
+    host as that stage (unless build saved it), and carries on with
+    `then(installed)`, the part being worked on. Later runs skip the build
+    and start from the stage. A lab with nvme_as_scsi (lab/lab-scsi.toml)
+    saves it live, so it resumes in seconds; the NVMe lab shuts the host
+    down to save it, and it boots when restored, with `unlock(lab, vm,
+    passphrase)` typing the stage's luks_passphrase if it has one.
+    BMAC_LAB_FRESH=1 builds the stage again."""
+    lab = s.lab
+    vm = lab.topology.vm(vm_name)
+    if lab.stage(vm, stage) and os.environ.get("BMAC_LAB_FRESH") != "1":
+        reuse(s, vm, stage, then, unlock)
+        return
+    failed = s.failed
+
+    def build_then(installed) -> None:
+        build(installed)
+        s.require(f"stage {stage} passed", s.failed == failed)
+        if stage not in installed.saved:
+            installed.save_stage(stage, live=lab.can_save_live(vm))
+        then(installed)
+
+    s.note(f"building stage {stage}")
+    install(s, layout, build_then, vm_name)
+
+
+def reuse(s, vm, stage: str, then, unlock: Callable | None = None) -> None:
     """Starts vm from stage instead of installing it, with the current
     bmacd package, and carries on with `then` before putting it back."""
     lab = s.lab
+    preflight(s)
+    work, host_name = work_dir(lab, vm), f"{lab.topology.tailnet_prefix}{vm.name}"
     lab.stop([vm])
     lab.checkpoint(vm, CHECKPOINT)
     with contextlib.ExitStack() as cleanup:
@@ -217,12 +304,17 @@ def reuse(s, vm, stage: str, work: Path, host_name: str, then) -> None:
         cleanup.callback(put_back)
         meta = lab.restore_stage(vm, stage, work)
         hours = (time.time() - meta["taken"]) / 3600
-        s.note(f"started {vm.name} from stage {stage}, saved {hours:.1f} h ago, instead of installing it; "
-               "BMAC_LAB_FRESH=1 installs it from scratch")
-        lab.start([vm])
-        lab.wait_ssh(vm, BOOT_TIMEOUT)
+        s.note(f"started {vm.name} from stage {stage}, saved {hours:.1f} h ago" + (" live" if meta.get("live") else "")
+               + ", instead of installing it; BMAC_LAB_FRESH=1 builds the stage again")
         installed = Installed(s, vm, work, meta["password"], host_name, reused=stage)
-        s.require(f"{host_name} answers SSH on the tailnet", lambda: wait_until(lambda: installed.on_host("true") == ""))
+        if unlock and meta.get("luks_passphrase"):
+            installed.unlock = lambda: unlock(lab, vm, meta["luks_passphrase"])
+        with booting(s, None if meta.get("live") else installed.unlock):
+            lab.start([vm])
+        s.require(f"{host_name} answers SSH on the tailnet", lambda: wait_until(
+            lambda: installed.on_host("true") == "", BOOT_TIMEOUT))
+        if meta.get("live"):
+            installed.on_host(f"date -s @{time.time():.3f} >/dev/null")
         if meta.get("package_sha256") != package_digest():
             s.note(f"installing the current bmacd package on {vm.name}")
             with package().open("rb") as deb:
@@ -231,34 +323,24 @@ def reuse(s, vm, stage: str, work: Path, host_name: str, then) -> None:
                                       stdin=deb, capture_output=True, text=True, timeout=300)
             s.require(f"the current bmacd package is installed on {vm.name} ({done.stderr.strip()[-200:]})",
                       done.returncode == 0)
-        s.require("bmacd and bmacd-web are running", lambda: installed.on_host(
-            "systemctl is-active bmacd.service bmacd-web.service").split() == ["active", "active"])
+        s.require("bmacd and bmacd-web are running", lambda: wait_until(lambda: installed.on_host(
+            "systemctl is-active bmacd.service bmacd-web.service").split() == ["active", "active"]))
         then(installed)
     s.check(f"{vm.name} is back as it was", lambda: lab.wait_ssh(vm, BOOT_TIMEOUT) or True)
 
 
 def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
-            bundle: Path | None = None, stage: str | None = None) -> None:
+            bundle: Path | None = None) -> None:
     """The task end to end; `layout` answers the pool layout form beyond the
     boot disks, and `then(installed)` carries on before the host is put
     back. With a join `bundle`, the host joins that cluster instead of
-    starting one. When vm has a saved `stage` (see Installed.save_stage),
-    it starts from that instead, unless BMAC_LAB_FRESH=1 is set; `then`
-    sees the stage's name in installed.reused."""
+    starting one. Installing drops vm's stages."""
     lab = s.lab
     vm = lab.topology.vm(vm_name)
-    keys = tailnet.read_secrets(lab.secrets)
-    for name in (HOST_KEY, DISCOVERY_KEY, tailnet.API_KEY, tailnet.ADMIN_EMAIL):
-        s.require(f"lab/secrets.env has {name}", lambda: keys.get(name))
-    s.require("the API key and this workstation are on the lab's Tailscale account", lambda: lab.tailscale() and True)
-    s.require("the development bmacd package is built (dev/build_deb.py)", lambda: list(PACKAGES.glob("bmacd_*.deb")))
-
+    keys = preflight(s)
     base = lab.paths.images.parent
-    work = base / ("m6" if vm.name == "mox3" else f"m6-{vm.name}")
+    work = work_dir(lab, vm)
     host_name = f"{lab.topology.tailnet_prefix}{vm.name}"
-    if then is not None and stage is not None and os.environ.get("BMAC_LAB_FRESH") != "1" and lab.stage(vm, stage):
-        reuse(s, vm, stage, work, host_name, then)
-        return
     shutil.rmtree(work, ignore_errors=True)
     (work / "ssh").mkdir(parents=True, mode=0o700)
     cache = base / "deployer-cache"
@@ -284,6 +366,7 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
     lab.checkpoint(vm, CHECKPOINT)
     password = tokens.token_urlsafe(18)
     stopping = threading.Event()
+    saved: list[str] = []
     with contextlib.ExitStack() as cleanup:
         def put_back() -> None:
             stopping.set()
@@ -291,11 +374,13 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
             lab.start([vm])
         cleanup.callback(put_back)
         isos: dict[str, str] = {}
+        # A host saved as a stage keeps its tailnet device.
         cleanup.callback(lambda: lab.forget_tailnet(
-            names={*isos.values(), *(() if lab.stage_names(vm) else (host_name,))}, required=False))
+            names={*isos.values(), *(() if saved else (host_name,))}, required=False))
 
         task = Task([str(driver), "--kind", "host", "--work", str(work), "--cache", str(cache),
-                     "--packages", str(PACKAGES), "--inventory", str(inventory)], work / "driver.log")
+                     "--packages", str(PACKAGES), "--inventory", str(inventory)], work / "driver.log",
+                    dict(os.environ, BMAC_LAB_TAILSCALE_PREFIX=lab.topology.tailnet_prefix))
         cleanup.callback(task.close)
         paths: dict[str, str] = {}
         result: dict = {}
@@ -333,7 +418,7 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
                 vlan = vm.nic("vlan").mac.lower()
                 answer.update(private_nic=choice(form, "private_nic", lambda c: c["value"].lower() == vlan)[0])
             elif title == "Pool layout":
-                answer.update(boot=choice(form, "boot", lambda c: c["label"].startswith("nvme")))
+                answer.update(boot=choice(form, "boot", lambda c: is_boot_disk(vm, c)))
                 answer.update({k: (v(form) if callable(v) else v) for k, v in layout.items()})
             elif title == "Root password and Tailscale key":
                 answer.update(root_password=password, root_password_again=password, tailscale_key=keys[HOST_KEY])
@@ -354,6 +439,10 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
                 paths[iso["kind"]] = iso["path"]
                 if iso["kind"] == "discovery":
                     isos["discovery"] = iso["target"]
+                    # Another lab's prefix would reach that lab's machines.
+                    if not iso["target"].startswith(lab.topology.tailnet_prefix):
+                        raise TaskFailed(f"the discovery ISO joins as {iso['target']}, outside this lab's "
+                                         f"{lab.topology.tailnet_prefix} names")
             if "answer_error" in line:
                 raise TaskFailed(line["answer_error"])
             if "ended" in line:
@@ -410,6 +499,7 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
         s.check(f"ssh {vm.name} was set up", any(o == f"ssh {vm.name} now reaches the host." for o in outputs))
 
         installed = Installed(s, vm, work, password, host_name)
+        installed.saved = saved
         on_host = installed.on_host
 
         version = on_host("dpkg-query -W -f='${Version}' bmacd")
@@ -422,8 +512,9 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
         card = Path(result.get("card_file", "/nonexistent"))
         s.check("the host's SSH key is the one on the host card", lambda: on_host(
             "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub").split()[1] in card.read_text())
-        pool = on_host("zpool status -P rpool | awk '/nvme/ {print $1}'").split()
-        s.check(f"rpool is the NVMe mirror ({len(pool)} members)", len(pool) == 2)
+        pool = on_host("for p in $(zpool status -P rpool | awk '$1 ~ /^\\/dev\\// {print $1}'); do "
+                       "lsblk -ndo SERIAL \"/dev/$(lsblk -ndo PKNAME \"$(readlink -f \"$p\")\")\"; done").split()
+        s.check(f"rpool mirrors the boot disks ({' '.join(pool)})", sorted(pool) == sorted(boot_serials(vm)))
         s.check("SSH on the public address is dropped by the guard", lambda: not public_ssh(lab, vm))
         s.check("bmacd answers TLS on the tailnet", lambda: on_host(
             "timeout 10 openssl s_client -connect \"$(tailscale ip -4 | head -n 1)\":8443 </dev/null "

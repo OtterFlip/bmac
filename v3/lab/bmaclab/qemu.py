@@ -78,22 +78,25 @@ def argv(topology: Topology, vm: Vm, paths: Paths, firmware_code: Path, media: P
     if vm.image == "ubuntu":
         args += ["-drive", f"if=none,id=seed,media=cdrom,readonly=on,file={paths.seed(vm.name)}", "-device", "ide-cd,drive=seed,bus=ide.1"]
 
-    if any(d.bus == "scsi" for d in vm.disks):
+    def bus(disk) -> str:
+        return "scsi" if topology.nvme_as_scsi and disk.bus == "nvme" else disk.bus
+
+    if any(bus(d) == "scsi" for d in vm.disks):
         args += ["-device", "virtio-scsi-pci,id=scsi0"]
     sata_port = 2
     for disk in vm.disks:
         drive = f"d-{disk.id}"
         args += ["-drive", f"if=none,id={drive},format=qcow2,file={paths.disk(disk)},discard=unmap"]
-        if disk.bus == "nvme":
+        if bus(disk) == "nvme":
             # One controller per disk, like separate physical NVMe drives.
             args += [
                 "-device", f"nvme,id=ctl-{disk.id},serial={disk.serial}",
                 "-device", f"nvme-ns,drive={drive},bus=ctl-{disk.id},nsid=1,eui64={disk.wwn}",
             ]
-        elif disk.bus == "sata":
+        elif bus(disk) == "sata":
             args += ["-device", f"ide-hd,drive={drive},bus=ide.{sata_port},serial={disk.serial},wwn={disk.wwn}"]
             sata_port += 1
-        elif disk.bus == "scsi":
+        elif bus(disk) == "scsi":
             args += ["-device", f"scsi-hd,drive={drive},bus=scsi0.0,serial={disk.serial},wwn={disk.wwn}"]
         else:
             args += ["-device", f"virtio-blk-pci,drive={drive},serial={disk.serial}"]

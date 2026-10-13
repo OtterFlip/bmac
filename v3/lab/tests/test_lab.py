@@ -145,6 +145,42 @@ class SnapshotTest(LabTestCase):
         with self.assertRaisesRegex(LabError, "no stage named 'cluster'"):
             self.lab.restore_stage(mox3, "cluster", files)
 
+    def test_a_vm_with_an_nvme_controller_is_not_saved_live(self) -> None:
+        mox3, appliance = self.topology.vm("mox3"), self.topology.vm("appliance")
+        self.assertFalse(self.lab.can_save_live(mox3))
+        self.assertTrue(self.lab.can_save_live(appliance))
+        self.lab.running = lambda vm: True
+        with self.assertRaisesRegex(LabError, "can't save live"):
+            self.lab.save_stage(mox3, "cluster", self.paths.root, {}, live=True)
+
+    def test_a_live_stage_job_covers_the_disks_and_waits_for_the_job(self) -> None:
+        mox3 = self.topology.vm("mox3")
+
+        class Monitor:
+            def __init__(self, error: str | None = None) -> None:
+                self.calls: list[tuple[str, dict]] = []
+                self.polls, self.error = 0, error
+
+            def command(self, name: str, /, **arguments: object) -> object:
+                self.calls.append((name, arguments))
+                if name == "query-block":
+                    return [{"device": "cd0"}, *({"device": f"d-{d.id}", "inserted": {"node-name": f"#n{i}"}}
+                                                 for i, d in enumerate(mox3.disks))]
+                if name == "query-jobs":
+                    self.polls += 1
+                    status = "concluded" if self.polls > 1 else "running"
+                    return [{"id": "snapshot-save-mox3", "status": status, **({"error": self.error} if self.error else {})}]
+                return {}
+
+        monitor = Monitor()
+        self.lab._snapshot_job(monitor, mox3, "snapshot-save", "stage-x")
+        nodes = [f"#n{i}" for i in range(len(mox3.disks))]
+        self.assertEqual(monitor.calls[1], ("snapshot-save", {"job-id": "snapshot-save-mox3", "tag": "stage-x",
+                                                              "devices": nodes, "vmstate": "#n0"}))
+        self.assertEqual(monitor.calls[-1], ("job-dismiss", {"id": "snapshot-save-mox3"}))
+        with self.assertRaisesRegex(LabError, "snapshot-save of mox3: no space"):
+            self.lab._snapshot_job(Monitor("no space"), mox3, "snapshot-save", "stage-x")
+
     def test_retaking_a_snapshot_replaces_it(self) -> None:
         self.lab.snapshot("base")
         self.lab.snapshot("base")

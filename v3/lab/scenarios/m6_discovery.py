@@ -49,14 +49,15 @@ def cargo_executable(args: list[str], env: dict[str, str] | None = None) -> Path
 
 
 class Driver:
-    def __init__(self, binary: Path, session: Path) -> None:
+    def __init__(self, binary: Path, session: Path, prefix: str) -> None:
         self.binary = binary
         self.session = session
+        self.env = dict(os.environ, BMAC_LAB_TAILSCALE_PREFIX=prefix)
 
     def run(self, action: str, *args: str, stdin: str = "", timeout: float = 300) -> dict | None:
         result = subprocess.run(
             [str(self.binary), action, "--session", str(self.session), *args],
-            input=stdin, capture_output=True, text=True, timeout=timeout,
+            input=stdin, capture_output=True, text=True, timeout=timeout, env=self.env,
         )
         if result.returncode != 0:
             raise RuntimeError(f"lab_discovery {action}: {result.stderr.strip()[-2000:]}")
@@ -103,7 +104,7 @@ def run(s) -> None:
     )
     s.require("bmac-inventory is statically linked", lambda: "static" in subprocess.run(
         ["file", "-b", str(inventory_bin)], capture_output=True, text=True).stdout.split(",")[0:4][-1])
-    driver = Driver(driver_bin, session)
+    driver = Driver(driver_bin, session, lab.topology.tailnet_prefix)
     pins = driver.run("pins")
     alpine = fetch(pins["alpine"]["url"], pins["alpine"]["sha256"], lab.paths.images, s.note)
     tailscale_tgz = fetch(pins["tailscale"]["url"], pins["tailscale"]["sha256"], lab.paths.images, s.note)

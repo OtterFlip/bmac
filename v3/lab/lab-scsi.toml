@@ -1,0 +1,19 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+# lab.toml's topology with each host's NVMe disks attached as SCSI disks,
+# with the same roles and serials, so QEMU can save the VMs live: a scenario
+# stage saved here resumes in seconds instead of booting. It runs beside the
+# NVMe lab: `lab/lab --config lab/lab-scsi.toml ...`.
+
+[lab]
+base = "lab.toml"
+name = "bmacscsi"
+base_port = 24000
+mcast_group = "230.0.66.2"
+mcast_base_port = 25000
+mac_prefix = "52:54:00:b4"
+# Not a prefix of the NVMe lab's, so neither lab's tailnet cleanup matches
+# the other's devices.
+tailnet_prefix = "bmacscsi-"
+nvme_as_scsi = true
