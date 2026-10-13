@@ -377,6 +377,29 @@ async fn a_forced_cancel_stops_even_a_phase_that_forbids_interruption() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_script_ended_by_bmacd_stopping_is_left_for_recovery() {
+    let f = fixture();
+    let script = f.root.join("mock/silent.sh");
+    std::fs::write(&script, "#!/usr/bin/env bash\nsleep 30\n").unwrap();
+    let (job, mut outcome) = f.start("silent");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(f.sup.is_running(job));
+    f.sup.stop();
+    let left = tokio::time::timeout(Duration::from_secs(20), outcome.wait_for(Option::is_some))
+        .await
+        .expect("the run ends");
+    assert!(left.is_err(), "no outcome is reported");
+    assert!(!f.sup.is_running(job));
+    assert!(
+        !f.events(job).iter().any(|e| matches!(
+            e,
+            EventBody::Failed { .. } | EventBody::Cancelled { .. } | EventBody::Completed { .. }
+        )),
+        "the job isn't ended"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secrets_are_redacted_everywhere() {
     let f = fixture();
     let (job, outcome) = f.start("secret");

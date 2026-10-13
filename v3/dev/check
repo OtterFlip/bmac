@@ -6,8 +6,10 @@
 # Run every v3 check: toolchain, versions, shell syntax, the Python tests,
 # Rust formatting, lints and tests, the generated TypeScript's freshness, and
 # the TypeScript lint, type checks, and tests.
-# Stops at the first failing step. Run it unsandboxed, as the Python suite
-# needs pty devices and real timing.
+# The Python, Rust, and TypeScript groups run at the same time, each
+# stopping at its first failing step; their output is shown once all three
+# finish. Run it unsandboxed, as the Python suite needs pty devices and real
+# timing.
 #
 #   v3/dev/check
 
@@ -33,47 +35,85 @@ mapfile -t shell_files < <(
       fi
     done
 )
-for file in "${shell_files[@]}"; do
-  bash -n -- "$file"
-done
+printf '%s\0' "${shell_files[@]}" | xargs -0 -r -n 16 -P "$(nproc)" bash -n --
 printf '%d shell files parsed\n' "${#shell_files[@]}"
 
-step "Python tests"
-python3 dev/run_tests.py
+python_checks() {
+  step "Python tests"
+  python3 dev/run_tests.py
+}
 
-step "Rust formatting"
-cargo fmt --all --check
+rust_checks() {
+  step "Rust formatting"
+  cargo fmt --all --check
 
-step "Rust lints"
-cargo clippy --workspace --all-targets --locked -- -D warnings
+  step "Rust lints"
+  cargo clippy --workspace --all-targets --locked -- -D warnings
 
-step "Rust tests"
-cargo test --workspace --locked
+  step "Rust tests"
+  if cargo nextest --version >/dev/null 2>&1; then
+    cargo nextest run --workspace --locked --no-fail-fast
+    cargo test --workspace --locked --doc
+  else
+    echo "cargo-nextest isn't installed; running the test binaries one after another"
+    cargo test --workspace --locked
+  fi
 
-step "Generated TypeScript"
-generated="$(mktemp -d)"
-trap 'rm -rf -- "$generated"' EXIT
-cargo run --quiet --locked -p bmac-proto --example typescript -- "$generated/generated"
-if ! diff -r -- "$generated/generated" ui/src/generated; then
-  echo "ui/src/generated is stale; run dev/generate-typescript" >&2
+  step "Generated TypeScript"
+  local generated
+  generated="$(mktemp -d)"
+  trap 'rm -rf -- "$generated"' RETURN
+  cargo run --quiet --locked -p bmac-proto --example typescript -- "$generated/generated"
+  if ! diff -r -- "$generated/generated" ui/src/generated; then
+    echo "ui/src/generated is stale; run dev/generate-typescript" >&2
+    return 1
+  fi
+  echo "ui/src/generated is current"
+}
+
+typescript_checks() {
+  step "TypeScript lint"
+  local web_sources=(ui/src webui/src applianceui/src deployer/src)
+  pnpm --silent exec oxlint --deny-warnings "${web_sources[@]}"
+  # Output is rendered as text; nothing parses strings into HTML.
+  if grep -rEn 'innerHTML|outerHTML|insertAdjacentHTML|document\.write' "${web_sources[@]}"; then
+    echo "the web apps must not write HTML from strings" >&2
+    return 1
+  fi
+  echo "no HTML sinks"
+
+  step "TypeScript type checks"
+  pnpm --silent typecheck
+
+  step "TypeScript tests"
+  pnpm --silent test
+}
+
+logs="$(mktemp -d)"
+trap 'rm -rf -- "$logs"' EXIT
+groups=(python rust typescript)
+declare -A pids
+for group in "${groups[@]}"; do
+  ( set -Eeuo pipefail; "${group}_checks" ) >"$logs/$group" 2>&1 &
+  pids[$group]=$!
+done
+step "Running the Python, Rust, and TypeScript checks in parallel"
+
+failed=()
+for group in "${groups[@]}"; do
+  if wait "${pids[$group]}"; then
+    printf '%s checks passed\n' "$group"
+  else
+    printf '%s checks FAILED\n' "$group"
+    failed+=("$group")
+  fi
+done
+for group in "${groups[@]}"; do
+  cat -- "$logs/$group"
+done
+
+if ((${#failed[@]})); then
+  printf '\n==> Failed: %s\n' "${failed[*]}" >&2
   exit 1
 fi
-echo "ui/src/generated is current"
-
-step "TypeScript lint"
-web_sources=(ui/src webui/src applianceui/src deployer/src)
-pnpm --silent exec oxlint --deny-warnings "${web_sources[@]}"
-# Output is rendered as text; nothing parses strings into HTML.
-if grep -rEn 'innerHTML|outerHTML|insertAdjacentHTML|document\.write' "${web_sources[@]}"; then
-  echo "the web apps must not write HTML from strings" >&2
-  exit 1
-fi
-echo "no HTML sinks"
-
-step "TypeScript type checks"
-pnpm --silent typecheck
-
-step "TypeScript tests"
-pnpm --silent test
-
 step "All checks passed"

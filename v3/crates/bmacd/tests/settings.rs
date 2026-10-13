@@ -773,28 +773,37 @@ fn changed(mut values: Values, (key, value): Change) -> Values {
 #[test]
 fn what_config_sh_rejects_the_typed_layer_rejects() {
     let lab = Lab::new(&[1]);
-    let check = |cluster: Values, mox1: Values, what: String| {
-        let typed =
-            validate_cluster(&cluster).and_then(|_| validate_host(host(1), &mox1, &cluster));
-        assert!(typed.is_err(), "the typed layer accepted {what}");
-        let dir = render_dir(&lab);
-        render(&dir, Some(&cluster), &[(host(1), &mox1)]).unwrap();
-        assert!(load(&dir, host(1)).is_err(), "config.sh accepted {what}");
-    };
-    for change in CLUSTER_REJECTED {
-        check(
-            changed(template_cluster(), *change),
-            template_mox1(),
-            format!("cluster {change:?}"),
-        );
-    }
-    for change in HOST_REJECTED {
-        check(
-            template_cluster(),
-            changed(template_mox1(), *change),
-            format!("mox1 {change:?}"),
-        );
-    }
+    let root = lab.dir.path().canonicalize().unwrap();
+    let cases: Vec<(Values, Values, String)> = CLUSTER_REJECTED
+        .iter()
+        .map(|change| {
+            (
+                changed(template_cluster(), *change),
+                template_mox1(),
+                format!("cluster {change:?}"),
+            )
+        })
+        .chain(HOST_REJECTED.iter().map(|change| {
+            (
+                template_cluster(),
+                changed(template_mox1(), *change),
+                format!("mox1 {change:?}"),
+            )
+        }))
+        .collect();
+    // Each case starts its own shell, so they run side by side.
+    std::thread::scope(|scope| {
+        for (n, (cluster, mox1, what)) in cases.iter().enumerate() {
+            let dir = root.join(format!("run-config-{n}"));
+            scope.spawn(move || {
+                let typed =
+                    validate_cluster(cluster).and_then(|_| validate_host(host(1), mox1, cluster));
+                assert!(typed.is_err(), "the typed layer accepted {what}");
+                render(&dir, Some(cluster), &[(host(1), mox1)]).unwrap();
+                assert!(load(&dir, host(1)).is_err(), "config.sh accepted {what}");
+            });
+        }
+    });
     let mut reused = template_mox2();
     reused.insert("NVME_MIRROR_2_SERIAL_1".into(), "S2A".into());
     let dir = render_dir(&lab);

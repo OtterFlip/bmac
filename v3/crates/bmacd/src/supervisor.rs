@@ -261,9 +261,13 @@ impl Supervisor {
     /// bmacd is stopping: a script that ends from now on without saying how
     /// it finished is left to the next start's recovery (which interrupts
     /// it, or resumes it after a restart it asked for) instead of failing.
-    /// Its end is a signal from the same stop, often one the job asked for.
+    /// Every script gets SIGTERM, so its traps run before systemd kills
+    /// what's left.
     pub fn stop(&self) {
         self.stopping.store(true, Ordering::SeqCst);
+        for run in self.runs.lock().unwrap().values() {
+            signal_group(run.pgid, rustix::process::Signal::TERM);
+        }
     }
 
     pub fn is_stopping(&self) -> bool {

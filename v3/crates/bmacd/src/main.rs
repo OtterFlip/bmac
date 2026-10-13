@@ -233,6 +233,7 @@ async fn run_engine(options: Options) -> Result<(), String> {
             }
         }));
     }
+    let mut stopping: Option<Arc<supervisor::Supervisor>> = None;
     match listen::node_name().parse::<HostSlot>() {
         Ok(host) => {
             let registry = Arc::new(
@@ -316,6 +317,7 @@ async fn run_engine(options: Options) -> Result<(), String> {
                 script_settings.render_ssh_config(std::path::Path::new(settings::SSH_CONFIG))
             }));
             let supervisor = supervisor::Supervisor::new(scripts, sink.clone());
+            stopping = Some(supervisor.clone());
             let runner = runner::Runner::new(
                 jobs.clone(),
                 supervisor,
@@ -392,7 +394,13 @@ async fn run_engine(options: Options) -> Result<(), String> {
     }
     tasks.extend(engine.spawn_job_upkeep(JOB_UPKEEP));
     let allowed = AllowedPeers::front_end_and_root(web);
-    server::serve(listener, allowed, Arc::new(engine), terminated()).await;
+    let shutdown = async move {
+        terminated().await;
+        if let Some(supervisor) = stopping {
+            supervisor.stop();
+        }
+    };
+    server::serve(listener, allowed, Arc::new(engine), shutdown).await;
     refresher.abort();
     upkeep.abort();
     script_config.abort();

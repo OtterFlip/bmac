@@ -22,6 +22,9 @@ RuntimeDirectoryPreserve=yes
 StateDirectory=bmac
 StateDirectoryMode=0700
 UMask=0077
+# Only the engine gets SIGTERM on a stop; the jobs it runs are killed once
+# it has exited, so a restart a job asked for never reads as the job failing.
+KillMode=mixed
 Restart=on-failure
 RestartSec=2s
 

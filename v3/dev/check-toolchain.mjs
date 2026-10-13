@@ -144,6 +144,14 @@ if (!rustVersion) {
 } else {
   notes.push(`rustc ${rustVersion} satisfies rust-version ${required ?? "(unset)"}.`);
 }
+if (run("cargo", ["nextest", "--version"]) === null) {
+  warnings.push(
+    "cargo-nextest was not found, so dev/check runs the Rust test binaries one after another.\n" +
+      "  Fix: cargo install cargo-nextest --locked",
+  );
+} else {
+  notes.push("cargo-nextest is installed; the Rust tests run in parallel across test binaries.");
+}
 
 // --- Native libraries (Deployer only) ---------------------------------------
 

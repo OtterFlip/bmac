@@ -23,19 +23,27 @@ scripts.
 ## Checks
 
 Run every check with `v3/dev/check`, unsandboxed (the Python tests need pty
-devices and real timing). It runs, and stops at the first failure:
+devices and real timing). It runs, stopping at the first failure:
 
 - the toolchain check (`node dev/check-toolchain.mjs`, `--deployer` for the
   Deployer's native libraries);
 - the version check (`dev/set_version.py`);
-- `bash -n` on every shell script;
+- `bash -n` on every shell script, in parallel;
+
+then these three groups at the same time, each stopping at its first
+failure, with each group's output shown once all three finish:
+
 - the Python tests (`dev/run_tests.py`, which takes the same options as v2's
   runner: `-k`, `-f`, `-j N`, `-v`, and test targets);
-- `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test`;
-- `pnpm typecheck` and `pnpm test`.
+- `cargo fmt --check`, `cargo clippy -D warnings`, and the Rust tests:
+  `cargo nextest run` (every test in its own process, across all test
+  binaries at once) and `cargo test --doc`, or plain `cargo test` where
+  cargo-nextest isn't installed (`cargo install cargo-nextest --locked`);
+- the TypeScript lint, `pnpm typecheck`, and `pnpm test`.
 
-Run the whole thing before reporting work as finished. Run `pnpm install`
-in `v3/` once first.
+Tests in every suite run in parallel, when possible, so each must stay independent of the
+others (see Tests). Run the whole thing before reporting work as finished.
+Run `pnpm install` in `v3/` once first.
 
 `v3/dev/check` is the only suite v3 work needs. Don't run v2's suite (the
 repository root's `dev/run_tests.py`) for changes under `v3/`: it collects
@@ -51,6 +59,9 @@ other, build fixtures under a per-test temporary directory, never write to
 the checkout or a fixed path, and don't use `setUpClass` or `setUpModule`. A
 fake command fed by a pipe must read its stdin. If a test fails only under
 parallel runs, fix the race rather than serializing it.
+
+For all test suites, if it's possible to run tests in parallel then make
+an effort to ensure that those tests are run in parallel.
 
 v2's `dev/run_tests.py` also collects every committed `test_*.py` under
 `v3/`, and runs it from the repository root. So a v3 Python test must find

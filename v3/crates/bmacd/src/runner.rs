@@ -475,14 +475,15 @@ impl Runner {
         });
     }
 
-    /// Watches one running script until it ends.
+    /// Watches one running script until it ends; `None` if bmacd is stopping
+    /// and left the job running for the next start's recovery.
     async fn drive(
         self: &Arc<Self>,
         record: JobRecord,
         nonce: &str,
         mut outcome: watch::Receiver<Option<Outcome>>,
         wake: Arc<Notify>,
-    ) -> (JobState, String, u64) {
+    ) -> Option<(JobState, String, u64)> {
         let id = record.id;
         let mut renew = tokio::time::interval(self.config.renew_every);
         renew.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -501,8 +502,9 @@ impl Runner {
             let renew_now = tokio::select! {
                 done = async { outcome.wait_for(Option::is_some).await.ok().and_then(|o| o.clone()) } => {
                     return match done {
-                        Some(done) => (done.state, done.message.unwrap_or_else(|| "finished".into()), done.last_seq),
-                        None => (JobState::Failed, "the supervisor stopped watching the script".into(), record.last_seq),
+                        Some(done) => Some((done.state, done.message.unwrap_or_else(|| "finished".into()), done.last_seq)),
+                        None if self.supervisor.is_stopping() => None,
+                        None => Some((JobState::Failed, "the supervisor stopped watching the script".into(), record.last_seq)),
                     };
                 }
                 _ = renew.tick() => true,
