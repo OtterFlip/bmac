@@ -16,4 +16,4 @@ mac_prefix = "52:54:00:b4"
 # Not a prefix of the NVMe lab's, so neither lab's tailnet cleanup matches
 # the other's devices.
 tailnet_prefix = "bmacscsi-"
-nvme_as_scsi = true
+nvme_as = "scsi"

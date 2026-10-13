@@ -101,6 +101,17 @@ class AnswerFileTest(unittest.TestCase):
         matched = [d.bus for d in mox2.disks if fnmatch.fnmatchcase(d.serial, pattern)]
         self.assertEqual(matched, ["nvme", "nvme"])
 
+    def test_the_sata_lab_finds_its_boot_disks_by_serial_as_the_nvme_lab_does(self) -> None:
+        topology = load(LAB / "lab-sata.toml")
+        mox2 = topology.vm("mox2")
+        answer = tomllib.loads(provision.answer_toml(topology, mox2, HASH, KEY))
+        nvme = [d for d in mox2.disks if d.bus == "nvme"]
+        self.assertEqual(answer["disk-setup"]["filter"]["ID_SERIAL_SHORT"], nvme[0].serial)
+        self.assertEqual(answer["disk-setup"]["filter"]["ID_SERIAL"], f"*{nvme[1].serial}*")
+        matched = [d.bus for d in mox2.disks
+                   if fnmatch.fnmatchcase(f"QEMU_HARDDISK_{d.serial}", answer["disk-setup"]["filter"]["ID_SERIAL"])]
+        self.assertEqual(matched, ["nvme"])
+
     def test_first_boot_script_addresses_both_private_nics_and_parses(self) -> None:
         script = provision.first_boot_script(self.topology, self.mox2)
         self.assertIn(f"configure {self.mox2.nic('mgmt').mac} 100.64.0.12/24", script)

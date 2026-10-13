@@ -49,8 +49,9 @@ DRILLS = os.environ.get("BMAC_LAB_DRILLS") == "1"
 m6 = load(Path(__file__).with_name("m6.py"))
 
 
-def sata_pair(form: dict) -> list[str]:
-    pair = m6.choice(form, "data", lambda c: c["value"].startswith("ata-"))
+def sata_pair(form: dict, vm) -> list[str]:
+    # In the SATA lab the boot disks are SATA too.
+    pair = m6.choice(form, "data", lambda c: c["value"].startswith("ata-") and not m6.is_boot_disk(vm, c))
     if len(pair) != 2:
         raise AssertionError(f"expected mox3's two SATA disks among the data choices, found {pair}")
     return pair

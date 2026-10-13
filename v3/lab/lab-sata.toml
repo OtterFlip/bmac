@@ -1,0 +1,19 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+# lab.toml's topology with each host's NVMe disks attached as SATA disks,
+# with the same roles and serials, so QEMU can save the VMs live, as in
+# lab-scsi.toml. A second live lab, so two scenarios can iterate at once:
+# `lab/lab --config lab/lab-sata.toml ...`.
+
+[lab]
+base = "lab.toml"
+name = "bmacsata"
+base_port = 26000
+mcast_group = "230.0.66.3"
+mcast_base_port = 27000
+mac_prefix = "52:54:00:b5"
+# Not a prefix of another lab's, so no lab's tailnet cleanup matches the
+# others' devices.
+tailnet_prefix = "bmacsata-"
+nvme_as = "sata"

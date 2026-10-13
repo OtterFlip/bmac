@@ -94,9 +94,14 @@ class Topology:
     source: Path
     tailnet_prefix: str
     reserved_tailnet_names: frozenset[str]
-    # The NVMe disks are attached as SCSI disks with the same serials, so
-    # QEMU can save the VMs live (it can't save a running NVMe controller).
-    nvme_as_scsi: bool = False
+    # "scsi" or "sata": the NVMe disks are attached on that bus with the same
+    # serials, so QEMU can save the VMs live (it can't save a running NVMe
+    # controller).
+    nvme_as: str | None = None
+
+    def bus(self, disk: Disk) -> str:
+        """The bus a disk is attached on in this lab."""
+        return self.nvme_as if self.nvme_as and disk.bus == "nvme" else disk.bus
 
     def tailnet_name(self, vm: Vm) -> str:
         """The only name a lab VM may use on a real tailnet."""
@@ -279,10 +284,14 @@ def parse(data: dict, source: Path) -> Topology:
     if not isinstance(reserved, list) or not all(isinstance(r, str) and r for r in reserved):
         raise TopologyError("[lab]: reserved_tailnet_names must be a list of names")
     reserved_names = frozenset(r.lower() for r in reserved)
-    nvme_as_scsi = lab.get("nvme_as_scsi", False)
-    if not isinstance(nvme_as_scsi, bool):
-        raise TopologyError("[lab]: nvme_as_scsi must be true or false")
+    nvme_as = lab.get("nvme_as")
+    if nvme_as not in (None, "scsi", "sata"):
+        raise TopologyError('[lab]: nvme_as must be "scsi" or "sata"')
     for vm in vms:
+        sata = [d for d in vm.disks if d.bus == "sata" or (d.bus == "nvme" and nvme_as == "sata")]
+        if len(sata) > SATA_PORTS:
+            raise TopologyError(f"[[vm]] {vm.name}: at most {SATA_PORTS} SATA disks fit on the AHCI controller, "
+                                f"counting the NVMe disks nvme_as attaches there")
         tailnet_name = f"{tailnet_prefix}{vm.name}"
         if tailnet_name in reserved_names:
             raise TopologyError(f"[[vm]] {vm.name}: tailnet name {tailnet_name} is reserved by [lab] reserved_tailnet_names")
@@ -303,7 +312,7 @@ def parse(data: dict, source: Path) -> Topology:
         source=source,
         tailnet_prefix=tailnet_prefix,
         reserved_tailnet_names=reserved_names,
-        nvme_as_scsi=nvme_as_scsi,
+        nvme_as=nvme_as,
     )
 
 

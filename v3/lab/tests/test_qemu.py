@@ -66,6 +66,17 @@ class QemuArgvTest(unittest.TestCase):
                 self.assertIn(f"scsi-hd,drive=d-{disk.id},bus=scsi0.0,serial={disk.serial},wwn={disk.wwn}", devices)
         self.assertEqual(devices.count("virtio-scsi-pci,id=scsi0"), 1)
 
+    def test_the_sata_lab_attaches_the_nvme_disks_as_sata(self) -> None:
+        topology = load(LAB / "lab-sata.toml")
+        mox1 = topology.vm("mox1")
+        devices = option_values(qemu.argv(topology, mox1, self.paths, self.code), "-device")
+        self.assertFalse([d for d in devices if d.startswith("nvme")])
+        sata = [d for d in devices if d.startswith("ide-hd,")]
+        self.assertEqual([d.split("bus=")[1].split(",")[0] for d in sata], ["ide.2", "ide.3", "ide.4", "ide.5"])
+        for disk in mox1.disks:
+            if disk.bus in ("nvme", "sata"):
+                self.assertEqual(len([d for d in sata if f"serial={disk.serial},wwn={disk.wwn}" in d]), 1)
+
     def test_nics_use_user_networking_and_loopback_multicast(self) -> None:
         mox2 = self.topology.vm("mox2")
         netdevs = option_values(self.argv("mox2"), "-netdev")

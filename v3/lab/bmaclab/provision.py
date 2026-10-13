@@ -140,7 +140,8 @@ def answer_toml(topology: Topology, vm: Vm, hashed_password: str, public_key: st
             # A SCSI disk with a WWN reports it as ID_SERIAL; its serial is
             # ID_SCSI_SERIAL, and only the boot disks' start with <VM>N.
             f"filter.ID_SCSI_SERIAL = {_toml(nvme[0].serial[:len(vm.name) + 1] + '*')}",
-        ] if topology.nvme_as_scsi else [
+        ] if topology.nvme_as == "scsi" else [
+            # An ATA disk's ID_SERIAL is <model>_<serial>, as an NVMe disk's is.
             f"filter.ID_SERIAL_SHORT = {_toml(nvme[0].serial)}",
             f"filter.ID_SERIAL = {_toml('*' + nvme[1].serial + '*')}",
         ]),

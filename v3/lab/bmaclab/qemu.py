@@ -78,9 +78,7 @@ def argv(topology: Topology, vm: Vm, paths: Paths, firmware_code: Path, media: P
     if vm.image == "ubuntu":
         args += ["-drive", f"if=none,id=seed,media=cdrom,readonly=on,file={paths.seed(vm.name)}", "-device", "ide-cd,drive=seed,bus=ide.1"]
 
-    def bus(disk) -> str:
-        return "scsi" if topology.nvme_as_scsi and disk.bus == "nvme" else disk.bus
-
+    bus = topology.bus
     if any(bus(d) == "scsi" for d in vm.disks):
         args += ["-device", "virtio-scsi-pci,id=scsi0"]
     sata_port = 2

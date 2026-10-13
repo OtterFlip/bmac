@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import itertools
 import sys
 import tempfile
 import tomllib
@@ -77,22 +78,39 @@ class CheckedInTopologyTest(unittest.TestCase):
             self.topology.vm("mox9")
 
 
-class ScsiLabTest(unittest.TestCase):
-    def test_it_is_the_nvme_lab_with_its_own_identity_and_scsi_boot_disks(self) -> None:
-        nvme, scsi = load(CONFIG), load(LAB / "lab-scsi.toml")
-        self.assertTrue(scsi.nvme_as_scsi)
-        self.assertFalse(nvme.nvme_as_scsi)
-        self.assertEqual([(v.name, v.role, [d.bus for d in v.disks]) for v in scsi.vms],
-                         [(v.name, v.role, [d.bus for d in v.disks]) for v in nvme.vms])
-        self.assertEqual(scsi.images, nvme.images)
-        self.assertNotEqual(scsi.name, nvme.name)
-        self.assertFalse(scsi.tailnet_prefix.startswith(nvme.tailnet_prefix))
-        self.assertFalse(nvme.tailnet_prefix.startswith(scsi.tailnet_prefix))
-        nvme_ports = {p for v in nvme.vms for p in v.ports.values()} | set(nvme.mcast_ports.values())
-        scsi_ports = {p for v in scsi.vms for p in v.ports.values()} | set(scsi.mcast_ports.values())
-        self.assertFalse(nvme_ports & scsi_ports)
-        self.assertNotEqual(scsi.mcast_group, nvme.mcast_group)
-        self.assertFalse({n.mac for v in nvme.vms for n in v.nics} & {n.mac for v in scsi.vms for n in v.nics})
+class LiveLabTest(unittest.TestCase):
+    def test_the_live_labs_are_the_nvme_lab_with_other_boot_buses(self) -> None:
+        nvme = load(CONFIG)
+        self.assertIsNone(nvme.nvme_as)
+        for bus in ("scsi", "sata"):
+            live = load(LAB / f"lab-{bus}.toml")
+            self.assertEqual(live.nvme_as, bus)
+            self.assertEqual([(v.name, v.role, [d.bus for d in v.disks]) for v in live.vms],
+                             [(v.name, v.role, [d.bus for d in v.disks]) for v in nvme.vms])
+            self.assertEqual(live.images, nvme.images)
+            self.assertEqual({live.bus(d) for v in live.vms for d in v.disks if d.bus == "nvme"}, {bus})
+
+    def test_no_two_labs_share_a_name_port_group_mac_or_tailnet_prefix(self) -> None:
+        labs = [load(CONFIG), load(LAB / "lab-scsi.toml"), load(LAB / "lab-sata.toml")]
+        for a, b in itertools.combinations(labs, 2):
+            with self.subTest(a=a.name, b=b.name):
+                self.assertNotEqual(a.name, b.name)
+                self.assertFalse(a.tailnet_prefix.startswith(b.tailnet_prefix))
+                self.assertFalse(b.tailnet_prefix.startswith(a.tailnet_prefix))
+                ports = [{p for v in t.vms for p in v.ports.values()} | set(t.mcast_ports.values()) for t in (a, b)]
+                self.assertFalse(ports[0] & ports[1])
+                self.assertNotEqual(a.mcast_group, b.mcast_group)
+                self.assertFalse({n.mac for v in a.vms for n in v.nics} & {n.mac for v in b.vms for n in v.nics})
+
+    def test_nvme_disks_as_sata_must_fit_the_sata_ports(self) -> None:
+        raw = data()
+        raw["lab"]["nvme_as"] = "sata"
+        raw["roles"]["host"]["disks"].append({"bus": "sata", "size_gib": 16})
+        with self.assertRaisesRegex(TopologyError, "at most 4 SATA disks"):
+            parse(raw, CONFIG)
+        raw["lab"]["nvme_as"] = "ide"
+        with self.assertRaisesRegex(TopologyError, "nvme_as must be"):
+            parse(raw, CONFIG)
 
     def test_a_base_may_not_have_a_base(self) -> None:
         scratch = tempfile.TemporaryDirectory(prefix="bmac-lab-topology-")

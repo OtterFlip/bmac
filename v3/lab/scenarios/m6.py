@@ -266,8 +266,8 @@ def staged(s, stage: str, build, then, layout: dict = NVME_MIRROR, vm_name: str 
     """Installs vm, runs `build(installed)` to reach the stage, saves the
     host as that stage (unless build saved it), and carries on with
     `then(installed)`, the part being worked on. Later runs skip the build
-    and start from the stage. A lab with nvme_as_scsi (lab/lab-scsi.toml)
-    saves it live, so it resumes in seconds; the NVMe lab shuts the host
+    and start from the stage. A lab with nvme_as (lab/lab-scsi.toml,
+    lab/lab-sata.toml) saves it live, so it resumes in seconds; the NVMe lab shuts the host
     down to save it, and it boots when restored, with `unlock(lab, vm,
     passphrase)` typing the stage's luks_passphrase if it has one.
     BMAC_LAB_FRESH=1 builds the stage again."""
@@ -419,7 +419,7 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
                 answer.update(private_nic=choice(form, "private_nic", lambda c: c["value"].lower() == vlan)[0])
             elif title == "Pool layout":
                 answer.update(boot=choice(form, "boot", lambda c: is_boot_disk(vm, c)))
-                answer.update({k: (v(form) if callable(v) else v) for k, v in layout.items()})
+                answer.update({k: (v(form, vm) if callable(v) else v) for k, v in layout.items()})
             elif title == "Root password and Tailscale key":
                 answer.update(root_password=password, root_password_again=password, tailscale_key=keys[HOST_KEY])
             elif title == f"How will you boot {vm.name}?":

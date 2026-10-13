@@ -386,7 +386,7 @@ class Lab:
 
     def can_save_live(self, vm: Vm) -> bool:
         """QEMU can't save a running NVMe controller."""
-        return self.topology.nvme_as_scsi or all(disk.bus != "nvme" for disk in vm.disks)
+        return all(self.topology.bus(disk) != "nvme" for disk in vm.disks)
 
     def _snapshot_job(self, monitor: Qmp, vm: Vm, kind: str, tag: str) -> None:
         """Runs QMP's snapshot-save, -load, or -delete over vm's disks, with
@@ -422,7 +422,7 @@ class Lab:
         if live and not self.running(vm):
             raise LabError(f"{vm.name} must be running to save it live")
         if live and not self.can_save_live(vm):
-            raise LabError(f"{vm.name} has NVMe disks, which QEMU can't save live; use a topology with nvme_as_scsi")
+            raise LabError(f"{vm.name} has NVMe disks, which QEMU can't save live; use a topology with nvme_as")
         restart = self.running(vm) and not live
         if restart:
             self.stop([vm])

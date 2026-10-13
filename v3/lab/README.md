@@ -124,20 +124,25 @@ stages, and `lab/lab rebuild` drops them with the disks.
 
 How a stage is saved depends on the lab. QEMU can't save a running NVMe
 controller ("non-migratable device"), so in the NVMe lab (`lab.toml`) the
-VM is shut down for the save and boots when restored. `lab-scsi.toml` is
-the same topology (its own name, ports, multicast group, MACs, and tailnet
-prefix `bmacscsi-`) with `nvme_as_scsi = true`, which attaches the NVMe
-disks as SCSI disks with the same serials. There a stage is saved live
-(QMP `snapshot-save`, the memory in the first disk) and restored with
-`snapshot-load` before the VM runs, so it resumes where it was in seconds,
-past its boot's VLAN carrier delay; the scenario then sets the guest's
-clock. Both labs run at the same time:
+VM is shut down for the save and boots when restored. `lab-scsi.toml` and
+`lab-sata.toml` are the same topology, each with its own name, ports,
+multicast group, MACs, and tailnet prefix (`bmacscsi-`, `bmacsata-`), and
+`nvme_as = "scsi"` or `"sata"`, which attaches the NVMe disks on that bus
+with the same serials. There a stage is saved live (QMP `snapshot-save`,
+the memory in the first disk) and restored with `snapshot-load` before the
+VM runs, so it resumes where it was in seconds, past its boot's VLAN
+carrier delay; the scenario then sets the guest's clock. The Deployer's lab
+build names machines with the lab's prefix (`BMAC_LAB_TAILSCALE_PREFIX`,
+set by the scenarios), so no lab reaches another's machines. A stage that
+hasn't passed yet is developed on the SATA lab, from the live stage before
+it; the final runs go on all three labs at once, up to 29 GiB of RAM each:
 
 ```bash
-lab/lab --config lab/lab-scsi.toml create          # once
-lab/lab --config lab/lab-scsi.toml scenario m7_join # iterate here
-lab/lab scenario m7_join &                         # final: both at once
-lab/lab --config lab/lab-scsi.toml scenario m7_join
+lab/lab --config lab/lab-sata.toml create            # once per live lab
+lab/lab --config lab/lab-sata.toml scenario m7_join  # iterate here
+lab/lab scenario m7_join &                           # final: all three at once
+lab/lab --config lab/lab-scsi.toml scenario m7_join &
+lab/lab --config lab/lab-sata.toml scenario m7_join
 ```
 
 A VM's stages share its tailnet name, so they form one chain: each builds
