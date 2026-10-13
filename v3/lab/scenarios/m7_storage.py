@@ -50,7 +50,10 @@ m6 = load(Path(__file__).with_name("m6.py"))
 
 
 def sata_pair(form: dict) -> list[str]:
-    return m6.choice(form, "data", lambda c: c["label"].startswith("ata"))[:2]
+    pair = m6.choice(form, "data", lambda c: c["value"].startswith("ata-"))
+    if len(pair) != 2:
+        raise AssertionError(f"expected mox3's two SATA disks among the data choices, found {pair}")
+    return pair
 
 
 LAYOUT = {"data_kind": "mirror", "data": sata_pair, "encryption": "luks2"}
@@ -316,10 +319,14 @@ def then(host) -> None:
     s.check("both ESPs are enabled again", lambda: host.on_host("proxmox-boot-tool status | grep -c 'is configured'") == "2")
 
     bridged = host.on_host("ip -4 -o address show dev vmbr-private | awk '{print $4}'").split()
-    s.check(f"vmbr-private has the private and replication addresses ({' '.join(bridged)})",
-            f"{vm.vlan_ip}/24" in bridged and len(bridged) == 2)
-    s.check("the private NIC is vmbr-private's only port", lambda: host.on_host(
-        "for p in /sys/class/net/vmbr-private/brif/*; do cat /sys/class/net/${p##*/}/address; done")
+    vips = host.on_host("awk '/virtual_ipaddress/ {f=1; next} f && /}/ {f=0} f {print $1}' "
+                        "/etc/keepalived/keepalived.conf").split()
+    others = [a for a in bridged if a != f"{vm.vlan_ip}/24" and a not in vips]
+    s.check(f"vmbr-private has the private and replication addresses, and keepalived's VIP ({' '.join(bridged)})",
+            f"{vm.vlan_ip}/24" in bridged and len(others) == 1 and others[0].endswith("/28"))
+    s.check("the private NIC is vmbr-private's only physical port", lambda: host.on_host(
+        "for p in /sys/class/net/vmbr-private/brif/*; do case ${p##*/} in veth*|tap*|fwpr*) ;; "
+        "*) cat /sys/class/net/${p##*/}/address ;; esac; done")
         == vm.nic("vlan").mac.lower())
     s.check("the bridge is in the interfaces files", lambda: "auto vmbr-private" in host.on_host(
         "cat /etc/network/interfaces.d/bmac-private.cfg"))

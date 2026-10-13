@@ -583,6 +583,12 @@ pub(crate) fn layout_from(values: &Values) -> Result<PoolLayout, FieldErrors> {
                 "Choose how the data disks are used.",
             ));
         }
+        _ if data.is_empty() => {
+            return Err(field_error(
+                "data",
+                "Choose the data disks, or set Other data disks to None.",
+            ));
+        }
         "mirror" => {
             if data.len() % 2 != 0 {
                 return Err(field_error(

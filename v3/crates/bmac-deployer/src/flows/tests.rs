@@ -770,6 +770,11 @@ fn layouts_come_from_the_chosen_disks() {
         json!({"boot": ["a"], "data_kind": "mirror", "data": ["b", "c", "d"]}),
         "data",
     );
+    refused(
+        json!({"boot": ["a"], "data_kind": "mirror", "data": []}),
+        "data",
+    );
+    refused(json!({"boot": ["a"], "data_kind": "raidz1"}), "data");
     // The installer can be pointed at two boot disks at most.
     refused(
         json!({"boot": ["a", "b", "c"], "data_kind": "none"}),
