@@ -29,6 +29,7 @@ const RECOVER_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 const RECOVER_WITHIN: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 /// How often each host re-pins the hosts' private addresses in `/etc/hosts`.
 const HOST_PINS: std::time::Duration = std::time::Duration::from_secs(60);
+const SETUP_DONE_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 const JOB_UPKEEP: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long after a certificate switch the front end restarts, so the
 /// switch's reply reaches the browser over the old certificate first.
@@ -83,6 +84,34 @@ async fn terminated() {
         _ = term.recv() => {}
         _ = int.recv() => {}
     }
+}
+
+/// What a host runs is chosen at startup, and setup mode leaves out the
+/// peer links, join bundles, and host pins. Once setup has finished and its
+/// job's end is recorded, bmacd restarts as a cluster member. The restart is
+/// queued without waiting, since the stop it asks for ends this process.
+fn restart_after_setup(
+    runner: Arc<runner::Runner>,
+    paths: bmacd::native::setup::Paths,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(SETUP_DONE_POLL).await;
+            if bmacd::native::setup::in_setup_mode(&paths) || !runner.is_idle() {
+                continue;
+            }
+            log::info("setup is finished; restarting as a cluster member");
+            let restarted = tokio::process::Command::new(bmac_adapters::programs::SYSTEMCTL)
+                .args(["--no-block", "restart", "bmacd.service", WEB_UNIT])
+                .status()
+                .await;
+            match restarted {
+                Ok(status) if status.success() => return,
+                Ok(status) => log::error(&format!("cannot restart bmacd: systemctl {status}")),
+                Err(e) => log::error(&format!("cannot restart bmacd: {e}")),
+            }
+        }
+    })
 }
 
 /// After a certificate switch: publish the new fingerprint, then restart
@@ -209,7 +238,8 @@ async fn run_engine(options: Options) -> Result<(), String> {
         .with_setup(bmacd::native::setup::Paths::system());
     let mut tasks = Vec::new();
     let setup_paths = bmacd::native::setup::Paths::system();
-    if bmacd::native::setup::in_setup_mode(&setup_paths) {
+    let started_in_setup = bmacd::native::setup::in_setup_mode(&setup_paths);
+    if started_in_setup {
         tasks.push(bmacd::joiner::spawn(
             setup_paths.bootstrap.clone(),
             setup_paths.join_state.clone(),
@@ -355,6 +385,9 @@ async fn run_engine(options: Options) -> Result<(), String> {
                 Err(e) => log::warning(&format!("jobs that restart this host won't resume: {e}")),
             }
             tasks.push(runner.spawn(changes));
+            if started_in_setup {
+                tasks.push(restart_after_setup(runner.clone(), setup_paths.clone()));
+            }
             tasks.push(
                 records::task::RecordsTask {
                     host,

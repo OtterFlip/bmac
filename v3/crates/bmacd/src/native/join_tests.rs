@@ -18,6 +18,13 @@ async fn remote(output: String) -> tokio::io::DuplexStream {
     ours
 }
 
+#[test]
+fn the_launched_job_gets_the_host_it_was_started_for() {
+    let values = BTreeMap::from([("host".to_string(), Value::from("mox2"))]);
+    let prepared = crate::operations::prepare(&operation(), &values, false).unwrap();
+    assert_eq!(parse_args(&prepared.args).unwrap().to_string(), "mox2");
+}
+
 #[tokio::test]
 async fn phases_and_messages_pass_through_and_the_run_ends_completed() {
     let dir = tempfile::tempdir().unwrap();

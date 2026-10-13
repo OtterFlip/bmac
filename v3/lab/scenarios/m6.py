@@ -16,6 +16,7 @@ printed; the root password is made up for the run."""
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import queue
@@ -150,9 +151,18 @@ NVME_MIRROR = {"data_kind": "none", "encryption": "none"}
 class Installed:
     """The host the task installed, for a scenario that carries on with it."""
 
-    def __init__(self, s, vm, work: Path, password: str, host_name: str) -> None:
+    def __init__(self, s, vm, work: Path, password: str, host_name: str, reused: str | None = None) -> None:
         self.s, self.lab, self.vm, self.work = s, s.lab, vm, work
         self.password, self.host_name = password, host_name
+        # The stage the host was restored from instead of installed, if any.
+        self.reused = reused
+
+    def save_stage(self, name: str) -> None:
+        """Saves the running host live as stage name, for later runs to
+        start from (see install's stage); it resumes where it was, so an
+        encrypted root needs no passphrase."""
+        self.s.note(f"saving {self.vm.name} as stage {name}")
+        self.lab.save_stage(self.vm, name, self.work, {"password": self.password, "package_sha256": package_digest()})
 
     def ssh_args(self, extra: list[str] | None = None) -> list[str]:
         return ["ssh", "-F", str(self.work / "ssh" / "config"), "-o", "BatchMode=yes",
@@ -170,12 +180,68 @@ def run(s) -> None:
     install(s)
 
 
+def wait_until(test, timeout: float = 180) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if test():
+                return True
+        except (RuntimeError, OSError, subprocess.TimeoutExpired):
+            pass
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(3)
+
+
+def package() -> Path:
+    return max(PACKAGES.glob("bmacd_*.deb"), key=lambda p: p.stat().st_mtime)
+
+
+def package_digest() -> str:
+    return hashlib.sha256(package().read_bytes()).hexdigest()
+
+
+def reuse(s, vm, stage: str, work: Path, host_name: str, then) -> None:
+    """Starts vm from stage instead of installing it, with the current
+    bmacd package, and carries on with `then` before putting it back."""
+    lab = s.lab
+    lab.stop([vm])
+    lab.checkpoint(vm, CHECKPOINT)
+    with contextlib.ExitStack() as cleanup:
+        def put_back() -> None:
+            lab.restore_checkpoint(vm, CHECKPOINT)
+            lab.start([vm])
+        cleanup.callback(put_back)
+        meta = lab.restore_stage(vm, stage, work)
+        hours = (time.time() - meta["taken"]) / 3600
+        s.note(f"started {vm.name} from stage {stage}, saved {hours:.1f} h ago, instead of installing it; "
+               "BMAC_LAB_FRESH=1 installs it from scratch")
+        lab.start([vm])
+        lab.wait_ssh(vm, BOOT_TIMEOUT)
+        installed = Installed(s, vm, work, meta["password"], host_name, reused=stage)
+        s.require(f"{host_name} answers SSH on the tailnet", lambda: wait_until(lambda: installed.on_host("true") == ""))
+        if meta.get("package_sha256") != package_digest():
+            s.note(f"installing the current bmacd package on {vm.name}")
+            with package().open("rb") as deb:
+                done = subprocess.run([*installed.ssh_args(), "cat > /tmp/bmacd.deb && dpkg -i /tmp/bmacd.deb >/dev/null "
+                                       "&& rm /tmp/bmacd.deb && systemctl restart bmacd.service bmacd-web.service"],
+                                      stdin=deb, capture_output=True, text=True, timeout=300)
+            s.require(f"the current bmacd package is installed on {vm.name} ({done.stderr.strip()[-200:]})",
+                      done.returncode == 0)
+        s.require("bmacd and bmacd-web are running", lambda: installed.on_host(
+            "systemctl is-active bmacd.service bmacd-web.service").split() == ["active", "active"])
+        then(installed)
+    s.check(f"{vm.name} is back as it was", lambda: lab.wait_ssh(vm, BOOT_TIMEOUT) or True)
+
+
 def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
-            bundle: Path | None = None) -> None:
+            bundle: Path | None = None, stage: str | None = None) -> None:
     """The task end to end; `layout` answers the pool layout form beyond the
     boot disks, and `then(installed)` carries on before the host is put
     back. With a join `bundle`, the host joins that cluster instead of
-    starting one."""
+    starting one. When vm has a saved `stage` (see Installed.save_stage),
+    it starts from that instead, unless BMAC_LAB_FRESH=1 is set; `then`
+    sees the stage's name in installed.reused."""
     lab = s.lab
     vm = lab.topology.vm(vm_name)
     keys = tailnet.read_secrets(lab.secrets)
@@ -186,6 +252,10 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
 
     base = lab.paths.images.parent
     work = base / ("m6" if vm.name == "mox3" else f"m6-{vm.name}")
+    host_name = f"{lab.topology.tailnet_prefix}{vm.name}"
+    if then is not None and stage is not None and os.environ.get("BMAC_LAB_FRESH") != "1" and lab.stage(vm, stage):
+        reuse(s, vm, stage, work, host_name, then)
+        return
     shutil.rmtree(work, ignore_errors=True)
     (work / "ssh").mkdir(parents=True, mode=0o700)
     cache = base / "deployer-cache"
@@ -204,9 +274,10 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
         ["--release", "-p", "bmac-inventory", "--target", discovery.STATIC_TARGET,
          "--target-dir", str(base / "discovery" / "static-target")], static_env)
 
-    host_name = f"{lab.topology.tailnet_prefix}{vm.name}"
-    lab.forget_tailnet(names={host_name}, required=False)
     lab.stop([vm])
+    # A stage's host keeps its tailnet device; installing anew removes it.
+    lab.drop_stages(vm)
+    lab.forget_tailnet(names={host_name}, required=False)
     lab.checkpoint(vm, CHECKPOINT)
     password = tokens.token_urlsafe(18)
     stopping = threading.Event()
@@ -217,7 +288,8 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
             lab.start([vm])
         cleanup.callback(put_back)
         isos: dict[str, str] = {}
-        cleanup.callback(lambda: lab.forget_tailnet(names={host_name, *isos.values()}, required=False))
+        cleanup.callback(lambda: lab.forget_tailnet(
+            names={*isos.values(), *(() if lab.stage_names(vm) else (host_name,))}, required=False))
 
         task = Task([str(driver), "--kind", "host", "--work", str(work), "--cache", str(cache),
                      "--packages", str(PACKAGES), "--inventory", str(inventory)], work / "driver.log")

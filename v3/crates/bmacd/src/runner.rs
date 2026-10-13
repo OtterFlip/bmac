@@ -246,6 +246,11 @@ impl Runner {
         self.active.lock().unwrap().contains_key(&job)
     }
 
+    /// Whether no job runs here; a job leaves only after its end is recorded.
+    pub fn is_idle(&self) -> bool {
+        self.active.lock().unwrap().is_empty()
+    }
+
     /// Looks for admitted jobs now, as when one was just launched or resumed.
     pub fn kick(&self) {
         self.kick.notify_one();

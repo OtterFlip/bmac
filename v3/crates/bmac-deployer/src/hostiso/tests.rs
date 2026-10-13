@@ -351,7 +351,10 @@ fn a_used_tailscale_key_is_refused_unless_the_build_accepts_it() {
         cluster_name: "MyAppCloud".into(),
         cluster_settings: cluster(),
         slot: HostSlot::new(1).unwrap(),
-        host_settings: host_settings(),
+        host_settings: host_settings()
+            .into_iter()
+            .filter(|(key, _)| key.starts_with("MAX_"))
+            .collect(),
         join_token: "join-token-secret".into(),
         expires_ms: NOW + 1000,
         hosts: Vec::new(),
@@ -376,6 +379,16 @@ fn a_used_tailscale_key_is_refused_unless_the_build_accepts_it() {
         BootstrapOrigin::Join(b) => assert_eq!(b.used_tailscale_key_sha256.len(), 2),
         other => panic!("{other:?}"),
     }
+
+    // The network form adds the ports and addresses, but what the bundle
+    // set stays as it was.
+    let (key, value) = bundle.host_settings.iter().next().unwrap();
+    let mut changed = req.clone();
+    changed
+        .host_settings
+        .insert(key.clone(), format!("{value}9"));
+    let error = prepare(&changed, &packages(), NOW, false).unwrap_err();
+    assert!(error.contains(key.as_str()), "{error}");
 
     let mut expired = bundle;
     expired.expires_ms = NOW;

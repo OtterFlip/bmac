@@ -6,8 +6,14 @@ setup job makes a one-host cluster, without the boot drills. mox3's
 Dashboard API then issues a join bundle for mox2, the Deployer installs
 mox2 from that bundle, and mox2 asks mox3 to let it join. Approved on mox3,
 the hosts.join job sets mox2 up over SSH, relaying its questions, and keeps
-going across mox2's boot drills. The root@pam password for `pvecm add` is
-answered once, in the job, and must not appear in its events.
+going across mox2's boot drills when BMAC_LAB_DRILLS=1 is set (they are
+declined otherwise, as in m7_storage). The root@pam password for
+`pvecm add` is answered once, in the job, and must not appear in its events.
+
+mox3 is saved as the lab stage m7-one-host-cluster once it is a cluster
+member, and later runs start mox3 from it, with the current bmacd package,
+instead of installing and setting it up again. BMAC_LAB_FRESH=1 ignores the
+stage, and installing mox3 anew (m6, m7_storage) drops it.
 
 Both hosts are put back as they were afterwards. The root passwords are
 made up for the run."""
@@ -28,6 +34,8 @@ DESCRIPTION = "mox3 starts a cluster, issues a join bundle, and its hosts.join j
 JOB_TIMEOUT = 5400
 REQUEST_TIMEOUT = 900
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED"}
+# mox3 as a one-host cluster, saved the first time it gets there.
+STAGE = "m7-one-host-cluster"
 SETUP_PHASES = ("identity", "settings", "storage", "drills", "network", "cluster", "retire",
                 "orchestration", "headers", "verify")
 
@@ -134,11 +142,18 @@ def then(mox3) -> None:
             return {"kind": "confirm", "confirmed": form.get("title") != "Run the boot drills?"}
         raise AssertionError(f"unexpected request {form['kind']} {form.get('title')!r}")
 
-    s.require("mox3 is in setup mode", lambda: dashboard.call("GET", "/setup").get("active") is True)
-    summary, _ = follow(s, dashboard, dashboard.start("hosts.setup", {}), first_host)
-    s.require(f"mox3's setup completes ({summary.get('state')}: {summary.get('message') or ''})",
-              summary.get("state") == "COMPLETED")
-    s.check("mox3 has left setup mode", lambda: dashboard.call("GET", "/setup").get("active") is False)
+    if mox3.reused != STAGE:
+        s.require("mox3 is in setup mode", lambda: dashboard.call("GET", "/setup").get("active") is True)
+        summary, _ = follow(s, dashboard, dashboard.start("hosts.setup", {}), first_host)
+        s.require(f"mox3's setup completes ({summary.get('state')}: {summary.get('message') or ''})",
+                  summary.get("state") == "COMPLETED")
+        s.check("mox3 has left setup mode", lambda: m7.wait_for(
+            lambda: dashboard.call("GET", "/setup").get("active") is False))
+        s.require("mox3 restarted as a cluster member and issues join bundles",
+                  lambda: m7.wait_for(lambda: "joins" in dashboard.call("GET", "/joins")))
+        mox3.save_stage(STAGE)
+    s.require("mox3 is a cluster member and issues join bundles",
+              lambda: m7.wait_for(lambda: "joins" in dashboard.call("GET", "/joins")))
 
     issued = dashboard.call("POST", "/joins", {"host": "mox2", "max_prod_vms": 1, "max_staging_vms": 2})
     bundle_file = mox3.work / issued["file_name"]
@@ -175,7 +190,7 @@ def join(s, dashboard: Dashboard, mox3, mox2, setup_key: str) -> None:
     def joining(form: dict) -> dict:
         kind, title = form["kind"], form.get("title", "")
         if kind == "confirm":
-            return {"kind": "confirm", "confirmed": True}
+            return {"kind": "confirm", "confirmed": m7.DRILLS or title != "Run the boot drills?"}
         if kind == "manual_action":
             return {"kind": "acknowledge"}
         if kind == "input_group" and any(f["id"] == "password" for f in form.get("fields", [])):
@@ -215,4 +230,4 @@ def join(s, dashboard: Dashboard, mox3, mox2, setup_key: str) -> None:
 
 
 def run(s) -> None:
-    m6.install(s, m6.NVME_MIRROR, then)
+    m6.install(s, m6.NVME_MIRROR, then, stage=STAGE)

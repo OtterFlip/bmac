@@ -223,14 +223,11 @@ pub fn prepare(
             field_errors,
         });
     }
-    let mut args = Vec::new();
-    if operation.kind == OperationKind::Script {
-        args = options;
-        if dry_run {
-            args.push(DRY_RUN_FLAG.to_string());
-        }
-        args.extend(positional);
+    let mut args = options;
+    if dry_run && operation.kind == OperationKind::Script {
+        args.push(DRY_RUN_FLAG.to_string());
     }
+    args.extend(positional);
     let locks = operation
         .locks
         .iter()
@@ -756,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn native_operations_get_no_arguments() {
+    fn native_operations_get_their_parameters_but_no_dry_run_flag() {
         let op = operation(json!({
             "kind": "native", "script": null, "cancel": {"rule": "phases"},
             "params": [{"id": "resource", "label": "VM", "type": "production", "required": true}],
@@ -764,7 +761,7 @@ mod tests {
         }));
         Registry::new(vec![op.clone()]).unwrap();
         let prepared = prepare(&op, &values(json!({"resource": "prod2"})), true).unwrap();
-        assert!(prepared.args.is_empty());
+        assert_eq!(prepared.args, ["prod2"]);
         assert_eq!(prepared.locks, ["production:prod2"]);
     }
 

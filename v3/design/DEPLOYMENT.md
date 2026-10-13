@@ -600,6 +600,9 @@ The job's phases, in order:
    Dashboard, and pulled by every enrolled backup appliance (`BACKUP.md`;
    the cluster never pushes to an appliance).
 9. **Verify the end state**, as v2's step 9 does, and leave setup mode.
+   Once the job's end is recorded, `bmacd` restarts itself, since what it
+   runs is chosen at startup: as a cluster member it links with the other
+   hosts, issues join bundles, and keeps the hosts pinned in `/etc/hosts`.
 
 ### Things that used to live on the workstation
 

@@ -198,10 +198,16 @@ pub fn prepare(
                     bundle.slot
                 ));
             }
-            if without_boot_mirror(&bundle.host_settings)
-                != without_boot_mirror(&request.host_settings)
-            {
-                return Err("The host settings differ from the join bundle's.".into());
+            let changed: Vec<String> = without_boot_mirror(&bundle.host_settings)
+                .into_iter()
+                .filter(|(key, value)| request.host_settings.get(key) != Some(value))
+                .map(|(key, _)| key)
+                .collect();
+            if !changed.is_empty() {
+                return Err(format!(
+                    "The host settings change what the join bundle set: {}.",
+                    changed.join(", ")
+                ));
             }
             if bundle.expires_ms <= now_ms {
                 return Err(

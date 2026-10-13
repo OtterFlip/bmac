@@ -73,6 +73,24 @@ we run the tests within this suite, then the repeated runs of the suite
 itself, before everything passes in the suite, are less optimal when it
 comes to the time consumed to run the suite.
 
+When a lab scenario builds on a long stage that has already passed (a host
+installed and set up, a cluster formed), save the VMs at that stage and let
+later runs start from it, so work on what comes after doesn't repeat the
+stage each time. Watch for these: whenever a scenario spends many minutes
+reaching a state before the part being worked on, save that state as a
+stage. Save one with `Installed.save_stage` once the stage's checks pass:
+it uses QEMU's live snapshots, so the host keeps running, and a restored
+host resumes where it was, memory and all, with no boot (and so no LUKS
+passphrase) and its clock set to now. Pass the stage's name to
+`m6.install(..., stage=...)`, which restores it, installs the current bmacd
+package on it, and runs the rest. A stage keeps the host's tailnet device,
+and installing that VM anew drops its stages. Save the hosts of a cluster
+together, one after another while nothing is changing, so they agree with
+each other when restored. `BMAC_LAB_FRESH=1` ignores every stage. As with the boot
+drills, once the later part passes from a stage, run the whole scenario
+once from scratch before reporting the work as finished. The stages saved
+so far are listed in [`lab/README.md`](lab/README.md#stages).
+
 v2's `dev/run_tests.py` also collects every committed `test_*.py` under
 `v3/`, and runs it from the repository root. So a v3 Python test must find
 what it tests by paths relative to its own file (for example, loading a

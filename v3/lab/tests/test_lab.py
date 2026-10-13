@@ -117,6 +117,62 @@ class SnapshotTest(LabTestCase):
         with self.assertRaisesRegex(LabError, "no checkpoint named 'before'"):
             self.lab.restore_checkpoint(mox3, "before")
 
+    def test_a_stage_outlives_restores_until_dropped(self) -> None:
+        mox3, mox1 = self.topology.vm("mox3"), self.topology.vm("mox1")
+        files = self.paths.root / "work"
+        files.mkdir()
+        (files / "card.txt").write_text("card v1")
+        self.lab.save_stage(mox3, "cluster", files, {"password": "made-up"})
+        self.assertEqual(self.lab.stage_names(mox3), ["cluster"])
+        self.assertEqual(self.lab.stage_names(mox1), [])
+        self.assertEqual((self.paths.vm("mox3") / "stages" / "cluster" / "stage.json").stat().st_mode & 0o777, 0o600)
+        disk = str(self.paths.disk(mox3.disks[0]))
+        self.assertIn(f"snapshot -c stage-cluster {disk}", self.calls.read_text().splitlines())
+
+        (files / "card.txt").write_text("card v2")
+        self.paths.vars("mox3").write_text("new vars")
+        for _ in range(2):
+            meta = self.lab.restore_stage(mox3, "cluster", files)
+            self.assertEqual(meta["password"], "made-up")
+            self.assertEqual((files / "card.txt").read_text(), "card v1")
+            self.assertEqual(self.paths.vars("mox3").read_text(), "vars of mox3 v1")
+        self.assertIn(f"snapshot -a stage-cluster {disk}", self.calls.read_text().splitlines())
+        self.assertNotIn(f"snapshot -d stage-cluster {disk}", self.calls.read_text().splitlines())
+
+        self.lab.drop_stages(mox3)
+        self.assertEqual(self.lab.stage_names(mox3), [])
+        self.assertIsNone(self.lab.stage(mox3, "cluster"))
+        with self.assertRaisesRegex(LabError, "no stage named 'cluster'"):
+            self.lab.restore_stage(mox3, "cluster", files)
+
+    def test_a_live_stage_job_covers_the_disks_and_waits_for_the_job(self) -> None:
+        mox3 = self.topology.vm("mox3")
+
+        class Monitor:
+            def __init__(self, error: str | None = None) -> None:
+                self.calls: list[tuple[str, dict]] = []
+                self.polls, self.error = 0, error
+
+            def command(self, name: str, /, **arguments: object) -> object:
+                self.calls.append((name, arguments))
+                if name == "query-block":
+                    return [{"device": "cd0"}, *({"device": f"d-{d.id}", "inserted": {"node-name": f"#n{i}"}}
+                                                 for i, d in enumerate(mox3.disks))]
+                if name == "query-jobs":
+                    self.polls += 1
+                    status = "concluded" if self.polls > 1 else "running"
+                    return [{"id": "snapshot-save-mox3", "status": status, **({"error": self.error} if self.error else {})}]
+                return {}
+
+        monitor = Monitor()
+        self.lab._snapshot_job(monitor, mox3, "snapshot-save", "stage-x")
+        nodes = [f"#n{i}" for i in range(len(mox3.disks))]
+        self.assertEqual(monitor.calls[1], ("snapshot-save", {"job-id": "snapshot-save-mox3", "tag": "stage-x",
+                                                              "devices": nodes, "vmstate": "#n0"}))
+        self.assertEqual(monitor.calls[-1], ("job-dismiss", {"id": "snapshot-save-mox3"}))
+        with self.assertRaisesRegex(LabError, "snapshot-save of mox3: no space"):
+            self.lab._snapshot_job(Monitor("no space"), mox3, "snapshot-save", "stage-x")
+
     def test_retaking_a_snapshot_replaces_it(self) -> None:
         self.lab.snapshot("base")
         self.lab.snapshot("base")

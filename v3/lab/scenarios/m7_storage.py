@@ -341,8 +341,31 @@ def then(host) -> None:
         "systemctl is-active bmac-haproxy-ingress.service bmac-haproxy-route-sync.timer | sort -u") == "active")
     s.check("setup is marked complete", lambda: host.on_host(
         "test -e /var/lib/bmac/setup-complete && echo done") == "done")
-    with connected() as api:
-        s.check("the host has left setup mode", lambda: api.request("GET", "/setup").get("active") is False)
+    s.check("bmacd restarted as a cluster member once setup finished", lambda: wait_for(
+        lambda: "restarting as a cluster member" in host.on_host("journalctl -b -u bmacd.service -o cat")))
+
+    def left_setup() -> bool:
+        with connected() as api:
+            login(api)
+            return api.request("GET", "/setup").get("active") is False
+
+    s.check("the host has left setup mode", lambda: wait_for(left_setup))
+
+
+def wait_for(test, timeout: float = 180) -> bool:
+    """Whether `test` holds within `timeout`, trying again while bmacd
+    restarts."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if test():
+                return True
+        except Exception:
+            if time.monotonic() > deadline:
+                raise
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(3)
 
 
 def run(s) -> None:
