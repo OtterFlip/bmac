@@ -1,0 +1,10 @@
+<!--
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+-->
+
+<p style="margin:0 0 16px;font-size:18px;"><strong>Cluster answering again</strong></p>
+<p style="margin:0 0 16px;">Cluster {{ cluster_name }} is answering backup appliance {{ appliance_name }} again, since {{ up_at }}. It stopped answering at {{ down_since }}.</p>
+<ul style="margin:0;padding-left:20px;font-size:14px;">
+{{#each hosts}}<li style="margin:0 0 6px;">{{ host }} is answering</li>
+{{/each}}</ul>

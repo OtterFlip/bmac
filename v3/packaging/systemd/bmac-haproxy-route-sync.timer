@@ -1,0 +1,17 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[Unit]
+Description=Continuously reconcile BMAC HAProxy ingress
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=1min
+RandomizedDelaySec=10s
+AccuracySec=5s
+Persistent=false
+Unit=bmac-haproxy-route-sync.service
+
+# Host setup enables this once the host's HAProxy ingress exists.
+[Install]
+WantedBy=timers.target

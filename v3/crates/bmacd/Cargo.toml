@@ -1,0 +1,65 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "bmacd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "bmacd"
+path = "src/main.rs"
+
+[features]
+# Development builds for the lab: adds the mock operations.
+lab = []
+
+[dependencies]
+axum.workspace = true
+base64.workspace = true
+bmac-adapters.workspace = true
+bmac-core.workspace = true
+bmac-exec.workspace = true
+bmac-inventory.workspace = true
+bmac-proto.workspace = true
+bmac-registry.workspace = true
+bmac-settings.workspace = true
+bmac-storage.workspace = true
+bytes.workspace = true
+flate2.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client"] }
+jiff.workspace = true
+hyper-util.workspace = true
+bmac-pmxcfs.workspace = true
+rcgen.workspace = true
+ring.workspace = true
+rusqlite.workspace = true
+rustix.workspace = true
+rustls.workspace = true
+rustls-webpki.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
+tokio-rustls.workspace = true
+uuid.workspace = true
+bmac-notify.workspace = true
+
+[dev-dependencies]
+regex.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-std", "test-util"] }
+
+[lints]
+workspace = true

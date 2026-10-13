@@ -1,0 +1,13 @@
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+
+Resolved: {{ summary }}
+
+Host:      {{ host }}
+Resource:  {{ resource }}
+Condition: {{ condition }}
+Severity:  {{ severity }}
+Opened:    {{ opened_at }}
+Resolved:  {{ resolved_at }} ({{ resolved_at_local }})
+
+Alert {{ alert_id }}: {{ alert_url }}

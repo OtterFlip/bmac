@@ -1,0 +1,206 @@
+{
+  "source": "v2 Dashboard mock preview (dashboard/src/lib/mock)",
+  "viewport": {
+    "width": 1440,
+    "height": 960
+  },
+  "fixed_time": "2026-10-10T16:00:00.000Z",
+  "shots": [
+    {
+      "name": "page-dashboard.png",
+      "description": "Dashboard page, populated cluster"
+    },
+    {
+      "name": "page-hosts.png",
+      "description": "Hosts page, populated cluster"
+    },
+    {
+      "name": "page-storage.png",
+      "description": "Storage page, populated cluster"
+    },
+    {
+      "name": "page-production.png",
+      "description": "Production VMs page, populated cluster"
+    },
+    {
+      "name": "page-staging.png",
+      "description": "Staging VMs page, populated cluster"
+    },
+    {
+      "name": "page-qdevice.png",
+      "description": "QDevice page, populated cluster"
+    },
+    {
+      "name": "page-diagnostics.png",
+      "description": "Diagnostics page, populated cluster"
+    },
+    {
+      "name": "page-operations.png",
+      "description": "Operations page, populated cluster"
+    },
+    {
+      "name": "page-config.png",
+      "description": "Config page, populated cluster"
+    },
+    {
+      "name": "page-settings.png",
+      "description": "Settings page, populated cluster"
+    },
+    {
+      "name": "page-config-editor.png",
+      "description": "Config page with cluster.conf open in the editor"
+    },
+    {
+      "name": "menu-run-switcher.png",
+      "description": "Run switcher menu listing the startup refreshes"
+    },
+    {
+      "name": "console-open.png",
+      "description": "Under-the-hood console expanded"
+    },
+    {
+      "name": "dialog-launch.png",
+      "description": "Launch dialog for a mutating workflow with dry run on by default"
+    },
+    {
+      "name": "dialog-launch-advanced.png",
+      "description": "Launch dialog with advanced options expanded"
+    },
+    {
+      "name": "dialog-file-browser.png",
+      "description": "File browser dialog opened from a path field"
+    },
+    {
+      "name": "dialog-launch-destructive.png",
+      "description": "Launch dialog for a destructive workflow with dry run off"
+    },
+    {
+      "name": "dialog-launch-read-only.png",
+      "description": "Launch dialog for a read-only workflow with a required field"
+    },
+    {
+      "name": "run-running-read-only.png",
+      "description": "Read-only run in progress with phases"
+    },
+    {
+      "name": "run-running-read-only-console.png",
+      "description": "Read-only run in progress with the console showing its output"
+    },
+    {
+      "name": "run-succeeded-read-only.png",
+      "description": "Read-only run finished with a warning and a next step"
+    },
+    {
+      "name": "run-dry-run.png",
+      "description": "Dry run finished with a plan-only result"
+    },
+    {
+      "name": "request-input-select.png",
+      "description": "Waiting for input: a select field with context"
+    },
+    {
+      "name": "request-input-select-default.png",
+      "description": "Waiting for input: a select field with a default"
+    },
+    {
+      "name": "request-input-group.png",
+      "description": "Waiting for input: an input group form"
+    },
+    {
+      "name": "request-validation-error.png",
+      "description": "Waiting for input: the script rejected a field value"
+    },
+    {
+      "name": "request-plan-confirm.png",
+      "description": "Plan followed by a normal confirmation"
+    },
+    {
+      "name": "run-running-progress.png",
+      "description": "Mutating run in progress with a progress bar"
+    },
+    {
+      "name": "run-running-no-cancel.png",
+      "description": "Run in a phase the script marked unsafe to interrupt"
+    },
+    {
+      "name": "run-succeeded.png",
+      "description": "Mutating run finished with a result and next steps"
+    },
+    {
+      "name": "request-confirm-typed.png",
+      "description": "Destructive confirmation requiring a typed phrase"
+    },
+    {
+      "name": "request-confirm-typed-filled.png",
+      "description": "Destructive confirmation with the phrase typed"
+    },
+    {
+      "name": "run-cancelled.png",
+      "description": "Run cancelled by the operator while waiting"
+    },
+    {
+      "name": "request-confirm-destructive-storage.png",
+      "description": "Destructive storage confirmation"
+    },
+    {
+      "name": "request-manual-action.png",
+      "description": "Waiting for a manual action at the host console"
+    },
+    {
+      "name": "run-failed.png",
+      "description": "Run that failed"
+    },
+    {
+      "name": "page-operations-history.png",
+      "description": "Operations page after every run state above"
+    },
+    {
+      "name": "dialog-close-requested.png",
+      "description": "Quit confirmation while a run is active"
+    },
+    {
+      "name": "fresh-landing.png",
+      "description": "First launch lands on Settings with setup steps"
+    },
+    {
+      "name": "fresh-page-dashboard.png",
+      "description": "Dashboard page, first launch with no cluster"
+    },
+    {
+      "name": "fresh-page-hosts.png",
+      "description": "Hosts page, first launch with no cluster"
+    },
+    {
+      "name": "fresh-page-storage.png",
+      "description": "Storage page, first launch with no cluster"
+    },
+    {
+      "name": "fresh-page-production.png",
+      "description": "Production VMs page, first launch with no cluster"
+    },
+    {
+      "name": "fresh-page-staging.png",
+      "description": "Staging VMs page, first launch with no cluster"
+    },
+    {
+      "name": "fresh-page-qdevice.png",
+      "description": "QDevice page, first launch with no cluster"
+    },
+    {
+      "name": "fresh-page-diagnostics.png",
+      "description": "Diagnostics page, first launch with no cluster"
+    },
+    {
+      "name": "fresh-page-operations.png",
+      "description": "Operations page, first launch with no cluster"
+    },
+    {
+      "name": "fresh-page-config.png",
+      "description": "Config page, first launch with no cluster"
+    },
+    {
+      "name": "fresh-page-settings.png",
+      "description": "Settings page, first launch with no cluster"
+    }
+  ]
+}

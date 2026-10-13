@@ -2,6 +2,7 @@
 *.key
 *.cer
 secrets.env
+tailscale.jsonc
 cluster_state.txt
 __pycache__/
 __pycache__/*

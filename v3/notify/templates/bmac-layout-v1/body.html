@@ -1,0 +1,32 @@
+<!--
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{{ product_name }}</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f5f7;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2328;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;">
+<tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid #d0d7de;border-radius:6px;">
+<tr><td style="padding:16px 24px;border-bottom:1px solid #d0d7de;font-size:14px;color:#57606a;">
+<strong style="color:#1f2328;">{{ product_name }}</strong> &middot; cluster {{ cluster_name }}
+</td></tr>
+<tr><td style="padding:24px;font-size:15px;line-height:1.5;">
+{{{ @content }}}
+</td></tr>
+<tr><td style="padding:16px 24px;border-top:1px solid #d0d7de;font-size:12px;line-height:1.5;color:#57606a;">
+Sent by {{ product_name }} for cluster {{ cluster_name }} at {{ sent_at }}.<br>
+<a href="{{ dashboard_url }}" style="color:#0969da;">Open the Dashboard</a>. Links in this email never log you in; the Dashboard asks you to log in.
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body>
+</html>

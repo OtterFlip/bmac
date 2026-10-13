@@ -1,0 +1,10 @@
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+
+No host of cluster {{ cluster_name }} has answered backup appliance
+{{ appliance_name }} since {{ down_since }}.
+
+{{#each hosts}}- {{ host }}: last answered {{ last_seen }}
+{{/each}}
+The cluster can't send alerts while it is down. This message comes from
+the backup appliance.

@@ -1,0 +1,15 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[Unit]
+Description=Retry deferred BMAC staging cleanup
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+RandomizedDelaySec=30s
+AccuracySec=15s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,15 @@
+<!--
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+-->
+
+<p style="margin:0 0 16px;font-size:18px;"><strong>Resolved:</strong> {{ summary }}</p>
+<table role="presentation" cellpadding="0" cellspacing="0" style="font-size:14px;margin:0 0 16px;">
+<tr><td style="padding:2px 12px 2px 0;color:#57606a;">Host</td><td>{{ host }}</td></tr>
+<tr><td style="padding:2px 12px 2px 0;color:#57606a;">Resource</td><td>{{ resource }}</td></tr>
+<tr><td style="padding:2px 12px 2px 0;color:#57606a;">Condition</td><td>{{ condition }}</td></tr>
+<tr><td style="padding:2px 12px 2px 0;color:#57606a;">Severity</td><td>{{ severity }}</td></tr>
+<tr><td style="padding:2px 12px 2px 0;color:#57606a;">Opened</td><td>{{ opened_at }}</td></tr>
+<tr><td style="padding:2px 12px 2px 0;color:#57606a;">Resolved</td><td>{{ resolved_at }} ({{ resolved_at_local }})</td></tr>
+</table>
+<p style="margin:0;"><a href="{{ alert_url }}" style="color:#0969da;">Open alert {{ alert_id }}</a></p>

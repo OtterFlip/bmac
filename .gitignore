@@ -1,6 +1,7 @@
 *.env
 *.key
 secrets.env
+tailscale.jsonc
 config/*.conf
 config/*.cer
 cluster_state.txt

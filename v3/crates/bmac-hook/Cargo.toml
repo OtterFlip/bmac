@@ -1,0 +1,17 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "bmac-hook"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bmac-hook"
+path = "src/main.rs"
+
+[lints]
+workspace = true

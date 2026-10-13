@@ -1,0 +1,106 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+# The nested lab: three Proxmox hosts, one appliance, one QDevice.
+# `lab/lab --config FILE` uses another topology; `BMAC_LAB_DIR` moves the
+# disks, images, and sockets (default ~/.local/share/bmac-lab/<name>).
+
+[lab]
+name = "bmaclab"
+# Workstation ports forwarded to each VM start here, ten per VM, on 127.0.0.1.
+base_port = 22000
+# The management and VLAN segments are QEMU multicast sockets on loopback,
+# so no bridge, tap device, or root is needed.
+mcast_group = "230.0.66.1"
+mcast_base_port = 23000
+mac_prefix = "52:54:00:b3"
+# Lab-only credentials, for the lab's throwaway VMs.
+root_password = "bmac-lab"
+domain = "lab.internal"
+# A lab VM that joins a real tailnet is named <tailnet_prefix><vm name>, never
+# the bare VM name: the v2 test cluster already uses these names on the tailnet.
+tailnet_prefix = "bmaclab-"
+reserved_tailnet_names = ["qdevice", "mox1", "mox2", "mox3"]
+
+[networks.mgmt]
+# Stands in for the tailnet.
+cidr = "100.64.0.0/24"
+
+[networks.vlan]
+# Stands in for the 10 Gbps private VLAN; addresses follow v2's example plan
+# (docs/MAIN_DESIGN.md, "Names, addresses, VMIDs, and MACs").
+cidr = "10.213.0.0/24"
+
+[images.proxmox]
+url = "https://enterprise.proxmox.com/iso/proxmox-ve_9.2-1.iso"
+sha256 = "4e88fe416df9b527624a175f24c9aa07c714d3332afb1ee3dbf3879573ef2c6c"
+
+[images.ubuntu]
+url = "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img"
+# Empty: verified against SHA256SUMS fetched over HTTPS from the same folder.
+sha256 = ""
+
+[tools.auto_install_assistant]
+url = "http://download.proxmox.com/debian/pve/dists/trixie/pve-no-subscription/binary-amd64/proxmox-auto-install-assistant_9.2.5_amd64.deb"
+sha256 = "9a61e37c3efce192a5ea86af06b3ccf7027fe581226068911d4833f4af7ac83e"
+binary = "usr/bin/proxmox-auto-install-assistant"
+
+[roles.host]
+image = "proxmox"
+cpus = 4
+memory_gib = 8
+# The two NVMe disks become the rpool mirror; the rest are for vdev tests.
+disks = [
+  { bus = "nvme", size_gib = 32 },
+  { bus = "nvme", size_gib = 32 },
+  { bus = "sata", size_gib = 16 },
+  { bus = "sata", size_gib = 16 },
+  { bus = "scsi", size_gib = 16 },
+  { bus = "scsi", size_gib = 16 },
+]
+networks = ["uplink", "mgmt", "vlan"]
+
+[roles.appliance]
+image = "ubuntu"
+cpus = 2
+memory_gib = 4
+disks = [
+  { bus = "virtio", size_gib = 40 },
+  { bus = "scsi", size_gib = 64 },
+]
+networks = ["uplink", "mgmt"]
+
+[roles.qdevice]
+image = "ubuntu"
+cpus = 1
+memory_gib = 1
+disks = [{ bus = "virtio", size_gib = 10 }]
+networks = ["uplink", "mgmt"]
+
+[[vm]]
+name = "mox1"
+role = "host"
+mgmt_ip = "100.64.0.11"
+vlan_ip = "10.213.0.11"
+
+[[vm]]
+name = "mox2"
+role = "host"
+mgmt_ip = "100.64.0.12"
+vlan_ip = "10.213.0.12"
+
+[[vm]]
+name = "mox3"
+role = "host"
+mgmt_ip = "100.64.0.13"
+vlan_ip = "10.213.0.13"
+
+[[vm]]
+name = "appliance"
+role = "appliance"
+mgmt_ip = "100.64.0.100"
+
+[[vm]]
+name = "qdevice"
+role = "qdevice"
+mgmt_ip = "100.64.0.101"

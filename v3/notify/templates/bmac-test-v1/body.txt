@@ -1,0 +1,9 @@
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+
+This is a test email, sent from Settings by {{ requested_by }}.
+
+If you are reading it, the Postmark server token, the sender address, and
+the email templates are all working.
+
+Notification settings: {{ settings_url }}

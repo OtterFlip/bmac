@@ -1,0 +1,51 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+# The Deployer's work, without its window: tasks, workstation checks, and
+# settings. deployer/src-tauri is the thin Tauri layer on top.
+
+[package]
+name = "bmac-deployer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+# Lab builds: hosts join the tailnet as bmaclab-<host>, and a reused
+# Tailscale key is accepted with a warning (lab/README.md).
+lab = []
+
+[dependencies]
+base64.workspace = true
+bmac-core.workspace = true
+bmac-exec.workspace = true
+bmac-proto.workspace = true
+bmac-settings.workspace = true
+bmac-storage.workspace = true
+bytes.workspace = true
+flate2.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client"] }
+hyper-util.workspace = true
+jiff.workspace = true
+rcgen.workspace = true
+rustls-webpki.workspace = true
+ring.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha-crypt.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+tokio-rustls.workspace = true
+x509-parser.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

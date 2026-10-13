@@ -1,0 +1,11 @@
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+
+{{ product_name }} - cluster {{ cluster_name }}
+
+{{{ @content }}}
+
+--
+Sent by {{ product_name }} for cluster {{ cluster_name }} at {{ sent_at }}.
+Dashboard: {{ dashboard_url }}
+Links in this email never log you in; the Dashboard asks you to log in.

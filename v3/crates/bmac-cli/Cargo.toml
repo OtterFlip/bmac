@@ -1,0 +1,45 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "bmac-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "bmac_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bmac"
+path = "src/main.rs"
+
+[dependencies]
+base64.workspace = true
+bmac-adapters.workspace = true
+bmac-core.workspace = true
+bmac-exec.workspace = true
+bmac-proto.workspace = true
+bmac-registry.workspace = true
+bmac-storage.workspace = true
+bmacd = { path = "../bmacd" }
+regex.workspace = true
+rustix = { workspace = true, features = ["termios"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+bmac-pmxcfs.workspace = true
+rcgen.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

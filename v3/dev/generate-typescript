@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+# Regenerate ui/src/generated, the TypeScript form of the dashboard API and
+# stream types, from the Rust types. Run it after changing those types;
+# dev/check fails while the generated copy is stale.
+#
+#   v3/dev/generate-typescript
+
+set -Eeuo pipefail
+
+V3_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd -- "$V3_ROOT"
+
+cargo run --quiet --locked -p bmac-proto --example typescript -- ui/src/generated

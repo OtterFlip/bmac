@@ -1,0 +1,29 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[Unit]
+Description=BMAC engine
+Documentation=file:///usr/share/doc/bmacd/README.md
+After=network-online.target pve-cluster.service
+Wants=network-online.target pve-cluster.service bmacd-web.service
+# The lifecycle hook reads the script config the engine renders before it
+# reports ready.
+Before=pve-guests.service pve-ha-lrm.service
+
+[Service]
+Type=notify
+ExecStart=/usr/lib/bmac/bmacd engine
+# The engine socket lives here: root and the bmac-web group may enter.
+RuntimeDirectory=bmac
+RuntimeDirectoryMode=0750
+# The script config in it stays for the hook and the timers while the
+# engine restarts.
+RuntimeDirectoryPreserve=yes
+StateDirectory=bmac
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

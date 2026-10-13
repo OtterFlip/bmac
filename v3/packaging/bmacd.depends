@@ -1,0 +1,12 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+# Debian packages the bmacd package depends on, one per line, for the
+# legacy runtime's commands; Proxmox VE itself provides the rest.
+corosync-qdevice
+curl
+jq
+psmisc
+python3
+util-linux
+xorriso

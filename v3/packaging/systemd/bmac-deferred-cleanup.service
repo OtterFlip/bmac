@@ -1,0 +1,18 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[Unit]
+Description=Process deferred BMAC staging cleanup
+After=pve-cluster.service
+Wants=pve-cluster.service
+# Nothing to do on a host without cluster settings yet.
+ConditionPathExists=/run/bmac/config/cluster.conf
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/lib/bmac/bmacd render-config
+ExecStart=/usr/lib/bmac/legacy/scripts/host_runtime/process_deferred_cleanup.sh --max-seconds 120
+TimeoutStartSec=150
+Nice=10
+IOSchedulingClass=idle
+UMask=0077

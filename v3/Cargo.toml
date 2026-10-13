@@ -1,0 +1,85 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/bmac-core",
+    "crates/bmac-exec",
+    "crates/bmac-pmxcfs",
+    "crates/bmac-registry",
+    "crates/bmac-settings",
+    "crates/bmac-storage",
+    "crates/bmac-adapters",
+    "crates/bmac-proto",
+    "crates/bmac-inventory",
+    "crates/bmacd",
+    "crates/bmac-hook",
+    "crates/bmac-cli",
+    "crates/bmac-backupd",
+    "crates/bmac-notify",
+    "crates/bmac-deployer",
+    "deployer/src-tauri",
+]
+
+[workspace.package]
+version = "3.0.0-dev.0"
+edition = "2024"
+# Raise it when a dependency needs a newer compiler.
+rust-version = "1.90"
+license = "GPL-3.0-only"
+authors = ["BEENTHERE VENTURES, INC."]
+
+[workspace.dependencies]
+base64 = "0.22"
+bmac-core = { path = "crates/bmac-core" }
+bmac-exec = { path = "crates/bmac-exec" }
+bytes = "1"
+flate2 = "1"
+http-body = "1"
+http-body-util = "0.1"
+bmac-inventory = { path = "crates/bmac-inventory" }
+bmac-pmxcfs = { path = "crates/bmac-pmxcfs" }
+bmac-notify = { path = "crates/bmac-notify" }
+bmac-proto = { path = "crates/bmac-proto" }
+bmac-registry = { path = "crates/bmac-registry" }
+bmac-settings = { path = "crates/bmac-settings" }
+bmac-storage = { path = "crates/bmac-storage" }
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json"] }
+bmac-adapters = { path = "crates/bmac-adapters" }
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "service", "tokio", "http1", "http2"] }
+rcgen = { version = "0.13", features = ["x509-parser"] }
+regex = "1"
+ring = "0.17"
+rusqlite = { version = "0.37", features = ["bundled"] }
+x509-parser = "0.16"
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustix = { version = "1", features = ["fs", "process", "system"] }
+sha2 = "0.10"
+sha-crypt = { version = "0.6", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+time = { version = "0.3", default-features = false, features = ["std"] }
+ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4"] }
+
+[workspace.lints.rust]
+# Only bmac-exec may opt out, for the process-group setup it needs.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Keep LTO thin and codegen-units at its default: fat LTO or a single codegen
+# unit runs the final optimization of the whole program on one core.
+[profile.release]
+lto = "thin"
+strip = true

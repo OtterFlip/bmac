@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react"],
+  "categories": {
+    "correctness": "off"
+  },
+  "rules": {
+    "react/no-danger": "error",
+    "react/no-danger-with-children": "error",
+    "react/jsx-no-script-url": "error",
+    "react/iframe-missing-sandbox": "error",
+    "no-eval": "error",
+    "no-new-func": "error"
+  },
+  "ignorePatterns": ["**/dist/**", "**/node_modules/**", "**/generated/**"]
+}

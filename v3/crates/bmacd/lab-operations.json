@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "operations": [
+    {
+      "id": "lab.interactive",
+      "title": "Lab: interactive mock",
+      "summary": "Runs the interactive mock script on a chosen host.",
+      "description": "A development build's mock workflow: an input group with validation, a typed confirmation, a manual action, a plan, and a result. It changes nothing.",
+      "category": "diagnostics",
+      "kind": "script",
+      "script": "mock/interactive.sh",
+      "min_role": "operator",
+      "mutating": true,
+      "destructive": false,
+      "params": [
+        {"id": "host", "label": "Host", "type": "host", "flag": "--host", "required": true}
+      ],
+      "locks": ["host:{host}"],
+      "target": {"rule": "host", "param": "host"},
+      "cancel": {"rule": "script"},
+      "resume": "never"
+    },
+    {
+      "id": "lab.long",
+      "title": "Lab: long-running mock",
+      "summary": "Runs for a minute on a chosen host, reporting progress.",
+      "description": "A development build's mock workflow that reports progress for about a minute and can be cancelled after its first phase. It changes nothing.",
+      "category": "diagnostics",
+      "kind": "script",
+      "script": "mock/long_running.sh",
+      "min_role": "operator",
+      "mutating": true,
+      "destructive": false,
+      "params": [
+        {"id": "host", "label": "Host", "type": "host", "flag": "--host", "required": true}
+      ],
+      "locks": ["capacity"],
+      "target": {"rule": "host", "param": "host"},
+      "cancel": {"rule": "script"},
+      "resume": "never"
+    }
+  ]
+}

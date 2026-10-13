@@ -1,0 +1,800 @@
+#!/usr/bin/env bash
+
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+# Permanently remove one registry-backed staging VM, its linked clone, its
+# source-owned snapshot copies, ingress route, and registry allocation.
+
+set -Eeuo pipefail
+set +x
+umask 077
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)"
+# shellcheck source=../../../lib/ui_protocol.sh
+source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
+CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
+REMOTE_ROOT="$REPO_ROOT"
+REMOTE_REGISTRY="${REMOTE_ROOT}/scripts/host_runtime/cluster_registry.py"
+REMOTE_HAPROXY_SYNC="${REMOTE_ROOT}/scripts/host_runtime/sync_haproxy_routes.sh"
+
+DRY_RUN=false
+RESOURCE_NAME=""
+COORDINATOR=""
+RUN_DIR=""
+RESOURCE_ID=""
+RESOURCE_REVISION=""
+RESOURCE_STATE=""
+VMID=""
+STAGING_NODE=""
+STAGING_VOLUME=""
+STAGING_DATASET=""
+SOURCE_NAME=""
+SOURCE_VMID=""
+SOURCE_OWNER=""
+SOURCE_PURPOSE=""
+SNAPSHOT_NAME=""
+SNAPSHOT_SHARED_WITH=""
+SNAPSHOT_ALSO_RELEASING=""
+ROUTES_ENABLED=0
+LIVE_PRESENT=0
+declare -a SOURCE_PLACEMENT=()
+declare -a SOURCE_VOLUMES=()
+declare -a CLUSTER_NODES=()
+
+die() {
+  printf '\nERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
+  exit 1
+}
+
+log() {
+  printf '\n==> %s\n' "$*"
+  bmac_ui_step "$*"
+}
+
+info() {
+  printf '    %s\n' "$*"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: remove_staging_vm.sh [--dry-run] [stageNprodN]
+
+With no resource argument, lists registered staging guests and prompts for one.
+Permanently removes the selected guest's route, QEMU VM and VM-owned disks,
+and linked clone. When no other staging guest shares its source snapshot, that
+one exact snapshot is deleted too, and replication is verified to have removed
+its copies from every production placement node. A snapshot another staging
+guest still uses is kept; it is deleted when its last staging guest is removed.
+No other production snapshot is touched, and production itself is never
+stopped or destroyed.
+
+Options:
+  --dry-run  Validate and print the complete destruction plan without changes.
+  -h, --help
+EOF
+}
+
+parse_args() {
+  while (($#)); do
+    case "$1" in
+      --dry-run)
+        DRY_RUN=true
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        [[ -z "$RESOURCE_NAME" ]] ||
+          die "Only one staging resource may be selected"
+        RESOURCE_NAME="$1"
+        ;;
+    esac
+    shift
+  done
+}
+
+node_exec() {
+  local node="$1"
+  shift
+  [[ "$node" =~ ^mox([1-9]|[12][0-9]|3[0-2])$ ]] || return 2
+  (($# > 0)) || return 2
+  local payload="set -Eeuo pipefail"$'\n'"exec" argument quoted
+  for argument in "$@"; do
+    printf -v quoted '%q' "$argument"
+    payload+=" ${quoted}"
+  done
+  payload+=$'\n'
+  printf '%s' "$payload" | mox_ssh "$node" bash -s
+}
+
+registry_cmd() {
+  mox_ssh "$COORDINATOR" "$REMOTE_REGISTRY" \
+    --state-dir "$CLUSTER_STATE_DIR" "$@" </dev/null
+}
+
+pvesh_get() {
+  mox_ssh "$COORDINATOR" pvesh get "$@" --output-format json </dev/null
+}
+
+write_json() {
+  local path="$1" value="$2"
+  printf '%s\n' "$value" >"$path"
+  chmod 0600 "$path"
+  python3 - "$path" <<'PY'
+import json
+import sys
+json.load(open(sys.argv[1], encoding="utf-8"))
+PY
+}
+
+cleanup() {
+  local code=$?
+  trap - EXIT
+  set +e
+  [[ -z "$RUN_DIR" ]] || rm -rf -- "$RUN_DIR"
+  exit "$code"
+}
+
+select_resource() {
+  local resources_json="$1" table names default
+  table="$(
+    python3 - "$resources_json" <<'PY'
+import json
+import sys
+rows = [
+    row for row in json.loads(sys.argv[1])
+    if row.get("kind") == "staging"
+]
+rows.sort(key=lambda row: (row.get("source", ""), row.get("index", 0)))
+if not rows:
+    raise SystemExit("no registered staging guests exist")
+def snapshot_of(row):
+    snapshot = (row.get("proxmox") or {}).get("snapshot")
+    return snapshot.get("name") if isinstance(snapshot, dict) else None
+users = {}
+for row in rows:
+    if snapshot_of(row):
+        users.setdefault((row.get("source"), snapshot_of(row)), []).append(row["name"])
+print("  NAME                 SOURCE     NODE     STATE       SNAPSHOT                                 DOMAIN")
+for row in rows:
+    placement = row.get("placement") or ["?"]
+    snapshot = snapshot_of(row) or "-"
+    others = [
+        name for name in users.get((row.get("source"), snapshot), [])
+        if name != row["name"]
+    ]
+    if others:
+        snapshot += f" (shared with {', '.join(others)})"
+    print(
+        f"  {row['name']:<20} {str(row.get('source', '?')):<10} "
+        f"{str(placement[0]):<8} {str(row.get('state', '?')):<11} "
+        f"{snapshot:<40} {row.get('domains', {}).get('primary', '?')}"
+    )
+PY
+  )" || die "No registered staging guest is available for destruction"
+  printf '\nRegistered staging guests:\n%s\n' "$table"
+  [[ -z "$RESOURCE_NAME" ]] || return 0
+  names="$(
+    python3 - "$resources_json" <<'PY'
+import json
+import sys
+rows = [
+    row for row in json.loads(sys.argv[1])
+    if row.get("kind") == "staging"
+]
+rows.sort(key=lambda row: (row.get("source", ""), row.get("index", 0)))
+print(*[row["name"] for row in rows], sep="\n")
+PY
+  )"
+  default="$(printf '%s\n' "$names" | awk 'NF {print; exit}')"
+  if bmac_ui_is_json; then
+    local -a options=()
+    local name
+    while IFS= read -r name; do
+      [[ -z "$name" ]] || options+=("$name" "$name")
+    done <<<"$names"
+    bmac_ui_choose RESOURCE_NAME "Staging guest to destroy" "$default" "${options[@]}"
+    RESOURCE_NAME="${RESOURCE_NAME:-$default}"
+    return 0
+  fi
+  IFS= read -r -p "Staging guest to destroy [${default}]: " RESOURCE_NAME
+  RESOURCE_NAME="${RESOURCE_NAME:-$default}"
+}
+
+volume_dataset_on_node() {
+  local node="$1" volume="$2"
+  # shellcheck disable=SC2016 # This script is evaluated by remote Bash.
+  node_exec "$node" bash -c '
+set -Eeuo pipefail
+volume="$1"
+path="$(pvesm path "$volume")"
+[[ "$path" == /dev/zvol/* && -b "$path" ]]
+dataset="${path#/dev/zvol/}"
+[[ "$dataset" =~ ^[A-Za-z0-9._/+:-]+$ ]]
+[[ "$(zfs list -Hp -o type "$dataset")" == volume ]]
+printf "%s\n" "$dataset"
+' bash "$volume"
+}
+
+parse_and_validate_plan() {
+  local resources_json="$1" live_json="$2" nodes_json="$3"
+  local ha_json="$4" replication_json="$5" cleanup_json="$6"
+  local -a fields=()
+  mapfile -d '' -t fields < <(
+    python3 - "$resources_json" "$live_json" "$nodes_json" "$ha_json" \
+      "$replication_json" "$cleanup_json" "$RESOURCE_NAME" <<'PY'
+import json
+import re
+import sys
+
+resources, live, nodes, ha, replication, cleanup = [
+    json.loads(value) for value in sys.argv[1:7]
+]
+name = sys.argv[7]
+matches = [row for row in resources if row.get("name") == name]
+if len(matches) != 1 or matches[0].get("kind") != "staging":
+    raise SystemExit("selection is not exactly one registered staging resource")
+stage = matches[0]
+if not re.fullmatch(r"stage[1-9][0-9]*prod[1-9][0-9]*", name):
+    raise SystemExit("staging name does not match the current naming contract")
+source_matches = [
+    row for row in resources
+    if row.get("name") == stage.get("source") and row.get("kind") == "production"
+]
+if len(source_matches) != 1:
+    raise SystemExit("staging source production resource is missing or ambiguous")
+source = source_matches[0]
+placement = stage.get("placement")
+if not isinstance(placement, list) or len(placement) != 1:
+    raise SystemExit("staging placement is not exactly one node")
+stage_node = placement[0]
+if stage.get("owner_node") not in (None, stage_node):
+    raise SystemExit("staging owner differs from fixed placement")
+source_placement = source.get("placement")
+if not isinstance(source_placement, list) or len(source_placement) < 2:
+    raise SystemExit("source production placement is invalid")
+online = {
+    row.get("node", row.get("name"))
+    for row in nodes
+    if str(row.get("status", "")).lower() == "online"
+    or row.get("online") in (1, True)
+}
+if set(source_placement) - online:
+    raise SystemExit("every source production placement node must be online")
+
+vmid = int(stage["vmid"])
+live_matches = [
+    row for row in live if row.get("vmid") in (vmid, str(vmid))
+]
+if len(live_matches) == 1:
+    vm = live_matches[0]
+    if (
+        vm.get("name") != name
+        or vm.get("type") != "qemu"
+        or vm.get("node") != stage_node
+    ):
+        raise SystemExit("live staging VM identity or node differs from registry")
+    live_present = True
+elif len(live_matches) == 0 and stage.get("state") in {
+    "stopping", "stopped", "failed", "cleanup_pending"
+}:
+    live_present = False
+else:
+    raise SystemExit("live staging VM identity is absent or ambiguous")
+
+if any(row.get("sid") == f"vm:{vmid}" for row in ha):
+    raise SystemExit("staging VM must not be a Proxmox HA resource")
+snapshot = stage.get("proxmox", {}).get("snapshot")
+if (
+    not isinstance(snapshot, dict)
+    or snapshot.get("verified") is not True
+    or snapshot.get("source_resource") != source["name"]
+    or snapshot.get("dependent_resources") != [name]
+    or snapshot.get("refcount") != 1
+):
+    raise SystemExit("staging snapshot dependency metadata is incomplete")
+source_volumes = snapshot.get("source_volume_ids")
+if (
+    not isinstance(source_volumes, list)
+    or not source_volumes
+    or len(source_volumes) != len(set(source_volumes))
+):
+    raise SystemExit("source snapshot volume inventory is invalid")
+volume = stage.get("proxmox", {}).get("volume_id")
+if not isinstance(volume, str) or not volume:
+    raise SystemExit("staging clone volume is missing")
+owned_cleanup = [
+    row for row in cleanup if row.get("resource_id") == stage["id"]
+]
+if any(row.get("resource") != name for row in owned_cleanup):
+    raise SystemExit("deferred cleanup resource identity is inconsistent")
+
+source_vmid = int(source["vmid"])
+source_live = [
+    row for row in live if row.get("vmid") in (source_vmid, str(source_vmid))
+]
+if (
+    len(source_live) != 1
+    or source_live[0].get("name") != source["name"]
+    or source_live[0].get("node") not in source_placement
+    or source_live[0].get("status") != "running"
+):
+    raise SystemExit("source production VM must be uniquely running on placement")
+source_owner = source_live[0]["node"]
+jobs = [
+    row for row in replication
+    if row.get("guest") in (source_vmid, str(source_vmid))
+]
+targets = {row.get("target") for row in jobs}
+if targets != set(source_placement) - {source_owner}:
+    raise SystemExit("source replication targets differ from placement minus owner")
+job_ids = [str(row.get("id", "")) for row in jobs]
+if any(not re.fullmatch(r"[1-9][0-9]{2,8}-[0-9]+", value) for value in job_ids):
+    raise SystemExit("source replication job identity is unsafe")
+sharing = [
+    row for row in resources
+    if row.get("kind") == "staging"
+    and row.get("name") != name
+    and row.get("source") == source["name"]
+    and isinstance((row.get("proxmox") or {}).get("snapshot"), dict)
+    and row["proxmox"]["snapshot"].get("name") == snapshot["name"]
+]
+
+values = (
+    stage["id"],
+    stage["revision"],
+    stage["state"],
+    vmid,
+    stage_node,
+    volume,
+    "1" if stage.get("routes_enabled") else "0",
+    "1" if live_present else "0",
+    source["name"],
+    source_vmid,
+    source_owner,
+    source["purpose"]["slug"],
+    snapshot["name"],
+    ",".join(source_placement),
+    ",".join(source_volumes),
+    stage["domains"]["primary"],
+    ",".join(sorted(online, key=lambda value: int(value[3:]))),
+    ",".join(row["name"] for row in sharing if row.get("state") != "cleanup_pending"),
+    ",".join(row["name"] for row in sharing if row.get("state") == "cleanup_pending"),
+    stage["spec"]["storage"],
+)
+for value in values:
+    sys.stdout.buffer.write(str(value).encode() + b"\0")
+PY
+  ) || die "Staging destruction preflight failed"
+  ((${#fields[@]} == 20)) || die "Could not parse destruction plan"
+  RESOURCE_ID="${fields[0]}"
+  RESOURCE_REVISION="${fields[1]}"
+  RESOURCE_STATE="${fields[2]}"
+  VMID="${fields[3]}"
+  STAGING_NODE="${fields[4]}"
+  STAGING_VOLUME="${fields[5]}"
+  ROUTES_ENABLED="${fields[6]}"
+  LIVE_PRESENT="${fields[7]}"
+  SOURCE_NAME="${fields[8]}"
+  SOURCE_VMID="${fields[9]}"
+  SOURCE_OWNER="${fields[10]}"
+  SOURCE_PURPOSE="${fields[11]}"
+  SNAPSHOT_NAME="${fields[12]}"
+  IFS=',' read -r -a SOURCE_PLACEMENT <<<"${fields[13]}"
+  IFS=',' read -r -a SOURCE_VOLUMES <<<"${fields[14]}"
+  STAGING_DOMAIN="${fields[15]}"
+  IFS=',' read -r -a CLUSTER_NODES <<<"${fields[16]}"
+  SNAPSHOT_SHARED_WITH="${fields[17]}"
+  SNAPSHOT_ALSO_RELEASING="${fields[18]}"
+  STAGING_STORAGE="${fields[19]}"
+}
+
+snapshot_taken_label() {
+  local stamp="${1##*-}"
+  if [[ "$stamp" =~ ^([0-9]{2})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z$ ]]; then
+    printf '20%s-%s-%s %s:%s:%s UTC\n' "${BASH_REMATCH[@]:1:6}"
+  else
+    printf 'unknown time\n'
+  fi
+}
+
+# Prints the staging guests that still reference the removed guest's snapshot
+# once its cleanup has finished; empty means the snapshot was deleted.
+remaining_snapshot_users() {
+  local resources
+  resources="$(registry_cmd list 2>/dev/null)" || return 1
+  python3 - "$resources" "$SOURCE_NAME" "$SNAPSHOT_NAME" <<'PY'
+import json
+import sys
+
+rows = json.loads(sys.argv[1])
+print(",".join(
+    row["name"] for row in rows
+    if row.get("kind") == "staging"
+    and row.get("source") == sys.argv[2]
+    and isinstance((row.get("proxmox") or {}).get("snapshot"), dict)
+    and row["proxmox"]["snapshot"].get("name") == sys.argv[3]
+))
+PY
+}
+
+validate_live_vm() {
+  local config
+  config="$(node_exec "$STAGING_NODE" qm config "$VMID")" || return 1
+  python3 - "$config" "$RESOURCE_NAME" "$VMID" "$STAGING_VM_TAG" \
+    "$EVICTABLE_VM_TAG" "${PURPOSE_TAG_PREFIX}${SOURCE_PURPOSE}" \
+    "$STAGING_VOLUME" "$STAGING_STORAGE" "$GUEST_ROLE_HOOK_PATH" <<'PY'
+import re
+import sys
+config = {}
+for line in sys.argv[1].splitlines():
+    if ": " in line:
+        key, value = line.split(": ", 1)
+        config[key] = value
+name, raw_vmid, staging_tag, evictable_tag, purpose_tag, volume, storage, hook = sys.argv[2:]
+vmid = int(raw_vmid)
+tags = {value for value in re.split(r"[;,]", config.get("tags", "")) if value}
+if config.get("name") != name:
+    raise SystemExit("staging VM name differs from registry")
+if tags != {staging_tag, evictable_tag, purpose_tag}:
+    raise SystemExit("staging VM tags differ from exact role")
+if config.get("onboot", "0") != "0":
+    raise SystemExit("staging VM onboot is enabled")
+if config.get("hookscript") != hook:
+    raise SystemExit("staging lifecycle hook differs from contract")
+if config.get("scsi0", "").split(",", 1)[0] != volume:
+    raise SystemExit("staging root volume differs from registry")
+efi = config.get("efidisk0", "").split(",", 1)[0]
+if not re.fullmatch(rf"{re.escape(storage)}:vm-{vmid}-disk-[1-9][0-9]*", efi):
+    raise SystemExit("staging EFI volume identity is invalid")
+disks = {
+    key for key in config
+    if re.fullmatch(r"(?:scsi|sata|virtio|ide|unused|efidisk|tpmstate)[0-9]+", key)
+}
+if disks != {"scsi0", "efidisk0"}:
+    raise SystemExit("staging VM has unexpected disks")
+PY
+}
+
+validate_owned_volumes() {
+  local inventory
+  inventory="$(
+    node_exec "$STAGING_NODE" pvesm list "$STAGING_STORAGE" --vmid "$VMID"
+  )" || return 1
+  python3 - "$inventory" "$STAGING_VOLUME" "$STAGING_STORAGE" "$VMID" <<'PY'
+import re
+import sys
+lines = [line.split() for line in sys.argv[1].splitlines()[1:] if line.split()]
+observed = {parts[0] for parts in lines}
+root, storage, raw_vmid = sys.argv[2:]
+vmid = int(raw_vmid)
+if root not in observed or len(observed) != 2:
+    raise SystemExit("staging VM-owned volume inventory must contain exactly root and EFI")
+others = observed - {root}
+if len(others) != 1 or not re.fullmatch(
+    rf"{re.escape(storage)}:vm-{vmid}-disk-[1-9][0-9]*",
+    next(iter(others)),
+):
+    raise SystemExit("staging EFI volume inventory is invalid")
+PY
+}
+
+verify_snapshot_and_clone() {
+  local require_quiescent="${1:-false}"
+  local volume node dataset guid expected_guid origin clone_path
+  STAGING_DATASET="$(volume_dataset_on_node "$STAGING_NODE" "$STAGING_VOLUME")" ||
+    die "Could not resolve the staging clone dataset"
+  origin="$(node_exec "$STAGING_NODE" zfs get -Hp -o value origin "$STAGING_DATASET")" ||
+    die "Could not read the staging clone origin"
+  for volume in "${SOURCE_VOLUMES[@]}"; do
+    for node in "${SOURCE_PLACEMENT[@]}"; do
+      expected_guid="$(
+        registry_cmd get "$RESOURCE_NAME" |
+          python3 -c '
+import json,sys
+row=json.load(sys.stdin)
+print(row["proxmox"]["snapshot"]["volume_guids"][sys.argv[1]][sys.argv[2]])
+' "$volume" "$node"
+      )" || die "Could not read registered snapshot GUID metadata"
+      dataset="$(volume_dataset_on_node "$node" "$volume")" ||
+        die "Could not resolve $volume on $node"
+      guid="$(
+        node_exec "$node" zfs get -Hp -o value guid \
+          "${dataset}@${SNAPSHOT_NAME}"
+      )" || die "Required snapshot copy is absent on $node"
+      [[ "$guid" == "$expected_guid" ]] ||
+        die "Snapshot GUID differs for $volume on $node"
+      if [[ "$node" == "$STAGING_NODE" &&
+        "$volume" == "${SOURCE_VOLUMES[0]}" ]]; then
+        [[ "$origin" == "${dataset}@${SNAPSHOT_NAME}" ]] ||
+          die "Staging clone origin differs from its registered source snapshot"
+      fi
+    done
+  done
+  clone_path="$(
+    node_exec "$STAGING_NODE" pvesm path "$STAGING_VOLUME"
+  )" || die "Could not resolve the staging clone block path"
+  # shellcheck disable=SC2016 # This script is evaluated by remote Bash.
+  node_exec "$STAGING_NODE" bash -c '
+set -Eeuo pipefail
+path="$1"; dataset="$2"; require_quiescent="$3"
+[[ "$path" == "/dev/zvol/${dataset}" && -b "$path" ]]
+resolved="$(readlink -f -- "$path")"
+[[ "$resolved" =~ ^/dev/[A-Za-z0-9._/+:-]+$ && -b "$resolved" ]]
+if [[ "$require_quiescent" == true ]]; then
+  for device in "$path" "$resolved"; do
+    if findmnt -rn -S "$device" >/dev/null 2>&1 || fuser "$device" >/dev/null 2>&1; then
+      exit 1
+    fi
+  done
+fi
+' bash "$clone_path" "$STAGING_DATASET" "$require_quiescent" ||
+    die "Staging clone is mounted, open, or has an unsafe block identity"
+}
+
+registry_update() {
+  local value
+  value="$(
+    registry_cmd update "$RESOURCE_NAME" \
+      --expected-revision "$RESOURCE_REVISION" "$@"
+  )" || die "Registry update failed during staging destruction"
+  RESOURCE_REVISION="$(
+    python3 -c 'import json,sys; print(json.loads(sys.argv[1])["revision"])' \
+      "$value"
+  )"
+  RESOURCE_STATE="$(
+    python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state"])' \
+      "$value"
+  )"
+}
+
+queue_cleanup_plan() {
+  local node
+  registry_cmd defer-cleanup \
+    --resource "$RESOURCE_NAME" \
+    --node "$STAGING_NODE" \
+    --action destroy-vm \
+    --target "vm:${VMID}" \
+    --reason "operator requested complete staging VM destruction" \
+    >/dev/null ||
+    die "Could not queue staging VM destruction"
+  registry_cmd defer-cleanup \
+    --resource "$RESOURCE_NAME" \
+    --node "$STAGING_NODE" \
+    --action destroy-volume \
+    --target "$STAGING_VOLUME" \
+    --reason "operator requested linked-clone destruction" \
+    >/dev/null ||
+    die "Could not queue staging clone destruction"
+  for node in "${SOURCE_PLACEMENT[@]}"; do
+    registry_cmd defer-cleanup \
+      --resource "$RESOURCE_NAME" \
+      --node "$node" \
+      --action delete-snapshot \
+      --target "vm-${SOURCE_VMID}@${SNAPSHOT_NAME}" \
+      --reason "operator released this staging guest's snapshot; deleted once no staging guest shares it" \
+      >/dev/null ||
+      die "Could not queue exact snapshot cleanup on $node"
+  done
+  for node in "${CLUSTER_NODES[@]}"; do
+    registry_cmd defer-cleanup \
+      --resource "$RESOURCE_NAME" \
+      --node "$node" \
+      --action remove-route \
+      --target "$RESOURCE_NAME" \
+      --reason "operator requested staging route removal" \
+      >/dev/null ||
+      die "Could not queue route cleanup on $node"
+  done
+  registry_update --state cleanup_pending --routes-disabled
+}
+
+wait_for_durable_cleanup() {
+  local deadline=$((SECONDS + 1200)) node resources verdict
+  local unconfirmed=0
+  while ((SECONDS < deadline)); do
+    for node in "${CLUSTER_NODES[@]}"; do
+      node_exec "$node" systemctl start --no-block \
+        bmac-deferred-cleanup.service >/dev/null 2>&1 || true
+    done
+    # "Gone" must be a positive answer. "get" exits 1 with no output both when
+    # the record was deleted and when the registry could not be read, and a
+    # dropped SSH connection looks the same. "list" exits 0 with a JSON array
+    # whenever the registry is readable, so only a successful listing that
+    # lacks this name counts as deleted; anything else is unknown and retried.
+    verdict=unknown
+    if resources="$(registry_cmd list 2>/dev/null)"; then
+      verdict="$(
+        python3 - "$resources" "$RESOURCE_NAME" "$RESOURCE_ID" <<'PY' 2>/dev/null
+import json
+import sys
+
+rows = json.loads(sys.argv[1])
+if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+    raise SystemExit(1)
+matches = [row for row in rows if row.get("name") == sys.argv[2]]
+if not matches:
+    print("gone")
+elif (
+    len(matches) == 1
+    and matches[0].get("id") == sys.argv[3]
+    and matches[0].get("state") == "cleanup_pending"
+    and matches[0].get("routes_enabled") is False
+):
+    print("pending")
+else:
+    print("changed")
+PY
+      )" || verdict=unknown
+    fi
+    case "$verdict" in
+      gone)
+        return 0
+        ;;
+      pending)
+        unconfirmed=0
+        ;;
+      changed)
+        die "Staging cleanup resource identity or state changed"
+        ;;
+      *)
+        ((unconfirmed += 1))
+        if ((unconfirmed == 1)); then
+          info "Could not read the registry; cleanup is unconfirmed, retrying" >&2
+        fi
+        ;;
+    esac
+    sleep 5
+  done
+  registry_cmd list --record-type cleanup >&2 || true
+  if ((unconfirmed > 0)); then
+    die "Timed out without confirming staging cleanup: the last ${unconfirmed} registry queries failed, so the resource may or may not be gone; queued actions will continue retrying"
+  fi
+  die "Timed out waiting for durable staging cleanup; queued actions will continue retrying"
+}
+
+main() {
+  parse_args "$@"
+  [[ -f "$CONFIG_LIB" && ! -L "$CONFIG_LIB" ]] ||
+    die "Configuration library is unavailable"
+  # shellcheck disable=SC1090
+  source "$CONFIG_LIB"
+  load_proxmox_config ||
+    die "Could not load cluster configuration"
+  local command_name
+  for command_name in awk bash date install mktemp python3 rm ssh ssh-keygen; do
+    command -v "$command_name" >/dev/null 2>&1 ||
+      die "Required command is unavailable: $command_name"
+  done
+  RUN_DIR="$(mktemp -d "${BMAC_WORK_DIR:-${TMPDIR:-/tmp}}/destroy-staging-vm.XXXXXX")"
+  chmod 0700 "$RUN_DIR"
+  trap cleanup EXIT
+  COORDINATOR="$(this_mox)" ||
+    die "Could not tell which cluster host this is"
+  node_exec "$COORDINATOR" test -x "$REMOTE_REGISTRY" ||
+    die "Installed cluster registry is unavailable"
+
+  local resources nodes live ha replication cleanup_records
+  resources="$(registry_cmd list)" || die "Could not list registry resources"
+  select_resource "$resources"
+  [[ "$RESOURCE_NAME" =~ ^stage[1-9][0-9]*prod[1-9][0-9]*$ ]] ||
+    die "A staging resource name such as stage1prod1 is required"
+  nodes="$(pvesh_get /nodes)" || die "Could not list cluster nodes"
+  live="$(pvesh_get /cluster/resources --type vm)" ||
+    die "Could not list live VMs"
+  ha="$(pvesh_get /cluster/ha/resources)" ||
+    die "Could not list HA resources"
+  replication="$(pvesh_get /cluster/replication)" ||
+    die "Could not list replication jobs"
+  cleanup_records="$(registry_cmd list --record-type cleanup)" ||
+    die "Could not list deferred cleanup records"
+  parse_and_validate_plan \
+    "$resources" "$live" "$nodes" "$ha" "$replication" "$cleanup_records"
+  if [[ "$LIVE_PRESENT" == 1 ]]; then
+    validate_live_vm || die "Live staging VM failed exact identity validation"
+    validate_owned_volumes ||
+      die "Staging VM-owned volume inventory failed validation"
+  fi
+  verify_snapshot_and_clone false
+
+  log "Validated staging destruction plan"
+  info "Resource: $RESOURCE_NAME / VMID $VMID / state $RESOURCE_STATE"
+  info "Source: $SOURCE_NAME (VMID $SOURCE_VMID; owner $SOURCE_OWNER)"
+  info "Staging node/clone: $STAGING_NODE / $STAGING_VOLUME"
+  local snapshot_taken snapshot_scope
+  snapshot_taken="$(snapshot_taken_label "$SNAPSHOT_NAME")"
+  info "Snapshot: $SNAPSHOT_NAME (taken $snapshot_taken) on ${SOURCE_PLACEMENT[*]}"
+  if [[ -n "$SNAPSHOT_SHARED_WITH" ]]; then
+    info "Snapshot is shared with: ${SNAPSHOT_SHARED_WITH//,/, } (it will be kept)"
+    snapshot_scope="its linked clone; the snapshot it shares with ${SNAPSHOT_SHARED_WITH//,/, } is kept"
+  else
+    snapshot_scope="its linked clone, and its source snapshot $SNAPSHOT_NAME"
+  fi
+  [[ -z "$SNAPSHOT_ALSO_RELEASING" ]] ||
+    info "Also releasing this snapshot: ${SNAPSHOT_ALSO_RELEASING//,/, }"
+  info "Domain/route enabled: $STAGING_DOMAIN / $ROUTES_ENABLED"
+  info "Live VM present: $LIVE_PRESENT"
+  bmac_ui_plan_begin "Destroy $RESOURCE_NAME" "Validated against the live cluster; nothing has changed yet."
+  bmac_ui_plan_item remove "$RESOURCE_NAME" "VMID $VMID, state $RESOURCE_STATE, on $STAGING_NODE"
+  bmac_ui_plan_item remove "linked clone" "$STAGING_VOLUME"
+  if [[ -n "$SNAPSHOT_SHARED_WITH" ]]; then
+    bmac_ui_plan_item keep "source snapshot" "$SNAPSHOT_NAME of $SOURCE_NAME (taken $snapshot_taken) is still used by ${SNAPSHOT_SHARED_WITH//,/, }"
+  else
+    bmac_ui_plan_item remove "source snapshot" "$SNAPSHOT_NAME of $SOURCE_NAME (taken $snapshot_taken) on ${SOURCE_PLACEMENT[*]}"
+  fi
+  bmac_ui_plan_item remove "route" "$STAGING_DOMAIN (enabled: $ROUTES_ENABLED)"
+  bmac_ui_plan_item keep "$SOURCE_NAME" "The production source VM (VMID $SOURCE_VMID) is not changed"
+  BMAC_UI_DRY_RUN="$DRY_RUN" bmac_ui_plan_end
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry run complete; no state was changed"
+    bmac_ui_step_done
+    bmac_ui_next_step "Review the plan, then destroy $RESOURCE_NAME for real." \
+      --workflow staging.remove --arg "resource=$RESOURCE_NAME" --arg dry_run=false
+    return 0
+  fi
+
+  printf '\nTHIS PERMANENTLY DESTROYS %s AND %s.\n' \
+    "$RESOURCE_NAME" "${snapshot_scope^^}"
+  local confirmation
+  if bmac_ui_is_json; then
+    bmac_ui_confirm --id destroy --severity critical --title "Destroy $RESOURCE_NAME?" \
+      --message "This permanently destroys $RESOURCE_NAME and ${snapshot_scope}." \
+      --confirm-label "Destroy $RESOURCE_NAME" --text "DESTROY ${RESOURCE_NAME}" &&
+      confirmation="DESTROY ${RESOURCE_NAME}" || confirmation=""
+  else
+    printf 'Type exactly: DESTROY %s\n> ' "$RESOURCE_NAME"
+    IFS= read -r confirmation
+  fi
+  [[ "$confirmation" == "DESTROY ${RESOURCE_NAME}" ]] ||
+    die "Destruction confirmation did not match"
+
+  log "Disabling staging ingress and committing durable cleanup"
+  case "$RESOURCE_STATE" in
+    active)
+      registry_update --state stopping --routes-disabled
+      ;;
+    ready)
+      registry_update --routes-disabled
+      ;;
+    stopping | stopped | failed)
+      registry_update --routes-disabled
+      ;;
+    *)
+      die "Unsupported staging destruction state: $RESOURCE_STATE"
+      ;;
+  esac
+  queue_cleanup_plan
+  mox_ssh "$COORDINATOR" "$REMOTE_HAPROXY_SYNC" \
+    --lock-timeout 240 </dev/null ||
+    die "Could not converge HAProxy after route removal"
+
+  log "Waiting for the shared cleanup workers to remove the exact staging payload"
+  wait_for_durable_cleanup
+
+  local still_used_by snapshot_deleted=false
+  still_used_by="$(remaining_snapshot_users)" ||
+    still_used_by="$SNAPSHOT_SHARED_WITH"
+  log "Staging VM destruction complete"
+  info "Destroyed resource: $RESOURCE_NAME (former VMID $VMID)"
+  if [[ -n "$still_used_by" ]]; then
+    info "Removed route, VM disks, linked clone, and registry metadata."
+    info "Kept snapshot $SNAPSHOT_NAME; it is still used by ${still_used_by//,/, }."
+  else
+    snapshot_deleted=true
+    info "Removed route, VM disks, linked clone, $SNAPSHOT_NAME and its replicated copies, and registry metadata."
+  fi
+  bmac_ui_step_done
+  bmac_ui_result destroyed "$RESOURCE_NAME" former_vmid "$VMID" source "$SOURCE_NAME" \
+    snapshot "$SNAPSHOT_NAME" snapshot_deleted:bool "$snapshot_deleted" \
+    snapshot_still_used_by "${still_used_by//,/, }"
+  bmac_ui_next_step "Remove the $RESOURCE_NAME entry from the Deployer's Workstation SSH page if you set one up."
+}
+
+if [[ "${BMAC_REMOVE_STAGING_SOURCE_ONLY:-0}" != 1 ]]; then
+  bmac_ui_bootstrap "$@"
+  main "$@"
+fi

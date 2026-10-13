@@ -1,0 +1,20 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "bmac-settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+bmac-core.workspace = true
+bmac-pmxcfs.workspace = true
+bmac-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

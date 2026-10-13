@@ -1,0 +1,82 @@
+<!--
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+-->
+
+# Agent instructions for v3
+
+Everything for BMAC v3 lives under `v3/`. Nothing outside it changes: v2's
+files are read as reference and copied into `v3/` when reused, never moved or
+edited in place. The design is in [`design/`](design/), and the order of work
+is [`design/IMPLEMENTATION_PLAN.md`](design/IMPLEMENTATION_PLAN.md).
+
+v3 is not compatible with v2, and there is no upgrade path from a v2
+deployment. Don't keep v2's names, paths, locks, or record formats for
+compatibility's sake, and don't add migration or mixed v2/v3 support.
+
+## Platform
+
+v3 development is amd64 Linux only (with KVM for the lab). Don't add
+macOS or other platform workarounds to the code, the lab, or the dev
+scripts.
+
+## Checks
+
+Run every check with `v3/dev/check`, unsandboxed (the Python tests need pty
+devices and real timing). It runs, and stops at the first failure:
+
+- the toolchain check (`node dev/check-toolchain.mjs`, `--deployer` for the
+  Deployer's native libraries);
+- the version check (`dev/set_version.py`);
+- `bash -n` on every shell script;
+- the Python tests (`dev/run_tests.py`, which takes the same options as v2's
+  runner: `-k`, `-f`, `-j N`, `-v`, and test targets);
+- `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test`;
+- `pnpm typecheck` and `pnpm test`.
+
+Run the whole thing before reporting work as finished. Run `pnpm install`
+in `v3/` once first.
+
+`v3/dev/check` is the only suite v3 work needs. Don't run v2's suite (the
+repository root's `dev/run_tests.py`) for changes under `v3/`: it collects
+only committed test files, so until v3 is committed it tests v2's unchanged
+scripts, and once v3 is committed it runs the same v3 Python tests that
+`v3/dev/check` already ran. Run it only if a change touches something
+outside `v3/`, which v3 work shouldn't.
+
+## Tests
+
+The v2 rules apply unchanged: tests stay independent of order and of each
+other, build fixtures under a per-test temporary directory, never write to
+the checkout or a fixed path, and don't use `setUpClass` or `setUpModule`. A
+fake command fed by a pipe must read its stdin. If a test fails only under
+parallel runs, fix the race rather than serializing it.
+
+v2's `dev/run_tests.py` also collects every committed `test_*.py` under
+`v3/`, and runs it from the repository root. So a v3 Python test must find
+what it tests by paths relative to its own file (for example, loading a
+module with `importlib` from `Path(__file__)`), never by importing from the
+repository root, where `dev` and `scripts` are v2's.
+
+## Tailscale names
+
+A v2 test cluster is deployed on the same tailnet as `qdevice`, `mox1`,
+`mox2`, and `mox3`. Nothing in v3 development may register a tailnet node
+under those names. Lab VMs use `Topology.tailnet_name()` (`bmaclab-mox1`,
+and so on; see `lab/README.md`), and any other test that joins Tailscale
+uses a name with a `bmac-` prefix or similar, ephemeral keys where
+possible, and never a bare host name.
+
+## Versions
+
+`v3/dev/VERSION` is the single source of truth. Change it with
+`v3/dev/set_version.py X.Y.Z`, which rewrites every Cargo and npm copy.
+New crates use `version.workspace = true`; new pnpm packages are listed in
+`pnpm-workspace.yaml` so the tool finds them.
+
+## License headers
+
+Every source file starts with the copyright line and
+`SPDX-License-Identifier: GPL-3.0-only`, in the file's comment syntax.
+`dev/test_license_headers.py` enforces it; JSON and generated lock files are
+exempt.

@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+# Run every v3 check: toolchain, versions, shell syntax, the Python tests,
+# Rust formatting, lints and tests, the generated TypeScript's freshness, and
+# the TypeScript lint, type checks, and tests.
+# Stops at the first failing step. Run it unsandboxed, as the Python suite
+# needs pty devices and real timing.
+#
+#   v3/dev/check
+
+set -Eeuo pipefail
+
+V3_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd -- "$V3_ROOT"
+
+step() { printf '\n==> %s\n' "$*"; }
+
+step "Toolchain"
+node dev/check-toolchain.mjs
+
+step "Versions"
+python3 dev/set_version.py
+
+step "Shell syntax"
+mapfile -t shell_files < <(
+  find . \( -name node_modules -o -name target -o -name dist -o -name .git \) -prune -o \
+    -type f -print | while IFS= read -r file; do
+      if [[ "$file" == *.sh ]] || head -n 1 -- "$file" | grep -Eq '^#!.*\b(bash|sh)\b'; then
+        printf '%s\n' "$file"
+      fi
+    done
+)
+for file in "${shell_files[@]}"; do
+  bash -n -- "$file"
+done
+printf '%d shell files parsed\n' "${#shell_files[@]}"
+
+step "Python tests"
+python3 dev/run_tests.py
+
+step "Rust formatting"
+cargo fmt --all --check
+
+step "Rust lints"
+cargo clippy --workspace --all-targets --locked -- -D warnings
+
+step "Rust tests"
+cargo test --workspace --locked
+
+step "Generated TypeScript"
+generated="$(mktemp -d)"
+trap 'rm -rf -- "$generated"' EXIT
+cargo run --quiet --locked -p bmac-proto --example typescript -- "$generated/generated"
+if ! diff -r -- "$generated/generated" ui/src/generated; then
+  echo "ui/src/generated is stale; run dev/generate-typescript" >&2
+  exit 1
+fi
+echo "ui/src/generated is current"
+
+step "TypeScript lint"
+web_sources=(ui/src webui/src applianceui/src deployer/src)
+pnpm --silent exec oxlint --deny-warnings "${web_sources[@]}"
+# Output is rendered as text; nothing parses strings into HTML.
+if grep -rEn 'innerHTML|outerHTML|insertAdjacentHTML|document\.write' "${web_sources[@]}"; then
+  echo "the web apps must not write HTML from strings" >&2
+  exit 1
+fi
+echo "no HTML sinks"
+
+step "TypeScript type checks"
+pnpm --silent typecheck
+
+step "TypeScript tests"
+pnpm --silent test
+
+step "All checks passed"

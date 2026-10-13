@@ -1,0 +1,11 @@
+<!--
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+-->
+
+<p style="margin:0 0 16px;font-size:18px;"><strong>Daily summary:</strong> {{ open_count }} open alert(s)</p>
+<ul style="margin:0 0 16px;padding-left:20px;font-size:14px;">
+{{#each alerts}}<li style="margin:0 0 6px;"><strong>{{ severity }}</strong> on {{ host }} since {{ opened_at }}: {{ summary }}</li>
+{{/each}}</ul>
+<p style="margin:0 0 16px;"><strong>Backups:</strong> {{ backup_summary }}</p>
+<p style="margin:0;"><a href="{{ alerts_url }}" style="color:#0969da;">All alerts</a></p>

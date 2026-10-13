@@ -1,0 +1,199 @@
+{
+  "templates": [
+    {
+      "alias": "bmac-layout-v1",
+      "name": "BMAC layout v1",
+      "type": "Layout",
+      "state": "draft",
+      "fields": {
+        "product_name": "string",
+        "cluster_name": "string",
+        "dashboard_url": "string",
+        "sent_at": "string"
+      },
+      "test_model": {
+        "product_name": "BMAC",
+        "cluster_name": "lab",
+        "dashboard_url": "https://bmac.example.com/",
+        "sent_at": "2026-10-11 18:00 UTC"
+      }
+    },
+    {
+      "alias": "bmac-alert-opened-v1",
+      "name": "BMAC alert opened v1",
+      "type": "Standard",
+      "layout": "bmac-layout-v1",
+      "state": "draft",
+      "fields": {
+        "alert_id": "string",
+        "severity": "string",
+        "summary": "string",
+        "host": "string",
+        "resource": "string",
+        "condition": "string",
+        "opened_at": "string",
+        "opened_at_local": "string",
+        "next_step": "string",
+        "alert_url": "string"
+      },
+      "test_model": {
+        "alert_id": "a-0001",
+        "severity": "Critical",
+        "summary": "mox2: rpool member sdb (S2) is FAULTED",
+        "host": "mox2",
+        "resource": "mox2/rpool",
+        "condition": "zfs.pool.member",
+        "opened_at": "2026-10-11 17:58 UTC",
+        "opened_at_local": "2026-10-11 11:58 MDT",
+        "next_step": "Inspect mox2's pool members and disk serials.",
+        "alert_url": "https://bmac.example.com/alerts"
+      }
+    },
+    {
+      "alias": "bmac-alert-resolved-v1",
+      "name": "BMAC alert resolved v1",
+      "type": "Standard",
+      "layout": "bmac-layout-v1",
+      "state": "draft",
+      "fields": {
+        "alert_id": "string",
+        "severity": "string",
+        "summary": "string",
+        "host": "string",
+        "resource": "string",
+        "condition": "string",
+        "opened_at": "string",
+        "resolved_at": "string",
+        "resolved_at_local": "string",
+        "alert_url": "string"
+      },
+      "test_model": {
+        "alert_id": "a-0001",
+        "severity": "Critical",
+        "summary": "mox2: rpool member sdb (S2) is FAULTED",
+        "host": "mox2",
+        "resource": "mox2/rpool",
+        "condition": "zfs.pool.member",
+        "opened_at": "2026-10-11 17:58 UTC",
+        "resolved_at": "2026-10-11 19:12 UTC",
+        "resolved_at_local": "2026-10-11 13:12 MDT",
+        "alert_url": "https://bmac.example.com/alerts"
+      }
+    },
+    {
+      "alias": "bmac-digest-v1",
+      "name": "BMAC daily digest v1",
+      "type": "Standard",
+      "layout": "bmac-layout-v1",
+      "state": "draft",
+      "fields": {
+        "open_count": "integer",
+        "alerts": [
+          {
+            "severity": "string",
+            "host": "string",
+            "opened_at": "string",
+            "summary": "string"
+          }
+        ],
+        "backup_summary": "string",
+        "alerts_url": "string"
+      },
+      "test_model": {
+        "open_count": 2,
+        "alerts": [
+          {
+            "severity": "Warning",
+            "host": "mox1",
+            "opened_at": "2026-10-10 08:00 UTC",
+            "summary": "mox1: the Dashboard HTTPS certificate expires in 30 days"
+          },
+          {
+            "severity": "Critical",
+            "host": "mox2",
+            "opened_at": "2026-10-11 17:58 UTC",
+            "summary": "mox2: rpool member sdb (S2) is FAULTED"
+          }
+        ],
+        "backup_summary": "Every guest was backed up in the last 24 hours.",
+        "alerts_url": "https://bmac.example.com/alerts"
+      }
+    },
+    {
+      "alias": "bmac-test-v1",
+      "name": "BMAC test email v1",
+      "type": "Standard",
+      "layout": "bmac-layout-v1",
+      "state": "draft",
+      "fields": {
+        "requested_by": "string",
+        "settings_url": "string"
+      },
+      "test_model": {
+        "requested_by": "admin",
+        "settings_url": "https://bmac.example.com/settings"
+      }
+    },
+    {
+      "alias": "bmac-watchdog-down-v1",
+      "name": "BMAC watchdog: cluster down v1",
+      "type": "Standard",
+      "layout": "bmac-layout-v1",
+      "state": "draft",
+      "fields": {
+        "appliance_name": "string",
+        "down_since": "string",
+        "hosts": [
+          {
+            "host": "string",
+            "last_seen": "string"
+          }
+        ]
+      },
+      "test_model": {
+        "appliance_name": "backup1",
+        "down_since": "2026-10-11 18:00 UTC",
+        "hosts": [
+          {
+            "host": "mox1",
+            "last_seen": "2026-10-11 17:59 UTC"
+          },
+          {
+            "host": "mox2",
+            "last_seen": "2026-10-11 17:59 UTC"
+          }
+        ]
+      }
+    },
+    {
+      "alias": "bmac-watchdog-up-v1",
+      "name": "BMAC watchdog: cluster up v1",
+      "type": "Standard",
+      "layout": "bmac-layout-v1",
+      "state": "draft",
+      "fields": {
+        "appliance_name": "string",
+        "down_since": "string",
+        "up_at": "string",
+        "hosts": [
+          {
+            "host": "string"
+          }
+        ]
+      },
+      "test_model": {
+        "appliance_name": "backup1",
+        "down_since": "2026-10-11 18:00 UTC",
+        "up_at": "2026-10-11 18:20 UTC",
+        "hosts": [
+          {
+            "host": "mox1"
+          },
+          {
+            "host": "mox2"
+          }
+        ]
+      }
+    }
+  ]
+}

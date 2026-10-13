@@ -1,0 +1,37 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "bmac-deployer-app"
+description = "BMAC Deployer desktop application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "bmac_deployer_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "bmac-deployer"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+bmac-core.workspace = true
+bmac-deployer = { path = "../../crates/bmac-deployer" }
+bmac-exec.workspace = true
+bmac-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,11 @@
+<!--
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+-->
+
+<p style="margin:0 0 16px;font-size:18px;"><strong>Cluster not answering</strong></p>
+<p style="margin:0 0 16px;">No host of cluster {{ cluster_name }} has answered backup appliance {{ appliance_name }} since {{ down_since }}.</p>
+<ul style="margin:0 0 16px;padding-left:20px;font-size:14px;">
+{{#each hosts}}<li style="margin:0 0 6px;">{{ host }}: last answered {{ last_seen }}</li>
+{{/each}}</ul>
+<p style="margin:0;">The cluster can't send alerts while it is down. This message comes from the backup appliance.</p>

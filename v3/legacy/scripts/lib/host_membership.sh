@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+# Helpers shared by scripts/user_callable/hosts/remove_proxmox_host.sh,
+# scripts/user_callable/qdevice/add_qdevice.sh, scripts/user_callable/qdevice/remove_qdevice.sh, and the diagnostics:
+# logging and prompts, command execution on cluster members, Proxmox node
+# deletion, and host-slot bookkeeping. They run on a cluster host under bmacd,
+# which holds the cluster-membership lock for every membership change. It
+# connects scripts/lib/qdevice.sh, which holds the QDevice logic, to the
+# cluster through the coordinator. Source after scripts/lib/config.sh,
+# load_proxmox_config, and scripts/lib/cluster_control.sh. Callers set
+# HM_COORDINATOR to this host, which must survive the change.
+
+# shellcheck source=ui_protocol.sh
+declare -F bmac_ui_is_json >/dev/null ||
+  source "$(dirname -- "${BASH_SOURCE[0]}")/ui_protocol.sh"
+
+# shellcheck source=qdevice.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/qdevice.sh"
+
+HM_REMOTE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+HM_REMOTE_REGISTRY="${HM_REMOTE_ROOT}/scripts/host_runtime/cluster_registry.py"
+# shellcheck disable=SC2034 # Used by the scripts that source this library.
+HM_REMOTE_HAPROXY_SYNC="${HM_REMOTE_ROOT}/scripts/host_runtime/sync_haproxy_routes.sh"
+
+HM_COORDINATOR=""
+
+log() {
+  printf '\n==> %s\n' "$*"
+  bmac_ui_step "$*"
+}
+
+info() {
+  printf '    %s\n' "$*"
+}
+
+warn() {
+  printf 'WARNING: %s\n' "$*" >&2
+}
+
+die() {
+  printf '\nERROR: %s\n' "$*" >&2
+  bmac_ui_error failed "$*"
+  exit 1
+}
+
+prompt_with_default() {
+  local destination="$1" prompt="$2" default="$3" entered
+  if bmac_ui_is_json; then
+    bmac_ui_text entered "$prompt" "$default"
+  else
+    IFS= read -r -p "${prompt} [${default}]: " entered ||
+      die "Input ended before a value was entered"
+  fi
+  printf -v "$destination" '%s' "${entered:-$default}"
+}
+
+hm_prompt_yes() {
+  local answer
+  if bmac_ui_is_json; then
+    bmac_ui_ask "$1"
+    return
+  fi
+  IFS= read -r -p "$1 [y/N] " answer || return 1
+  [[ "${answer,,}" == y || "${answer,,}" == yes ]]
+}
+
+# Require the operator to type one exact phrase.
+hm_confirm_phrase() {
+  local message="$1" phrase="$2" entered
+  if bmac_ui_is_json; then
+    local severity=destructive
+    [[ "$phrase" == GO ]] && severity=warning
+    bmac_ui_confirm --id confirm_phrase --title "Confirm this change" \
+      --message "$message" --severity "$severity" --text "$phrase" &&
+      return 0
+    die "The change was not confirmed; no change was made"
+  fi
+  printf '\n%s\nType exactly: %s\n> ' "$message" "$phrase"
+  IFS= read -r entered || entered=""
+  [[ "$entered" == "$phrase" ]] ||
+    die "Confirmation did not match; no change was made"
+}
+
+hm_valid_node() {
+  [[ "${1:-}" =~ ^mox([1-9]|[12][0-9]|3[0-2])$ ]] && ((${1#mox} <= MAX_MOX_HOSTS))
+}
+
+# Execute one argv array on a cluster member with an empty stdin, directly
+# when it is this host and otherwise over the pinned SSH configuration.
+hm_exec() {
+  local node="$1"
+  shift
+  hm_valid_node "$node" || return 2
+  (($# > 0)) || return 2
+  local payload="set -Eeuo pipefail"$'\n'"exec" argument quoted
+  for argument in "$@"; do
+    printf -v quoted '%q' "$argument"
+    payload+=" ${quoted}"
+  done
+  payload+=$'\n'
+  printf '%s' "$payload" | mox_ssh "$node" bash -s
+}
+
+hm_registry() {
+  mox_ssh "$HM_COORDINATOR" "$HM_REMOTE_REGISTRY" \
+    --state-dir "$CLUSTER_STATE_DIR" "$@" </dev/null
+}
+
+hm_pvesh_get() {
+  mox_ssh "$HM_COORDINATOR" pvesh get "$@" --output-format json </dev/null
+}
+
+hm_json_field() {
+  python3 -c '
+import json, sys
+value = json.loads(sys.argv[1])
+for key in sys.argv[2:]:
+    value = value[key]
+print("" if value is None else value)
+' "$@"
+}
+
+# The installed registry must support host slots and their release.
+hm_require_slot_registry() {
+  local help_text
+  help_text="$(hm_registry --help)" ||
+    die "Could not run the installed cluster registry on $HM_COORDINATOR"
+  if ! grep -q -- 'host-references' <<<"$help_text" ||
+    ! grep -q -- 'host-release' <<<"$help_text"; then
+    die "The installed cluster registry on $HM_COORDINATOR lacks host slots; reinstall the bmacd package"
+  fi
+}
+
+# Print "NODE online|offline" for every configured cluster member.
+hm_member_states() {
+  local nodes_json
+  nodes_json="$(hm_pvesh_get /nodes)" || return 1
+  python3 - "$nodes_json" "$MAX_MOX_HOSTS" <<'PY'
+import json
+import re
+import sys
+
+rows = json.loads(sys.argv[1])
+maximum = int(sys.argv[2])
+if not isinstance(rows, list) or not rows:
+    raise SystemExit("pvesh /nodes returned no cluster members")
+members = []
+seen = set()
+for row in rows:
+    node = row.get("node", row.get("name")) if isinstance(row, dict) else None
+    match = re.fullmatch(r"mox([1-9]|[12][0-9]|3[0-2])", str(node))
+    if not match or int(match.group(1)) > maximum:
+        raise SystemExit(f"cluster contains unexpected node {node!r}")
+    if node in seen:
+        raise SystemExit(f"cluster returned duplicate node {node}")
+    seen.add(node)
+    online = (
+        str(row.get("status", "")).lower() == "online"
+        or row.get("online") in (1, True)
+    )
+    members.append((int(match.group(1)), node, "online" if online else "offline"))
+for _, node, state in sorted(members):
+    print(node, state)
+PY
+}
+
+hm_cluster_status() {
+  hm_exec "$HM_COORDINATOR" pvecm status
+}
+
+# scripts/lib/qdevice.sh reaches the cluster through HM_COORDINATOR.
+qd_coordinator() {
+  printf '%s\n' "$HM_COORDINATOR"
+}
+
+qd_exec() {
+  hm_exec "$@"
+}
+
+qd_member_states() {
+  hm_member_states
+}
+
+qd_exec_coordinator_shell() {
+  mox_ssh "$HM_COORDINATOR" bash -c "$1" </dev/null
+}
+
+# Check that this host reaches the QDevice as root and resolve its
+# Tailscale IPv4 into QD_IPV4. Returns 1, with QD_IPV4 empty, when it does
+# not; callers decide whether the change they make needs the QDevice.
+hm_verify_qdevice_access() {
+  log "QDevice access"
+  if qd_probe_access; then
+    info "Verified ssh root@${PROXMOX_QDEVICE_HOST} (Tailscale $QD_IPV4)"
+    return 0
+  fi
+  warn "The QDevice is not accessible: ${QD_ACCESS_PROBLEM}"
+  return 1
+}
+
+# Wait until Proxmox reports NODE offline and this host cannot reach it.
+hm_wait_until_offline() {
+  local node="$1" timeout="$2" deadline state
+  deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    state="$(
+      hm_member_states 2>/dev/null | awk -v node="$node" '$1 == node { print $2 }'
+    )"
+    if [[ "$state" == offline ]] && ! mox_is_reachable "$node"; then
+      return 0
+    fi
+    sleep 10
+  done
+  return 1
+}
+
+# Delete NODE from corosync and pmxcfs. NODE must already be powered off.
+# hm_delete_cluster_node NODE [EXPECTED_VOTES]
+# With EXPECTED_VOTES, the coordinator lowers expected votes to that value when
+# the cluster is not quorate shortly after the delete. The check runs in the
+# same remote command so an inquorate survivor recovers well inside the HA
+# watchdog window.
+hm_delete_cluster_node() {
+  local node="$1" fallback_votes="${2:-}" deadline listed
+  log "Deleting $node from the Proxmox cluster"
+  if [[ -n "$fallback_votes" ]]; then
+    [[ "$fallback_votes" =~ ^[1-9][0-9]*$ ]] ||
+      die "Invalid fallback expected votes: $fallback_votes"
+    # shellcheck disable=SC2016 # The script is evaluated on the coordinator.
+    hm_exec "$HM_COORDINATOR" bash -c '
+set -Eeuo pipefail
+pvecm delnode "$1"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if pvecm status | grep -Eq "^Quorate:[[:space:]]+Yes[[:space:]]*$"; then
+    exit 0
+  fi
+  sleep 1
+done
+printf "Cluster is not quorate after deleting %s; setting expected votes to %s\n" "$1" "$2" >&2
+pvecm expected "$2"
+' bash "$node" "$fallback_votes" ||
+      die "pvecm delnode $node failed on $HM_COORDINATOR"
+  else
+    hm_exec "$HM_COORDINATOR" pvecm delnode "$node" ||
+      die "pvecm delnode $node failed on $HM_COORDINATOR"
+  fi
+  deadline=$((SECONDS + 120))
+  while ((SECONDS < deadline)); do
+    listed="$(hm_member_states 2>/dev/null | awk -v node="$node" '$1 == node')" ||
+      listed="unknown"
+    [[ -n "$listed" ]] || break
+    sleep 5
+  done
+  [[ -z "$listed" ]] || die "$node is still listed as a cluster member after pvecm delnode"
+  hm_remove_node_directory "$node"
+}
+
+hm_remove_node_directory() {
+  local node="$1"
+  # shellcheck disable=SC2016 # The script is evaluated on the coordinator.
+  hm_exec "$HM_COORDINATOR" bash -c '
+set -Eeuo pipefail
+node="$1"
+[[ "$node" =~ ^mox([1-9]|[12][0-9]|3[0-2])$ ]]
+directory="/etc/pve/nodes/${node}"
+if [[ -e "$directory" ]]; then
+  [[ -d "$directory" && ! -L "$directory" ]]
+  rm -rf -- "$directory"
+fi
+[[ ! -e "$directory" ]]
+' bash "$node" || die "Could not remove /etc/pve/nodes/${node}"
+  info "Removed /etc/pve/nodes/${node}"
+}
+
+# Remove NODE's root key from cluster SSH trust and NODE's names and private
+# address from the shared known_hosts. KEY is optional; keys whose comment is
+# root@NODE are removed either way.
+hm_strip_node_ssh_trust() {
+  local node="$1" key="${2:-}" private_ip
+  private_ip="$(mox_private_ip "$node")" || return
+  # shellcheck disable=SC2016 # The script is evaluated on the coordinator.
+  hm_exec "$HM_COORDINATOR" python3 -c '
+import sys
+from pathlib import Path
+
+node, domain, private_ip, key = sys.argv[1:5]
+names = {node, f"{node}.{domain}", private_ip}
+
+
+def rewrite(path, keep):
+    if not path.exists():
+        return 0
+    lines = path.read_text(encoding="utf-8").splitlines()
+    kept = [line for line in lines if keep(line)]
+    if len(kept) != len(lines):
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write("".join(line + "\n" for line in kept))
+    return len(lines) - len(kept)
+
+
+def keep_authorized(line):
+    fields = line.split()
+    if key and line.strip() == key.strip():
+        return False
+    return not (len(fields) >= 3 and fields[-1] == f"root@{node}")
+
+
+def keep_known(line):
+    fields = line.split()
+    if not fields or line.startswith("#"):
+        return True
+    hosts = fields[1] if fields[0].startswith("@") and len(fields) > 1 else fields[0]
+    return not (set(hosts.split(",")) & names)
+
+
+removed = rewrite(Path("/etc/pve/priv/authorized_keys"), keep_authorized)
+removed += rewrite(Path("/etc/pve/priv/known_hosts"), keep_known)
+print(removed)
+' "$node" "$PROXMOX_INTERNAL_DOMAIN" "$private_ip" "$key" >/dev/null ||
+    die "Could not remove $node from cluster SSH trust"
+  info "Removed $node from cluster SSH authorized_keys and known_hosts"
+}
+
+hm_print_reinstall_follow_ups() {
+  local node="$1"
+  printf '\nFollow-up steps for %s:\n' "$node"
+  printf '  - Remove the %s device from the Tailscale admin console (Machines) so a\n' "$node"
+  printf '    future host in this slot can register the same Tailscale hostname.\n'
+  printf '  - Remove or update %s in the cluster settings. A future host may reuse\n' "$node"
+  printf '    the slot; host setup recommends the lowest free slot.\n'
+  printf '  - In Cloudflare Load Balancing, remove the %s pool and monitor from every\n' "$node"
+  printf '    load balancer if you have not already done so.\n'
+  bmac_ui_next_step "Remove the $node device from the Tailscale admin console (Machines) so a future host in this slot can register the same Tailscale hostname."
+  bmac_ui_next_step "Remove or update $node in the cluster settings. A future host may reuse the $node slot; host setup recommends the lowest free slot."
+  bmac_ui_next_step "In Cloudflare Load Balancing, remove the $node pool and monitor from every load balancer if you have not already done so."
+}

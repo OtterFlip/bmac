@@ -1,0 +1,17 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[Unit]
+Description=Converge and fail-close local BMAC HAProxy ingress
+After=network-online.target pve-cluster.service
+Wants=network-online.target pve-cluster.service
+# Nothing to do on a host without cluster settings yet.
+ConditionPathExists=/run/bmac/config/cluster.conf
+Before=bmac-haproxy-ingress.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/lib/bmac/bmacd render-config
+ExecStart=/usr/lib/bmac/legacy/scripts/host_runtime/sync_haproxy_routes.sh --local-reconcile
+TimeoutStartSec=180
+UMask=0077
