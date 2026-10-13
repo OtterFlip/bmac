@@ -115,11 +115,10 @@ fails. `lab/lab scenario NAME` exits 0 only when every check passed.
 
 A stage is a VM saved by a scenario once it reached a state that took long
 to reach, so later runs of a scenario that builds on it start there
-instead. A running VM is saved live (QMP `snapshot-save`, its memory in
-the first disk) as qcow2 snapshots named `stage-NAME`, and restored with
-`snapshot-load` before it runs, so it resumes without booting; the guest's
-clock is then set to the workstation's. The firmware store is raw, so it is
-copied beside the stage, under the VM's folder, with a copy of the
+instead. The VM is shut down for the save and boots when restored; QEMU
+can't save a running NVMe controller ("non-migratable device"), so live
+snapshots aren't used. The disks keep qcow2 snapshots named `stage-NAME`,
+and the VM's folder keeps its firmware store with a copy of the
 Deployer's working files and the run's made-up root password. The host
 keeps its tailnet device. A restored stage gets the current bmacd package. `BMAC_LAB_FRESH=1` ignores every stage, and
 installing the VM anew drops its stages. `lab/lab rebuild` drops them with

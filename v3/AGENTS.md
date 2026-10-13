@@ -78,10 +78,11 @@ installed and set up, a cluster formed), save the VMs at that stage and let
 later runs start from it, so work on what comes after doesn't repeat the
 stage each time. Watch for these: whenever a scenario spends many minutes
 reaching a state before the part being worked on, save that state as a
-stage. Save one with `Installed.save_stage` once the stage's checks pass:
-it uses QEMU's live snapshots, so the host keeps running, and a restored
-host resumes where it was, memory and all, with no boot (and so no LUKS
-passphrase) and its clock set to now. Pass the stage's name to
+stage. Save one with `Installed.save_stage` once the stage's checks pass.
+Every VM, the appliance and the QDevice included, is shut down for the
+save and boots when restored, so an encrypted host would wait for its LUKS
+passphrase. (QEMU's live snapshots aren't used: its NVMe emulation can't
+be saved while running.) Pass the stage's name to
 `m6.install(..., stage=...)`, which restores it, installs the current bmacd
 package on it, and runs the rest. A stage keeps the host's tailnet device,
 and installing that VM anew drops its stages. Save the hosts of a cluster

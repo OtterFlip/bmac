@@ -158,11 +158,14 @@ class Installed:
         self.reused = reused
 
     def save_stage(self, name: str) -> None:
-        """Saves the running host live as stage name, for later runs to
-        start from (see install's stage); it resumes where it was, so an
-        encrypted root needs no passphrase."""
+        """Shuts the host down, saves it as stage name for later runs to
+        start from (see install's stage), and starts it again. A restored
+        stage boots, so an encrypted root would wait for its passphrase."""
         self.s.note(f"saving {self.vm.name} as stage {name}")
         self.lab.save_stage(self.vm, name, self.work, {"password": self.password, "package_sha256": package_digest()})
+        self.lab.wait_ssh(self.vm, BOOT_TIMEOUT)
+        self.s.require(f"{self.host_name} answers SSH on the tailnet after its stage was saved",
+                       lambda: wait_until(lambda: self.on_host("true") == ""))
 
     def ssh_args(self, extra: list[str] | None = None) -> list[str]:
         return ["ssh", "-F", str(self.work / "ssh" / "config"), "-o", "BatchMode=yes",
