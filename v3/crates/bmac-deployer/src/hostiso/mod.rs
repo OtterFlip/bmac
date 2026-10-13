@@ -54,11 +54,17 @@ const LAB_TAILSCALE_PREFIX: &str = "bmaclab-";
 /// If the variable is not lowercase letters, digits and hyphens ending in
 /// a hyphen; only lab builds call this.
 pub fn lab_tailscale_prefix() -> String {
-    let prefix = std::env::var(LAB_TAILSCALE_PREFIX_VAR).unwrap_or_else(|_| LAB_TAILSCALE_PREFIX.to_string());
+    let prefix = std::env::var(LAB_TAILSCALE_PREFIX_VAR)
+        .unwrap_or_else(|_| LAB_TAILSCALE_PREFIX.to_string());
     let valid = prefix.ends_with('-')
         && prefix.len() > 1
-        && prefix.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    assert!(valid, "{LAB_TAILSCALE_PREFIX_VAR} must be lowercase letters, digits and hyphens ending in a hyphen");
+        && prefix
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    assert!(
+        valid,
+        "{LAB_TAILSCALE_PREFIX_VAR} must be lowercase letters, digits and hyphens ending in a hyphen"
+    );
     prefix
 }
 
