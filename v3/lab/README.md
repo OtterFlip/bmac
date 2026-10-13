@@ -151,7 +151,14 @@ stage after the chain's last rather than a second one beside it.
 
 | Stage | VM | Saved by | Used by | State |
 |---|---|---|---|---|
-| `m7-first-host` | mox3 | `m7_storage`, when every check passes | `m7_join` | boot mirror and SATA data mirror, all LUKS2 (the run's made-up passphrase is kept with the stage and typed at the console when an NVMe-lab restore boots), setup finished, an encrypted one-host cluster whose bmacd issues join bundles |
+| `m7-first-host` | mox3 | `m7_storage`, when every check passes | `m7_join`, `m7_cluster` | boot mirror and SATA data mirror, all LUKS2 (the run's made-up passphrase is kept with the stage and typed at the console when an NVMe-lab restore boots), setup finished, an encrypted one-host cluster whose bmacd issues join bundles |
+| `m7-cluster` | mox3, mox1, mox2 | `m7_cluster`, when every check passes, from `m7-first-host` | scenarios that need a working cluster (`m7_cluster.staged`) | mox3 as in `m7-first-host`, then mox1 and mox2 joined through it with plain NVMe boot mirrors: a quorate three-host cluster, every setup phase complete, no join bundle left |
+
+The hosts of a stage saved together are restored together
+(`m6.reuse_cluster`), and only when each has it. `m7_join` installs mox2
+anew, which drops mox2's `m7-cluster`, so run it on a lab whose cluster
+stage you don't need, or expect the next cluster scenario there to build it
+again.
 
 ## A cluster running bmacd
 

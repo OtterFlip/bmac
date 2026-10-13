@@ -9,7 +9,9 @@
 //! the state directory. Age alone never breaks a lock. An explicit break on
 //! pmxcfs sets the directory's times to zero, which pmxcfs treats as a
 //! cluster-wide unlock request checked against its own observation age;
-//! outside pmxcfs an old, empty directory is removed.
+//! outside pmxcfs an old, empty directory is removed. A short-lived lock
+//! (`LockOptions::short_lived`) sends that request on pmxcfs whenever it
+//! waits.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -27,6 +29,7 @@ pub const REGISTRY_LOCK_PREFIX: &str = "bmac-registry-";
 const OWNER_FILE: &str = ".allocator-lock-owner.json";
 const LOCAL_LOCK_DIR: &str = ".allocator.lock";
 const POLL: Duration = Duration::from_millis(100);
+const UNLOCK_REQUEST_EVERY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockOptions {
@@ -38,6 +41,13 @@ pub struct LockOptions {
     /// Only an explicit operator request breaks a lock
     /// (`--break-stale-lock`).
     pub break_stale: bool,
+    /// The holder keeps the lock for moments, never near pmxcfs's lock
+    /// timeout (120 s). A waiter on pmxcfs then asks pmxcfs to drop the lock
+    /// once a second, as Proxmox's own `cfs_lock` does, and pmxcfs drops it
+    /// only once it has seen it unchanged for that long. So a lock left
+    /// behind (its removal refused while the cluster had no quorum) clears
+    /// itself instead of blocking every later writer.
+    pub short_lived: bool,
     pub prefix: String,
 }
 
@@ -47,6 +57,7 @@ impl Default for LockOptions {
             timeout: Duration::from_secs(15),
             stale_after: Duration::from_secs(900),
             break_stale: false,
+            short_lived: false,
             prefix: REGISTRY_LOCK_PREFIX.to_string(),
         }
     }
@@ -94,10 +105,21 @@ impl RegistryLock {
         let parent = lock.path.parent().unwrap_or(Path::new("/")).to_path_buf();
         pmxcfs.ensure_directory(&parent, 0o700)?;
         let deadline = Instant::now() + options.timeout;
+        let mut unlock_requested: Option<Instant> = None;
         loop {
             match pmxcfs.ops().mkdir(&lock.path, 0o700) {
                 Ok(()) => break,
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    if on_pmxcfs
+                        && options.short_lived
+                        && unlock_requested.is_none_or(|at| at.elapsed() >= UNLOCK_REQUEST_EVERY)
+                    {
+                        unlock_requested = Some(Instant::now());
+                        // pmxcfs refuses it while the lock is younger than its
+                        // timeout; mkdir tells whether it went.
+                        let _ = pmxcfs.ops().utime_zero(&lock.path);
+                        continue;
+                    }
                     let breakable = on_pmxcfs || lock.is_stale(options.stale_after);
                     if options.break_stale && breakable && lock.break_stale(on_pmxcfs)? {
                         continue;

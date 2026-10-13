@@ -221,6 +221,37 @@ fn simulated_pmxcfs_stale_break_uses_safe_unlock_request() {
 }
 
 #[test]
+fn a_short_lived_lock_asks_pmxcfs_to_drop_one_left_behind() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("etc/pve");
+    let state = root.join("priv/bmac/jobs");
+    std::fs::create_dir_all(&root).unwrap();
+    let simulated = SimulatedPmxcfs::new(&root);
+    let pmxcfs = Pmxcfs::new(&root, simulated.clone());
+    pmxcfs.ensure_directory(&state, 0o700).unwrap();
+    // As a holder leaves it when pmxcfs refuses its release without quorum.
+    let left = RegistryLock::path_for(&pmxcfs, &state, "bmac-jobs-").unwrap();
+    std::fs::create_dir_all(&left).unwrap();
+
+    let ordinary = LockOptions {
+        prefix: "bmac-jobs-".into(),
+        ..quick(false)
+    };
+    assert!(RegistryLock::acquire(&pmxcfs, &state, &ordinary).is_err());
+    assert_eq!(simulated.stale_break_requests.load(Ordering::SeqCst), 0);
+
+    let short = LockOptions {
+        short_lived: true,
+        ..ordinary
+    };
+    let acquired = RegistryLock::acquire(&pmxcfs, &state, &short).unwrap();
+    assert_eq!(acquired.path(), left);
+    assert_eq!(simulated.stale_break_requests.load(Ordering::SeqCst), 1);
+    acquired.release().unwrap();
+    assert!(!left.exists());
+}
+
+#[test]
 fn atomic_lock_times_out_and_can_explicitly_reap_stale_lock() {
     let temporary = tempfile::tempdir().unwrap();
     let state = temporary.path().join("state");

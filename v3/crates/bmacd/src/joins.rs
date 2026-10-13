@@ -127,6 +127,7 @@ impl JoinStore {
         let options = LockOptions {
             timeout: Duration::from_secs(15),
             prefix: LOCK_PREFIX.to_string(),
+            short_lived: true,
             ..LockOptions::default()
         };
         let lock = RegistryLock::acquire(&self.pmxcfs, root, &options).map_err(storage)?;

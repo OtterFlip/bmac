@@ -159,6 +159,7 @@ impl NotifyStore {
         let options = LockOptions {
             timeout: self.lock_timeout,
             prefix: LOCK_PREFIX.to_string(),
+            short_lived: true,
             ..LockOptions::default()
         };
         let lock = RegistryLock::acquire(&self.pmxcfs, &self.dir, &options).map_err(storage)?;

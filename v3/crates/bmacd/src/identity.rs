@@ -173,6 +173,7 @@ impl Identities {
         let options = LockOptions {
             timeout: Duration::from_secs(15),
             prefix: LOCK_PREFIX.to_string(),
+            short_lived: true,
             ..LockOptions::default()
         };
         let lock = RegistryLock::acquire(&self.pmxcfs, &self.dir, &options).map_err(storage)?;

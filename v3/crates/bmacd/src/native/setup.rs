@@ -568,14 +568,20 @@ async fn cluster_phase(
     match (&bootstrap.origin, driver) {
         (BootstrapOrigin::NewCluster(_), _) => cluster.create().await,
         (BootstrapOrigin::Join(bundle), Some(driver)) => {
-            cluster
+            let joined = cluster
                 .join(&super::cluster::JoinVia {
                     host: driver.host,
                     address: driver.address,
                     fingerprint: driver.fingerprint.clone(),
                     cluster_name: bundle.cluster_name.clone(),
                 })
-                .await
+                .await?;
+            // The bundle named only the members when it was issued; a host
+            // that joined since is in the settings this host now shares.
+            if super::cluster::pin_from_settings(Path::new("/"), settings).map_err(Stop::failed)? {
+                flow.info("Pinned every member in the cluster settings to the private VLAN in /etc/hosts.");
+            }
+            Ok(joined)
         }
         (BootstrapOrigin::Join(_), None) => Err(Stop::failed(
             "A joining host is set up from the cluster; approve its join in a member's \

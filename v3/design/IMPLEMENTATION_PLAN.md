@@ -1565,7 +1565,15 @@ setups: the control node must finish its cluster creation first
 --driven-by` over SSH and relays it into the job (`DEPLOYMENT.md`, "Host
 setup job"). For now the job refuses to start while a QDevice is configured,
 rather than removing it and adding it back as v2 does; the operator removes
-it first and adds it again afterwards.
+it first and adds it again afterwards. Joins take turns: two new hosts may
+ask at once, but approving one while another's `hosts.join` runs is
+refused (the `cluster-membership` lock), and its request waits to be
+approved again. A bundle names the members when it was issued, so a host
+pins every member in the shared settings once it has joined. bmacd's own
+pmxcfs locks are short-lived: a waiter asks pmxcfs to drop an expired one,
+as Proxmox's `cfs_lock` does, because a membership change can leave one
+behind (its removal refused while quorum was briefly lost). Lab:
+`lab/lab scenario m7_cluster`.
 
 **Tests:** port the cluster setup tests in `test_add_proxmox_host.py` and
 `test_host_membership.py`; three-host lab join with two joins started at

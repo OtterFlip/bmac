@@ -39,6 +39,8 @@ DESCRIPTION = "the Deployer installs mox3 from discovery through the host ISO to
 HOST_KEY = "TAILSCALE_LAB_AUTH_KEY_PROXMOX_HOST"
 DISCOVERY_KEY = "TAILSCALE_LAB_AUTH_KEY_DISCOVERY"
 CHECKPOINT = "before-m6"
+# Stage fields a host restored from the stage keeps into the stages saved from it.
+CARRIED = ("luks_passphrase",)
 INSTALL_TIMEOUT = 2400
 TASK_TIMEOUT = 5400
 PACKAGES = V3 / "target" / "deployer-bundle" / "packages"
@@ -161,13 +163,15 @@ class Installed:
         self.saved: list[str] = []
         # Types an encrypted root's passphrase at the console during a boot.
         self.unlock: Callable[[], None] | None = None
+        # Fields of the stage it came from that the host still needs.
+        self.carried: dict = {}
 
     def save_stage(self, name: str, live: bool = False, extra: dict | None = None) -> None:
         """Saves the host as stage name for later runs to start from (see
         staged), with extra in its record. A live stage keeps running; any
         other is shut down for the save and started again."""
         self.s.note(f"saving {self.vm.name} as stage {name}" + (" live" if live else ""))
-        meta = {"password": self.password, "package_sha256": package_digest(), **(extra or {})}
+        meta = {"password": self.password, "package_sha256": package_digest(), **self.carried, **(extra or {})}
         with booting(self.s, None if live else self.unlock):
             self.lab.save_stage(self.vm, name, self.work, meta, live=live)
         self.saved.append(name)
@@ -292,6 +296,28 @@ def staged(s, stage: str, build, then, layout: dict = NVME_MIRROR, vm_name: str 
 def reuse(s, vm, stage: str, then, unlock: Callable | None = None) -> None:
     """Starts vm from stage instead of installing it, with the current
     bmacd package, and carries on with `then` before putting it back."""
+    with restored(s, vm, stage, unlock) as installed:
+        then(installed)
+
+
+def has_stage(lab, vm_names: list[str], stage: str) -> bool:
+    """Whether every VM has the stage, and BMAC_LAB_FRESH doesn't ask for it
+    to be built again."""
+    return os.environ.get("BMAC_LAB_FRESH") != "1" and all(lab.stage(lab.topology.vm(n), stage) for n in vm_names)
+
+
+def reuse_cluster(s, vm_names: list[str], stage: str, then, unlock: Callable | None = None) -> None:
+    """Starts every VM in vm_names from stage, saved together, and carries on
+    with `then({name: installed})` before putting them all back."""
+    with contextlib.ExitStack() as stack:
+        hosts = {name: stack.enter_context(restored(s, s.lab.topology.vm(name), stage, unlock)) for name in vm_names}
+        then(hosts)
+
+
+@contextlib.contextmanager
+def restored(s, vm, stage: str, unlock: Callable | None = None):
+    """vm started from stage with the current bmacd package, put back as it
+    was when the block ends."""
     lab = s.lab
     preflight(s)
     work, host_name = work_dir(lab, vm), f"{lab.topology.tailnet_prefix}{vm.name}"
@@ -307,6 +333,7 @@ def reuse(s, vm, stage: str, then, unlock: Callable | None = None) -> None:
         s.note(f"started {vm.name} from stage {stage}, saved {hours:.1f} h ago" + (" live" if meta.get("live") else "")
                + ", instead of installing it; BMAC_LAB_FRESH=1 builds the stage again")
         installed = Installed(s, vm, work, meta["password"], host_name, reused=stage)
+        installed.carried = {k: meta[k] for k in CARRIED if k in meta}
         if unlock and meta.get("luks_passphrase"):
             installed.unlock = lambda: unlock(lab, vm, meta["luks_passphrase"])
         with booting(s, None if meta.get("live") else installed.unlock):
@@ -325,7 +352,7 @@ def reuse(s, vm, stage: str, then, unlock: Callable | None = None) -> None:
                       done.returncode == 0)
         s.require("bmacd and bmacd-web are running", lambda: wait_until(lambda: installed.on_host(
             "systemctl is-active bmacd.service bmacd-web.service").split() == ["active", "active"]))
-        then(installed)
+        yield installed
     s.check(f"{vm.name} is back as it was", lambda: lab.wait_ssh(vm, BOOT_TIMEOUT) or True)
 
 

@@ -368,6 +368,7 @@ impl Jobs {
         let options = LockOptions {
             timeout: self.config.lock_timeout,
             prefix: LOCK_PREFIX.to_string(),
+            short_lived: true,
             ..LockOptions::default()
         };
         let lock = RegistryLock::acquire(&self.config.pmxcfs, &self.config.dir, &options)

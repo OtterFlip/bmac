@@ -211,6 +211,10 @@ def then(host) -> None:
         token[0] = api.token
         view = api.request("GET", "/setup")
         s.check("the host is in setup mode", view.get("active") is True and view.get("operation") == "hosts.setup")
+        # So admitting and running the setup job proves jobs work on a host
+        # that isn't in a cluster, where quorum is the host's own.
+        s.check("mox3 isn't in a cluster yet", lambda: host.on_host(
+            "test -e /etc/pve/corosync.conf && echo clustered || echo standalone") == "standalone")
         started = api.request("POST", "/jobs", {"operation": "hosts.setup", "parameters": {},
                                                 "idempotency_key": str(uuid.uuid4()), "dry_run": False})
     job = started["id"]
