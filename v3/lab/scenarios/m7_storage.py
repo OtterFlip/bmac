@@ -16,11 +16,17 @@ verification, and leaves setup mode. mox3 is put back afterwards.
 
 The lab's installed host has no serial console of its own (a real host is
 unlocked at its VGA console, and a serial console would take the prompt
-from it), so the scenario adds one over SSH before the job starts."""
+from it), so the scenario adds one over SSH before the job starts.
+
+The three boot drills take most of the run's time, so the scenario declines
+them unless BMAC_LAB_DRILLS=1 is set:
+
+    BMAC_LAB_DRILLS=1 lab/lab scenario m7_storage"""
 
 from __future__ import annotations
 
 import contextlib
+import os
 import secrets as tokens
 import socket
 import subprocess
@@ -38,6 +44,7 @@ DESCRIPTION = "host setup encrypts mox3's boot mirror in place, adds an encrypte
 JOB_TIMEOUT = 5400
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED"}
 UNLOCK_PROMPT = r"Please unlock disk|Enter passphrase|Caching passphrase for \S+: "
+DRILLS = os.environ.get("BMAC_LAB_DRILLS") == "1"
 
 m6 = load(Path(__file__).with_name("m6.py"))
 
@@ -240,7 +247,7 @@ def then(host) -> None:
                         title = form.get("title", "")
                         s.note(f"request: {title}")
                         if form["kind"] == "confirm":
-                            reply = {"kind": "confirm", "confirmed": True}
+                            reply = {"kind": "confirm", "confirmed": DRILLS or title != "Run the boot drills?"}
                         elif form["kind"] == "manual_action" and title == "Type the LUKS passphrase at the console":
                             enter_passphrase()
                             reply = {"kind": "acknowledge"}
@@ -282,9 +289,14 @@ def then(host) -> None:
     for phase in ("identity", "settings", "storage", "drills", "network", "cluster", "retire",
                   "orchestration", "headers", "verify"):
         s.check(f"the {phase} phase is complete", phases.get(phase) == "complete")
-    s.check(f"three boots were unlocked at the console ({len(prompts)}; {'; '.join(unlock_failures) or 'no failures'})",
-            len(prompts) == 3)
-    s.check(f"each drill boot changed the boot ID ({len(set(boots))} boots)", len(set(boots)) >= 4)
+    if DRILLS:
+        s.check(f"three boots were unlocked at the console ({len(prompts)}; {'; '.join(unlock_failures) or 'no failures'})",
+                len(prompts) == 3)
+        s.check(f"each drill boot changed the boot ID ({len(set(boots))} boots)", len(set(boots)) >= 4)
+    else:
+        s.note("the boot drills were declined; BMAC_LAB_DRILLS=1 runs them")
+        s.check("the boot drills were skipped", any(
+            e["type"] == "output" and e.get("text") == "The boot drills were skipped." for e in events))
 
     leaves = host.on_host("zpool status -P rpool | awk '$1 ~ /^\\/dev\\// {print $1, $2}'").splitlines()
     s.check(f"rpool's four members are its LUKS mappers ({len(leaves)})",

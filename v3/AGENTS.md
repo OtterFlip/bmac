@@ -63,6 +63,16 @@ parallel runs, fix the race rather than serializing it.
 For all test suites, if it's possible to run tests in parallel then make
 an effort to ensure that those tests are run in parallel.
 
+For tests suites that include tests with multiple boot/reboot drills,
+perform all other tests in the suite first, ensuring they pass first,
+before adding/enabling the reboot/boot-test drills to ensure that they pass.
+The principle here to follow is to get all of the faster/shorter tests
+to pass first before getting the slower/longer tests to pass, because
+when we run an entire test suite repeatedly, if we don't optimize how
+we run the tests within this suite, then the repeated runs of the suite
+itself, before everything passes in the suite, are less optimal when it
+comes to the time consumed to run the suite.
+
 v2's `dev/run_tests.py` also collects every committed `test_*.py` under
 `v3/`, and runs it from the repository root. So a v3 Python test must find
 what it tests by paths relative to its own file (for example, loading a
