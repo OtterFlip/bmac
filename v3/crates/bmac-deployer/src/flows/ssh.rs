@@ -68,7 +68,7 @@ async fn host_address(ctx: &TaskContext, env: &Env, host: &str) -> Result<String
         PeerSelection::Absent => Err(Stop::failed(format!(
             "{host} isn't on this workstation's tailnet with the tag {}. Check that this \
              workstation is signed in to the cluster's tailnet.",
-            tailnet::HOST_TAG.to_string()
+            tailnet::HOST_TAG
         ))),
         PeerSelection::Offline => Err(Stop::failed(format!(
             "{host} is on the tailnet but offline. Try again once it is running."
@@ -80,7 +80,7 @@ async fn host_address(ctx: &TaskContext, env: &Env, host: &str) -> Result<String
         PeerSelection::Untagged { tags } => Err(Stop::failed(format!(
             "The machine named {host} on the tailnet doesn't carry {} (it has {}), so it isn't \
              one of the cluster's hosts.",
-            tailnet::HOST_TAG.to_string(),
+            tailnet::HOST_TAG,
             if tags.is_empty() {
                 "no tags".to_string()
             } else {

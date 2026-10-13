@@ -433,9 +433,14 @@ impl Runner {
         let runner = Arc::clone(self);
         tokio::spawn(async move {
             let id = record.id;
-            let (state, message, last_seq) = match outcome {
+            let ended = match outcome {
                 Ok(outcome) => runner.drive(record, &nonce, outcome, wake).await,
-                Err(error) => (JobState::Failed, error.message, first),
+                Err(error) => Some((JobState::Failed, error.message, first)),
+            };
+            let Some((state, message, last_seq)) = ended else {
+                runner.active.lock().unwrap().remove(&id);
+                runner.sink.flush().await;
+                return;
             };
             // pmxcfs refuses writes for a moment while membership changes,
             // which is when cluster jobs end.

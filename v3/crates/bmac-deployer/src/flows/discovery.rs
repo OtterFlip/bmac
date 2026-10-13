@@ -220,7 +220,7 @@ fn settings_form(preset: &Preset) -> RequestForm {
                 .help(&format!(
                     "Single-use and ephemeral, tagged {}. The machine leaves the tailnet by \
                      itself once it is powered off.",
-                    tailnet::DISCOVERY_TAG.to_string()
+                    tailnet::DISCOVERY_TAG
                 )),
             method_field(if preset.idrac.is_some() {
                 BootMethod::Idrac

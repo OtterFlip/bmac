@@ -40,7 +40,8 @@ What BMAC does not try to defend against:
   it already controls the cluster. BMAC adds no boundary between hosts and
   does not claim one.
 - **A compromised appliance or a stolen, unlocked appliance pool.** Each
-  appliance protects its own data.
+  appliance protects its own data, and serves another appliance only if its
+  administrator made that one a trusted peer (`BACKUP.md`, "Trusted peers").
 
 ## Browser HTTPS
 
@@ -347,7 +348,8 @@ them early.
 | Host HTTPS private key | `/etc/bmac/tls/` on its host | pmxcfs, other hosts, logs |
 | Postmark token (cluster) | `/etc/pve/priv/bmac/secrets/postmark.token` | Pages, logs, exports, ISOs |
 | Appliance client key and admin password hash | The appliance only | The cluster |
-| Restore and peer-export grants | Issued by an appliance, short-lived, held in memory by the job using them | Logs |
+| Restore grants | Issued by an appliance, short-lived, held in memory by the job using them | Logs |
+| Appliance trusted-peer list (peer fingerprints, not secret) | The appliance's metadata dataset, changed only on its own UI | The cluster, other appliances |
 
 Secret parameters are a distinct type in the operation schema. Their values
 go to a process's stdin or stay in memory; they are never part of a stored

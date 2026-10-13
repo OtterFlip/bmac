@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -244,6 +245,7 @@ pub struct Supervisor {
     config: SupervisorConfig,
     sink: Arc<dyn JobSink>,
     runs: Mutex<HashMap<JobId, ActiveRun>>,
+    stopping: AtomicBool,
 }
 
 impl Supervisor {
@@ -252,7 +254,20 @@ impl Supervisor {
             config,
             sink,
             runs: Mutex::new(HashMap::new()),
+            stopping: AtomicBool::new(false),
         })
+    }
+
+    /// bmacd is stopping: a script that ends from now on without saying how
+    /// it finished is left to the next start's recovery (which interrupts
+    /// it, or resumes it after a restart it asked for) instead of failing.
+    /// Its end is a signal from the same stop, often one the job asked for.
+    pub fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
     }
 
     fn now(&self) -> i64 {
@@ -727,6 +742,17 @@ impl Supervisor {
         let Some(mut run) = runs.remove(&job) else {
             return;
         };
+        if self.is_stopping()
+            && run.completed.is_none()
+            && run.cancel.is_none()
+            && run.protocol_failure.is_none()
+        {
+            if !run.pending.is_empty() {
+                self.sink.events(std::mem::take(&mut run.pending));
+            }
+            // Dropping the outcome sender tells the runner it was left.
+            return;
+        }
         let exit_code = status.and_then(|s| s.code());
         let signal = status.and_then(|s| s.signal());
         let how = match (exit_code, signal) {

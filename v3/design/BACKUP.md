@@ -28,7 +28,7 @@ ships in v3.0.
   procedure to make it production, backups that continue incrementally from
   the restored PIT, and recovery of a whole cluster onto new hardware.
 - Repair of an appliance that fell behind, from the cluster or from a peer
-  appliance.
+  appliance, when the two appliances trust each other.
 - A PIT graph (the branch tree of each VM's history) and transfer throughput
   in the Dashboard and the appliance UI.
 
@@ -43,8 +43,8 @@ are started by hand; there are no scheduled restores.
 | --- | --- | --- |
 | `bmacd` on each host | Full authority on the cluster | Run the backup schedule; create PITs, bookmarks, and local snapshots and prune them; maintain the PIT catalog; record appliance check-ins; run restores using appliance-issued grants |
 | `bmac-source` on each host | ZFS `send` and `hold` delegated on guest datasets (a send from a bookmark needs nothing more); the enrolled appliances' certificate fingerprints | Answer appliance check-ins (passing them to the local `bmacd`), stream BMAC PIT snapshots, and serve the PIT catalog to enrolled appliances. Nothing else |
-| Appliance (`bmac-backupd`) | Its client key; pinned Proxmox cluster CA | Check in; pull the PITs it is offered; write its own pool; serve exports only under grants |
-| Appliance administrator | Appliance UI and console credentials | Retention policy, branch retirement, restore and peer grants, unlock, scrubs |
+| Appliance (`bmac-backupd`) | Its client key; pinned Proxmox cluster CA; its trusted-peer list | Check in; pull the PITs it is offered; write its own pool; serve exports only to restore jobs under its grants and to the peers it trusts; repair only from peers it trusts |
+| Appliance administrator | Appliance UI and console credentials | Retention policy, branch retirement, restore grants, the trusted-peer list, unlock, scrubs |
 
 The cluster has **no credential for any appliance** and never opens a
 connection to one, except a restore job presenting an appliance-issued grant.
@@ -61,7 +61,8 @@ schedule gives it nothing more: an appliance only ever adds PITs.
 
 A compromised appliance exposes the backup data it already holds (it can read
 production snapshots through `bmac-source`). It cannot change anything on the
-cluster or on another appliance.
+cluster or on another appliance, and it can read nothing from another
+appliance that doesn't trust it (see "Trusted peers").
 
 ## Identities
 
@@ -424,7 +425,8 @@ Each appliance is independent: its own checkpoint, history, retention, and
 state. One appliance failing never stops the others, or the schedule. Because
 the cluster owns the schedule, every appliance assigned to a VM receives the
 same PITs, and two appliances can never ask for snapshots of the same VM at
-different moments.
+different moments. Appliances share nothing with each other unless their
+administrators make them trusted peers.
 
 ## Repairing an appliance that fell behind
 
@@ -432,15 +434,12 @@ When an appliance returns, it tries, in order:
 
 1. **From the cluster.** Its head's bookmark (or snapshot) is still on the
    placement hosts: pull one incremental to the next PIT offered.
-2. **From a peer appliance.** Ask its configured peers for a published PIT
-   that descends from its head on the same branch and is part of one complete
-   recovery set. Pull `zfs send -i head new` from the peer. Received snapshots
-   keep their GUIDs, so this works, and afterwards the appliance continues
-   from the cluster's bookmark of that PIT if it still exists. The peer
-   serves this only under a **peer grant**: a standing read-only authorization
-   for one cluster namespace, approved by the administrators of both
-   appliances. It allows reading published PITs only, and is rate- and
-   size-limited.
+2. **From a trusted peer appliance.** Ask the peers it trusts, that also
+   trust it (see "Trusted peers"), for a published PIT that descends from its
+   head on the same branch and is part of one complete recovery set. Pull
+   `zfs send -i head new` from the peer. Received snapshots keep their GUIDs,
+   so this works, and afterwards the appliance continues from the cluster's
+   bookmark of that PIT if it still exists.
 3. **Reseed.** Start a new lineage in new zvols from a full pull of the newest
    PIT. The old zvols and PITs stay until the appliance's own retention removes
    them.
@@ -448,9 +447,70 @@ When an appliance returns, it tries, in order:
 PITs are never mixed across branches or across recovery sets. If the
 appliance can't prove ancestry by GUID, it reseeds.
 
-A healthy appliance may keep bookmarks for peers known to be behind, within a
-bounded age and count, so a later peer repair stays possible after normal
-pruning.
+A healthy appliance may keep bookmarks for trusted peers known to be behind,
+within a bounded age and count, so a later peer repair stays possible after
+normal pruning. It keeps none for a peer it doesn't trust.
+
+### Trusted peers
+
+Each appliance decides for itself which other appliances are its trusted
+peers. Trust is all or nothing: a trusted peer can read every published PIT
+on the appliance, and an appliance that isn't trusted can't reach it at
+all. Only peers that trust each other repair from each other.
+
+- The trusted-peer list lives on the appliance, in its metadata dataset, and
+  only that appliance's administrator changes it, on the **Trusted peers**
+  page of the appliance UI. The cluster can't add to it (it has no
+  credential for any appliance), and neither can another appliance.
+- An entry is the peer's `appliance_uuid`, its certificate fingerprint
+  (SHA-256), and its address, nothing more. An appliance uses one
+  certificate as client and server on 8445, so one fingerprint identifies it
+  both ways. The fingerprint is never learned from the peer, or from the
+  cluster, on first use.
+- Trust goes one way. A serves B only if A trusts B, and B repairs from A
+  only if B trusts A, so B never receives data from an appliance its
+  administrator didn't choose. A repair needs both, set separately by each
+  administrator.
+- The appliance's export listener (8445) accepts a client certificate only
+  if it belongs to a trusted peer or to a cluster host presenting a restore
+  grant. Any other appliance is refused during the TLS handshake, before a
+  request is read: it gets no exports, no index of published PITs, no size
+  estimates, and no error detail beyond the refusal. The refusal is written
+  to the audit log, at most once per peer per hour.
+- A trusted peer can only read published PITs, by `GET /v1/peer-index` and
+  `POST /v1/export`. It can't prune, hold, publish, or change anything, and
+  it can't see unpublished receives or the appliance's settings.
+- Untrusting a peer takes effect at once: the next connection is refused and
+  open streams from it are closed. Bookmarks kept for it are released at the
+  next prune.
+- Trust between appliances is separate from enrollment with the cluster. An
+  appliance revoked by the cluster stays a trusted peer until each
+  administrator untrusts it; an enrolled appliance is never trusted by
+  another one until its administrator adds it.
+
+The Trusted peers page:
+
+- shows this appliance's own `appliance_uuid` and fingerprint, to read out
+  or copy to the other appliance's administrator;
+- lists each trusted peer, when it last connected, and whether it trusts
+  this appliance back. An appliance can't ask for the other's list:
+  "doesn't trust this appliance" means that peer refused this appliance's
+  last handshake;
+- **Trust a peer**: the administrator enters the peer's address and the
+  fingerprint shown on the peer's own UI. The appliance connects and saves
+  the entry only if the certificate presented matches the fingerprint
+  typed; on a mismatch it warns and saves nothing. Even on a match, the page
+  reminds the administrator that the match only proves anything if the
+  fingerprint came from the peer's own UI or its administrator, not from a
+  message that could have been altered;
+- **Untrust** a peer, after a confirmation naming it;
+- lists recent refusals (the fingerprint and the `appliance_uuid` it
+  claimed, the source address, and when). A refusal can't be turned into
+  trust with one click; trusting that appliance still takes its fingerprint
+  from its own UI.
+
+Each trust or untrust needs the administrator's password again, and goes to
+the audit log.
 
 ## Appliance retention
 
@@ -465,8 +525,8 @@ kept.
   each tier are kept. A PIT that wins in several tiers is kept once.
 - The keep set is the union of: bucket winners, each branch's head, branch
   roots and common ancestors (including pending branch roots of restores),
-  PITs named in live restore grants, clone origins, administrator holds, peer
-  repair bookmarks, and transfers in progress.
+  PITs named in live restore grants, clone origins, administrator holds,
+  repair bookmarks kept for trusted peers, and transfers in progress.
 - Every prune is planned first: PITs to delete, why each other PIT is kept,
   estimated space freed (often less than expected, since blocks are shared),
   and the restore coverage that remains. Live ZFS state is read again under
@@ -742,18 +802,19 @@ and each host's headers from that host's `bmac-source`
   React components and embedded in `bmac-backupd`) follows the same login
   rule as the Web Dashboard: the token lives only in page memory. It covers
   status, the PIT browser and graph, transfer throughput, retention policy,
-  prunes, grants, peers, scrubs, notification settings, unlock status, and
-  the audit log.
+  prunes, restore grants, trusted peers (trust and untrust, see "Trusted
+  peers"), scrubs, notification settings, unlock status, and the audit log.
 - Appliance audit log: every pull (with bytes, duration, and average rate),
-  publish, prune, grant, and policy change, with IDs and GUIDs, never data or
-  secrets.
+  publish, prune, grant, trust and untrust, export to a peer, refused peer,
+  and policy change, with IDs and GUIDs, never data or secrets.
 
 ## Protocol
 
 Everything is TLS 1.3 with mutual authentication, using HTTP/2 from the
 `hyper`/`rustls` stack. Version negotiation comes first on every connection.
 `bmac-source` listens on port 8445 on each host's private and Tailscale
-addresses; the appliance listens on 8443 (its UI) and 8445 (exports).
+addresses; the appliance listens on 8443 (its UI) and 8445 (exports, to
+restore jobs and trusted peers only).
 
 | Endpoint | Served by | Client | Purpose |
 | --- | --- | --- | --- |
@@ -766,7 +827,8 @@ addresses; the appliance listens on 8443 (its UI) and 8445 (exports).
 | `GET /v1/recovery-manifest` | `bmac-source` | Enrolled appliance | Cluster recovery manifest |
 | `GET /v1/luks-headers` | `bmac-source` | Enrolled appliance | This host's LUKS header backups (`DEPLOYMENT.md`), read from `/var/lib/bmac/luks-headers/` through a group `bmac-source` belongs to |
 | `GET /v1/heartbeat` | `bmac-source` | Enrolled appliance | Host and cluster liveness for the watchdog (`MONITORING.md`) |
-| `POST /v1/export` | Appliance | Cluster restore job (with grant) or peer appliance (with peer grant) | Stream a published PIT volume, full or incremental from a given GUID, or its size estimate |
+| `POST /v1/export` | Appliance | Cluster restore job (with grant) or trusted peer | Stream a published PIT volume, full or incremental from a given GUID, or its size estimate |
+| `GET /v1/peer-index` | Appliance | Trusted peer | Published PITs (metadata only) |
 | `POST /v1/enroll` | `bmacd`, port 8444 (`SECURITY.md`, "Joins and enrollment") | New appliance (with token) | Present the appliance certificate for approval |
 
 `bmac-source` checks the client certificate's fingerprint against the
@@ -795,8 +857,10 @@ settings:
 | One appliance stops checking in | LATE after 3 minutes, alert; the others continue |
 | No assigned appliance available at a scheduled slot | No snapshot (unless local retention claims the slot); alert |
 | Appliance doesn't claim within the claim window | Snapshot released for it; it catches up from its head's bookmark at the next PIT |
-| Appliance delinquent | Its bookmarks are released; registration and data remain; it repairs from a peer or reseeds |
-| Appliance returns | Repair from cluster, then peer, then reseed |
+| Appliance delinquent | Its bookmarks are released; registration and data remain; it repairs from a trusted peer or reseeds |
+| Appliance returns | Repair from cluster, then a peer that both trusts and is trusted by it, then reseed |
+| Untrusted appliance connects to an appliance | Refused in the TLS handshake; audit log entry |
+| Trusted peer untrusted during a stream | Stream closed; the receiving appliance aborts the partial receive and tries its other peers or reseeds |
 | Pull interrupted | Resume with token while the snapshot exists; otherwise abort the partial receive and catch up at the next PIT; never publish partial |
 | Publication report lost | The next check-in reports it; nothing is assumed |
 | Pool locked after reboot | `LOCKED`; alert to unlock at console; no automatic unlock |
@@ -804,7 +868,7 @@ settings:
 | Unrepairable scrub error | Mark PITs suspect; alert; point to other copies |
 | Required volume missing | PIT not published |
 | GUID mismatch | Refuse the incremental; never force |
-| Bookmark missing on the host serving a send | Serve from another placement host that has it; otherwise the appliance repairs from a peer or reseeds |
+| Bookmark missing on the host serving a send | Serve from another placement host that has it; otherwise the appliance repairs from a trusted peer or reseeds |
 | Owner moves before snapshot | Resolve again; retry under the resource intent |
 | Owner moves during a pull | Any host with the snapshot and base can continue the stream; otherwise retry from another host |
 | Placement host added | Replication brings the BMAC snapshots, and bookmarks are made there, before that host serves sends |
@@ -868,7 +932,9 @@ hardware:
    sent from a bookmark by the new owner;
 5. A stops checking in: LATE alert; B continues;
 6. A returns within the delinquency period and catches up from its bookmark;
-7. A returns after it and repairs from B;
+7. A returns after it and repairs from B, which it trusts and which trusts
+   it, after both administrators add each other on the Trusted peers page;
+   then B untrusts A, and A's next repair from B is refused;
 8. a scheduled slot with no appliance available: no snapshot, and the alert;
 9. a local rollback starts a new branch, received as a clone on both
    appliances;
@@ -892,5 +958,13 @@ Security tests:
 - a stolen appliance certificate can't get sends of non-BMAC snapshots, or
   of VMs not assigned to it;
 - peers can't modify each other;
+- an appliance that B doesn't trust gets nothing from B's 8445, not even
+  the peer index or a size estimate, and its refusal is in B's audit log;
+- with one-way trust (B trusts A, A doesn't trust B), A refuses B, and A
+  never repairs from B;
+- the cluster, with every cluster credential, can't add a trusted peer to
+  any appliance;
+- a typed fingerprint that doesn't match the peer's certificate saves no
+  entry;
 - quotas stop a cluster from filling an appliance;
 - no LUKS passphrase or grant appears in any log, page, or email.

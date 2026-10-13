@@ -640,7 +640,7 @@ fn secrets_form(host: HostSlot) -> RequestForm {
                 .required()
                 .help(&format!(
                     "A fresh single-use key tagged {}, not ephemeral; {host} keeps it.",
-                    tailnet::HOST_TAG.to_string()
+                    tailnet::HOST_TAG
                 )),
         ],
     }

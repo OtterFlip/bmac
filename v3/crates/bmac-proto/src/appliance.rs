@@ -29,9 +29,43 @@ pub mod on_source {
     pub const HEARTBEAT: &str = "/v1/heartbeat";
 }
 
-/// Served by an appliance.
+/// Served by an appliance on [`SOURCE_PORT`], only to cluster restore jobs
+/// under its grants and to its trusted peers (`BACKUP.md`, "Trusted peers").
 pub mod on_appliance {
     pub const EXPORT: &str = "/v1/export";
+    pub const PEER_INDEX: &str = "/v1/peer-index";
+}
+
+/// One entry of an appliance's trusted-peer list. Only that appliance's
+/// administrator adds or removes entries; trust goes one way, so a repair
+/// between two appliances needs an entry on each. Trust is all or nothing:
+/// a trusted peer reads every published PIT.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedPeer {
+    pub appliance_uuid: String,
+    /// SHA-256 of the peer's certificate, typed from the peer's own UI.
+    pub fingerprint: String,
+    pub address: String,
+}
+
+/// The trusted peer a client certificate belongs to, if any. Anything else
+/// is refused in the handshake.
+pub fn trusted_peer<'a>(peers: &'a [TrustedPeer], fingerprint: &str) -> Option<&'a TrustedPeer> {
+    let wanted = normalized_fingerprint(fingerprint)?;
+    peers
+        .iter()
+        .find(|peer| normalized_fingerprint(&peer.fingerprint).as_deref() == Some(wanted.as_str()))
+}
+
+/// Lowercase hex without separators, or `None` unless it is a SHA-256.
+pub fn normalized_fingerprint(text: &str) -> Option<String> {
+    let hex: String = text
+        .chars()
+        .filter(|c| !matches!(c, ':' | ' '))
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hex)
 }
 
 /// The prefix every snapshot `bmac-source` will send carries.
@@ -119,5 +153,31 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn peer(fingerprint: &str) -> TrustedPeer {
+        TrustedPeer {
+            appliance_uuid: "b".into(),
+            fingerprint: fingerprint.into(),
+            address: "bmac-appliance-b".into(),
+        }
+    }
+
+    #[test]
+    fn only_a_listed_fingerprint_is_a_trusted_peer() {
+        let listed = "AB:".repeat(31) + "AB";
+        let peers = [peer(&listed)];
+        assert!(trusted_peer(&peers, &"ab".repeat(32)).is_some());
+        assert!(trusted_peer(&peers, &"cd".repeat(32)).is_none());
+        assert!(trusted_peer(&peers, "").is_none());
+        assert!(trusted_peer(&[peer("")], "").is_none());
+        assert!(trusted_peer(&[], &"ab".repeat(32)).is_none());
+    }
+
+    #[test]
+    fn a_trusted_peer_entry_has_nothing_but_identity() {
+        let entry = json!({"appliance_uuid": "b", "fingerprint": "ab".repeat(32),
+                           "address": "bmac-appliance-b", "namespaces": ["cluster-1"]});
+        assert!(serde_json::from_value::<TrustedPeer>(entry).is_err());
     }
 }

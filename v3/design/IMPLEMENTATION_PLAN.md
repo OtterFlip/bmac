@@ -1826,10 +1826,23 @@ delegated or root fallback from lab item 5.
 **Builds:** `bmac-backupd`: unlock at the console, import by pool GUID, the
 catalog, check-ins every 60 seconds, claims, pulls with resume tokens,
 two-phase publication, new branches received as clones, retention, prunes,
-grants, peers and repair, scrubs, the watchdog (`MONITORING.md`) with its
-optional checks of public production URLs, its own Postmark settings,
-adoption after an OS reinstall, and the appliance UI (`v3/applianceui/`,
-memory-only token) with the PIT graph and transfer throughput.
+restore grants, trusted peers and repair from them (`BACKUP.md`, "Trusted
+peers"), scrubs, the watchdog (`MONITORING.md`) with its optional checks of
+public production URLs, its own Postmark settings, adoption after an OS
+reinstall, and the appliance UI (`v3/applianceui/`, memory-only token) with
+the PIT graph, transfer throughput, and the Trusted peers page (trust with a
+typed fingerprint checked against the peer's certificate, untrust, recent
+refusals).
+
+Trusted peers, all or nothing: the list in the metadata dataset; the 8445
+listener's client certificate check (trusted peer, or cluster host with a
+restore grant), refusing everyone else in the handshake; `GET /v1/peer-index`
+and `POST /v1/export` of published PITs for a trusted peer; untrust closing
+open streams; repair asking only peers that this appliance trusts.
+**Tests:** an untrusted appliance is refused before any request; one-way
+trust serves one direction only; a fingerprint mismatch saves nothing;
+untrust ends a stream in progress; a trusted peer still can't read
+unpublished receives or change anything.
 
 Enrollment, end to end (`DEPLOYMENT.md`, "Backup appliance ISO"): the
 Dashboard issues an enrollment bundle (M3.4); on first boot, or from
