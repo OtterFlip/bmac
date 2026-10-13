@@ -116,6 +116,18 @@ class QmpTest(unittest.TestCase):
             self.assertEqual(monitor.event(timeout=5)["event"], "SHUTDOWN")
             self.assertEqual(monitor.command("cont"), {})
 
+    def test_a_reset_connection_is_a_qmp_error(self) -> None:
+        def handler(server: FakeServer, conn: socket.socket) -> None:
+            send(conn, {"QMP": {"version": {}, "capabilities": []}})
+            # Closing with the command unread resets the connection, as a
+            # VM killed mid-handshake does.
+            conn.recv(1, socket.MSG_PEEK)
+
+        server = FakeServer(self.path, handler)
+        self.addCleanup(server.close)
+        with self.assertRaises(QmpError):
+            Qmp(self.path)
+
     def test_no_server_is_a_qmp_error(self) -> None:
         with self.assertRaisesRegex(QmpError, "cannot connect"):
             Qmp(self.path)

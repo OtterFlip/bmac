@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -1262,6 +1263,37 @@ printf '%s\\n' "$ROOT_VOLUME"
             ):
                 self.assertNotIn(mutation, calls_text)
             self.assertEqual(sorted(work_dir.iterdir()), [], "dry run leaked its run directory")
+
+    def test_the_installed_vm_is_started_by_its_owners_status_not_the_lagging_resource_view(self) -> None:
+        text = SCRIPT.read_text(encoding="utf-8")
+        function = re.search(r"^start_installed_vm\(\) \{\n.*?^\}\n", text, re.M | re.S).group(0)
+        verify = re.search(r"^verify_installed_guest\(\) \{\n.*?^\}\n", text, re.M | re.S).group(0)
+        self.assertIn("start_installed_vm", verify)
+        self.assertNotIn('"$VM_LIVE_STATUS" == stopped', verify)
+        for status, started in (("stopped", True), ("running", False)):
+            stubs = (
+                # /cluster/resources still says running after the poweroff.
+                'VM_LIVE_STATUS=running; VMID=100; OWNER_NODE=mox1\n'
+                f'vm_status() {{ echo {status}; }}\n'
+                'node_exec() { echo "$*"; }\n'
+                'die() { echo "died: $*"; exit 1; }\n'
+            )
+            done = subprocess.run(["bash", "-c", stubs + function + "start_installed_vm"],
+                                  capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.assertEqual(done.stdout.strip(), "mox1 qm start 100" if started else "", status)
+        unknown = subprocess.run(
+            ["bash", "-c", 'VMID=100; OWNER_NODE=mox1\nvm_status() { echo paused; }\n'
+             'node_exec() { echo "$*"; }\ndie() { echo "died: $*"; exit 1; }\n' + function + "start_installed_vm"],
+            capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL)
+        self.assertEqual(unknown.returncode, 1)
+        self.assertIn("unexpected status paused", unknown.stdout)
+
+    def test_guest_scripts_get_every_host_value_as_an_argument(self) -> None:
+        bodies = re.findall(r"<<'GUEST'[^\n]*\n(.*?)^GUEST$", SCRIPT.read_text(encoding="utf-8"), re.S | re.M)
+        self.assertTrue(bodies)
+        for body in bodies:
+            self.assertEqual(set(re.findall(r"\$\{?([A-Z][A-Z0-9_]*)", body)) - {"BASH_COMMAND"}, set())
 
     def test_live_mutations_are_guarded_and_no_destructive_rollback_exists(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")

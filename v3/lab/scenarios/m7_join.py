@@ -114,8 +114,9 @@ def follow(s, dashboard: Dashboard, job: str, reply) -> tuple[dict, list[dict]]:
             elif e["type"] in ("warning", "error"):
                 s.note(f"{e['type']}: {e.get('message')}")
         request = summary.get("pending_request")
-        if summary.get("state") not in TERMINAL and request and request not in answered:
-            form = next(e for e in reversed(events) if e["type"] == "request" and e["request_id"] == request)
+        form = next((e for e in reversed(events) if e["type"] == "request" and e.get("request_id") == request), None)
+        # The record can name a request whose event is still being relayed.
+        if summary.get("state") not in TERMINAL and form and request not in answered:
             s.note(f"request: {form.get('title')}")
             dashboard.call("POST", f"/jobs/{job}/requests/{request}", reply(form))
             answered.add(request)
@@ -219,8 +220,9 @@ def approve(s, dashboard: Dashboard, first, newcomer, job: str | None = None) ->
             first.password not in json.dumps(dashboard.call("GET", f"/jobs/{summary['id']}?from_seq=1")))
     s.check(f"{name}'s setup is marked complete", lambda: newcomer.on_host(
         "test -e /var/lib/bmac/setup-complete && echo done") == "done")
-    s.check(f"bmacd runs on {name} after the join", lambda: newcomer.on_host(
-        "systemctl is-active bmacd.service bmacd-web.service").split() == ["active", "active"])
+    # bmacd restarts itself once setup is complete.
+    s.check(f"bmacd runs on {name} after the join", lambda: m6.wait_until(lambda: newcomer.on_host(
+        "systemctl is-active bmacd.service bmacd-web.service || true").split() == ["active", "active"], 120))
 
 
 def check_members(s, dashboard: Dashboard, members: list, setup_keys: list[str]) -> None:

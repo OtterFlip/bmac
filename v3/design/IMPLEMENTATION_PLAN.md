@@ -384,6 +384,15 @@ collectors and the platform: `ProxmoxCluster` (`pvesh get /nodes`,
 `test_quick_state.py`) become adapter fixtures. Add raidz, special, log,
 cache, and spare `zpool status` fixtures captured in the lab.
 
+**As built:** `lab/lab scenario m2_cli` builds a raidz2 pool with a dedup,
+special, log, cache, and spare vdev on loop devices, healthy and with a
+member faulted, and with `BMAC_LAB_CAPTURE_FIXTURES=1` writes its
+`zpool status` and `zpool list` outputs to
+`crates/bmac-adapters/tests/fixtures/lab/`; both parse as v2 parses them.
+They showed that `zpool list -v -H` pads the class headings with spaces,
+not tabs, and lists a hot spare in use twice (the parser keeps the second,
+`INUSE` row, as v2 does; the sizes match).
+
 ### M1.8 `bmac-storage`: layout model and capacity (M8a)
 
 **Builds:** the layout model, validation, and capacity function from
@@ -662,6 +671,14 @@ with live VM state, and the host key is read with `qm guest exec ... cat
 **Tests:** fixtures from `test_setup_jump_ssh_access.py`; `bmac luks-enter`
 writes the root-only file and refuses symlinks.
 
+**As built (lab):** `m7_storage` types the passphrase with `bmac luks-enter`
+at the console. `lab/lab scenario m2_cli`, on the three-host cluster, checks
+`bmac status`, `bmac guests`, and `bmac capacity` on rpool and on a raidz2
+of four, where a filled sparse zvol of 256 MiB at 16 KiB blocks took
+294,060,032 bytes against the capacity function's 297,414,284. `bmac
+guest-host-key` needs a guest with its agent, so M4's end-to-end run
+checks it on the production VM it creates.
+
 ### M2.13 Interim lab bootstrap
 
 **Builds:** `lab/lab bootstrap`, a development-only command that makes the
@@ -908,6 +925,68 @@ the alias cleanup test in `test_remove_staging_vm.py`.
 from the Web Dashboard, including a staging VM created, patched, started,
 and removed, a production VM created with replication and HA, and a
 failover drill showing staging eviction.
+
+**As built (lab, in progress):** `m4_prod` runs prod.add from mox3's
+Dashboard on the `m7-cluster` stage. prod1 is installed unattended from
+the pinned Ubuntu 26.04.1 ISO on mox1, replicated to mox2 and mox3, under
+HA, and `bmac guest-host-key` attests its host key (owed by M2.12). The
+three hosts are then saved as the stage `m4-prod`, from which the
+production VM diagnostic passes. The run found:
+- **Two bugs in `add_prod_vm.sh`, both from v2.** After the installer's
+  poweroff, the script decided whether to start the VM from
+  `/cluster/resources`, which pvestatd refreshes every 10 seconds. It
+  still said running, so the VM was never started and the guest agent
+  wait ran out. The script now asks `qm status` on the owner. The guest
+  check also used a host variable (`PRIVATE_SUBNET_LENGTH`) inside its
+  quoted heredoc, where it is unset; it is now passed as an argument, and
+  a test checks that no guest script uses a host variable.
+- **A read race in bmac-pmxcfs.** While a job record was being replaced,
+  FUSE answered the stat from its cached attributes of the old file, which
+  the read then found gone, and the Dashboard got HTTP 500.
+  `Pmxcfs::read_json` now retries for up to 3 seconds when only the read
+  misses the file.
+- **The lab network.** QEMU's multicast sockets handed each VM its own
+  frames, so mox1's bridge learned prod1's MAC on its uplink and prod1
+  could not be reached from another host. The lab now switches its
+  segments itself.
+- **Fencing on a live restore.** Stepping a resumed host's clock fenced
+  it when it ran an HA service, because watchdog-mux times its clients by
+  the wall clock. The lab now stops the host's HA services around the step.
+- **A job that never ended.** staging.add's script finished, but its job
+  stayed running: the staging VM's QEMU, started through `mox_ssh` on the
+  local host, inherited the job's protocol pipe, so bmacd never saw the
+  end of its output. `mox_ssh` now closes the protocol descriptors for a
+  local command, and bmacd gives a script's output 10 seconds after the
+  script exits, then logs a warning and finishes the job without it.
+- **HTTP 503 for a removed guest.** Starting an operation on a guest the
+  registry no longer has answered "unavailable"; it is now "not found".
+- **Eviction is deferred.** prod1's start on a standby stops that host's
+  staging VM and marks it `cleanup_pending`; the cleanup worker, every 2
+  minutes, destroys it once replication has dropped its snapshot copies.
+  prod.change_owner refuses while staging VMs derived from the guest
+  remain, so the scenario removes them first. Its refusal named the wrong
+  phase; fixed.
+- **A replication race in `add_staging_vm.sh`, from v2.** It accepted any
+  replication run that started up to 5 seconds before its snapshot, by the
+  script host's clock, so a run without the snapshot could pass and the
+  GUID check then found it missing on a standby. The bound now comes from
+  the owner's clock, and a run counts only once the target has the
+  snapshot; otherwise the job is run again.
+- **Settling after a restore.** The scripts read node status from
+  `/nodes`, which pvestatd fills in after `/cluster/status` already shows
+  the node online; the scenario waits for every host's `/nodes` view. A
+  job's record can also name a request whose event is still being relayed
+  to the Dashboard's host, so the lab waits for the event.
+
+`m4_ops` passes from the `m4-prod` stage (57 checks, 29 minutes):
+staging.add on mox2 and mox3, each with its own name, address, hostname,
+and host key; the failover drill, where mox1 is powered off, HA restarts
+prod1 on mox2, its staging VM is stopped within 15 seconds while mox3's
+runs on, and the cleanup worker destroys it; staging.remove;
+prod.change_owner back to mox1; prod.change_placement removing mox3 and
+adding it back; prod.extend_disk, grown online in the guest; and
+prod.remove, after which prod1 is gone from the registry, HA,
+replication, and every host's pool. **M4's done-when is met in the lab.**
 
 ---
 
@@ -1624,6 +1703,14 @@ job resumes correctly after a reboot at every phase boundary (lab).
 blank VMs to a working cluster through the Deployer and Dashboard alone,
 with LUKS on one of them, boot drills passing, and `final_verify` green.
 
+**Status:** met on the SATA lab, except the boot drills, which were proved
+earlier on the first host (`m7_storage`) and are run again with
+`BMAC_LAB_DRILLS=1` in the final validation, with the SCSI and NVMe labs.
+`m7_storage` takes mox3 from blank through every setup phase with LUKS;
+`m7_cluster` joins mox1 and mox2 through the Dashboard, `final_verify`
+green on all three. The owed lab checks are done: M1.7 (`zpool` fixtures
+from the lab), M2.12 (`m2_cli`), and M4.5 (`m4_prod`, `m4_ops`).
+
 ---
 
 ## M8. Storage
@@ -1701,7 +1788,10 @@ M1.8 run again at the start of every phase.
   `command_replace_member` (1450–1571): replace only a missing or faulted
   member; for the boot vdev, copy partitions and set up the ESP first; don't
   wait for the resilver inside the job (it shows as a condition); return a
-  spare after replacement.
+  spare after replacement. Proxmox runs the ZFS event daemon, which puts a
+  hot spare in for a faulted member within a second (seen in the lab by
+  `m2_cli`), so the workflow finds the spare already resilvering in and
+  replaces the faulted member under it rather than offering the spare.
 - `storage.remove_vdev` from `decommission_disks.sh` (611 lines): refuse
   on layouts that don't allow removal; destroy related staging first;
   `fstrim` every production guest on or replicating to the host through the

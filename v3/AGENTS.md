@@ -100,12 +100,15 @@ There are three labs, and they run at the same time (each takes up to
   disks attached as SCSI or SATA. Their stages are saved live and resume in
   seconds, running, with the guest's clock set to now.
 
-Develop a stage that hasn't passed yet on the SATA lab, from the live
-stage of the one it builds on: each failed try restores that stage and goes
-again. For the final runs, run the scenario on all three labs concurrently,
-so the change is proved from each lab's stage, NVMe and SCSI included. When a change touches what
-a stage itself covers, run with `BMAC_LAB_FRESH=1` on every lab, which
-proves the stage from scratch and saves it again. Save the hosts of a
+Until the whole implementation plan is done, develop and prove every
+stage on the SATA lab alone, from the live stage of the one it builds on:
+each failed try restores that stage and goes again. Most bugs show on any
+one lab, and running all three each time slows development down. The SCSI
+and NVMe labs stay as they are, for a final validation across the storage
+types once the plan is finished: then every scenario runs on all three labs
+concurrently, from scratch (`BMAC_LAB_FRESH=1`). When a change touches what
+a stage itself covers, run it on the SATA lab with `BMAC_LAB_FRESH=1`,
+which proves the stage from scratch and saves it again. Save the hosts of a
 cluster together, one after another while nothing is changing, so they
 agree with each other when restored. The stages saved so far are
 listed in [`lab/README.md`](lab/README.md#stages).

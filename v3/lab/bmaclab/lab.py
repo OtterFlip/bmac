@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -40,6 +41,15 @@ def kvm_nested() -> bool:
         if flag.exists():
             return flag.read_text().strip() in ("Y", "1")
     return False
+
+
+def process_gone(pid: int) -> bool:
+    """A zombie has already closed its files."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    return stat.rsplit(")", 1)[1].split()[0] in ("Z", "X")
 
 
 class Lab:
@@ -81,6 +91,21 @@ class Lab:
 
     def exists(self) -> bool:
         return self.paths.state.exists()
+
+    @contextlib.contextmanager
+    def scenario_lock(self, name: str):
+        """Two scenarios on one lab would stop and restore each other's VMs."""
+        self.paths.root.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.paths.root / "scenario.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "r+") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise LabError(f"another scenario is running on this lab: {lock.read().strip()}") from None
+            lock.truncate(0)
+            lock.write(f"{name} (pid {os.getpid()})\n")
+            lock.flush()
+            yield
 
     def require_created(self) -> None:
         if not self.exists():
@@ -124,12 +149,16 @@ class Lab:
         self.require_created()
         self.require_tools()
         assert self.firmware is not None
+        # Before any VM, so their first frames have a switch to reach.
+        self.ensure_supervisor()
         for vm in vms:
             if self.running(vm):
                 if media:
                     raise LabError(f"{vm.name} is already running; use `lab/lab media` to change its CD")
                 continue
-            for stale in (self.paths.qmp(vm.name), self.paths.events(vm.name), self.paths.console(vm.name), self.paths.vnc(vm.name)):
+            nics = [self.paths.nic(vm.name, nic.network) for nic in vm.nics if nic.network != "uplink"]
+            for stale in (self.paths.qmp(vm.name), self.paths.events(vm.name), self.paths.console(vm.name),
+                          self.paths.vnc(vm.name), *nics):
                 stale.unlink(missing_ok=True)
             args = qemu.argv(self.topology, vm, self.paths, self.firmware[0], media, self.qemu_binary, no_reboot)
             try:
@@ -153,8 +182,11 @@ class Lab:
         self.ensure_supervisor()
 
     def wait_exit(self, vm: Vm, timeout: float) -> bool:
+        # A dying QEMU's cmdline reads empty while the kernel frees its
+        # memory, long before it lets go of its disk images' locks.
+        pid = self.pid(vm)
         deadline = time.monotonic() + timeout
-        while self.running(vm):
+        while pid is not None and not process_gone(pid):
             if time.monotonic() > deadline:
                 return False
             time.sleep(0.5)
@@ -196,7 +228,9 @@ class Lab:
         if not self.wait_exit(vm, 10):
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
-            self.wait_exit(vm, 10)
+            # A process with gigabytes of guest memory takes a while to go.
+            if not self.wait_exit(vm, 60):
+                raise LabError(f"{vm.name} (pid {pid}) is still running after SIGKILL")
         self.log(f"Powered off {vm.name}")
 
     def power(self, vm: Vm, action: str) -> None:
@@ -432,7 +466,9 @@ class Lab:
         shutil.rmtree(folder, ignore_errors=True)
         folder.mkdir(parents=True, mode=0o700)
         if live:
-            with Qmp(self.paths.qmp(vm.name), timeout=30) as monitor:
+            # QEMU's monitor doesn't answer until it has written the guest's
+            # memory, which takes minutes for a guest that has used it all.
+            with Qmp(self.paths.qmp(vm.name), timeout=STAGE_TIMEOUT) as monitor:
                 with contextlib.suppress(LabError):
                     self._snapshot_job(monitor, vm, "snapshot-delete", tag)
                 self._snapshot_job(monitor, vm, "snapshot-save", tag)

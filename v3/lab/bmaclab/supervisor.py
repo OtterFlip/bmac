@@ -12,15 +12,20 @@ once no lab VM has been running for a while.
 from __future__ import annotations
 
 import os
+import select
 import signal
+import socket
+import threading
 import time
 from pathlib import Path
 
-from .lab import Lab
+from .lab import LINKS, Lab
 from .qmp import Qmp, QmpError
 from .topology import Vm
 
 IDLE_EXIT_SECONDS = 15
+MAX_FRAME = 65536 + 64
+SWITCHED = tuple(network for network in LINKS if network != "uplink")
 
 
 def read_float(path: Path) -> float | None:
@@ -90,6 +95,50 @@ class Watch:
             self.drop()
 
 
+class Switch:
+    """The lab's management and VLAN networks. Every frame goes to each
+    other VM on its network and never back to its sender, the way a switch
+    floods it. QEMU's multicast socket also hands a VM its own frames, which
+    teaches a host's bridge that its guests' MACs are out on the uplink."""
+
+    def __init__(self, lab: Lab) -> None:
+        self.ports: dict[socket.socket, list[str]] = {}
+        for network in SWITCHED:
+            members = [str(lab.paths.nic(vm.name, network)) for vm in lab.topology.vms if vm.nic(network)]
+            if not members:
+                continue
+            path = lab.paths.switch(network)
+            path.unlink(missing_ok=True)
+            port = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            port.bind(str(path))
+            port.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
+            port.setblocking(False)
+            self.ports[port] = members
+
+    def serve(self, stopping: threading.Event) -> None:
+        while not stopping.is_set():
+            ready, _, _ = select.select(list(self.ports), [], [], 0.5)
+            for port in ready:
+                self.forward(port)
+
+    def forward(self, port: socket.socket) -> None:
+        for _ in range(256):
+            try:
+                frame, sender = port.recvfrom(MAX_FRAME)
+            except BlockingIOError:
+                return
+            for member in self.ports[port]:
+                if member != sender:
+                    try:
+                        port.sendto(frame, member)
+                    except OSError:  # stopped, or too far behind: dropped, as a switch would
+                        pass
+
+    def close(self) -> None:
+        for port in self.ports:
+            port.close()
+
+
 def supervise(lab: Lab) -> None:
     paths = lab.paths
     paths.supervisor_pid.write_text(f"{os.getpid()}\n")
@@ -101,6 +150,9 @@ def supervise(lab: Lab) -> None:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    switch = Switch(lab)
+    switched = threading.Event()
+    threading.Thread(target=switch.serve, args=(switched,), daemon=True).start()
     watches = [Watch(lab, vm) for vm in lab.topology.vms]
     idle_since: float | None = None
     try:
@@ -115,8 +167,10 @@ def supervise(lab: Lab) -> None:
                 break
             time.sleep(0.1)
     finally:
+        switched.set()
         for watch in watches:
             watch.drop()
+        switch.close()
         if read_float(paths.supervisor_pid) == os.getpid():
             paths.supervisor_pid.unlink(missing_ok=True)
 

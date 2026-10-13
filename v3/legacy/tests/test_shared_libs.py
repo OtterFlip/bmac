@@ -2586,6 +2586,19 @@ esac
         self.assertFalse(sentinel.exists())
         self.assertEqual(completed.stdout, f"in <{malicious}>\n")
 
+    def test_a_local_command_does_not_inherit_a_json_jobs_protocol_pipes(self) -> None:
+        completed = self.run_mox_ssh(
+            "exec 7>/dev/null 8</dev/null\n"
+            "BMAC_UI_EVENT_FD=7 BMAC_UI_INPUT_FD=8\n"
+            "mox_ssh mox2 bash -c 'ls /proc/$$/fd | sort -n | tr \"\\n\" \" \"'\n"
+            "echo; ls /proc/$$/fd | grep -cx '[78]'\n",
+            BMAC_HOST="mox2",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        child, kept = completed.stdout.splitlines()
+        self.assertFalse({"7", "8"} & set(child.split()), child)
+        self.assertEqual(kept, "2")
+
     def test_mox_copy_installs_the_file_complete_and_at_its_mode(self) -> None:
         source = Path(self.temporary.name) / "source file"
         source.write_text("payload $(not evaluated)\n", encoding="utf-8")

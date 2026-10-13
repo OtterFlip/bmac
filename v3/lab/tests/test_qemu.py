@@ -77,14 +77,15 @@ class QemuArgvTest(unittest.TestCase):
             if disk.bus in ("nvme", "sata"):
                 self.assertEqual(len([d for d in sata if f"serial={disk.serial},wwn={disk.wwn}" in d]), 1)
 
-    def test_nics_use_user_networking_and_loopback_multicast(self) -> None:
+    def test_nics_use_user_networking_and_the_supervisors_switch(self) -> None:
         mox2 = self.topology.vm("mox2")
         netdevs = option_values(self.argv("mox2"), "-netdev")
         self.assertTrue(netdevs[0].startswith("user,id=uplink,hostname=mox2,"))
         self.assertIn(f"hostfwd=tcp:127.0.0.1:{mox2.ports['ssh']}-:22", netdevs[0])
         self.assertIn(f"hostfwd=tcp:127.0.0.1:{mox2.ports['web']}-:8443", netdevs[0])
-        self.assertEqual(netdevs[1], "socket,id=mgmt,mcast=230.0.66.1:23000,localaddr=127.0.0.1")
-        self.assertEqual(netdevs[2], "socket,id=vlan,mcast=230.0.66.1:23001,localaddr=127.0.0.1")
+        for netdev, network in zip(netdevs[1:], ("mgmt", "vlan")):
+            self.assertEqual(netdev, f"dgram,id={network},local.type=unix,local.path={self.paths.nic('mox2', network)},"
+                                     f"remote.type=unix,remote.path={self.paths.switch(network)}")
         devices = option_values(self.argv("mox2"), "-device")
         self.assertIn(f"virtio-net-pci,netdev=vlan,mac={mox2.nic('vlan').mac},id=nic-vlan,speed=10000,duplex=full", devices)
 

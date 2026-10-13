@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -401,6 +403,42 @@ assert_not_referenced_by_vm
                 "get /nodes/mox1/qemu/300/config --output-format json",
                 calls.read_text(encoding="utf-8"),
             )
+
+    def test_a_replication_run_without_the_snapshot_is_run_again(self) -> None:
+        text = CREATE_SCRIPT.read_text(encoding="utf-8")
+        functions = "".join(
+            re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", text, re.M | re.S).group(0)
+            for name in ("replication_status_target", "snapshot_replicated_to", "trigger_and_wait_for_replication")
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = Path(tmp) / "calls"
+            stubs = (
+                f'CALLS={shlex.quote(str(calls))}\n'
+                'SOURCE_VOLUMES=(local-zfs:vm-100-disk-0 local-zfs:vm-100-disk-1)\n'
+                'SNAPSHOT_NAME=stg-base; SOURCE_OWNER=mox1; REPLICATION_JOBS=(100-0)\n'
+                'REPLICATION_TIMEOUT_SECONDS=60\n'
+                'require_source_unchanged() { :; }; sleep() { :; }\n'
+                'info() { echo "info: $*"; }; die() { echo "died: $*"; exit 1; }\n'
+                'volume_dataset_on_node() { echo "rpool/data/${2#*:}"; }\n'
+                'pvesh_get() { echo \'{"id": "100-0", "target": "mox2", "last_sync": 1000, "fail_count": 0}\'; }\n'
+                'node_exec() {\n'
+                '  echo "$*" >>"$CALLS"\n'
+                '  case "$2" in\n'
+                '    date) echo 1000 ;;\n'
+                # The first run that reports success did not carry the snapshot.
+                '    zfs) (($(grep -c " zfs list " "$CALLS") > 1)) ;;\n'
+                '  esac\n'
+                '}\n'
+            )
+            done = subprocess.run(["bash", "-c", "set -Eeuo pipefail\n" + stubs + functions
+                                   + "trigger_and_wait_for_replication"],
+                                  capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.assertIn("ran without stg-base; running it again", done.stdout)
+            self.assertIn("Snapshot replication job 100-0 completed to mox2", done.stdout)
+            log = calls.read_text(encoding="utf-8")
+            self.assertEqual(log.count("pvesr schedule-now 100-0"), 2, log)
+            self.assertIn("mox2 zfs list -H -o name rpool/data/vm-100-disk-1@stg-base", log)
 
     def test_creation_order_and_rollback_guards_are_explicit(self) -> None:
         text = CREATE_SCRIPT.read_text(encoding="utf-8")

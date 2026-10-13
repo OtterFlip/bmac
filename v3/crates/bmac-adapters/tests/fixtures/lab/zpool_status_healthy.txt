@@ -1,0 +1,33 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+  pool: fixture
+ state: ONLINE
+config:
+
+	NAME            STATE     READ WRITE CKSUM
+	fixture         ONLINE       0     0     0
+	  raidz2-0      ONLINE       0     0     0
+	    /dev/loop0  ONLINE       0     0     0
+	    /dev/loop1  ONLINE       0     0     0
+	    /dev/loop2  ONLINE       0     0     0
+	    /dev/loop3  ONLINE       0     0     0
+	dedup	
+	  mirror-1      ONLINE       0     0     0
+	    /dev/loop4  ONLINE       0     0     0
+	    /dev/loop5  ONLINE       0     0     0
+	special	
+	  mirror-2      ONLINE       0     0     0
+	    /dev/loop6  ONLINE       0     0     0
+	    /dev/loop7  ONLINE       0     0     0
+	logs	
+	  mirror-3      ONLINE       0     0     0
+	    /dev/loop8  ONLINE       0     0     0
+	    /dev/loop9  ONLINE       0     0     0
+	cache
+	  /dev/loop10   ONLINE       0     0     0
+	spares
+	  /dev/loop11   AVAIL   
+	  /dev/loop12   AVAIL   
+
+errors: No known data errors

@@ -397,6 +397,8 @@ fn typed_records_match_what_v2_reports() {
         registry.orchestration(prod(3)).unwrap_err().to_string(),
         "resource does not exist: prod3"
     );
+    assert!(registry.find_resource(prod(3)).unwrap().is_none());
+    assert!(registry.find_resource(prod(1)).unwrap().is_some());
 
     assert_eq!(
         as_json(&registry.host_slots().unwrap()),

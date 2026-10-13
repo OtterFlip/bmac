@@ -1666,27 +1666,48 @@ print(target)
 PY
 }
 
+snapshot_replicated_to() {
+  local node="$1" volume dataset
+  for volume in "${SOURCE_VOLUMES[@]}"; do
+    dataset="$(volume_dataset_on_node "$node" "$volume" 2>/dev/null)" || return 1
+    node_exec "$node" zfs list -H -o name "${dataset}@${SNAPSHOT_NAME}" >/dev/null 2>&1 ||
+      return 1
+  done
+}
+
 trigger_and_wait_for_replication() {
   CURRENT_PHASE="replicating staging-base snapshot"
   require_source_unchanged
-  local minimum_sync=$(( $(date +%s) - 5 )) job
+  # last_sync is when a run started, on the owner's clock; one that started
+  # in the same second as the snapshot may not carry it.
+  local minimum_sync job
+  minimum_sync="$(node_exec "$SOURCE_OWNER" date +%s)" ||
+    die "Could not read the clock of $SOURCE_OWNER"
   for job in "${REPLICATION_JOBS[@]}"; do
     node_exec "$SOURCE_OWNER" pvesr schedule-now "$job"
   done
 
   local deadline=$((SECONDS + REPLICATION_TIMEOUT_SECONDS))
-  local status target
+  local status target since
   for job in "${REPLICATION_JOBS[@]}"; do
     target=""
+    since="$minimum_sync"
     while ((SECONDS < deadline)); do
       status="$(pvesh_get \
         "/nodes/${SOURCE_OWNER}/replication/${job}/status" 2>/dev/null)" || {
         sleep 10
         continue
       }
-      target="$(replication_status_target "$status" "$job" "$minimum_sync" 2>/dev/null)" ||
+      target="$(replication_status_target "$status" "$job" "$since" 2>/dev/null)" ||
         target=""
-      [[ -z "$target" ]] || break
+      if [[ -n "$target" ]]; then
+        snapshot_replicated_to "$target" && break
+        info "Replication job $job ran without $SNAPSHOT_NAME; running it again"
+        since="$(node_exec "$SOURCE_OWNER" date +%s)" ||
+          die "Could not read the clock of $SOURCE_OWNER"
+        node_exec "$SOURCE_OWNER" pvesr schedule-now "$job"
+        target=""
+      fi
       sleep 10
     done
     [[ -n "$target" ]] ||

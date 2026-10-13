@@ -47,9 +47,10 @@ pub fn holds_duty(cluster: &dyn ClusterView, host: HostSlot) -> Result<(), Strin
 pub trait ClusterView: Send + Sync {
     fn membership(&self) -> Result<Membership, String>;
     /// The host whose node directory holds the guest's config, or `None`
-    /// when no host has it.
+    /// when no host has it or the registry has no such guest.
     fn guest_owner(&self, guest: GuestName) -> Result<Option<HostSlot>, String>;
-    /// The production guest's placement hosts, from the registry.
+    /// The production guest's placement hosts, from the registry; none when
+    /// the registry has no such guest.
     fn placement(&self, guest: GuestName) -> Result<Vec<HostSlot>, String>;
 }
 
@@ -118,10 +119,13 @@ impl ClusterView for PveCluster {
     }
 
     fn guest_owner(&self, guest: GuestName) -> Result<Option<HostSlot>, String> {
-        let resource = self
+        let Some(resource) = self
             .registry
-            .resource(guest)
-            .map_err(|e| format!("{guest}: {e}"))?;
+            .find_resource(guest)
+            .map_err(|e| format!("{guest}: {e}"))?
+        else {
+            return Ok(None);
+        };
         let config = format!("{}.conf", resource.vmid);
         for host in HostSlot::all() {
             let path = self
@@ -138,11 +142,12 @@ impl ClusterView for PveCluster {
     }
 
     fn placement(&self, guest: GuestName) -> Result<Vec<HostSlot>, String> {
-        let resource = self
+        Ok(self
             .registry
-            .resource(guest)
-            .map_err(|e| format!("{guest}: {e}"))?;
-        Ok(resource.placement)
+            .find_resource(guest)
+            .map_err(|e| format!("{guest}: {e}"))?
+            .map(|r| r.placement)
+            .unwrap_or_default())
     }
 }
 

@@ -377,6 +377,12 @@ fn targets_follow_each_operation_rule() {
     let (code, _) =
         target(&mox1, "prod.extend_disk", json!({"resource": "prod9"}), "y").unwrap_err();
     assert_eq!(code, ErrorCode::NotFound);
+    let (code, _) = target(&mox1, "staging.add", json!({"source": "prod9"}), "z").unwrap_err();
+    assert_eq!(
+        code,
+        ErrorCode::NotFound,
+        "a guest the registry doesn't have"
+    );
 }
 
 #[test]

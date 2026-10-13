@@ -179,6 +179,39 @@ fn simulated_pmxcfs_uses_supported_atomic_file_and_lock_operations() {
     assert!(simulated.regular_replacements.load(Ordering::SeqCst) >= 3);
 }
 
+/// Misses the file `misses` times, as FUSE does when its cached attributes
+/// are of a file pmxcfs has just replaced.
+struct Replacing {
+    misses: Mutex<usize>,
+}
+
+impl FsOps for Replacing {
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let mut misses = self.misses.lock().unwrap();
+        if *misses > 0 {
+            *misses -= 1;
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        RealFs.read(path)
+    }
+}
+
+#[test]
+fn a_record_replaced_between_its_stat_and_its_read_is_read_once_it_settles() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("job.json");
+    std::fs::write(&path, br#"{"generation": 2}"#).unwrap();
+    let ops = Arc::new(Replacing {
+        misses: Mutex::new(2),
+    });
+    let pmxcfs = Pmxcfs::new(temporary.path(), ops.clone());
+    assert_eq!(
+        pmxcfs.read_json(&path, "job record").unwrap(),
+        json!({"generation": 2})
+    );
+    assert_eq!(*ops.misses.lock().unwrap(), 0);
+}
+
 #[test]
 fn simulated_pmxcfs_stale_break_uses_safe_unlock_request() {
     let temporary = tempfile::tempdir().unwrap();

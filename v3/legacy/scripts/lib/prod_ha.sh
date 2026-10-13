@@ -420,6 +420,7 @@ PY
 }
 
 prod_refuse_staging_dependents() {
+  CURRENT_PHASE="checking for staging VMs derived from $RESOURCE_NAME"
   ((${#STAGING_DEPENDENTS[@]} == 0)) && return 0
   die "$RESOURCE_NAME has staging VMs derived from it (${STAGING_DEPENDENTS[*]}); destroy them with scripts/user_callable/guests/staging/remove_staging_vm.sh first"
 }

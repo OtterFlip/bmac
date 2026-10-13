@@ -39,6 +39,17 @@ class HostSetupScriptTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn("Usage: verify_host.sh luks|none", result.stderr)
 
+    def test_ssh_never_reads_a_loops_input(self) -> None:
+        # An ssh in a `while read` loop otherwise swallows the rest of the
+        # list, and the loop silently stops after one remote host.
+        for script in (ORCHESTRATE, VERIFY):
+            with self.subTest(script=script.name):
+                for number, line in enumerate(script.read_text(encoding="utf-8").splitlines(), 1):
+                    words = line.split()
+                    if words[:1] == ["ssh"]:
+                        self.assertTrue("-n" in words or "</dev/null" in line,
+                                        f"{script.name}:{number}: {line.strip()}")
+
     def test_no_v2_names_remain(self) -> None:
         for script in (ORCHESTRATE, VERIFY):
             with self.subTest(script=script.name):

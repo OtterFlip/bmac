@@ -1,0 +1,28 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+fixture	6039797760	606470144	5433327616	DEGRADED
+	raidz2-0	4026531840	603979776	3422552064	DEGRADED
+	/dev/loop0	1073741824	-	-	ONLINE
+	/dev/loop1	1073741824	-	-	ONLINE
+	spare-2	-	-	-	DEGRADED
+	/dev/loop2	1073741824	-	-	FAULTED
+	/dev/loop11	1073741824	-	-	ONLINE
+	/dev/loop3	1073741824	-	-	ONLINE
+dedup                       -          -           -         -
+	mirror-1	1006632960	0	1006632960	ONLINE
+	/dev/loop4	1073741824	-	-	ONLINE
+	/dev/loop5	1073741824	-	-	ONLINE
+special                     -          -           -         -
+	mirror-2	1006632960	2490368	1004142592	ONLINE
+	/dev/loop6	1073741824	-	-	ONLINE
+	/dev/loop7	1073741824	-	-	ONLINE
+logs                        -          -           -         -
+	mirror-3	1006632960	131072	1006501888	ONLINE
+	/dev/loop8	1073741824	-	-	ONLINE
+	/dev/loop9	1073741824	-	-	ONLINE
+cache                       -          -           -         -
+	/dev/loop10	1073741824	18440192	1050578944	ONLINE
+spare                       -          -           -         -
+	/dev/loop11	1073741824	-	-	INUSE
+	/dev/loop12	1073741824	-	-	AVAIL

@@ -361,6 +361,79 @@ fn status_parse_matches_v2_for_every_vdev_class() {
     );
 }
 
+/// Captured from Proxmox's OpenZFS by `lab/lab scenario m2_cli` with
+/// `BMAC_LAB_CAPTURE_FIXTURES=1`: a raidz2 of four with every other vdev
+/// class, healthy, and with a member faulted and the event daemon's hot
+/// spare resilvered in.
+const LAB_STATUS_HEALTHY: &str = include_str!("fixtures/lab/zpool_status_healthy.txt");
+const LAB_STATUS_DEGRADED: &str = include_str!("fixtures/lab/zpool_status_degraded.txt");
+const LAB_LIST_HEALTHY: &str = include_str!("fixtures/lab/zpool_list_healthy.txt");
+const LAB_LIST_DEGRADED: &str = include_str!("fixtures/lab/zpool_list_degraded.txt");
+
+/// The command's output, after the license header the capture puts first.
+fn captured(file: &str) -> &str {
+    file.split_once("\n\n")
+        .expect("a header, then the output")
+        .1
+}
+
+#[test]
+fn lab_captured_pools_parse_as_v2_parses_them() {
+    let texts = [captured(LAB_STATUS_HEALTHY), captured(LAB_STATUS_DEGRADED)];
+    let expected = python(PARSE_STATUS, &json!(texts));
+    for (text, expected) in texts.iter().zip(expected.as_array().unwrap()) {
+        let ours = zpool::parse_status(text).unwrap();
+        assert_eq!(&v2_shape(&ours), expected, "{text}");
+        assert_eq!(
+            ours.sections.iter().map(|s| s.class).collect::<Vec<_>>(),
+            [
+                VdevClass::Data,
+                VdevClass::Dedup,
+                VdevClass::Special,
+                VdevClass::Logs,
+                VdevClass::Cache,
+                VdevClass::Spares
+            ]
+        );
+        let data = ours.vdevs(VdevClass::Data);
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].vdev_type(), "raidz2");
+        assert_eq!(
+            data[0].children.len(),
+            4,
+            "a spare group stands for one member"
+        );
+    }
+
+    let healthy = zpool::parse_status(texts[0]).unwrap();
+    assert!(healthy.findings(&no_disk, None).is_empty());
+    let degraded = zpool::parse_status(texts[1]).unwrap();
+    assert_eq!(
+        degraded.findings(&no_disk, None),
+        [
+            "pool fixture is DEGRADED",
+            "fixture member /dev/loop2 (?) is FAULTED (external device fault)",
+        ],
+        "the spare standing in and the INUSE spare are fine"
+    );
+
+    let rows = zpool::parse_list(captured(LAB_LIST_HEALTHY));
+    assert_eq!(rows["fixture"].health.as_deref(), Some("ONLINE"));
+    assert!(rows["fixture"].size.is_some());
+    assert_eq!(rows["/dev/loop10"].size, Some(1 << 30), "the cache device");
+    assert!(!rows.contains_key("dedup"), "class headings are not rows");
+    let rows = zpool::parse_list(captured(LAB_LIST_DEGRADED));
+    assert_eq!(rows["/dev/loop2"].health.as_deref(), Some("FAULTED"));
+    assert_eq!(rows["spare-2"].health.as_deref(), Some("DEGRADED"));
+    assert_eq!(
+        rows["/dev/loop11"].health.as_deref(),
+        Some("INUSE"),
+        "the spare's row under `spare` comes last"
+    );
+    assert_eq!(rows["/dev/loop11"].size, Some(1 << 30));
+    assert_eq!(rows["/dev/loop12"].health.as_deref(), Some("AVAIL"));
+}
+
 fn no_disk(_: &str) -> Option<String> {
     None
 }

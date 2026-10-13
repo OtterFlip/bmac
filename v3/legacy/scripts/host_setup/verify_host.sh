@@ -111,8 +111,12 @@ vip_state() {
     return
   fi
   pin="/etc/pve/nodes/${node}/ssh_known_hosts"
-  [[ -s "$pin" && ! -L "$pin" ]] || return 1
-  ssh -o BatchMode=yes -o ClearAllForwardings=yes \
+  if [[ ! -s "$pin" || -L "$pin" ]]; then
+    printf '%s has no SSH host key pin in %s.\n' "$node" "$pin" >&2
+    return 1
+  fi
+  # -n: the caller's loop reads the node list from stdin.
+  ssh -n -o BatchMode=yes -o ClearAllForwardings=yes \
     -o StrictHostKeyChecking=yes -o CheckHostIP=no \
     -o "HostKeyAlias=${node}" -o "UserKnownHostsFile=${pin}" \
     -o GlobalKnownHostsFile=none "root@${node}.${PROXMOX_INTERNAL_DOMAIN}" "$probe"

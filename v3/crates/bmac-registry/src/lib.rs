@@ -177,6 +177,15 @@ impl Registry {
         validate_resource(&self.read(&path, "resource record")?, &policy)
     }
 
+    /// The guest's resource, or None when it has no record.
+    pub fn find_resource(&self, name: GuestName) -> Result<Option<Resource>> {
+        let path = self.root.join("resources").join(format!("{name}.json"));
+        match path.symlink_metadata() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            _ => self.resource(name).map(Some),
+        }
+    }
+
     pub fn cleanup_records(&self) -> Result<Vec<CleanupRecord>> {
         let mut records = self.named(
             "deferred-cleanup",

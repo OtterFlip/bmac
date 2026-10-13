@@ -110,7 +110,7 @@ EOF
   local rules_json position managed_rule_count
   rules_json="$(pvesh get "/nodes/$host_id/firewall/rules" --output-format json)"
   while IFS= read -r position; do
-    pvesh delete "/nodes/$host_id/firewall/rules/$position"
+    pvesh delete "/nodes/$host_id/firewall/rules/$position" </dev/null
   done < <(
     jq -r '
       [.[] | select(

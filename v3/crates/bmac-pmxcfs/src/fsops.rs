@@ -1,8 +1,9 @@
 // Copyright (c) 2026 BEENTHERE VENTURES, INC.
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The mutating filesystem calls, behind a trait so tests can stand in for
-//! pmxcfs and refuse what it doesn't support.
+//! The mutating filesystem calls, and reads, behind a trait so tests can
+//! stand in for pmxcfs: refuse what it doesn't support, and miss a file it
+//! is replacing.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -50,6 +51,10 @@ pub trait FsOps: Send + Sync {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         std::fs::rename(from, to)
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        std::fs::read(path)
     }
 
     /// Sets a path's access and modification times to the epoch, which

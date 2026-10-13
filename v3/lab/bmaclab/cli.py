@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import os
 import select
+import signal
 import socket
 import subprocess
 import sys
@@ -155,6 +156,10 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
 
+def interrupted(signum, frame) -> None:
+    raise KeyboardInterrupt
+
+
 def dispatch(lab: Lab, args: argparse.Namespace) -> int:
     t = lab.topology
     command = args.command
@@ -242,5 +247,8 @@ def dispatch(lab: Lab, args: argparse.Namespace) -> int:
     elif command == "scenario":
         if lab.exists():
             lab.require_created()
-        return scenario.run(lab, args.name)
+        # Unwinds like Ctrl-C, so the scenario puts its VMs back as they were.
+        signal.signal(signal.SIGTERM, interrupted)
+        with lab.scenario_lock(args.name):
+            return scenario.run(lab, args.name)
     return 0

@@ -110,8 +110,17 @@ class Paths:
     def last_reset(self, name: str) -> Path:
         return self.vm(name) / "last-reset"
 
+    def nic(self, name: str, network: str) -> Path:
+        """Where the VM's NIC on network sends from and receives at."""
+        return self._socket(name, f"net-{network}.sock")
+
+    def switch(self, network: str) -> Path:
+        return self._checked(self.root / f"switch-{network}.sock")
+
     def _socket(self, name: str, leaf: str) -> Path:
-        path = self.vm(name) / leaf
+        return self._checked(self.vm(name) / leaf)
+
+    def _checked(self, path: Path) -> Path:
         if len(os.fsencode(path)) > MAX_SOCKET_PATH:
             raise ValueError(f"{path} is too long for a Unix socket; set BMAC_LAB_DIR to a shorter folder")
         return path

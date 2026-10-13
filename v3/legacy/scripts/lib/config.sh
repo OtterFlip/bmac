@@ -1054,7 +1054,13 @@ mox_ssh() {
   mox_is_local "$host" || local_status=$?
   ((local_status != 2)) || return 2
   if ((local_status == 0)); then
-    "$@"
+    # A daemon the command starts, such as a VM's QEMU, would otherwise hold
+    # a JSON-mode job's protocol pipes, and the job would never end.
+    if [[ "${BMAC_UI_EVENT_FD:-}" =~ ^[0-9]+$ && "${BMAC_UI_INPUT_FD:-}" =~ ^[0-9]+$ ]]; then
+      "$@" {BMAC_UI_EVENT_FD}>&- {BMAC_UI_INPUT_FD}>&-
+    else
+      "$@"
+    fi
     return
   fi
   _quote_remote_argv "$@" || return

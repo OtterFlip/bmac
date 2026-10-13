@@ -15,6 +15,11 @@ OVMF_CANDIDATES = (
     ("/usr/share/edk2/x64/OVMF_CODE.4m.fd", "/usr/share/edk2/x64/OVMF_VARS.4m.fd"),
     ("/usr/share/edk2/ovmf/OVMF_CODE.fd", "/usr/share/edk2/ovmf/OVMF_VARS.fd"),
 )
+# no-flush: a live save writes the guest's memory into the image, and with
+# host flushes each cluster it allocates waits on the host filesystem's
+# journal, so an 8 GiB guest took over ten minutes. Without them a host
+# crash can corrupt a lab image; BMAC_LAB_FRESH=1 rebuilds it.
+DISK_OPTIONS = "discard=unmap,cache.no-flush=on"
 
 
 def find_firmware(candidates=OVMF_CANDIDATES) -> tuple[Path, Path] | None:
@@ -59,7 +64,9 @@ def argv(topology: Topology, vm: Vm, paths: Paths, firmware_code: Path, media: P
         if nic.network == "uplink":
             netdev = f"user,id={nic.network},hostname={vm.name},{_hostfwd(vm)}"
         else:
-            netdev = f"socket,id={nic.network},mcast={topology.mcast_group}:{topology.mcast_ports[nic.network]},localaddr=127.0.0.1"
+            # The supervisor's switch (supervisor.Switch) carries the frames.
+            netdev = (f"dgram,id={nic.network},local.type=unix,local.path={paths.nic(vm.name, nic.network)},"
+                      f"remote.type=unix,remote.path={paths.switch(nic.network)}")
         device = f"virtio-net-pci,netdev={nic.network},mac={nic.mac},id={nic.id}"
         if nic.network == "vlan":
             # The private VLAN is 10 Gbps, which host setup requires.
@@ -84,7 +91,7 @@ def argv(topology: Topology, vm: Vm, paths: Paths, firmware_code: Path, media: P
     sata_port = 2
     for disk in vm.disks:
         drive = f"d-{disk.id}"
-        args += ["-drive", f"if=none,id={drive},format=qcow2,file={paths.disk(disk)},discard=unmap"]
+        args += ["-drive", f"if=none,id={drive},format=qcow2,file={paths.disk(disk)},{DISK_OPTIONS}"]
         if bus(disk) == "nvme":
             # One controller per disk, like separate physical NVMe drives.
             args += [

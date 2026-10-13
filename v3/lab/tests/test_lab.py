@@ -9,9 +9,13 @@ import io
 import json
 import os
 import shutil
+import socket
+import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,9 +23,9 @@ from unittest import mock
 LAB = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(LAB))
 
-from bmaclab.lab import Lab, LabError  # noqa: E402
+from bmaclab.lab import Lab, LabError, process_gone  # noqa: E402
 from bmaclab.paths import Paths  # noqa: E402
-from bmaclab.supervisor import Watch  # noqa: E402
+from bmaclab.supervisor import Switch, Watch  # noqa: E402
 from bmaclab.topology import load  # noqa: E402
 
 # Keeps each disk's snapshot tags in <disk>.tags so `-l` can list them.
@@ -82,6 +86,79 @@ class LabTestCase(unittest.TestCase):
             for disk in vm.disks:
                 self.paths.disk(disk).write_text(f"{disk.id} v1")
         self.paths.state.write_text(json.dumps({"topology_sha256": self.lab.topology_digest}))
+
+
+class ProcessGoneTest(unittest.TestCase):
+    def test_a_live_process_is_there_and_a_zombie_or_reaped_one_is_gone(self) -> None:
+        self.assertFalse(process_gone(os.getpid()))
+        child = subprocess.Popen(["true"])
+        deadline = time.monotonic() + 10
+        while not process_gone(child.pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(process_gone(child.pid))
+        child.wait()
+        self.assertTrue(process_gone(child.pid))
+
+
+class ScenarioLockTest(LabTestCase):
+    def test_a_second_scenario_on_the_lab_is_refused_until_the_first_ends(self) -> None:
+        other = Lab(self.topology, self.paths, log=lambda line: None)
+        with self.lab.scenario_lock("m7_cluster"):
+            with self.assertRaisesRegex(LabError, rf"another scenario is running on this lab: m7_cluster \(pid {os.getpid()}\)"):
+                with other.scenario_lock("m7_join"):
+                    pass
+        with other.scenario_lock("m7_join"):
+            pass
+
+    def test_sigterm_unwinds_a_scenario_so_its_cleanup_runs(self) -> None:
+        root = self.paths.root.parent
+        script = root / "sleepy.py"
+        script.write_text(textwrap.dedent(f"""\
+            import time
+            from pathlib import Path
+            def run(s):
+                try:
+                    Path({str(root / "started")!r}).touch()
+                    time.sleep(60)
+                finally:
+                    Path({str(root / "cleaned")!r}).touch()
+        """))
+        child = subprocess.Popen([sys.executable, str(LAB / "lab"), "--config", str(self.config), "scenario", str(script)],
+                                 env={**os.environ, "BMAC_LAB_DIR": str(root / "empty-lab")},
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(child.kill)
+        deadline = time.monotonic() + 30
+        while not (root / "started").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        child.terminate()
+        self.assertEqual(child.wait(timeout=30), 130)
+        self.assertTrue((root / "cleaned").exists())
+
+
+class SwitchTest(LabTestCase):
+    def test_a_frame_reaches_every_other_vm_on_its_network_and_not_its_sender(self) -> None:
+        members = [vm.name for vm in self.topology.vms if vm.nic("vlan")]
+        self.assertGreaterEqual(len(members), 3)
+        nics = {}
+        for name in members:
+            nic = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            nic.bind(str(self.paths.nic(name, "vlan")))
+            nic.settimeout(5)
+            self.addCleanup(nic.close)
+            nics[name] = nic
+        switch = Switch(self.lab)
+        self.addCleanup(switch.close)
+        stopping = threading.Event()
+        self.addCleanup(stopping.set)
+        threading.Thread(target=switch.serve, args=(stopping,), daemon=True).start()
+        sender, *others = members
+        frame = bytes.fromhex("ffffffffffff525400000001") + b"\x08\x06" + b"arp" * 20
+        nics[sender].sendto(frame, str(self.paths.switch("vlan")))
+        for name in others:
+            self.assertEqual(nics[name].recv(65536), frame, name)
+        nics[sender].settimeout(0.5)
+        with self.assertRaises(TimeoutError):
+            nics[sender].recv(65536)
 
 
 class SnapshotTest(LabTestCase):

@@ -34,6 +34,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 
 use crate::auth::Clock;
+use crate::log;
 
 /// Where adapted scripts and their protocol library are installed.
 pub const LEGACY_ROOT: &str = "/usr/lib/bmac/legacy";
@@ -106,6 +107,9 @@ pub struct SupervisorConfig {
     /// `BMAC_WORK_DIR` in its environment.
     pub work_root: PathBuf,
     pub force_kill_after: Duration,
+    /// How long the output may stay open after the script exits: a process
+    /// it left running, such as a VM's QEMU, can hold it open for good.
+    pub output_drain: Duration,
     pub clock: Clock,
     /// Whether a next step's operation ID names an operation.
     pub known_operation: Arc<dyn Fn(&str) -> bool + Send + Sync>,
@@ -129,6 +133,7 @@ impl SupervisorConfig {
             ],
             work_root: PathBuf::from(WORK_ROOT),
             force_kill_after: Duration::from_secs(10),
+            output_drain: Duration::from_secs(10),
             clock,
             known_operation,
             prepare: None,
@@ -459,10 +464,22 @@ impl Supervisor {
             }
         });
         let waiter = Arc::clone(self);
+        let drain = self.config.output_drain;
         tokio::spawn(async move {
+            let (mut out_task, mut err_task) = (out_task, err_task);
             let status = child.wait().await;
-            let _ = out_task.await;
-            let _ = err_task.await;
+            let drained = tokio::time::timeout(drain, async {
+                let _ = (&mut out_task).await;
+                let _ = (&mut err_task).await;
+            })
+            .await;
+            if drained.is_err() {
+                out_task.abort();
+                err_task.abort();
+                log::warning(&format!(
+                    "job {job}: a process the script left running still holds its output; finishing without it"
+                ));
+            }
             waiter.finalize(job, status.ok());
         });
         Ok(outcome_rx)

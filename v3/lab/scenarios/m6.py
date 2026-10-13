@@ -32,15 +32,18 @@ from pathlib import Path
 
 from bmaclab import tailnet
 from bmaclab.bootstrap import V3, conf_files
-from bmaclab.lab import BOOT_TIMEOUT
+from bmaclab.lab import BOOT_TIMEOUT, LabError
+from bmaclab.qmp import QmpError
 from bmaclab.scenario import load
 
 DESCRIPTION = "the Deployer installs mox3 from discovery through the host ISO to a matching Dashboard certificate and pinned SSH, with the development bmacd package"
 HOST_KEY = "TAILSCALE_LAB_AUTH_KEY_PROXMOX_HOST"
 DISCOVERY_KEY = "TAILSCALE_LAB_AUTH_KEY_DISCOVERY"
 CHECKPOINT = "before-m6"
+# A stage is saved shut down only after this many live tries fail.
+LIVE_SAVE_ATTEMPTS = 2
 # Stage fields a host restored from the stage keeps into the stages saved from it.
-CARRIED = ("luks_passphrase",)
+CARRIED = ("luks_passphrase", "prod_root_password")
 INSTALL_TIMEOUT = 2400
 TASK_TIMEOUT = 5400
 PACKAGES = V3 / "target" / "deployer-bundle" / "packages"
@@ -172,8 +175,20 @@ class Installed:
         other is shut down for the save and started again."""
         self.s.note(f"saving {self.vm.name} as stage {name}" + (" live" if live else ""))
         meta = {"password": self.password, "package_sha256": package_digest(), **self.carried, **(extra or {})}
-        with booting(self.s, None if live else self.unlock):
-            self.lab.save_stage(self.vm, name, self.work, meta, live=live)
+        for attempt in range(LIVE_SAVE_ATTEMPTS if live else 0):
+            try:
+                self.lab.save_stage(self.vm, name, self.work, meta, live=True)
+                break
+            except (LabError, QmpError) as error:
+                last = attempt + 1 == LIVE_SAVE_ATTEMPTS or not self.lab.running(self.vm)
+                self.s.note(f"{self.vm.name} couldn't be saved live ({error}); "
+                            + ("saving it shut down instead" if last else "trying again"))
+                if last:
+                    live = False
+                    break
+        if not live:
+            with booting(self.s, self.unlock):
+                self.lab.save_stage(self.vm, name, self.work, meta)
         self.saved.append(name)
         # The guard drops SSH on the public address, so only the tailnet reaches it.
         self.s.require(f"{self.host_name} answers SSH on the tailnet after its stage was saved",
@@ -251,6 +266,19 @@ def package_digest() -> str:
     return hashlib.sha256(package().read_bytes()).hexdigest()
 
 
+PACKAGE_SOURCES = ("legacy/scripts", "legacy/protocol", "packaging", "crates", "webui/src")
+
+
+def newer_than_package(root: Path = V3) -> Path | None:
+    """The newest file the package is built from, if it changed after the
+    package was built."""
+    built = package().stat().st_mtime
+    newest = max((p for sub in PACKAGE_SOURCES for p in (root / sub).rglob("*")
+                  if p.is_file() and not {"__pycache__", "tests"} & set(p.parts) and ".test." not in p.name),
+                 key=lambda p: p.stat().st_mtime, default=None)
+    return newest if newest is not None and newest.stat().st_mtime > built else None
+
+
 def work_dir(lab, vm) -> Path:
     return lab.paths.images.parent / ("m6" if vm.name == "mox3" else f"m6-{vm.name}")
 
@@ -262,6 +290,9 @@ def preflight(s) -> dict:
         s.require(f"lab/secrets.env has {name}", lambda: keys.get(name))
     s.require("the API key and this workstation are on the lab's Tailscale account", lambda: lab.tailscale() and True)
     s.require("the development bmacd package is built (dev/build_deb.py)", lambda: list(PACKAGES.glob("bmacd_*.deb")))
+    stale = newer_than_package()
+    s.require("the bmacd package is newer than its sources"
+              + (f" ({stale.relative_to(V3)} changed since; run dev/build_deb.py)" if stale else ""), stale is None)
     return keys
 
 
@@ -341,7 +372,15 @@ def restored(s, vm, stage: str, unlock: Callable | None = None):
         s.require(f"{host_name} answers SSH on the tailnet", lambda: wait_until(
             lambda: installed.on_host("true") == "", BOOT_TIMEOUT))
         if meta.get("live"):
+            # watchdog-mux times its clients by the wall clock, so stepping it
+            # fences a host whose HA manager has a service. Stopped on its
+            # own, the HA manager freezes its services and closes the watchdog.
+            ha = installed.on_host("systemctl is-active --quiet pve-ha-lrm.service && echo yes || true") == "yes"
+            if ha:
+                installed.on_host("systemctl stop pve-ha-lrm.service pve-ha-crm.service")
             installed.on_host(f"date -s @{time.time():.3f} >/dev/null")
+            if ha:
+                installed.on_host("systemctl start pve-ha-crm.service pve-ha-lrm.service")
         if meta.get("package_sha256") != package_digest():
             s.note(f"installing the current bmacd package on {vm.name}")
             with package().open("rb") as deb:

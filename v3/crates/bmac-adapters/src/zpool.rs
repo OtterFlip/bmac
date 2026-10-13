@@ -501,7 +501,9 @@ fn optional_int(text: &str) -> Option<u64> {
 ///
 /// Only the pool row follows `-o`; OpenZFS prints every vdev and member row
 /// with its fixed ten columns (name, size, allocated, free, checkpoint,
-/// expandsize, fragmentation, capacity, dedup, health).
+/// expandsize, fragmentation, capacity, dedup, health). A hot spare in use
+/// is listed twice, in its spare group and under `spare`, and the second
+/// row (`INUSE`) is kept, as v2 does; both give the same size.
 pub fn parse_list(text: &str) -> BTreeMap<String, ListRow> {
     let mut rows = BTreeMap::new();
     for line in text.lines() {

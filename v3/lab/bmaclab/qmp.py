@@ -53,6 +53,9 @@ class Qmp:
                 chunk = self.sock.recv(65536)
             except TimeoutError:
                 return None
+            except OSError as error:
+                # A VM killed mid-handshake resets the connection.
+                raise QmpError(f"the QMP connection failed: {error}") from error
             if not chunk:
                 raise QmpError("QEMU closed the QMP connection")
             self.buffer += chunk
@@ -64,7 +67,10 @@ class Qmp:
         if arguments:
             message["arguments"] = arguments
         self.sock.settimeout(self.timeout)
-        self.sock.sendall(json.dumps(message).encode() + b"\n")
+        try:
+            self.sock.sendall(json.dumps(message).encode() + b"\n")
+        except OSError as error:
+            raise QmpError(f"{name}: the QMP connection failed: {error}") from error
         while True:
             reply = self._read(self.timeout)
             if reply is None:

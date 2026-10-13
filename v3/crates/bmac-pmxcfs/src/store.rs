@@ -8,12 +8,18 @@ use std::io::{self, Write};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 use crate::fsops::{FsOps, RealFs};
 use crate::json::{canonical_json, reject_secret_material};
 use crate::{BUDGET_HARD, BUDGET_WARN, MAX_JSON_BYTES, PmxcfsError, Result};
+
+/// How long a read waits for a file that was replaced under it: past FUSE's
+/// one-second attribute cache.
+const REPLACED_FOR: Duration = Duration::from_secs(3);
+const REPLACED_POLL: Duration = Duration::from_millis(50);
 
 /// A cap on the total size of everything under `root`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +150,26 @@ impl Pmxcfs {
     /// Reads a JSON record: a regular file, not a symlink, within the size
     /// limit, and free of secret material (`read_json_file`).
     pub fn read_json(&self, path: &Path, context: &str) -> Result<Value> {
+        // While another write replaces the file, FUSE can still answer the
+        // stat from its cached attributes of the old one, which the read
+        // then finds gone. The new one is there once the cache expires.
+        let deadline = Instant::now() + REPLACED_FOR;
+        loop {
+            if let Some(value) = self.read_json_once(path, context)? {
+                return Ok(value);
+            }
+            if Instant::now() >= deadline {
+                return Err(PmxcfsError::invalid(format!(
+                    "{context} kept vanishing while being read: {}",
+                    path.display()
+                )));
+            }
+            std::thread::sleep(REPLACED_POLL);
+        }
+    }
+
+    /// None when the file went between its stat and its read.
+    fn read_json_once(&self, path: &Path, context: &str) -> Result<Option<Value>> {
         let meta = match path.symlink_metadata() {
             Ok(meta) => meta,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -171,13 +197,21 @@ impl Pmxcfs {
                 path.display()
             )));
         }
-        let data = std::fs::read(path)
-            .map_err(|e| PmxcfsError::io(format!("cannot read {context} {}", path.display()), e))?;
+        let data = match self.ops.read(path) {
+            Ok(data) => data,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(PmxcfsError::io(
+                    format!("cannot read {context} {}", path.display()),
+                    e,
+                ));
+            }
+        };
         let value: Value = serde_json::from_slice(&data).map_err(|e| {
             PmxcfsError::invalid(format!("cannot read {context} {}: {e}", path.display()))
         })?;
         reject_secret_material(&value, context)?;
-        Ok(value)
+        Ok(Some(value))
     }
 
     /// Whether `path` exists, without following a final symlink.

@@ -2321,14 +2321,23 @@ host_key_fingerprint() {
   printf '%s\n' "$(awk '{print $1, $2}' <<<"$1")" | ssh-keygen -lf - | awk '{print $2}'
 }
 
+# The owner's qm status, not /cluster/resources: pvestatd refreshes that
+# every 10 seconds, so right after the installer's poweroff it can still say
+# running, and the VM would never be started.
+start_installed_vm() {
+  local live
+  live="$(vm_status)" || die "Could not read VM $VMID's status on $OWNER_NODE"
+  case "$live" in
+    stopped) node_exec "$OWNER_NODE" qm start "$VMID" ;;
+    running) ;;
+    *) die "Installed VM has unexpected status $live" ;;
+  esac
+}
+
 verify_installed_guest() {
   CURRENT_PHASE="verifying installed guest"
   locate_vm >/dev/null || die "Installed VM disappeared"
-  if [[ "$VM_LIVE_STATUS" == stopped ]]; then
-    node_exec "$OWNER_NODE" qm start "$VMID"
-  elif [[ "$VM_LIVE_STATUS" != running ]]; then
-    die "Installed VM has unexpected status $VM_LIVE_STATUS"
-  fi
+  start_installed_vm
   wait_for_qga ||
     die "QEMU guest agent did not become ready within ${QGA_TIMEOUT_SECONDS}s"
   locate_vm >/dev/null
@@ -2422,6 +2431,7 @@ PY
   guest_agent_run --stdin "$OWNER_NODE" "$VMID" 900 \
     bash -s -- "$RESOURCE_NAME" "$PROD_PRIVATE_IP" "$GUEST_GATEWAY" \
     "$dns_csv" "$STARTUP_SHA256" "$PROD_GUEST_OS_INSTALL_MODE" "$host_key" \
+    "$PRIVATE_SUBNET_LENGTH" \
     "$ADMIN_1_PUBLIC_SSH_KEY" "$ADMIN_2_PUBLIC_SSH_KEY" <<'GUEST' || status=$?
 set -Eeuo pipefail
 expected_name="$1"
@@ -2431,7 +2441,8 @@ expected_dns_csv="$4"
 expected_startup_sha256="$5"
 install_mode="$6"
 expected_host_key="$7"
-shift 7
+subnet_length="$8"
+shift 8
 trap 'printf "Guest check failed: %s\n" "$BASH_COMMAND" >&2' ERR
 
 [[ "$(id -u)" == 0 ]]
@@ -2446,7 +2457,7 @@ if [[ "$install_mode" == ubuntu-autoinstall ]]; then
   timeout 600 cloud-init status --wait
 fi
 ip -4 -o address show dev lan0 |
-  awk -v address="${expected_ip}/${PRIVATE_SUBNET_LENGTH}" '$4 == address { found=1 } END { exit !found }'
+  awk -v address="${expected_ip}/${subnet_length}" '$4 == address { found=1 } END { exit !found }'
 ip -4 route show default |
   awk -v gateway="$expected_gateway" '$3 == gateway { found=1 } END { exit !found }'
 dns_status="$(resolvectl dns lan0)"

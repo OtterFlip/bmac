@@ -1,0 +1,41 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+  pool: fixture
+ state: DEGRADED
+status: One or more devices are faulted in response to persistent errors.
+	Sufficient replicas exist for the pool to continue functioning in a
+	degraded state.
+action: Replace the faulted device, or use 'zpool clear' to mark the device
+	repaired.
+  scan: resilvered 128M in 00:00:01 with 0 errors on Tue Oct 13 17:21:44 2026
+config:
+
+	NAME               STATE     READ WRITE CKSUM
+	fixture            DEGRADED     0     0     0
+	  raidz2-0         DEGRADED     0     0     0
+	    /dev/loop0     ONLINE       0     0     0
+	    /dev/loop1     ONLINE       0     0     0
+	    spare-2        DEGRADED     0     0     0
+	      /dev/loop2   FAULTED      0     0     0  external device fault
+	      /dev/loop11  ONLINE       0     0     0
+	    /dev/loop3     ONLINE       0     0     0
+	dedup	
+	  mirror-1         ONLINE       0     0     0
+	    /dev/loop4     ONLINE       0     0     0
+	    /dev/loop5     ONLINE       0     0     0
+	special	
+	  mirror-2         ONLINE       0     0     0
+	    /dev/loop6     ONLINE       0     0     0
+	    /dev/loop7     ONLINE       0     0     0
+	logs	
+	  mirror-3         ONLINE       0     0     0
+	    /dev/loop8     ONLINE       0     0     0
+	    /dev/loop9     ONLINE       0     0     0
+	cache
+	  /dev/loop10      ONLINE       0     0     0
+	spares
+	  /dev/loop11      INUSE     currently in use
+	  /dev/loop12      AVAIL   
+
+errors: No known data errors

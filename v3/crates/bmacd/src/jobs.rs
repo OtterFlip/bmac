@@ -574,9 +574,11 @@ impl Jobs {
             TargetRule::Standby { param: id } => {
                 let name = guest(id)?;
                 let owner = self.cluster.guest_owner(name).map_err(cluster)?;
-                self.cluster
-                    .placement(name)
-                    .map_err(cluster)?
+                let placement = self.cluster.placement(name).map_err(cluster)?;
+                if placement.is_empty() {
+                    return Err(error(ErrorCode::NotFound, format!("no host has {name}")));
+                }
+                placement
                     .into_iter()
                     .filter(|h| Some(*h) != owner && membership.online.contains(h))
                     .min()

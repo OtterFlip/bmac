@@ -18,7 +18,7 @@ import json
 import time
 import urllib.request
 
-from bmaclab import tailnet
+from bmaclab import qemu, tailnet
 from bmaclab.api import Api, Codes, Tunnel, pinned_fingerprint
 from bmaclab.bootstrap import Bootstrap
 from bmaclab.lab import BOOT_TIMEOUT
@@ -141,7 +141,7 @@ def pull_disk(lab, vm, disk) -> None:
 def insert_disk(lab, vm, disk) -> None:
     drive = f"d-{disk.id}"
     with lab.qmp(vm) as monitor:
-        monitor.command("human-monitor-command", **{"command-line": f"drive_add 0 if=none,id={drive},format=qcow2,file={lab.paths.disk(disk)},discard=unmap"})
+        monitor.command("human-monitor-command", **{"command-line": f"drive_add 0 if=none,id={drive},format=qcow2,file={lab.paths.disk(disk)},{qemu.DISK_OPTIONS}"})
         monitor.command("device_add", driver="scsi-hd", drive=drive, bus="scsi0.0", serial=disk.serial, wwn=int(disk.wwn, 16))
 
 

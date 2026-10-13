@@ -70,7 +70,12 @@ Each VM has three kinds of network:
 - **VLAN** (`10.213.0.0/24`, hosts only): a shared segment standing in for the
   10 Gbps private VLAN, using v2's example addresses.
 
-The management and VLAN segments are QEMU multicast sockets on loopback. The
+The management and VLAN segments are a switch in the lab's supervisor:
+each VM's NIC is a QEMU `dgram` socket in its folder, and every frame goes
+to the other VMs on its segment, never back to its sender. QEMU's multicast
+sockets also hand a VM its own frames, after which a host's bridge sends its
+guests' traffic out the uplink. The `mcast_group` and `mcast_base_port`
+settings are no longer used. The
 Proxmox hosts get their management and VLAN addresses from a first-boot
 script baked into their install ISO, which also turns on the serial console.
 The Ubuntu VMs get theirs from cloud-init.
@@ -84,8 +89,9 @@ The Ubuntu VMs get theirs from cloud-init.
   and bring them back.
 - `lab/lab carrier VM SECONDS`: after every boot or reset of VM, its VLAN
   carrier stays down for SECONDS, the way FiberState's VLAN comes up well
-  after the host. A background supervisor, started by `lab/lab start`,
-  watches for guest resets and raises the link on time.
+  after the host. A background supervisor, started by `lab/lab start` and
+  running the segments' switch, watches for guest resets and raises the
+  link on time.
 - `lab/lab media VM ISO` and `lab/lab media VM`: insert and eject a CD;
   `lab/lab start VM --iso ISO` boots from one.
 - `lab/lab console VM`: the serial console (Ctrl-] detaches). Scenarios use
@@ -126,21 +132,31 @@ How a stage is saved depends on the lab. QEMU can't save a running NVMe
 controller ("non-migratable device"), so in the NVMe lab (`lab.toml`) the
 VM is shut down for the save and boots when restored. `lab-scsi.toml` and
 `lab-sata.toml` are the same topology, each with its own name, ports,
-multicast group, MACs, and tailnet prefix (`bmacscsi-`, `bmacsata-`), and
+MACs, and tailnet prefix (`bmacscsi-`, `bmacsata-`), and
 `nvme_as = "scsi"` or `"sata"`, which attaches the NVMe disks on that bus
 with the same serials. There a stage is saved live (QMP `snapshot-save`,
 the memory in the first disk) and restored with `snapshot-load` before the
 VM runs, so it resumes where it was in seconds, past its boot's VLAN
-carrier delay; the scenario then sets the guest's clock. The Deployer's lab
+carrier delay; the scenario then sets the guest's clock, with the host's
+HA services stopped meanwhile: watchdog-mux times them by the wall clock, so
+the step would otherwise fence a host running an HA service. Should a live save
+fail twice, the scenario saves the VM shut down instead. The lab's disks ignore
+the guest's and QEMU's flushes (`cache.no-flush=on`), without which a live
+save of a guest that has used its memory waits on the host's journal for
+every cluster and takes over ten minutes; a host crash can then corrupt a
+lab disk, and `BMAC_LAB_FRESH=1` rebuilds it. A lab runs one scenario at a
+time; a second one is refused while the first runs. The Deployer's lab
 build names machines with the lab's prefix (`BMAC_LAB_TAILSCALE_PREFIX`,
-set by the scenarios), so no lab reaches another's machines. A stage that
-hasn't passed yet is developed on the SATA lab, from the live stage before
-it; the final runs go on all three labs at once, up to 29 GiB of RAM each:
+set by the scenarios), so no lab reaches another's machines. Until the
+implementation plan is finished, every stage is developed and proved on
+the SATA lab, from the live stage before it. The SCSI and NVMe labs are for
+the final validation across storage types at the end, when every scenario
+runs on all three labs at once, up to 29 GiB of RAM each:
 
 ```bash
 lab/lab --config lab/lab-sata.toml create            # once per live lab
-lab/lab --config lab/lab-sata.toml scenario m7_join  # iterate here
-lab/lab scenario m7_join &                           # final: all three at once
+lab/lab --config lab/lab-sata.toml scenario m7_join  # develop here
+lab/lab scenario m7_join &                           # final validation: all three at once
 lab/lab --config lab/lab-scsi.toml scenario m7_join &
 lab/lab --config lab/lab-sata.toml scenario m7_join
 ```
@@ -152,7 +168,8 @@ stage after the chain's last rather than a second one beside it.
 | Stage | VM | Saved by | Used by | State |
 |---|---|---|---|---|
 | `m7-first-host` | mox3 | `m7_storage`, when every check passes | `m7_join`, `m7_cluster` | boot mirror and SATA data mirror, all LUKS2 (the run's made-up passphrase is kept with the stage and typed at the console when an NVMe-lab restore boots), setup finished, an encrypted one-host cluster whose bmacd issues join bundles |
-| `m7-cluster` | mox3, mox1, mox2 | `m7_cluster`, when every check passes, from `m7-first-host` | scenarios that need a working cluster (`m7_cluster.staged`) | mox3 as in `m7-first-host`, then mox1 and mox2 joined through it with plain NVMe boot mirrors: a quorate three-host cluster, every setup phase complete, no join bundle left |
+| `m7-cluster` | mox3, mox1, mox2 | `m7_cluster`, when every check passes, from `m7-first-host` | scenarios that need a working cluster (`m7_cluster.staged`), such as `m2_cli` and `m4_prod` | mox3 as in `m7-first-host`, then mox1 and mox2 joined through it with plain NVMe boot mirrors: a quorate three-host cluster, every setup phase complete, no join bundle left |
+| `m4-prod` | mox3, mox1, mox2 | `m4_prod`, when prod.add and its checks pass, from `m7-cluster` | `m4_prod`'s diagnostic and M4's other operations in `m4_ops` (`m4_prod.staged`) | the cluster with production VM prod1 (Ubuntu 26.04, installed unattended) running on mox1, placed on all three hosts, replicated to mox2 and mox3, under HA; the guest ISO and second admin key in the settings; the run's made-up root password is kept with the stage |
 
 The hosts of a stage saved together are restored together
 (`m6.reuse_cluster`), and only when each has it. `m7_join` installs mox2

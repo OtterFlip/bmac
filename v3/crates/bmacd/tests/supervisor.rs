@@ -85,6 +85,7 @@ fn fixture_prepared(env: &[(&str, &str)], prepare: Option<Prepare>) -> Fixture {
         .env
         .extend(env.iter().map(|(k, v)| (k.to_string(), v.to_string())));
     config.force_kill_after = Duration::from_secs(2);
+    config.output_drain = Duration::from_secs(1);
     config.prepare = prepare;
     config.native = root.join("mock/native.sh");
     let sup = Supervisor::new(config, sink.clone());
@@ -483,6 +484,19 @@ async fn output_without_the_protocol_fails_the_run() {
         done.message
             .unwrap()
             .contains("did not begin with a bmac-ui protocol event")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_process_left_holding_the_output_does_not_keep_the_run_going() {
+    let f = fixture();
+    let (job, outcome) = f.start("leaves_a_daemon");
+    let done = finished(outcome).await;
+    assert_eq!(done.state, JobState::Completed, "{done:?}");
+    assert!(
+        f.events(job)
+            .iter()
+            .any(|e| matches!(e, EventBody::Output { text, .. } if text == "started a daemon"))
     );
 }
 
