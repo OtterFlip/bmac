@@ -298,9 +298,13 @@ Two things stand out:
    upper bound.
 3. **Space needed for a zvol** of size `V` and block size `b`:
    `V × I(b) × (1 + m(b))`, where the metadata allowance
-   `m(b) = 2 × 128 / b` covers one 128-byte block pointer per data block,
-   stored twice (ZFS keeps redundant metadata copies by default). That is
-   about 1.6% at 16 KiB. The lab checks the allowance and adjusts it.
+   `m(b) = 128 / b` covers one 128-byte block pointer per data block. That
+   is about 0.8% at 16 KiB. ZFS keeps two copies of metadata, but compresses
+   the indirect blocks that hold the pointers, so the lab measured 0.2 to 0.8
+   times `128 / b` on raidz1, raidz2, and raidz3 of 3 to 10 disks at every
+   offered block size (M8.5, `bmac-storage`'s `tests/fixtures/lab/capacity.json`).
+   Twice the allowance, as first planned, overstated a 16 KiB zvol by more
+   than 1%.
 4. **Compression** is ignored for reservations and limits, which assume
    incompressible data, the worst case. The Dashboard can also show the
    measured compression ratio.
@@ -356,8 +360,10 @@ each list the other's disks. Since a disk's storage carries its block size,
 everything Proxmox does that writes a new copy of a disk keeps it:
 replication, migration, Move disk, and restoring a Proxmox backup. BMAC's
 own restores keep it too (`BACKUP.md` checks `volblocksize`). The lab
-confirms each of these. The set of offered sizes is a cluster setting
-(default: all four).
+confirms each of these. The set of offered sizes is a cluster setting,
+`VM_BLOCK_SIZES` (default: all four). Setup still creates all four storages
+on every host, so changing the setting only changes what new VMs are
+offered.
 
 **Suggested default.** The smallest offered size whose inflation is at most
 1.05 on every placement host of the VM. On mirror-only hosts that is 16 KiB.

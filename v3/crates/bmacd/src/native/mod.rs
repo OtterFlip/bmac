@@ -9,6 +9,7 @@
 //! resumed job skips what it already finished.
 
 pub mod cluster;
+pub mod disks;
 pub mod join;
 pub mod network;
 pub mod orchestration;
@@ -695,6 +696,7 @@ pub fn main(args: &[String]) -> ExitCode {
             }
             setup::OPERATION => setup::run(&Workflow::stdio(), rest).await,
             join::OPERATION => join::run(&Workflow::stdio(), rest).await,
+            id if disks::OPERATIONS.contains(&id) => disks::run(id, &Workflow::stdio(), rest).await,
             other => {
                 eprintln!("{other} is not a native operation");
                 ExitCode::from(2)

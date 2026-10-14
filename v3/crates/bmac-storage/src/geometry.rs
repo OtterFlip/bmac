@@ -155,10 +155,34 @@ impl BlockSize {
         }
     }
 
-    /// `m(b) = 2 × 128 / b`: one 128-byte block pointer per data block,
-    /// stored twice.
+    /// `16K`, as the `VM_BLOCK_SIZES` setting writes it.
+    pub fn short(self) -> String {
+        format!("{}K", self.0 / 1024)
+    }
+
+    /// The `VM_BLOCK_SIZES` setting: some of [`Self::OFFERED`], such as
+    /// `16K,64K`, each once.
+    pub fn parse_offered(text: &str) -> Result<Vec<BlockSize>, String> {
+        let mut sizes = Vec::new();
+        for word in text.split(',') {
+            let size = Self::OFFERED
+                .into_iter()
+                .find(|b| b.short() == word.trim())
+                .ok_or_else(|| format!("{word} is not one of 16K, 32K, 64K, and 128K"))?;
+            if sizes.contains(&size) {
+                return Err(format!("{word} is listed twice"));
+            }
+            sizes.push(size);
+        }
+        sizes.sort();
+        Ok(sizes)
+    }
+
+    /// `m(b) = 128 / b`: one 128-byte block pointer per data block. Its
+    /// second copy is offset by the compression of indirect blocks
+    /// (measured in the lab, `tests/capacity_lab.rs`).
     pub fn metadata_allowance(self) -> Ratio {
-        Ratio::new(256, self.bytes())
+        Ratio::new(128, self.bytes())
     }
 }
 
@@ -399,6 +423,27 @@ mod tests {
     }
 
     #[test]
+    fn the_offered_sizes_setting_lists_some_of_the_four() {
+        assert_eq!(
+            BlockSize::parse_offered("64K, 16K"),
+            Ok(vec![BlockSize::K16, BlockSize::K64])
+        );
+        assert_eq!(
+            BlockSize::parse_offered("16K,32K,64K,128K"),
+            Ok(BlockSize::OFFERED.to_vec())
+        );
+        for (text, why) in [
+            ("", "not one of"),
+            ("8K", "not one of"),
+            ("16k", "not one of"),
+            ("16K,16K", "twice"),
+        ] {
+            let error = BlockSize::parse_offered(text).unwrap_err();
+            assert!(error.contains(why), "{text}: {error}");
+        }
+    }
+
+    #[test]
     fn storage_md_summary_example() {
         // "6 × 4 TB raidz1: nominal 20 TB (5 of 6 disks), ZFS will report
         // about 19.2 TB, VM disks at 16 KiB: 16 TB ... 32 KiB would give
@@ -417,11 +462,11 @@ mod tests {
             data: vec![Geometry::new(VdevType::Mirror, 2, 12), raidz(1, 5)],
         };
         assert_eq!(pool.inflation(BlockSize::K16), Ratio::new(6, 5));
-        // 1 GiB at 16 KiB: × 1.2 × (1 + 256/16384).
+        // 1 GiB at 16 KiB: × 1.2 × (1 + 128/16384).
         let gib = 1 << 30;
         assert_eq!(
             pool.space_needed(gib, BlockSize::K16),
-            (gib * 6 * 16640).div_ceil(5 * 16384)
+            (gib * 6 * 16512).div_ceil(5 * 16384)
         );
     }
 

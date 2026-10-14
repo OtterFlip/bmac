@@ -263,8 +263,20 @@ export function StoragePage() {
           </>
         )}
         <SectionTitle>Storage operations</SectionTitle>
-        <p className="mb-2.5 text-[12.5px] text-fg-subtle">Adding, replacing, and retiring disks arrive with the storage layouts. For now, inspect a host for its full disk report.</p>
-        <OperationTiles ids={["diagnostics.host_state"]} />
+        <p className="mb-2.5 text-[12.5px] text-fg-subtle">
+          Each runs on the host you choose. Hosts whose disks can't be pulled while running practice replacements with Simulate a disk failure; Storage inventory finishes removals and replacements and says which disks are safe to pull.
+        </p>
+        <OperationTiles
+          ids={[
+            "storage.add_vdev",
+            "storage.attach_disk",
+            "storage.replace_disk",
+            "storage.remove_vdev",
+            "storage.inventory",
+            "storage.simulate_failure",
+            "diagnostics.host_state",
+          ]}
+        />
       </PageBody>
     </>
   );

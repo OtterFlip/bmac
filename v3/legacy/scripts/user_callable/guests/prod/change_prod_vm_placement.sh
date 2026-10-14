@@ -275,7 +275,14 @@ reserved, pool, percent = int(sys.argv[2]), sys.argv[3], sys.argv[4]
 available, reserve = capacity["space"]["available"], capacity["reserve"]
 needed = max(capacity["fit"]["needed"], reserved)
 if available - needed >= reserve:
-    print(f"OK {available - needed - reserve}")
+    fit = capacity["fit"]
+    note = ""
+    if fit.get("inflation", 1.0) > 1.05:
+        note = (
+            f"(warning: raidz inflates this disk's {fit['block_size'] // 1024}K blocks "
+            f"{fit['inflation']:.2f}x here)"
+        )
+    print(f"OK {available - needed - reserve} {note}".rstrip())
 else:
     print(
         f"pool {pool}: {available} bytes available, replica needs {needed} bytes, "
@@ -513,7 +520,7 @@ repair_partial_change() {
 
 choose_add_hosts() {
   local -a candidates=() eligible=() node
-  local blocker input parsed
+  local blocker input parsed spare note
   for node in "${CLUSTER_NODES[@]}"; do
     list_contains "$node" "${PLACEMENT_NODES[@]}" || candidates+=("$node")
   done
@@ -526,8 +533,9 @@ choose_add_hosts() {
     blocker="$(add_blocker "$node")"
     if [[ "$blocker" == OK\ * ]]; then
       eligible+=("$node")
-      printf '  %-6s eligible; %s bytes would remain above the %s%% reserve\n' \
-        "$node" "${blocker#OK }" "$POOL_RESERVE_PERCENT"
+      read -r _ spare note <<<"$blocker"
+      printf '  %-6s eligible; %s bytes would remain above the %s%% reserve%s\n' \
+        "$node" "$spare" "$POOL_RESERVE_PERCENT" "${note:+ $note}"
     else
       printf '  %-6s not eligible: %s\n' "$node" "$blocker"
     fi

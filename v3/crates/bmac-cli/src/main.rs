@@ -87,8 +87,8 @@ fn luks_enter(prompter: &mut Tty) -> Result<i32> {
     }
     luks::store(Path::new(luks::PASSPHRASE_FILE), first.as_bytes())?;
     prompter.say(
-        "Stored for the setup job, which deletes it when the storage phase is done. \
-         Go back to the Dashboard and continue the job.",
+        "Stored for the job that asked for it, which deletes it once the disks are \
+         prepared. Go back to the Dashboard and continue the job.",
     );
     Ok(0)
 }
@@ -227,6 +227,14 @@ async fn execute(command: Command) -> Result<i32> {
             let growth =
                 capacity::growth(&input, allocation, volsize, block).map_err(CliError::Message)?;
             print_json(&growth);
+            Ok(0)
+        }
+        Command::BlockSizes { offered } => {
+            let mut input = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+                .map_err(|e| CliError::Message(format!("cannot read standard input: {e}")))?;
+            let sizes = capacity::block_sizes(&input, &offered).map_err(CliError::Message)?;
+            print_json(&sizes);
             Ok(0)
         }
     }

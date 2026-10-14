@@ -2,10 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! Pool vdevs and the disks outside every pool, from a host's storage
-//! layout, as v2's `disk_inventory.py` summarizes them (`summarize_vdevs`
-//! 104–149, `classify_disk` 160–230). The statuses that come from the host
-//! storage journal (awaiting finalization, evacuating, pending replacement
-//! or addition) join with that journal in M8.2.
+//! layout and storage journal, as v2's `disk_inventory.py` summarizes them
+//! (`summarize_vdevs` 104–149, `classify_disk` 160–230).
 
 use std::collections::BTreeMap;
 
@@ -13,6 +11,7 @@ use bmac_adapters::layout::{DiskRow, Layout, Member};
 use bmac_proto::status::{
     Disk, DiskContents, DiskStatus, Encryption, Vdev, VdevMember, VdevStatus,
 };
+use bmac_storage::journal::State as Journal;
 
 fn encryption(members: &[Member]) -> Encryption {
     let resolved: Vec<&Member> = members
@@ -107,8 +106,58 @@ fn sentence(reasons: &[String]) -> String {
     }
 }
 
+/// What the journal says a disk outside the pool is waiting for.
+fn journaled(layout: &Layout, journal: &Journal, disk: &DiskRow) -> Option<(DiskStatus, String)> {
+    let identity = disk.identity.as_ref()?;
+    if let Some(removal) = journal.removal_in_progress().filter(|r| {
+        r.members
+            .iter()
+            .any(|m| m.identity.as_ref() == Some(identity))
+    }) {
+        return Some(if layout.pool.removal_in_progress {
+            (
+                DiskStatus::Evacuating,
+                format!(
+                    "Its vdev, {}, is being removed; ZFS is copying its data to the other vdevs.",
+                    removal.vdev
+                ),
+            )
+        } else {
+            (
+                DiskStatus::AwaitingFinalization,
+                format!(
+                    "The removal of {} has finished. Run Storage inventory to close its LUKS and release the disk.",
+                    removal.vdev
+                ),
+            )
+        });
+    }
+    if let Some(addition) = journal
+        .additions
+        .iter()
+        .find(|a| a.members.contains(identity))
+    {
+        return Some((
+            DiskStatus::PendingAddition,
+            format!(
+                "Chosen for a new {} {} vdev that isn't in the pool yet; run Add disks again to finish it.",
+                addition.class, addition.kind
+            ),
+        ));
+    }
+    journal.replacing(identity).map(|r| {
+        (
+            DiskStatus::PendingReplacement,
+            format!(
+                "Chosen to replace {} in {}, and not in the pool yet; run Replace a disk again to finish.",
+                r.leaf, r.vdev
+            ),
+        )
+    })
+}
+
 /// The physical disks in no pool, each with a status and what to do.
-pub fn disks(layout: &Layout) -> Vec<Disk> {
+pub fn disks(layout: &Layout, journal: &Journal) -> Vec<Disk> {
     let rpool = &layout.pool.name;
     let open_mappers: BTreeMap<&str, &str> = layout
         .luks_mappings
@@ -136,7 +185,9 @@ pub fn disks(layout: &Layout) -> Vec<Disk> {
     rows.into_iter()
         .map(|(disk, esp_only)| {
             let serial = disk.serial.as_deref().filter(|s| !s.is_empty());
-            let (status, detail) = if esp_only {
+            let (status, detail) = if let Some(found) = journaled(layout, journal, disk) {
+                found
+            } else if esp_only {
                 (
                     DiskStatus::PendingReplacement,
                     "Holds a registered boot ESP but has not joined rpool. \
@@ -191,7 +242,7 @@ pub fn disks(layout: &Layout) -> Vec<Disk> {
                 detail,
                 in_use_reasons: disk.in_use_reasons.clone(),
                 removable: disk.in_use_reasons.is_empty()
-                    && !matches!(status, DiskStatus::AwaitingFinalization | DiskStatus::Evacuating),
+                    && matches!(status, DiskStatus::Available | DiskStatus::NoSerial),
             }
         })
         .collect()
@@ -203,6 +254,7 @@ mod tests {
     use bmac_adapters::layout::{
         CrypttabEntry, ImportedVdev, LayoutVdev, LuksMapping, PoolSummary,
     };
+    use bmac_core::DiskIdentity;
 
     fn member(disk: Option<&str>, luks: bool) -> Member {
         Member {
@@ -214,9 +266,11 @@ mod tests {
             backing: None,
             disk: disk.map(str::to_string),
             serial: disk.map(|d| format!("SN-{d}")),
+            identity: disk.map(|d| DiskIdentity::Serial(format!("SN-{d}"))),
             model: None,
             disk_size: Some(100),
             member_size: Some(90),
+            group: None,
         }
     }
 
@@ -224,6 +278,7 @@ mod tests {
         DiskRow {
             disk: name.into(),
             serial: serial.map(str::to_string),
+            identity: serial.map(|s| DiskIdentity::Serial(s.into())),
             model: Some("QEMU".into()),
             size: Some(1 << 30),
             tran: None,
@@ -337,7 +392,7 @@ mod tests {
     fn disks_outside_pools_are_classified() {
         let mut layout = layout();
         layout.imported_pool_vdevs[1].members[0].disk = Some("sdd".into());
-        let disks = disks(&layout);
+        let disks = disks(&layout, &Journal::default());
         let by_name: BTreeMap<&str, &Disk> = disks.iter().map(|d| (d.disk.as_str(), d)).collect();
         assert_eq!(
             disks.iter().map(|d| d.disk.as_str()).collect::<Vec<_>>(),
@@ -395,5 +450,65 @@ mod tests {
                 "rpool mixes encrypted and unencrypted members (1 of 2 encrypted)",
             ]
         );
+    }
+
+    #[test]
+    fn the_storage_journal_explains_disks_waiting_on_a_workflow() {
+        use bmac_storage::journal::{Addition, Removal, RemovalState, RemovedMember, Replacement};
+        use bmac_storage::{VdevClass, VdevType};
+        let serial = |s: &str| DiskIdentity::Serial(s.into());
+        let mut journal = Journal::default();
+        journal.removals.push(Removal {
+            id: "r1".into(),
+            vdev: "mirror-1".into(),
+            members: vec![RemovedMember {
+                identity: Some(serial("SN-f")),
+                mapper: None,
+                size: None,
+            }],
+            state: RemovalState::Requested,
+            requested_at: 0,
+            updated_at: 0,
+            notes: vec![],
+        });
+        journal.additions.push(Addition {
+            number: 1,
+            class: VdevClass::Data,
+            kind: VdevType::Mirror,
+            members: vec![serial("SN-c")],
+            recorded_at: 0,
+        });
+        journal.replacements.insert(
+            serial("SN-e"),
+            Replacement {
+                leaf: "/dev/mapper/bmac-rpool-sSN-old".into(),
+                old: None,
+                mapper: None,
+                vdev: "mirror-0".into(),
+                recorded_at: 0,
+            },
+        );
+        let mut layout = layout();
+        let by_name = |layout: &Layout| -> BTreeMap<String, Disk> {
+            disks(layout, &journal)
+                .into_iter()
+                .map(|d| (d.disk.clone(), d))
+                .collect()
+        };
+        let found = by_name(&layout);
+        assert_eq!(found["sdf"].status, DiskStatus::AwaitingFinalization);
+        assert!(found["sdf"].detail.contains("Storage inventory"));
+        assert_eq!(found["sdc"].status, DiskStatus::PendingAddition);
+        assert!(!found["sdc"].removable, "it's about to join the pool");
+        assert_eq!(found["sde"].status, DiskStatus::PendingReplacement);
+        assert!(found["sde"].detail.contains("SN-old"));
+        assert_eq!(
+            found["sdb"].status,
+            DiskStatus::NoSerial,
+            "unrecorded disks are unchanged"
+        );
+
+        layout.pool.removal_in_progress = true;
+        assert_eq!(by_name(&layout)["sdf"].status, DiskStatus::Evacuating);
     }
 }

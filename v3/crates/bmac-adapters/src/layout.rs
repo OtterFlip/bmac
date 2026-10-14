@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
-use bmac_core::{DatasetName, PoolName};
+use bmac_core::{DatasetName, DiskIdentity, PoolName};
 use bmac_exec::CommandRunner;
 use regex::Regex;
 use serde::Serialize;
@@ -93,9 +93,13 @@ pub struct Member {
     pub backing: Option<String>,
     pub disk: Option<String>,
     pub serial: Option<String>,
+    /// The disk's WWN, or its serial when it has none.
+    pub identity: Option<DiskIdentity>,
     pub model: Option<String>,
     pub disk_size: Option<u64>,
     pub member_size: Option<u64>,
+    /// The `replacing-N` or `spare-N` grouping the leaf is under, if any.
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -143,6 +147,7 @@ pub struct ImportedVdev {
 pub struct DiskRow {
     pub disk: String,
     pub serial: Option<String>,
+    pub identity: Option<DiskIdentity>,
     pub model: Option<String>,
     pub size: Option<u64>,
     pub tran: Option<String>,
@@ -255,9 +260,11 @@ impl Resolver<'_> {
             backing: None,
             disk: None,
             serial: None,
+            identity: None,
             model: None,
             disk_size: None,
             member_size: self.list.get(path).and_then(|r| r.size),
+            group: None,
         };
         let Some(device) = self.devices.get(&kname) else {
             return row;
@@ -273,6 +280,7 @@ impl Resolver<'_> {
             self.member_disks.insert(disk.kname.clone());
             row.disk = Some(disk.kname.clone());
             row.serial = disk.serial.clone();
+            row.identity = disk.identity();
             row.model = disk.model.clone();
             row.disk_size = disk.size;
         }
@@ -280,10 +288,27 @@ impl Resolver<'_> {
     }
 
     fn members(&mut self, vdev: &ConfigNode) -> Vec<Member> {
-        vdev.leaves()
-            .into_iter()
-            .map(|leaf| self.member(leaf))
-            .collect()
+        let mut out = Vec::new();
+        self.walk(vdev, None, &mut out);
+        out
+    }
+
+    /// The leaves in [`ConfigNode::leaves`] order, each with its grouping.
+    fn walk(&mut self, node: &ConfigNode, group: Option<&str>, out: &mut Vec<Member>) {
+        if node.children.is_empty() {
+            let mut member = self.member(node);
+            member.group = group.map(str::to_string);
+            out.push(member);
+            return;
+        }
+        let group = if node.name.starts_with("replacing-") || node.name.starts_with("spare-") {
+            Some(node.name.as_str())
+        } else {
+            group
+        };
+        for child in &node.children {
+            self.walk(child, group, out);
+        }
     }
 }
 
@@ -526,6 +551,7 @@ fn disk_row(
     DiskRow {
         disk: kname.clone(),
         serial: device.serial.clone(),
+        identity: device.identity(),
         model: device.model.clone(),
         size: device.size,
         tran: device.tran.clone(),

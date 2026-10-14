@@ -44,6 +44,7 @@ export const CLUSTER_KEYS: SettingKey[] = (
     ["PROD_VM_DISK_GB", "positive_integer"],
     ["STAGING_VM_CORES", "positive_integer"],
     ["STAGING_VM_MEMORY_GIB", "positive_integer"],
+    ["VM_BLOCK_SIZES", "block_sizes"],
     ["PROXMOX_ISO_FILE_URL", "iso_url"],
     ["PROXMOX_ISO_FILE_SHA256", "sha256"],
     ["PROD_GUEST_OS_INSTALL_MODE", "choice", false, ["ubuntu-autoinstall", "manual"]],

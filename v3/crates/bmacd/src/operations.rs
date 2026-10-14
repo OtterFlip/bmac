@@ -49,10 +49,12 @@ struct ScriptFile {
 
 /// Operations implemented in Rust. Each milestone that ports one adds it here.
 pub fn native_operations() -> Vec<Operation> {
-    vec![
+    let mut operations = vec![
         crate::native::setup::operation(),
         crate::native::join::operation(),
-    ]
+    ];
+    operations.extend(crate::native::disks::operations());
+    operations
 }
 
 #[derive(Debug)]

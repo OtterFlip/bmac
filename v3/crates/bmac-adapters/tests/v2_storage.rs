@@ -159,6 +159,27 @@ import test_host_storage as T
 json.dump([T.host_storage.parse_zpool_status(text) for text in json.load(sys.stdin)], sys.stdout)
 "#;
 
+/// The layout without what v3 adds for its storage workflows: each disk's
+/// and member's identity, and a member's replacing or spare group.
+fn without_v3_fields(mut value: Value) -> Value {
+    match &mut value {
+        Value::Object(map) => {
+            map.remove("identity");
+            map.remove("group");
+            for v in map.values_mut() {
+                *v = without_v3_fields(v.take());
+            }
+        }
+        Value::Array(items) => {
+            for v in items.iter_mut() {
+                *v = without_v3_fields(v.take());
+            }
+        }
+        _ => {}
+    }
+    value
+}
+
 fn text<'a>(inputs: &'a Value, key: &str) -> &'a str {
     inputs[key].as_str().unwrap_or_default()
 }
@@ -187,7 +208,7 @@ fn layouts_match_v2_for_its_fixtures() {
         };
         let ours = layout::build_from_texts(&texts, &realpath, "mox1", 1758704200).unwrap();
         assert_eq!(
-            serde_json::to_value(&ours).unwrap(),
+            without_v3_fields(serde_json::to_value(&ours).unwrap()),
             case["layout"],
             "layout case {name}"
         );

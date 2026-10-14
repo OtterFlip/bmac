@@ -112,7 +112,7 @@ class PlacementTest(unittest.TestCase):
                 printf '%s\\n' "$*" >>"$CALLS"
                 # The capacity function charges 64/63 of the logical bytes here.
                 local needed=$((REPLICA_BYTES * 64 / 63))
-                printf '{"space": {"used": 700, "available": 300}, "reserve": 100, "fit": {"needed": %s}}\\n' "$needed"
+                printf '{"space": {"used": 700, "available": 300}, "reserve": 100, "fit": {"needed": %s, "block_size": 16384, "inflation": %s}}\\n' "$needed" "${INFLATION:-1.0}"
                 ((300 - needed >= 100)) || return 3
               else
                 printf '%s\\n' "$VOLUMES"
@@ -123,6 +123,7 @@ class PlacementTest(unittest.TestCase):
             REPLICA_RESERVED_BYTES=0
             REPLICA_BYTES=126
             printf 'A<%s>\\n' "$(add_blocker mox3)"
+            printf 'I<%s>\\n' "$(INFLATION=1.33 add_blocker mox3)"
             REPLICA_BYTES=250
             printf 'B<%s>\\n' "$(add_blocker mox3)"
             printf 'C<%s>\\n' "$(add_blocker mox4)"
@@ -138,6 +139,7 @@ class PlacementTest(unittest.TestCase):
         )
         out = completed.stdout
         self.assertIn("A<OK 72>", out)
+        self.assertIn("I<OK 72 (warning: raidz inflates this disk's 16K blocks 1.33x here)>", out)
         self.assertIn(
             "B<pool rpool: 300 bytes available, replica needs 253 bytes, 10% reserve is 100 bytes>",
             out,

@@ -954,47 +954,122 @@ collect_post_install_options() {
     "Delete the cached source ISO after the install?" yes
 }
 
-# The JSON-mode form of collect_new_request: one form, validated as a whole
-# with the same rules. Sets the same globals the terminal prompts do.
-# The zfspool storages a production disk can use, each labelled with its block
-# size, into VM_STORAGE_IDS (sorted) and VM_STORAGE_LABELS; DEFAULT_VM_STORAGE
-# is local-zfs.
+# The zfspool storages a production disk can use, each with a block size in
+# VM_BLOCK_SIZES (all four when unset), into VM_STORAGE_IDS (sorted),
+# VM_STORAGE_LABELS and VM_STORAGE_NODES. DEFAULT_VM_STORAGE becomes the
+# suggestion for NODES (STORAGE.md, "Suggested default"), or local-zfs, or the
+# first, when the nodes cannot be measured.
 VM_STORAGE_IDS=()
 declare -A VM_STORAGE_LABELS=()
 declare -A VM_STORAGE_NODES=()
+declare -A VM_STORAGE_INFLATION=()
+declare -A NODE_CAPACITY=()
 DEFAULT_VM_STORAGE=local-zfs
 load_vm_storages() {
-  local storages id nodes label
+  local storages id nodes label offered="${VM_BLOCK_SIZES:-16K,32K,64K,128K}"
   storages="$(pvesh_get /storage)" || die "Could not list the cluster's storages"
   VM_STORAGE_IDS=()
   VM_STORAGE_LABELS=()
   VM_STORAGE_NODES=()
+  VM_STORAGE_INFLATION=()
   while IFS=$'\x1f' read -r id nodes label; do
     VM_STORAGE_IDS+=("$id")
     VM_STORAGE_LABELS["$id"]="$label"
     VM_STORAGE_NODES["$id"]="$nodes"
   done < <(
-    python3 - "$storages" <<'PY'
+    python3 - "$storages" "$offered" <<'PY'
 import json
 import re
 import sys
 
+offered = sys.argv[2].split(",")
 for row in sorted(json.loads(sys.argv[1]), key=lambda row: row.get("storage", "")):
     storage = row.get("storage", "")
     content = str(row.get("content", "")).split(",")
+    block = str(row.get("blocksize") or "16k").upper()
     if (
         row.get("type") != "zfspool"
         or "images" not in content
         or row.get("disable")
         or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,62}[a-z0-9]", storage)
+        or block not in offered
     ):
         continue
-    block = str(row.get("blocksize") or "16k").upper()
     print(f"{storage}\x1f{row.get('nodes', '')}\x1f{storage} ({block}iB blocks, {row.get('pool', '?')})")
 PY
   ) || die "Could not parse the cluster's storages"
+  ((${#VM_STORAGE_IDS[@]})) ||
+    die "No zfspool storage offers a block size in VM_BLOCK_SIZES ($offered); rerun host setup"
+  DEFAULT_VM_STORAGE=local-zfs
   [[ -n "${VM_STORAGE_LABELS[$DEFAULT_VM_STORAGE]+x}" ]] ||
-    die "$DEFAULT_VM_STORAGE is not a zfspool storage for VM disks; rerun host setup"
+    DEFAULT_VM_STORAGE="${VM_STORAGE_IDS[0]}"
+  suggest_vm_storage "$offered" "$@"
+}
+
+# Measure each node's rpool and let bmac block-sizes suggest the storage, and
+# label each storage with its raidz inflation per node. Best effort: an
+# unmeasured cluster keeps the plain labels and default.
+suggest_vm_storage() {
+  local offered="$1" node capacity capacities="" sizes kind storage hosts label
+  shift
+  for node in "$@"; do
+    if [[ -z "${NODE_CAPACITY[$node]:-}" ]]; then
+      if ! capacity="$(node_exec "$node" bmac capacity --json --pool rpool 2>/dev/null)" ||
+        [[ -z "$capacity" ]]; then
+        warn "Could not measure rpool on $node; no block size is suggested"
+        return 0
+      fi
+      NODE_CAPACITY["$node"]="$capacity"
+    fi
+    capacities+="${NODE_CAPACITY[$node]}"$'\n'
+  done
+  sizes="$(bmac block-sizes --json --offered "$offered" <<<"$capacities" 2>/dev/null)" || {
+    warn "Could not compare block sizes; no block size is suggested"
+    return 0
+  }
+  while IFS=$'\t' read -r kind storage hosts label; do
+    [[ -n "${VM_STORAGE_LABELS[$storage]+x}" ]] || continue
+    case "$kind" in
+      suggested)
+        DEFAULT_VM_STORAGE="$storage"
+        VM_STORAGE_LABELS["$storage"]+=" (suggested)"
+        ;;
+      inflation)
+        VM_STORAGE_INFLATION["$storage"]="$hosts"
+        VM_STORAGE_LABELS["$storage"]+=", raidz inflation $label"
+        ;;
+    esac
+  done < <(
+    python3 -c '
+import json, sys
+sizes = json.load(sys.stdin)
+for size in sizes["sizes"]:
+    hosts = size["hosts"].items()
+    print(
+        "inflation",
+        size["storage"],
+        ",".join(f"{host} {value:.2f}" for host, value in hosts),
+        ", ".join(f"{host}={value:.2f}" for host, value in hosts),
+        sep="\t",
+    )
+print("suggested", sizes["storage"], "-", "-", sep="\t")
+' <<<"$sizes"
+  ) || warn "bmac block-sizes returned no usable result; no block size is suggested"
+}
+
+# Warn when STORAGE's block size wastes more than 5% of raw space on a node of
+# PLACEMENT_CSV (its inflation is above the suggestion's 1.05).
+warn_vm_storage_inflation() {
+  local storage="$1" placement_csv="$2" entry node value
+  local -a entries
+  IFS=',' read -r -a entries <<<"${VM_STORAGE_INFLATION[$storage]:-}"
+  for entry in "${entries[@]}"; do
+    read -r node value <<<"$entry"
+    [[ ",$placement_csv," == *",$node,"* ]] || continue
+    awk -v v="$value" 'BEGIN { exit !(v > 1.05) }' &&
+      warn "$storage inflates raidz allocations ${value}x on $node; a larger block size wastes less space there"
+  done
+  return 0
 }
 
 # Print why STORAGE cannot hold a disk on every node of PLACEMENT_CSV.
@@ -1014,6 +1089,8 @@ vm_storage_problem() {
   return 0
 }
 
+# The JSON-mode form of collect_new_request: one form, validated as a whole
+# with the same rules. Sets the same globals the terminal prompts do.
 collect_new_request_json() {
   local placement_csv="" aliases_raw="" allocation_choice="" message node
   local -a node_options=()
@@ -1022,8 +1099,9 @@ collect_new_request_json() {
   for node in "${ONLINE_NODES[@]}"; do
     node_options+=(--option "$node" "$node")
   done
-  load_vm_storages
-  local -a storage_options=()
+  load_vm_storages "${ONLINE_NODES[@]}"
+  local -a storage_options=(--option suggested
+    "The suggested block size for the placement nodes")
   local storage
   for storage in "${VM_STORAGE_IDS[@]}"; do
     storage_options+=(--option "$storage" "${VM_STORAGE_LABELS[$storage]}")
@@ -1050,8 +1128,8 @@ collect_new_request_json() {
     --default sparse --required --option sparse "Sparse (recommended)" \
     --option full "Full (refreservation)"
   bmac_ui_group_add VM_STORAGE --id storage --type select --label "Root disk storage" \
-    --help "Each storage gives its disks one block size. Larger blocks waste less space on raidz; smaller blocks suit small random writes. It cannot be changed later." \
-    --default "$DEFAULT_VM_STORAGE" --required "${storage_options[@]}"
+    --help "Each storage gives its disks one block size. Larger blocks waste less space on raidz; smaller blocks suit small random writes. The suggestion is the smallest size that wastes at most 5% on every placement node. It cannot be changed later." \
+    --default suggested --required "${storage_options[@]}"
   bmac_ui_group_add REPLICATION_MINUTES --id replication_minutes --type integer \
     --label "Replication interval" --suffix minutes \
     --default "$DEFAULT_REPLICATION_MINUTES" --min 1 --required
@@ -1062,7 +1140,8 @@ collect_new_request_json() {
     elif [[ ",$placement_csv," != *",$INITIAL_NODE,"* ]]; then
       bmac_ui_field_error initial_node "The initial node must be one of the placement nodes"
     fi
-    message="$(vm_storage_problem "$VM_STORAGE" "$placement_csv")" ||
+    [[ "$VM_STORAGE" == suggested ]] ||
+      message="$(vm_storage_problem "$VM_STORAGE" "$placement_csv")" ||
       bmac_ui_field_error storage "$message"
     # shellcheck disable=SC2030,SC2031 # A dry run in a subshell; applied below.
     if ! message="$( (
@@ -1094,6 +1173,13 @@ collect_new_request_json() {
   placement_csv="$(validate_placement_csv "$placement_csv")" ||
     die "Invalid placement selection"
   IFS=',' read -r -a PLACEMENT_NODES <<<"$placement_csv"
+  if [[ "$VM_STORAGE" == suggested ]]; then
+    load_vm_storages "${PLACEMENT_NODES[@]}"
+    VM_STORAGE="$DEFAULT_VM_STORAGE"
+    info "Root disk storage: ${VM_STORAGE_LABELS[$VM_STORAGE]}, for ${PLACEMENT_NODES[*]}"
+  fi
+  message="$(vm_storage_problem "$VM_STORAGE" "$placement_csv")" || die "$message"
+  warn_vm_storage_inflation "$VM_STORAGE" "$placement_csv"
   # shellcheck disable=SC2031
   PRIMARY_DOMAIN="$(normalize_domain "$PRIMARY_DOMAIN")" ||
     die "Invalid primary domain"
@@ -1170,7 +1256,7 @@ collect_new_request() {
     *) die "Disk allocation must be sparse or full" ;;
   esac
 
-  load_vm_storages
+  load_vm_storages "${PLACEMENT_NODES[@]}"
   local storage message
   for storage in "${VM_STORAGE_IDS[@]}"; do
     info "Storage ${VM_STORAGE_LABELS[$storage]}"
@@ -1178,6 +1264,7 @@ collect_new_request() {
   prompt_with_default VM_STORAGE "Root disk storage (fixed for the VM's life)" \
     "$DEFAULT_VM_STORAGE"
   message="$(vm_storage_problem "$VM_STORAGE" "$placement_csv")" || die "$message"
+  warn_vm_storage_inflation "$VM_STORAGE" "$placement_csv"
 
   prompt_with_default INITIAL_NODE "Initial installation node" \
     "${PLACEMENT_NODES[0]}"

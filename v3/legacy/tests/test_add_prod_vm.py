@@ -849,6 +849,66 @@ install_or_resume_os
             ],
         )
 
+    def test_offered_block_sizes_and_the_measured_suggestion_pick_the_storage(self) -> None:
+        storages = json.dumps([
+            {"storage": "local-zfs", "type": "zfspool", "content": "images", "pool": "rpool/data"},
+            {"storage": "bmac-zfs-32k", "type": "zfspool", "content": "images",
+             "pool": "rpool/data-32k", "blocksize": "32k"},
+            {"storage": "bmac-zfs-64k", "type": "zfspool", "content": "images",
+             "pool": "rpool/data-64k", "blocksize": "64k"},
+        ])
+        sizes = json.dumps({
+            "suggested": 65536, "storage": "bmac-zfs-64k",
+            "sizes": [
+                {"block_size": 32768, "storage": "bmac-zfs-32k",
+                 "hosts": {"mox1": 1.0, "mox2": 1.2}, "worst": 1.2, "efficient": False},
+                {"block_size": 65536, "storage": "bmac-zfs-64k",
+                 "hosts": {"mox1": 1.0, "mox2": 1.03}, "worst": 1.03, "efficient": True},
+            ],
+        })
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        calls = Path(temporary.name) / "bmac-calls"
+        completed = self.run_sourced(
+            f"""
+            pvesh_get() {{ printf '%s\\n' {shlex.quote(storages)}; }}
+            node_exec() {{ printf '{{"host":"%s"}}\\n' "$1"; }}
+            bmac() {{
+              {{ printf 'bmac %s\\n' "$*"; cat; }} >>{shlex.quote(str(calls))}
+              printf '%s\\n' {shlex.quote(sizes)}
+            }}
+            VM_BLOCK_SIZES=32K,64K
+            load_vm_storages mox1 mox2
+            printf '%s\\n' "${{VM_STORAGE_IDS[*]}}" "$DEFAULT_VM_STORAGE"
+            printf '%s\\n' "${{VM_STORAGE_LABELS[bmac-zfs-64k]}}"
+            warn_vm_storage_inflation bmac-zfs-32k mox1,mox2
+            warn_vm_storage_inflation bmac-zfs-64k mox1,mox2
+            node_exec() {{ return 1; }}
+            NODE_CAPACITY=()
+            unset VM_BLOCK_SIZES
+            load_vm_storages mox1 mox2
+            printf '%s\\n' "${{VM_STORAGE_IDS[*]}}" "$DEFAULT_VM_STORAGE"
+            """
+        )
+        self.assertEqual(
+            completed.stdout.splitlines(),
+            [
+                "bmac-zfs-32k bmac-zfs-64k",
+                "bmac-zfs-64k",
+                "bmac-zfs-64k (64KiB blocks, rpool/data-64k), raidz inflation mox1=1.00, mox2=1.03 (suggested)",
+                "bmac-zfs-32k bmac-zfs-64k local-zfs",
+                "local-zfs",
+            ],
+        )
+        self.assertEqual(
+            calls.read_text(),
+            'bmac block-sizes --json --offered 32K,64K\n{"host":"mox1"}\n{"host":"mox2"}\n\n',
+        )
+        self.assertIn("bmac-zfs-32k inflates raidz allocations 1.20x on mox2", completed.stderr)
+        self.assertNotIn("1.00x", completed.stderr)
+        self.assertNotIn("bmac-zfs-64k inflates", completed.stderr)
+        self.assertIn("Could not measure rpool on mox1", completed.stderr)
+
     def test_resumed_vm_requires_exact_disk_and_secure_boot_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / "qm.conf"

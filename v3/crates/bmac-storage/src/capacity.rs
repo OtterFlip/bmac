@@ -230,8 +230,8 @@ mod tests {
         }
     }
 
-    /// `I × (1 + m)` on a mirror at 16 KiB: 1 + 256/16384.
-    const MIRROR_16K: Ratio = Ratio { num: 65, den: 64 };
+    /// `I × (1 + m)` on a mirror at 16 KiB: 1 + 128/16384.
+    const MIRROR_16K: Ratio = Ratio { num: 129, den: 128 };
 
     // The tests below are test_extend_prod_vm_disk.py's, with v2's flat 1.5%
     // sparse overhead replaced by the capacity function's charge.
@@ -248,7 +248,7 @@ mod tests {
         let growth = growth_allowance(sparse, 64 * GIB, BlockSize::K16, &hosts).unwrap();
         let headroom = 250 * GIB - 100 * GIB;
         assert_eq!(growth.hosts[1].headroom, headroom);
-        let expected = (headroom * 64 / 65 - 20 * GIB) / MIB * MIB;
+        let expected = (headroom * 128 / 129 - 20 * GIB) / MIB * MIB;
         assert_eq!(growth.allowed, expected);
         assert_eq!(growth.allowed % MIB, 0);
         let rows: Vec<_> = growth
@@ -295,7 +295,7 @@ mod tests {
         // mox3 keeps 200 GiB of its 2000 GiB pool, leaving the smaller 60 GiB.
         let headroom = 60 * GIB;
         assert_eq!(growth.hosts[1].headroom, headroom);
-        // ZFS's ratio (1.031...) exceeds the function's 1.0156 here.
+        // ZFS's ratio (1.031...) exceeds the function's 1.0078 here.
         let scaled = u128::from(headroom) * u128::from(volsize) / u128::from(refreservation);
         assert_eq!(growth.allowed, u64::try_from(scaled).unwrap() / MIB * MIB);
     }
@@ -313,7 +313,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(growth.hosts[0].charge, MIRROR_16K);
-        assert_eq!(growth.allowed, 100 * GIB * 64 / 65 / MIB * MIB);
+        assert_eq!(growth.allowed, 100 * GIB * 128 / 129 / MIB * MIB);
     }
 
     #[test]
@@ -334,7 +334,7 @@ mod tests {
             refreservation: GIB,
         };
         let growth = growth_allowance(reserved, GIB, BlockSize::K128, &[pool]).unwrap();
-        // (5 MiB + 99) × 512/513 is just under 5 MiB.
+        // (5 MiB + 99) × 1024/1025 is just under 5 MiB.
         assert_eq!(growth.allowed, 4 * MIB);
     }
 
@@ -385,9 +385,9 @@ mod tests {
         let hosts = [host("mox1", 1000 * GIB, 300 * GIB), raidz];
         let sparse = ZvolAllocation::Sparse { guest_free: 0 };
         let at16 = growth_allowance(sparse, 64 * GIB, BlockSize::K16, &hosts).unwrap();
-        // 1.2 × 65/64 on the raidz host.
-        assert_eq!(at16.hosts[1].charge, Ratio::new(78, 64));
-        assert_eq!(at16.allowed, 200 * GIB * 64 / 78 / MIB * MIB);
+        // 1.2 × 129/128 on the raidz host.
+        assert_eq!(at16.hosts[1].charge, Ratio::new(387, 320));
+        assert_eq!(at16.allowed, 200 * GIB * 320 / 387 / MIB * MIB);
         let at32 = growth_allowance(sparse, 64 * GIB, BlockSize::K32, &hosts).unwrap();
         assert!(at32.allowed > at16.allowed);
     }
@@ -422,7 +422,7 @@ mod tests {
             data: vec![Geometry::new(VdevType::Raidz1, 5, 12)],
         };
         let needed = raidz.space_needed(64 * GIB, BlockSize::K16);
-        assert_eq!(needed, (64 * GIB * 6 * 65).div_ceil(5 * 64));
+        assert_eq!(needed, (64 * GIB * 6 * 129).div_ceil(5 * 128));
         assert_eq!(
             reserved_refreservation(64 * GIB, BlockSize::K16, &raidz, 65 * GIB),
             needed

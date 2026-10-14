@@ -1,0 +1,354 @@
+[
+ {
+  "kind": "raidz1",
+  "width": 3,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 16384,
+  "used": 539576576
+ },
+ {
+  "kind": "raidz1",
+  "width": 3,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 32768,
+  "used": 538005248
+ },
+ {
+  "kind": "raidz1",
+  "width": 3,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 65536,
+  "used": 537219584
+ },
+ {
+  "kind": "raidz1",
+  "width": 3,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 131072,
+  "used": 536826752
+ },
+ {
+  "kind": "raidz1",
+  "width": 4,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 16384,
+  "used": 588248064
+ },
+ {
+  "kind": "raidz1",
+  "width": 4,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 32768,
+  "used": 586724352
+ },
+ {
+  "kind": "raidz1",
+  "width": 4,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 65536,
+  "used": 537203712
+ },
+ {
+  "kind": "raidz1",
+  "width": 4,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 131072,
+  "used": 536822784
+ },
+ {
+  "kind": "raidz1",
+  "width": 5,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 16384,
+  "used": 646337792
+ },
+ {
+  "kind": "raidz1",
+  "width": 5,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 32768,
+  "used": 537655040
+ },
+ {
+  "kind": "raidz1",
+  "width": 5,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 65536,
+  "used": 536922112
+ },
+ {
+  "kind": "raidz1",
+  "width": 5,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 131072,
+  "used": 536555648
+ },
+ {
+  "kind": "raidz1",
+  "width": 6,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 16384,
+  "used": 646337792
+ },
+ {
+  "kind": "raidz1",
+  "width": 6,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 32768,
+  "used": 537655040
+ },
+ {
+  "kind": "raidz1",
+  "width": 6,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 65536,
+  "used": 536922112
+ },
+ {
+  "kind": "raidz1",
+  "width": 6,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 131072,
+  "used": 536555648
+ },
+ {
+  "kind": "raidz2",
+  "width": 4,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 16384,
+  "used": 588248064
+ },
+ {
+  "kind": "raidz2",
+  "width": 4,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 32768,
+  "used": 586724352
+ },
+ {
+  "kind": "raidz2",
+  "width": 4,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 65536,
+  "used": 537203712
+ },
+ {
+  "kind": "raidz2",
+  "width": 4,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 131072,
+  "used": 536822784
+ },
+ {
+  "kind": "raidz2",
+  "width": 6,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 16384,
+  "used": 539620224
+ },
+ {
+  "kind": "raidz2",
+  "width": 6,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 32768,
+  "used": 538048896
+ },
+ {
+  "kind": "raidz2",
+  "width": 6,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 65536,
+  "used": 537263232
+ },
+ {
+  "kind": "raidz2",
+  "width": 6,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 131072,
+  "used": 536870400
+ },
+ {
+  "kind": "raidz2",
+  "width": 8,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 16384,
+  "used": 575457792
+ },
+ {
+  "kind": "raidz2",
+  "width": 8,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 32768,
+  "used": 574060032
+ },
+ {
+  "kind": "raidz2",
+  "width": 8,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 65536,
+  "used": 573361152
+ },
+ {
+  "kind": "raidz2",
+  "width": 8,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 131072,
+  "used": 537229056
+ },
+ {
+  "kind": "raidz2",
+  "width": 10,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 16384,
+  "used": 616561920
+ },
+ {
+  "kind": "raidz2",
+  "width": 10,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 32768,
+  "used": 615064320
+ },
+ {
+  "kind": "raidz2",
+  "width": 10,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 65536,
+  "used": 537638400
+ },
+ {
+  "kind": "raidz2",
+  "width": 10,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 131072,
+  "used": 537264000
+ },
+ {
+  "kind": "raidz3",
+  "width": 5,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 16384,
+  "used": 645175296
+ },
+ {
+  "kind": "raidz3",
+  "width": 5,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 32768,
+  "used": 536549376
+ },
+ {
+  "kind": "raidz3",
+  "width": 5,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 65536,
+  "used": 535713792
+ },
+ {
+  "kind": "raidz3",
+  "width": 5,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 131072,
+  "used": 535296000
+ },
+ {
+  "kind": "raidz3",
+  "width": 7,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 16384,
+  "used": 615507968
+ },
+ {
+  "kind": "raidz3",
+  "width": 7,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 32768,
+  "used": 614012928
+ },
+ {
+  "kind": "raidz3",
+  "width": 7,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 65536,
+  "used": 536719360
+ },
+ {
+  "kind": "raidz3",
+  "width": 7,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 131072,
+  "used": 536345600
+ },
+ {
+  "kind": "raidz3",
+  "width": 9,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 16384,
+  "used": 663989760
+ },
+ {
+  "kind": "raidz3",
+  "width": 9,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 32768,
+  "used": 662376960
+ },
+ {
+  "kind": "raidz3",
+  "width": 9,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 65536,
+  "used": 578995200
+ },
+ {
+  "kind": "raidz3",
+  "width": 9,
+  "ashift": 12,
+  "volsize": 536870912,
+  "block_size": 131072,
+  "used": 537304320
+ }
+]

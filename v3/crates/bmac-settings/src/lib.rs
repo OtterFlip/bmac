@@ -23,6 +23,9 @@ use bmac_proto::settings::SettingKey;
 use serde::Serialize;
 
 const MAX_VALUE: usize = 1024;
+/// The VM disk block sizes BMAC defines a storage for (`STORAGE.md`, "VM
+/// disk block size").
+pub const BLOCK_SIZES: [&str; 4] = ["16K", "32K", "64K", "128K"];
 
 /// What a key holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -53,6 +56,9 @@ pub enum Kind {
     SshPublicKey,
     Mac,
     MacOrAuto,
+    /// `VM_BLOCK_SIZES`: some of 16K, 32K, 64K, and 128K, comma-separated,
+    /// each once.
+    BlockSizes,
     Choice(&'static [&'static str]),
 }
 
@@ -112,6 +118,7 @@ pub const CLUSTER_KEYS: &[Key] = &[
     key("STAGING_VM_MEMORY_GIB", PositiveInteger, false),
     key("STAGING_VM_DISK_GB", PositiveInteger, false),
     key("STAGING_VM_BRIDGE", Interface, false),
+    key("VM_BLOCK_SIZES", BlockSizes, false),
     key("ISO_STORAGE_ID", Text, false),
     key("SNIPPETS_STORAGE_ID", Text, false),
     key("PROXMOX_ISO_FILE_URL", IsoUrl, false),
@@ -347,6 +354,19 @@ fn check_kind(key: &Key, value: &str, subnet: Option<Subnet>) -> Result<(), Stri
         MacOrAuto => (value == "auto" || is_mac(value))
             .then_some(())
             .ok_or_else(|| "must be a MAC address or auto".into()),
+        BlockSizes => {
+            let mut seen = Vec::new();
+            for size in value.split(',') {
+                if !BLOCK_SIZES.contains(&size) {
+                    return Err(format!("{size} is not one of {}", BLOCK_SIZES.join(", ")));
+                }
+                if seen.contains(&size) {
+                    return Err(format!("lists {size} twice"));
+                }
+                seen.push(size);
+            }
+            Ok(())
+        }
         Choice(choices) => choices
             .contains(&value)
             .then_some(())

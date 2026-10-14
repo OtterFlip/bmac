@@ -9,6 +9,7 @@
 pub mod capacity;
 pub mod checks;
 pub mod geometry;
+pub mod journal;
 pub mod layout;
 pub mod luks;
 pub mod partition;

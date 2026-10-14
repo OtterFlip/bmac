@@ -719,9 +719,6 @@ async fn a_new_mirror_is_partitioned_and_added_and_the_block_size_storages_made(
         &[ZPOOL, STATUS[0], STATUS[1], STATUS[2], STATUS[3]],
         pool("ONLINE", "", &boot),
     );
-    for n in [1, 1, 2] {
-        rig.expect(&[CRYPTSETUP, "isLuks", &p(n)], Reply::fail(1, ""));
-    }
     rig.expect(
         &[
             ZPOOL,

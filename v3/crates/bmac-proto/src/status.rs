@@ -265,7 +265,7 @@ impl DiskStatus {
             DiskStatus::AwaitingFinalization => "Awaiting finalization",
             DiskStatus::Evacuating => "Evacuating",
             DiskStatus::PendingReplacement => "Replacement in progress",
-            DiskStatus::PendingAddition => "New mirror in progress",
+            DiskStatus::PendingAddition => "New vdev in progress",
             DiskStatus::InUse => "In use",
             DiskStatus::NoSerial => "No serial",
             DiskStatus::Available => "Available",

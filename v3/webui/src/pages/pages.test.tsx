@@ -236,6 +236,14 @@ describe("the Storage page", () => {
     expect(screen.getAllByText("Every disk on this host is in a pool.")).toHaveLength(2);
   });
 
+  it("offers the storage operations", async () => {
+    await open("/storage");
+    const operations = (await screen.findByText("Storage operations")).nextElementSibling?.nextElementSibling as HTMLElement;
+    for (const title of ["Add a vdev", "Attach a disk", "Replace a disk", "Remove a vdev", "Storage inventory", "Simulate a disk failure"]) {
+      expect(within(operations).getByRole("button", { name: new RegExp(title) })).toBeInTheDocument();
+    }
+  });
+
   it("says when a host's storage hasn't been observed", async () => {
     mock.statusData.storage.hosts[1].observation = null;
     await open("/storage");

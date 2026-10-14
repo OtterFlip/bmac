@@ -61,6 +61,7 @@ fn template_cluster() -> Values {
         ("STAGING_VM_CORES", "10"),
         ("STAGING_VM_MEMORY_GIB", "16"),
         ("STAGING_VM_BRIDGE", "vmbr-private"),
+        ("VM_BLOCK_SIZES", "16K,64K"),
         ("ISO_STORAGE_ID", "local"),
         ("SNIPPETS_STORAGE_ID", "local"),
         (
@@ -723,6 +724,10 @@ const CLUSTER_REJECTED: &[Change] = &[
     ("MOX_SSH_CONNECT_TIMEOUT", Some("08")),
     ("PROD_VM_BRIDGE", Some("vmbr private")),
     ("STAGING_VM_BRIDGE", Some("a-very-long-bridge-name")),
+    ("VM_BLOCK_SIZES", Some("8K")),
+    ("VM_BLOCK_SIZES", Some("16K,16K")),
+    ("VM_BLOCK_SIZES", Some("16K,")),
+    ("VM_BLOCK_SIZES", Some("16k")),
     ("MOX_IP_START", None),
     ("PROXMOX_MIGRATION_NETWORK", None),
 ];

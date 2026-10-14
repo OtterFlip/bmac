@@ -53,6 +53,7 @@ const KIND_HELP: Record<string, string> = {
   ssh_public_key: "One SSH public key line",
   mac: "A MAC address, such as aa:bb:cc:dd:ee:ff",
   mac_or_auto: "A MAC address, or auto",
+  block_sizes: "Some of 16K, 32K, 64K, and 128K, comma-separated; all four when unset",
 };
 
 type Values = Record<string, string>;

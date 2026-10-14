@@ -22,6 +22,8 @@ use bmac_proto::status::{
 use serde::Deserialize;
 use serde_json::Value;
 
+use bmac_storage::journal;
+
 use super::disks;
 
 pub const COROSYNC_CONF: &str = "/etc/pve/corosync.conf";
@@ -275,7 +277,22 @@ pub async fn storage(
                 rpool.remove = layout.pool.remove.clone();
                 rpool.errors = layout.pool.errors.clone();
             }
-            (disks::vdevs(layout), disks::disks(layout))
+            let journal = match files.read(Path::new(journal::JOURNAL_FILE)) {
+                None => journal::State::default(),
+                Some(text) => match serde_json::from_str::<journal::State>(&text)
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| s.validate().map(|()| s).map_err(|e| e.to_string()))
+                {
+                    Ok(state) => state,
+                    Err(e) => {
+                        errors
+                            .errors
+                            .push(format!("{}: {e}", journal::JOURNAL_FILE));
+                        journal::State::default()
+                    }
+                },
+            };
+            (disks::vdevs(layout), disks::disks(layout, &journal))
         }
         None => (Vec::new(), Vec::new()),
     };

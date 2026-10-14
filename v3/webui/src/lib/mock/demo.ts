@@ -100,6 +100,29 @@ export const CLUSTER_OPERATIONS = (
       params,
       target: { rule: "duty" },
     })) as never[],
+  )
+  .concat(
+    (
+      [
+        ["storage.add_vdev", "Add a vdev", true],
+        ["storage.attach_disk", "Attach a disk", true],
+        ["storage.replace_disk", "Replace a disk", true],
+        ["storage.remove_vdev", "Remove a vdev", true],
+        ["storage.inventory", "Storage inventory", false],
+        ["storage.simulate_failure", "Simulate a disk failure", true],
+      ] as const
+    ).map(([id, title, destructive]) => ({
+      ...base,
+      id,
+      title,
+      summary: `${title}.`,
+      description: "",
+      category: "storage",
+      min_role: "admin",
+      destructive,
+      params: [param("host", "Host", "host")],
+      target: { rule: "host", param: "host" },
+    })) as never[],
   ) as unknown as OperationView[];
 
 export function seedDemo(mock: MockBackend) {

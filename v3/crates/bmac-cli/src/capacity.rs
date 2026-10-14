@@ -7,6 +7,8 @@
 //! (`STORAGE.md`, "One capacity function"). Script operations call it on
 //! each placement host instead of doing their own arithmetic.
 
+use std::collections::BTreeMap;
+
 use bmac_adapters::AdapterError;
 use bmac_adapters::zfs::Zfs;
 use bmac_adapters::zpool::{ConfigNode, PoolStatus, VdevClass, Zpool, int_property};
@@ -16,10 +18,12 @@ use bmac_storage::capacity::{Growth, HostPool, Placement, growth_allowance};
 use bmac_storage::{BlockSize, Geometry, PoolGeometry, PoolSpace, VdevType, ZvolAllocation};
 use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Fit {
     pub volsize: u64,
     pub block_size: u32,
+    /// `I(b)` on this pool, to two places.
+    pub inflation: f64,
     /// `V × I(b) × (1 + m(b))` on this pool.
     pub needed: u64,
     pub fits: bool,
@@ -28,7 +32,7 @@ pub struct Fit {
     pub explanation: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Capacity {
     pub host: HostSlot,
     pub pool: String,
@@ -95,6 +99,7 @@ pub fn compute(
         Fit {
             volsize,
             block_size: block.into(),
+            inflation: hundredths(geometry.inflation(block)),
             needed,
             fits: placement.fits(),
             spare: placement.spare(),
@@ -160,6 +165,76 @@ pub fn growth(
     growth_allowance(allocation, volsize, block, &hosts).map_err(|e| e.to_string())
 }
 
+/// One offered block size on the placement hosts.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SizeChoice {
+    pub block_size: u32,
+    /// The Proxmox storage BMAC defines for it.
+    pub storage: String,
+    /// `I(b)` on each host, to two places.
+    pub hosts: BTreeMap<HostSlot, f64>,
+    pub worst: f64,
+    /// At most the suggestion's 1.05 on every host.
+    pub efficient: bool,
+}
+
+/// `bmac block-sizes --json`: each offered size's inflation on the
+/// placement hosts, and the suggested one (`STORAGE.md`, "Suggested
+/// default").
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BlockSizes {
+    pub suggested: u32,
+    pub storage: String,
+    pub sizes: Vec<SizeChoice>,
+}
+
+fn hundredths(ratio: bmac_storage::Ratio) -> f64 {
+    (ratio.as_f64() * 100.0).round() / 100.0
+}
+
+pub fn block_sizes(input: &str, offered: &[BlockSize]) -> Result<BlockSizes, String> {
+    let hosts = serde_json::Deserializer::from_str(input)
+        .into_iter::<HostPool>()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("not bmac capacity --json output: {e}"))?;
+    if hosts.is_empty() {
+        return Err("at least one placement host is needed".into());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(pool) = hosts.iter().find(|pool| !seen.insert(pool.host)) {
+        return Err(format!("{} is listed twice", pool.host));
+    }
+    let geometries: Vec<PoolGeometry> = hosts.iter().map(|h| h.geometry.clone()).collect();
+    let suggested = bmac_storage::geometry::suggested_block_size(&geometries, offered)
+        .ok_or("no block size is offered")?;
+    let mut sizes: Vec<SizeChoice> = offered
+        .iter()
+        .map(|&b| {
+            let worst = geometries
+                .iter()
+                .map(|g| g.inflation(b))
+                .max()
+                .unwrap_or(bmac_storage::Ratio::ONE);
+            SizeChoice {
+                block_size: b.into(),
+                storage: b.storage(),
+                hosts: hosts
+                    .iter()
+                    .map(|h| (h.host, hundredths(h.geometry.inflation(b))))
+                    .collect(),
+                worst: hundredths(worst),
+                efficient: worst <= bmac_storage::geometry::SUGGESTED_MAX_INFLATION,
+            }
+        })
+        .collect();
+    sizes.sort_by_key(|s| s.block_size);
+    Ok(BlockSizes {
+        suggested: suggested.into(),
+        storage: suggested.storage(),
+        sizes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use bmac_adapters::programs;
@@ -213,7 +288,7 @@ mod tests {
         );
         assert_eq!((capacity.total, capacity.reserve), (1000 * GIB, 100 * GIB));
         let fit = capacity.fit.unwrap();
-        assert_eq!(fit.needed, 100 * GIB / 64 * 65);
+        assert_eq!(fit.needed, 100 * GIB / 128 * 129);
         assert!(fit.fits);
         assert_eq!(fit.spare, Some(800 * GIB - fit.needed));
     }
@@ -324,7 +399,7 @@ mod tests {
         let growth = growth(&input, sparse, 64 * GIB, BlockSize::K16).unwrap();
         assert_eq!(growth.hosts.len(), 2);
         assert_eq!(growth.hosts[1].headroom, 400 * GIB);
-        let expected = (400 * GIB / 65 * 64 - GIB) / (1024 * 1024) * (1024 * 1024);
+        let expected = (400 * GIB / 129 * 128 - GIB) / (1024 * 1024) * (1024 * 1024);
         assert_eq!(growth.allowed, expected);
         assert!(growth.hosts[0].allowed > growth.hosts[1].allowed);
     }
@@ -339,6 +414,52 @@ mod tests {
         let on_mirror = growth(&mirror, reserved, 64 * GIB, BlockSize::K16).unwrap();
         let on_raidz = growth(&raidz, reserved, 64 * GIB, BlockSize::K16).unwrap();
         assert!(on_raidz.allowed < on_mirror.allowed);
+    }
+
+    const RAIDZ1_5: &str = "\t  raidz1-0  ONLINE       0     0     0\n\
+                            \t    /dev/a  ONLINE       0     0     0\n\
+                            \t    /dev/b  ONLINE       0     0     0\n\
+                            \t    /dev/c  ONLINE       0     0     0\n\
+                            \t    /dev/d  ONLINE       0     0     0\n\
+                            \t    /dev/e  ONLINE       0     0     0\n";
+
+    #[test]
+    fn the_suggested_block_size_suits_every_placement_host() {
+        let mirror = capacity_json(1, MIRROR, 0, 1000 * GIB);
+        let raidz = capacity_json(2, RAIDZ1_5, 0, 1000 * GIB);
+        let alone = block_sizes(&mirror, &BlockSize::OFFERED).unwrap();
+        assert_eq!(
+            (alone.suggested, alone.storage.as_str()),
+            (16384, "local-zfs")
+        );
+
+        let both = block_sizes(&format!("{mirror}\n{raidz}"), &BlockSize::OFFERED).unwrap();
+        assert_eq!(
+            (both.suggested, both.storage.as_str()),
+            (32768, "bmac-zfs-32k")
+        );
+        let k16 = &both.sizes[0];
+        assert_eq!(k16.hosts[&mox(1)], 1.0);
+        assert_eq!(k16.hosts[&mox(2)], 1.2);
+        assert_eq!(k16.worst, 1.2);
+        assert!(!k16.efficient && both.sizes[1].efficient);
+
+        let only = block_sizes(&raidz, &[BlockSize::K16, BlockSize::K64]).unwrap();
+        assert_eq!(only.suggested, 65536);
+        assert_eq!(only.sizes.len(), 2);
+        let json = serde_json::to_value(&only).unwrap();
+        assert_eq!(json["sizes"][0]["hosts"]["mox2"], 1.2);
+
+        assert!(
+            block_sizes("", &BlockSize::OFFERED)
+                .unwrap_err()
+                .contains("at least one")
+        );
+        assert!(
+            block_sizes(&format!("{raidz}{raidz}"), &BlockSize::OFFERED)
+                .unwrap_err()
+                .contains("twice")
+        );
     }
 
     #[test]

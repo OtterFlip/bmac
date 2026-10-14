@@ -188,6 +188,12 @@ class JsonFormTest(unittest.TestCase):
             """
             ONLINE_NODES=(mox1 mox2 mox3)
             pvesh_get() { printf '%s\n' '[{"storage": "local-zfs", "type": "zfspool", "content": "images,rootdir", "pool": "rpool/data"}, {"storage": "bmac-zfs-64k", "type": "zfspool", "content": "images", "pool": "rpool/data-64k", "blocksize": "64k", "nodes": "mox1,mox3"}, {"storage": "local", "type": "dir", "content": "iso"}]'; }
+            node_exec() { printf '{"host":"%s"}\n' "$1"; }
+            bmac() {
+              local suggested=bmac-zfs-64k
+              [[ "$(cat)" != *mox2* ]] || suggested=local-zfs
+              printf '{"suggested":0,"storage":"%s","sizes":[]}\n' "$suggested"
+            }
             PURPOSE_SLUG=production
             PROD_VM_CORES=2
             PROD_VM_MEMORY_GIB=4
@@ -228,7 +234,7 @@ class JsonFormTest(unittest.TestCase):
         def fixed(request):
             seen.append(request)
             return {"values": {**values, "placement": ["mox1", "mox3"], "aliases": "www.example.com",
-                               "storage": "bmac-zfs-64k"}}
+                               "storage": "suggested"}}
 
         run = self.run_form(
             argv,
@@ -244,11 +250,12 @@ class JsonFormTest(unittest.TestCase):
         self.assertIn("at least two", errors["placement"])
         self.assertEqual(errors["storage"], "tank is not a zfspool storage for VM disks")
         storage = next(f for f in seen[0]["fields"] if f["id"] == "storage")
-        self.assertEqual(storage["default"], "local-zfs")
+        self.assertEqual(storage["default"], "suggested")
         self.assertEqual(
             [(o["value"], o["label"]) for o in storage["options"]],
-            [("bmac-zfs-64k", "bmac-zfs-64k (64KiB blocks, rpool/data-64k)"),
-             ("local-zfs", "local-zfs (16KiB blocks, rpool/data)")],
+            [("suggested", "The suggested block size for the placement nodes"),
+             ("bmac-zfs-64k", "bmac-zfs-64k (64KiB blocks, rpool/data-64k)"),
+             ("local-zfs", "local-zfs (16KiB blocks, rpool/data) (suggested)")],
         )
         self.assertEqual(
             run.of("result")[-1]["data"],

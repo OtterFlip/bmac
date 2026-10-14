@@ -99,6 +99,25 @@ pub fn with_entries(text: &str, pool: &PoolName, entries: &[Entry]) -> String {
     joined
 }
 
+/// `text` without the lines for these mapper names, for members that have
+/// left the pool; other lines stay as they are.
+pub fn without_entries(text: &str, names: &[String]) -> String {
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|line| {
+            fields(line)
+                .and_then(|f| f.first().copied())
+                .is_none_or(|name| !names.iter().any(|n| n == name))
+        })
+        .collect();
+    if kept.is_empty() {
+        return String::new();
+    }
+    let mut joined = kept.join("\n");
+    joined.push('\n');
+    joined
+}
+
 /// The mapper names the initramfs's `cryptroot/crypttab` lists.
 pub fn initramfs_names(text: &str) -> Vec<String> {
     text.lines()
@@ -157,6 +176,17 @@ mod tests {
         );
         let doubled = format!("{after}{}\n", a.line(&rpool()));
         assert!(!lists(&doubled, &rpool(), &a), "a name listed twice");
+    }
+
+    #[test]
+    fn retired_members_leave_crypttab_and_the_rest_stays() {
+        let text = "# comment\nbmac-rpool-sA UUID=1 bmac-rpool luks\nbmac-rpool-sB UUID=2 bmac-rpool luks\n";
+        let after = without_entries(text, &["bmac-rpool-sA".to_string()]);
+        assert_eq!(after, "# comment\nbmac-rpool-sB UUID=2 bmac-rpool luks\n");
+        assert_eq!(
+            without_entries(&after, &["bmac-rpool-sA".to_string()]),
+            after
+        );
     }
 
     #[test]

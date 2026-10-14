@@ -19,12 +19,15 @@ usage:
   bmac capacity [--json] [--pool POOL] [--volsize BYTES --block-size BYTES]
   bmac growth --json --volsize BYTES --block-size BYTES
               (--guest-free BYTES | --refreservation BYTES) < CAPACITIES
+  bmac block-sizes --json [--offered 16K,32K,64K,128K] < CAPACITIES
   bmac --version
 
 status, guests, guest-host-key, and capacity read this host directly and work
-with bmacd stopped. growth reads every placement host's capacity --json output
-on standard input and prints how far a disk may grow on all of them. jobs, cancel, and run log in through bmacd with a Proxmox
-user, password, and second factor, every time; nothing is remembered.";
+with bmacd stopped. growth and block-sizes read every placement host's
+capacity --json output on standard input; growth prints how far a disk may
+grow on all of them, and block-sizes each offered block size's space cost on
+them and the suggested one. jobs, cancel, and run log in through bmacd with a
+Proxmox user, password, and second factor, every time; nothing is remembered.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunArgs {
@@ -76,6 +79,9 @@ pub enum Command {
         allocation: ZvolAllocation,
         volsize: u64,
         block: BlockSize,
+    },
+    BlockSizes {
+        offered: Vec<BlockSize>,
     },
 }
 
@@ -311,6 +317,21 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 block,
             })
         }
+        "block-sizes" => {
+            let w = words(&["offered"])?;
+            w.only(&["json"])?;
+            w.positional(0)?;
+            if !w.flag("json") {
+                return Err("block-sizes only prints JSON; give --json".to_string());
+            }
+            let offered = match w.value("offered") {
+                Some(text) => {
+                    BlockSize::parse_offered(&text).map_err(|e| format!("--offered: {e}"))?
+                }
+                None => BlockSize::OFFERED.to_vec(),
+            };
+            Ok(Command::BlockSizes { offered })
+        }
         other => Err(format!("unknown command {other}")),
     }
 }
@@ -369,6 +390,18 @@ mod tests {
             })
         );
         assert_eq!(
+            parsed("block-sizes --json --offered 64K,16K"),
+            Ok(Command::BlockSizes {
+                offered: vec![BlockSize::K16, BlockSize::K64]
+            })
+        );
+        assert_eq!(
+            parsed("block-sizes --json"),
+            Ok(Command::BlockSizes {
+                offered: BlockSize::OFFERED.to_vec()
+            })
+        );
+        assert_eq!(
             parsed("guest-host-key prod1 --json"),
             Ok(Command::GuestHostKey {
                 guest: "prod1".into(),
@@ -406,6 +439,8 @@ mod tests {
                 "growth --json --block-size 16384 --guest-free 0",
                 "needs --volsize",
             ),
+            ("block-sizes", "give --json"),
+            ("block-sizes --json --offered 8K", "--offered: 8K"),
             ("guests extra", "unexpected argument extra"),
             ("luks-enter --json", "unknown option --json"),
             ("frobnicate", "unknown command"),

@@ -79,7 +79,7 @@ declare -ag _PROXMOX_CONFIG_CLUSTER_KEYS=(
   PROD_VM_BRIDGE PROD_VM_CPU_TYPE
   PROD_VM_REPLICATION_INTERVAL
   STAGING_VM_CORES STAGING_VM_MEMORY_GIB STAGING_VM_DISK_GB
-  STAGING_VM_BRIDGE
+  STAGING_VM_BRIDGE VM_BLOCK_SIZES
   ISO_STORAGE_ID
   SNIPPETS_STORAGE_ID DNS_SEARCH_DOMAIN GUEST_DNS_SERVERS
   MOX_SSH_CONNECT_TIMEOUT
@@ -480,6 +480,22 @@ _config_validate_interface() {
     config_die "${name} must be a safe Linux interface name (1-15 characters)"
 }
 
+# VM_BLOCK_SIZES: some of 16K, 32K, 64K, and 128K, comma-separated, each once.
+_config_validate_block_sizes() {
+  local name="$1" size seen=","
+  local -a sizes
+  IFS=',' read -r -a sizes <<<"${!name},"
+  ((${#sizes[@]})) || config_die "${name} must list block sizes" || return
+  for size in "${sizes[@]}"; do
+    case "$size" in
+      16K | 32K | 64K | 128K) ;;
+      *) config_die "${name}: ${size} is not one of 16K, 32K, 64K, 128K" || return ;;
+    esac
+    [[ "$seen" != *",${size},"* ]] || config_die "${name} lists ${size} twice" || return
+    seen+="${size},"
+  done
+}
+
 _config_validate_sha256() {
   local name="$1"
   [[ "${!name}" =~ ^[[:xdigit:]]{64}$ ]] ||
@@ -845,6 +861,7 @@ PY
   for name in PROXMOX_PRIVATE_BRIDGE PROD_VM_BRIDGE STAGING_VM_BRIDGE; do
     [[ -z "${!name+x}" ]] || _config_validate_interface "$name" || return
   done
+  [[ -z "${VM_BLOCK_SIZES+x}" ]] || _config_validate_block_sizes VM_BLOCK_SIZES || return
 }
 
 # mox_private_ip moxN: the host's private VLAN address without its prefix,

@@ -227,7 +227,7 @@ def then(host) -> None:
             console.line(passphrase)
             console.expect(r"Again: ", timeout=30)
             console.line(passphrase)
-            console.expect(r"Stored for the setup job", timeout=30)
+            console.expect(r"Stored for the job", timeout=30)
             console.line("exit")
 
     def unlock() -> None:

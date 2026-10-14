@@ -44,6 +44,13 @@ pub struct BlockDevice {
     pub children: Vec<String>,
 }
 
+impl BlockDevice {
+    /// How the disk is recognized: its WWN, or its serial when it has none.
+    pub fn identity(&self) -> Option<bmac_core::DiskIdentity> {
+        bmac_core::DiskIdentity::from_reported(self.wwn.as_deref(), self.serial.as_deref())
+    }
+}
+
 /// Every block device, keyed by kernel name (v2 `host_storage.py`,
 /// `parse_lsblk`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]

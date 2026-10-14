@@ -1757,6 +1757,20 @@ step:
 against the adapters' fixture runner; the port gate (`WORKFLOW_MIGRATION.md`)
 compares command sequences for the mirror cases.
 
+**As built:** no separate adapter per tool. The write commands run through
+the process runner from two places that share one implementation: the
+setup phase's `Storage` (`native/storage.rs`: partitioning, LUKS, the
+crypttab and initramfs proof, `zpool create`/`add`) and the storage
+operations (`native/disks/`), which reuse `Storage` for member
+preparation and add `zpool attach`/`replace`/`remove`/`offline`/`online`,
+best-effort `labelclear`, and metadata erasure. Every program comes from
+`bmac_adapters::programs`. The tests replay the commands against a fake
+host (`native/disks/tests.rs`, `storage_tests.rs`) that names disks as
+`lsblk -p` does (`/dev/sdX`), because the lab found a mismatch between
+the layout's `/dev/sdX` and the inventory's `sdX`. Proxmox doesn't
+install `cryptsetup`, so an unencrypted pool never calls it (the lab found
+`isLuks` failing with exit 127); the inventory's LUKS facts answer instead.
+
 ### M8.2 Host storage journal
 
 **Builds:** `/var/lib/bmac/storage-state.json`, written under `flock` with
@@ -1766,6 +1780,12 @@ replacements, removals in progress, trims, and scrubs.
 **From v2:** `scripts/utilities/storage_state.py` (`validate`, `mutate`,
 `record_trims`, `record_scrub`, `record_removal`, `set_removal`,
 `record_replacement`, `record_addition`) and `test_storage_state.py`.
+
+**As built:** `bmac_storage::journal` holds trims, scrubs, removals with
+their members' identities, replacements until the old member's LUKS and
+crypttab line are retired, additions (numbered, never reused), and a
+failure drill under way. Changes take `flock`, then write, `fsync`, and
+rename. Its tests port `test_storage_state.py`.
 
 ### M8.3 Workflows
 
@@ -1815,6 +1835,18 @@ add raidz, special, log, cache, and spare cases. Lab: every
 workflow on mirror and raidz2 pools, with LUKS, on the VM lab with virtual
 NVMe disks.
 
+**As built:** `native/disks/` holds the six operations (`add.rs`,
+`replace.rs`, `remove.rs`, `inventory.rs`, `simulate.rs`, and attach in
+`add.rs`), each with the lock `storage:{host}`. The form shows the
+removal restriction for the pool's current shape before the operator
+picks. `attach_disk` widens a mirror, or widens a raidz once
+`feature@raidz_expansion` is enabled. `simulate_failure` takes one member
+of a healthy redundant vdev offline and closes its LUKS mapping, as if it
+had been pulled; it then either erases the disk for Replace a disk or
+brings it back online. That is how the lab exercises replacement and
+removal: the lab has no disk hotplug, and neither does the FiberState
+hardware. The Storage page offers all six as operation tiles.
+
 ### M8.4 Block-size storages
 
 **Builds:** the per-block-size datasets and Proxmox storages created during
@@ -1829,6 +1861,17 @@ checks; every occurrence becomes the VM's recorded storage ID (M4.3).
 
 **Tests:** suggestion table tests for mixed placement layouts; a staging
 clone lands on its production disk's storage.
+
+**As built:** the cluster setting `VM_BLOCK_SIZES` (a comma-separated list
+drawn from 16K, 32K, 64K, and 128K; all four when unset) limits what new
+VMs are offered. Setup still creates all four storages. `bmac capacity
+--json` reports each block size's inflation, and `bmac block-sizes`
+picks the suggestion from the placement hosts' capacities. In
+`prod.add`, the root-disk form's first and default option is
+"suggested", which resolves once the placement is known. Each choice is
+labelled with its inflation per host, and anything above 1.05 is warned
+about. `prod.change_placement` warns the same way when an added host
+inflates the VM's blocks.
 
 ### M8.5 Capacity measurements
 

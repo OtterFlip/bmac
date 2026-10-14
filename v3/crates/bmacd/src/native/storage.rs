@@ -34,29 +34,29 @@ use super::{Stop, Workflow};
 /// `PASSPHRASE_FILE`).
 pub const KEY_FILE: &str = "/run/bmac/luks-passphrase";
 pub const HEADER_DIR: &str = "/var/lib/bmac/luks-headers";
-const CRYPTTAB: &str = "/etc/crypttab";
+pub(crate) const CRYPTTAB: &str = "/etc/crypttab";
 const STORAGE_CFG: &str = "/etc/pve/storage.cfg";
 const DECRYPT_KEYCTL: &str = "/usr/lib/cryptsetup/scripts/decrypt_keyctl";
 const KEYCTL: &str = "/usr/bin/keyctl";
 const OSRELEASE: &str = "/proc/sys/kernel/osrelease";
 /// The partition the Proxmox installer puts the pool on.
-const BOOT_PARTITION: u32 = 3;
+pub(crate) const BOOT_PARTITION: u32 = 3;
 const GIB: u64 = bmac_core::Bytes::GIB;
 /// GPT type codes: Linux LUKS, and Solaris /usr (ZFS).
-const TYPE_LUKS: &str = "8309";
-const TYPE_ZFS: &str = "BF01";
+pub(crate) const TYPE_LUKS: &str = "8309";
+pub(crate) const TYPE_ZFS: &str = "BF01";
 pub const PACKAGES: &[&str] = &["cryptsetup", "cryptsetup-initramfs", "keyutils", "gdisk"];
 
-const CRYPTSETUP: &str = "/usr/sbin/cryptsetup";
-const SGDISK: &str = "/usr/sbin/sgdisk";
-const PARTX: &str = "/usr/bin/partx";
-const UDEVADM: &str = "/usr/bin/udevadm";
-const WIPEFS: &str = "/usr/sbin/wipefs";
-const UPDATE_INITRAMFS: &str = "/usr/sbin/update-initramfs";
-const UNMKINITRAMFS: &str = "/usr/bin/unmkinitramfs";
-const PROXMOX_BOOT_TOOL: &str = "/usr/sbin/proxmox-boot-tool";
+pub(crate) const CRYPTSETUP: &str = "/usr/sbin/cryptsetup";
+pub(crate) const SGDISK: &str = "/usr/sbin/sgdisk";
+pub(crate) const PARTX: &str = "/usr/bin/partx";
+pub(crate) const UDEVADM: &str = "/usr/bin/udevadm";
+pub(crate) const WIPEFS: &str = "/usr/sbin/wipefs";
+pub(crate) const UPDATE_INITRAMFS: &str = "/usr/sbin/update-initramfs";
+pub(crate) const UNMKINITRAMFS: &str = "/usr/bin/unmkinitramfs";
+pub(crate) const PROXMOX_BOOT_TOOL: &str = "/usr/sbin/proxmox-boot-tool";
 const PVESM: &str = "/usr/sbin/pvesm";
-const SLOW: Duration = Duration::from_secs(15 * 60);
+pub(crate) const SLOW: Duration = Duration::from_secs(15 * 60);
 
 /// Where a boot member is in the pool.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +292,74 @@ pub fn check_unpacked(dir: &Path, mappers: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// A vdev's members, ready to join the pool or in it already.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Prepared {
+    pub in_pool: bool,
+    pub encrypted: bool,
+    /// Each member's mapper name and partition.
+    pub members: Vec<(String, String)>,
+}
+
+impl Prepared {
+    /// The devices the pool takes: the mappers, or the partitions.
+    pub fn devices(&self) -> Vec<String> {
+        self.members
+            .iter()
+            .map(|(m, p)| {
+                if self.encrypted {
+                    mapper_path(m)
+                } else {
+                    p.clone()
+                }
+            })
+            .collect()
+    }
+
+    pub fn mappers(&self) -> Vec<String> {
+        if self.encrypted {
+            self.members.iter().map(|(m, _)| m.clone()).collect()
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// Whether an unpacked initramfs leaves every one of `mappers` alone at
+/// boot. One with no `cryptroot/crypttab` unlocks nothing.
+pub fn check_absent(dir: &Path, mappers: &[String]) -> Result<(), String> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&at) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(path);
+            } else if kind.is_file() && path.ends_with("cryptroot/crypttab") {
+                let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                let listed = luks::initramfs_names(&text);
+                let still: Vec<&str> = mappers
+                    .iter()
+                    .filter(|m| listed.contains(m))
+                    .map(String::as_str)
+                    .collect();
+                if !still.is_empty() {
+                    return Err(format!(
+                        "the initramfs still unlocks {} at boot",
+                        still.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// What the storage phase works with on the host; `root` is `/` except in
 /// tests.
 pub struct Storage<'a> {
@@ -306,23 +374,23 @@ pub struct Storage<'a> {
     pub poll: Duration,
 }
 
-fn part(member: &ById, number: u32) -> String {
+pub(crate) fn part(member: &ById, number: u32) -> String {
     format!("{}-part{number}", member.path())
 }
 
 /// Where partition `number` starts on `disk`, as the inventory read it.
-fn start_of(disk: &InventoryDisk, number: u32) -> u64 {
+pub(crate) fn start_of(disk: &InventoryDisk, number: u32) -> u64 {
     disk.partitions
         .iter()
         .find(|p| p.number == number)
         .map_or(0, |p| p.start_bytes)
 }
 
-fn mapper_path(name: &str) -> String {
+pub(crate) fn mapper_path(name: &str) -> String {
     format!("/dev/mapper/{name}")
 }
 
-fn fail(what: &str, e: impl std::fmt::Display) -> Stop {
+pub(crate) fn fail(what: &str, e: impl std::fmt::Display) -> Stop {
     Stop::Failed {
         message: format!("{what} failed"),
         details: Some(e.to_string()),
@@ -330,12 +398,12 @@ fn fail(what: &str, e: impl std::fmt::Display) -> Stop {
 }
 
 impl Storage<'_> {
-    fn at(&self, path: &str) -> PathBuf {
+    pub(crate) fn at(&self, path: &str) -> PathBuf {
         self.root.join(path.trim_start_matches('/'))
     }
 
     /// Whether two device paths name the same device, following symlinks.
-    fn same(&self, a: &str, b: &str) -> bool {
+    pub(crate) fn same(&self, a: &str, b: &str) -> bool {
         match (
             std::fs::canonicalize(self.at(a)),
             std::fs::canonicalize(self.at(b)),
@@ -345,7 +413,7 @@ impl Storage<'_> {
         }
     }
 
-    async fn run(&self, command: Command) -> Result<String, Stop> {
+    pub(crate) async fn run(&self, command: Command) -> Result<String, Stop> {
         let shown = command.to_string();
         let output = self
             .runner
@@ -355,7 +423,7 @@ impl Storage<'_> {
         Ok(output.stdout_text())
     }
 
-    async fn code(&self, command: Command, codes: &[i32]) -> Result<i32, Stop> {
+    pub(crate) async fn code(&self, command: Command, codes: &[i32]) -> Result<i32, Stop> {
         let shown = command.to_string();
         let output = self
             .runner
@@ -365,14 +433,14 @@ impl Storage<'_> {
         Ok(output.code().unwrap_or(-1))
     }
 
-    async fn status(&self) -> Result<PoolStatus, Stop> {
+    pub(crate) async fn status(&self) -> Result<PoolStatus, Stop> {
         Zpool::new(self.runner)
             .status(&self.layout.pool)
             .await
             .map_err(|e| fail("zpool status", e))
     }
 
-    fn disk<'d>(
+    pub(crate) fn disk<'d>(
         &self,
         disks: &'d [InventoryDisk],
         member: &ById,
@@ -383,14 +451,14 @@ impl Storage<'_> {
             .ok_or_else(|| Stop::failed(format!("{} is no longer on this host", member.as_str())))
     }
 
-    fn mapper(&self, disk: &InventoryDisk) -> Result<String, Stop> {
+    pub(crate) fn mapper(&self, disk: &InventoryDisk) -> Result<String, Stop> {
         disk.identity
             .as_ref()
             .map(|id| luks::mapper_name(&self.layout.pool, id))
             .ok_or_else(|| Stop::failed(format!("{} has no serial number or WWN", disk.name)))
     }
 
-    async fn open_on(&self, mapper: &str, partition: &str) -> Result<bool, Stop> {
+    pub(crate) async fn open_on(&self, mapper: &str, partition: &str) -> Result<bool, Stop> {
         if !self.at(&mapper_path(mapper)).exists() {
             return Ok(false);
         }
@@ -410,7 +478,7 @@ impl Storage<'_> {
         Ok(true)
     }
 
-    async fn is_luks(&self, partition: &str) -> Result<bool, Stop> {
+    pub(crate) async fn is_luks(&self, partition: &str) -> Result<bool, Stop> {
         let code = self
             .code(
                 Command::new(CRYPTSETUP).args(["isLuks", partition]),
@@ -420,7 +488,7 @@ impl Storage<'_> {
         Ok(code == 0)
     }
 
-    async fn test_passphrase(&self, partition: &str) -> Result<(), Stop> {
+    pub(crate) async fn test_passphrase(&self, partition: &str) -> Result<(), Stop> {
         let code = self
             .code(
                 Command::new(CRYPTSETUP).args([
@@ -444,7 +512,7 @@ impl Storage<'_> {
 
     // ---- the passphrase ----
 
-    fn key_ready(&self) -> Result<bool, Stop> {
+    pub(crate) fn key_ready(&self) -> Result<bool, Stop> {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let path = self.at(KEY_FILE);
         match std::fs::symlink_metadata(&path) {
@@ -470,7 +538,7 @@ impl Storage<'_> {
         }
     }
 
-    async fn wait_for_key(&self) -> Result<(), Stop> {
+    pub(crate) async fn wait_for_key(&self) -> Result<(), Stop> {
         while !self.key_ready()? {
             let host = crate::engine::listen::node_name();
             self.flow
@@ -521,7 +589,7 @@ impl Storage<'_> {
 
     // ---- boot unlock ----
 
-    fn read_crypttab(&self) -> Result<String, Stop> {
+    pub(crate) fn read_crypttab(&self) -> Result<String, Stop> {
         match std::fs::read_to_string(self.at(CRYPTTAB)) {
             Ok(text) => Ok(text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
@@ -529,7 +597,7 @@ impl Storage<'_> {
         }
     }
 
-    async fn entry(&self, mapper: &str, partition: &str) -> Result<Entry, Stop> {
+    pub(crate) async fn entry(&self, mapper: &str, partition: &str) -> Result<Entry, Stop> {
         let uuid = self
             .run(Command::new(CRYPTSETUP).args(["luksUUID", partition]))
             .await?
@@ -546,7 +614,7 @@ impl Storage<'_> {
         })
     }
 
-    async fn unpack_and_check(&self, mappers: &[String]) -> Result<(), Stop> {
+    async fn unpack_with(&self, check: impl Fn(&Path) -> Result<(), String>) -> Result<(), Stop> {
         let release = std::fs::read_to_string(self.at(OSRELEASE))
             .map_err(|e| Stop::failed(format!("cannot read {OSRELEASE}: {e}")))?;
         let initrd = format!("/boot/initrd.img-{}", release.trim());
@@ -558,15 +626,50 @@ impl Storage<'_> {
                 .timeout(SLOW),
         )
         .await?;
-        let checked = check_unpacked(&into, mappers);
+        let checked = check(&into);
         let _ = std::fs::remove_dir_all(&into);
         checked.map_err(|why| Stop::failed(format!("{why} ({initrd})")))
+    }
+
+    pub(crate) async fn unpack_and_check(&self, mappers: &[String]) -> Result<(), Stop> {
+        self.unpack_with(|dir| check_unpacked(dir, mappers)).await
+    }
+
+    /// Takes retired mappers out of crypttab, rebuilds the initramfs, and
+    /// proves it no longer waits for them at boot. The rebuild runs even
+    /// when crypttab had no line left to drop, so an interrupted earlier
+    /// run is finished.
+    pub(crate) async fn unregister(&self, mappers: &[String]) -> Result<(), Stop> {
+        let text = self.read_crypttab()?;
+        let updated = luks::without_entries(&text, mappers);
+        if updated != text {
+            super::write_atomic(&self.at(CRYPTTAB), updated.as_bytes())
+                .map_err(|e| Stop::failed(format!("cannot write {CRYPTTAB}: {e}")))?;
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(self.at(CRYPTTAB), std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| Stop::failed(format!("cannot restrict {CRYPTTAB}: {e}")))?;
+        }
+        self.flow.info("Rebuilding the initramfs.");
+        self.run(
+            Command::new(UPDATE_INITRAMFS)
+                .args(["-u", "-k", "all"])
+                .timeout(SLOW),
+        )
+        .await?;
+        self.run(Command::new(PROXMOX_BOOT_TOOL).arg("refresh").timeout(SLOW))
+            .await?;
+        self.unpack_with(|dir| check_absent(dir, mappers)).await?;
+        self.flow.info(format!(
+            "The initramfs no longer unlocks {}.",
+            mappers.join(", ")
+        ));
+        Ok(())
     }
 
     /// Lists the mappers in crypttab in the shared form, rebuilds the
     /// initramfs, and proves it unlocks them, before the pool depends on
     /// them.
-    async fn register(&self, mappers: &[(String, String)]) -> Result<(), Stop> {
+    pub(crate) async fn register(&self, mappers: &[(String, String)]) -> Result<(), Stop> {
         let mut entries = Vec::new();
         for (mapper, partition) in mappers {
             entries.push(self.entry(mapper, partition).await?);
@@ -610,7 +713,7 @@ impl Storage<'_> {
     }
 
     /// The pool's top-level vdev holding `device`, and the leaf for it.
-    fn find<'s>(
+    pub(crate) fn find<'s>(
         &self,
         status: &'s PoolStatus,
         device: &str,
@@ -729,7 +832,7 @@ impl Storage<'_> {
         self.settle(member, Some(n)).await
     }
 
-    async fn settle(&self, member: &ById, number: Option<u32>) -> Result<(), Stop> {
+    pub(crate) async fn settle(&self, member: &ById, number: Option<u32>) -> Result<(), Stop> {
         let mut partx = Command::new(PARTX).arg("--update");
         if let Some(n) = number {
             partx = partx.args(["--nr".to_string(), n.to_string()]);
@@ -754,7 +857,7 @@ impl Storage<'_> {
             .map_err(|e| fail(&format!("clearing the old ZFS labels on {partition}"), e))
     }
 
-    async fn format(&self, partition: &str, start: u64) -> Result<(), Stop> {
+    pub(crate) async fn format(&self, partition: &str, start: u64) -> Result<(), Stop> {
         self.clear_labels(partition, start)?;
         self.run(Command::new(WIPEFS).args(["--all", "--force", partition]))
             .await?;
@@ -774,7 +877,7 @@ impl Storage<'_> {
         Ok(())
     }
 
-    async fn open(&self, partition: &str, mapper: &str) -> Result<(), Stop> {
+    pub(crate) async fn open(&self, partition: &str, mapper: &str) -> Result<(), Stop> {
         self.test_passphrase(partition).await?;
         self.run(Command::new(CRYPTSETUP).args([
             "open",
@@ -871,13 +974,26 @@ impl Storage<'_> {
             let disk = self.disk(disks, member)?;
             let mapper = self.mapper(disk)?;
             let partition = part(member, 1);
-            let in_pool = self.find(status, &partition).is_some()
-                || self.find(status, &mapper_path(&mapper)).is_some();
+            let present = |path: &str| {
+                self.find(status, path).is_some_and(|(_, leaf)| {
+                    !matches!(
+                        leaf.state.as_deref(),
+                        Some("OFFLINE" | "UNAVAIL" | "FAULTED" | "REMOVED")
+                    )
+                })
+            };
+            let in_pool = present(&partition) || present(&mapper_path(&mapper));
             let partitioned = matches!(disk.partitions.as_slice(),
                 [p] if p.number == 1
                     && p.start_bytes == FIRST_PARTITION_START_BYTES
                     && p.start_bytes + p.size_bytes == end);
-            let luks = partitioned && !in_pool && self.is_luks(&partition).await?;
+            // An unencrypted host may not have cryptsetup installed.
+            let luks = partitioned
+                && !in_pool
+                && match self.layout.encryption {
+                    Encryption::Luks2 => self.is_luks(&partition).await?,
+                    Encryption::None => disk.partitions.iter().any(|p| p.luks.is_some()),
+                };
             let open = luks && self.open_on(&mapper, &partition).await?;
             out.push((
                 MemberFacts {
@@ -893,7 +1009,7 @@ impl Storage<'_> {
         Ok(out)
     }
 
-    async fn partition(
+    pub(crate) async fn partition(
         &self,
         vdev: &Vdev,
         member: &ById,
@@ -935,22 +1051,29 @@ impl Storage<'_> {
         Ok(())
     }
 
-    async fn add_vdev(&self, index: usize) -> Result<Vec<String>, Stop> {
+    /// Partitions, encrypts, and opens vdev `index`'s members, one step at a
+    /// time from what the disks show, until they are ready to join the pool
+    /// or are in it already.
+    pub(crate) async fn prepare(&self, index: usize) -> Result<Prepared, Stop> {
         let vdev = &self.layout.vdevs[index];
         let encrypted = self.layout.encryption == Encryption::Luks2;
         loop {
+            self.flow.check()?;
             let disks = self.host.disks();
             let status = self.status().await?;
             let members = self.member_facts(vdev, &disks, &status).await?;
             let facts: Vec<MemberFacts> = members.iter().map(|(f, _, _)| f.clone()).collect();
-            let mappers = || {
-                members
+            let prepared = |in_pool| Prepared {
+                in_pool,
+                encrypted,
+                members: members
                     .iter()
-                    .map(|(_, m, _)| m.clone())
-                    .collect::<Vec<_>>()
+                    .map(|(_, m, p)| (m.clone(), p.clone()))
+                    .collect(),
             };
             match vdev_step(encrypted, &facts) {
-                VdevStep::Done => return Ok(if encrypted { mappers() } else { Vec::new() }),
+                VdevStep::Done => return Ok(prepared(true)),
+                VdevStep::Add => return Ok(prepared(false)),
                 VdevStep::Partition(i) => {
                     self.partition(vdev, &vdev.members[i], &disks, encrypted)
                         .await?;
@@ -961,30 +1084,6 @@ impl Storage<'_> {
                         .await?;
                 }
                 VdevStep::Open(i) => self.open(&members[i].2, &members[i].1).await?,
-                VdevStep::Add => {
-                    if encrypted {
-                        let pairs: Vec<(String, String)> = members
-                            .iter()
-                            .map(|(_, m, p)| (m.clone(), p.clone()))
-                            .collect();
-                        self.register(&pairs).await?;
-                    }
-                    let devices: Vec<String> = members
-                        .iter()
-                        .map(|(_, m, p)| if encrypted { mapper_path(m) } else { p.clone() })
-                        .collect();
-                    self.flow.info(format!(
-                        "Adding {} to {}.",
-                        vdev.describe(),
-                        self.layout.pool
-                    ));
-                    self.run(
-                        Command::new(programs::ZPOOL)
-                            .args(add_args(self.layout, index, &devices))
-                            .timeout(SLOW),
-                    )
-                    .await?;
-                }
                 VdevStep::Refuse(why) => {
                     return Err(Stop::failed(format!("{} {why}.", vdev.describe())));
                 }
@@ -992,9 +1091,34 @@ impl Storage<'_> {
         }
     }
 
+    /// Readies vdev `index`, proves the initramfs unlocks it, and adds it.
+    pub(crate) async fn add_vdev(&self, index: usize) -> Result<Vec<String>, Stop> {
+        let vdev = &self.layout.vdevs[index];
+        loop {
+            let prepared = self.prepare(index).await?;
+            if prepared.in_pool {
+                return Ok(prepared.mappers());
+            }
+            if prepared.encrypted {
+                self.register(&prepared.members).await?;
+            }
+            self.flow.info(format!(
+                "Adding {} to {}.",
+                vdev.describe(),
+                self.layout.pool
+            ));
+            self.run(
+                Command::new(programs::ZPOOL)
+                    .args(add_args(self.layout, index, &prepared.devices()))
+                    .timeout(SLOW),
+            )
+            .await?;
+        }
+    }
+
     // ---- the rest ----
 
-    async fn backup_header(&self, mapper: &str, partition: &str) -> Result<(), Stop> {
+    pub(crate) async fn backup_header(&self, mapper: &str, partition: &str) -> Result<(), Stop> {
         use std::os::unix::fs::PermissionsExt;
         let dir = self.at(HEADER_DIR);
         std::fs::create_dir_all(&dir)
