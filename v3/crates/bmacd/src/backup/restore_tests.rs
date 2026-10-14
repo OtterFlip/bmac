@@ -48,6 +48,9 @@ pub(crate) struct World {
     pub(crate) jobs: Vec<(u32, crate::backup::replace::Job, i64)>,
     pub(crate) quorate: bool,
     pub(crate) fail_rename: Option<String>,
+    /// Every replication run fails with this, counted per job.
+    pub(crate) sync_error: Option<String>,
+    pub(crate) sync_fails: BTreeMap<String, u64>,
 }
 
 impl World {

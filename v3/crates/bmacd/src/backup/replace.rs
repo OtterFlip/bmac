@@ -63,6 +63,18 @@ const ZFS: &str = "/usr/sbin/zfs";
 const QM: &str = "/usr/sbin/qm";
 const PVESH: &str = "/usr/bin/pvesh";
 const PVESR: &str = "/usr/bin/pvesr";
+const BASH: &str = "/usr/bin/bash";
+/// `$1` the clone's origin, `$2` the clone's newest snapshot, `$3` the copy.
+const COPY_CLONE: &str = "set -euo pipefail
+/usr/sbin/zfs send -- \"$1\" | /usr/sbin/zfs receive -o volmode=none -- \"$3\"
+/usr/sbin/zfs send -I \"$1\" -- \"$2\" | /usr/sbin/zfs receive -- \"$3\"";
+/// A local copy of a whole disk.
+const COPY_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
+/// Set-aside disks nest one level per restore over a clone.
+const MAX_PROMOTES: usize = 16;
+/// A replication job that failed this many times since it was recreated
+/// stops the wait with Proxmox's error.
+const MAX_SYNC_FAILURES: u64 = 3;
 const PVECM: &str = "/usr/bin/pvecm";
 const HA_MANAGER: &str = "/usr/sbin/ha-manager";
 
@@ -182,11 +194,13 @@ pub struct Job {
     pub comment: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobState {
     pub busy: bool,
     pub failing: bool,
     pub last_sync_s: i64,
+    pub fail_count: u64,
+    pub error: Option<String>,
 }
 
 /// What changing a production VM's disks asks of its owner.
@@ -213,6 +227,19 @@ pub trait ReplaceHost: Send + Sync {
     fn rename(&self, from: &str, to: &str) -> BoxFuture<'_, Result<(), String>>;
     fn inherit_volmode(&self, dataset: &str) -> BoxFuture<'_, Result<(), String>>;
     fn promote(&self, dataset: &str) -> BoxFuture<'_, Result<(), String>>;
+    fn snapshot(&self, name: &str) -> BoxFuture<'_, Result<(), String>>;
+    /// Copies a clone into `target`, which then owns its history: a full
+    /// stream of the clone's `origin`, then the clone's snapshots from it
+    /// to `snapshot`. `target` is received with `volmode=none`.
+    fn copy_clone(
+        &self,
+        origin: &str,
+        snapshot: &str,
+        target: &str,
+    ) -> BoxFuture<'_, Result<(), String>>;
+    fn guid(&self, snapshot: &str) -> BoxFuture<'_, Result<Option<String>, String>>;
+    /// `zfs destroy -r` of a dataset or a snapshot; never `-R`.
+    fn destroy(&self, name: &str) -> BoxFuture<'_, Result<(), String>>;
     /// A clone's origin snapshot.
     fn origin(&self, dataset: &str) -> BoxFuture<'_, Result<Option<String>, String>>;
     /// The dataset's snapshots, oldest first.
@@ -486,6 +513,14 @@ async fn replicate(cx: &Context<'_>, f: &Fenced) -> Result<(), Stop> {
                 flow.info(format!("{} has its replica again.", job.target));
                 continue;
             }
+            if state.fail_count >= MAX_SYNC_FAILURES {
+                return Err(failed(format!(
+                    "replication to {} failed {} times: {}; it carries on in Proxmox",
+                    job.target,
+                    state.fail_count,
+                    state.error.as_deref().unwrap_or("no error given")
+                )));
+            }
             if !state.busy
                 && asked
                     .get(&job.id)
@@ -565,23 +600,99 @@ pub async fn swap(
         )));
     }
     for s in swaps {
-        // A clone of the old disk's snapshot owns them once promoted, and
-        // the old disk becomes the clone.
-        let origin = host.origin(&s.current).await.map_err(failed)?;
-        if origin.is_some_and(|o| o.split('@').next() == Some(aside[&s.slot].as_str()))
-            && let Err(e) = host.promote(&s.current).await
-        {
-            cx.flow().warning(format!(
-                "{}: could not promote it over the disk set aside ({e}); the cleanup does",
-                s.slot
-            ));
-        }
+        own_history(cx, &s.slot, &s.current).await?;
     }
     if let Err(e) = host.rescan(vmid).await {
         cx.flow()
             .warning(format!("Could not rescan VM {vmid}'s disk sizes: {e}"));
     }
     Ok(aside)
+}
+
+/// Makes a swapped-in disk own its snapshots: Proxmox replication sends a
+/// clone's stream, which its target can't receive without the origin. It
+/// is promoted over the set-aside and staging datasets it is a clone of,
+/// one level each. A clone of anything else (another VM's disk) is copied
+/// instead, since promoting it would take that disk's history.
+async fn own_history(cx: &Context<'_>, slot: &str, disk: &str) -> Result<(), Stop> {
+    let pool = disk.split('/').next().unwrap_or_default();
+    let ours = |dataset: &str| {
+        dataset.starts_with(&format!("{pool}/bmac-replaced/"))
+            || dataset.starts_with(&format!("{pool}/bmac-restore/"))
+    };
+    for _ in 0..MAX_PROMOTES {
+        let Some(origin) = cx.host.origin(disk).await.map_err(failed)? else {
+            return Ok(());
+        };
+        let parent = origin.split('@').next().unwrap_or_default();
+        if !ours(parent) {
+            return copy_clone(cx, slot, disk, &origin).await;
+        }
+        if let Err(e) = cx.host.promote(disk).await {
+            cx.flow().warning(format!(
+                "{slot}: could not promote {disk} over {parent} ({e}); replication \
+                 can't send it until it is"
+            ));
+            return Ok(());
+        }
+    }
+    cx.flow().warning(format!(
+        "{slot}: {disk} is still a clone after {MAX_PROMOTES} promotions"
+    ));
+    Ok(())
+}
+
+/// Replaces `disk`, a clone of another disk's `origin`, with a copy that
+/// keeps the origin snapshot's GUID and the clone's own writes. The copy
+/// is made under the staging tree, so a failure leaves the clone in place
+/// and the copy for the cleanup.
+async fn copy_clone(cx: &Context<'_>, slot: &str, disk: &str, origin: &str) -> Result<(), Stop> {
+    let host = cx.host;
+    let pool = disk.split('/').next().unwrap_or_default();
+    let at_s = cx.now_ms().div_euclid(1000);
+    let leaf = disk.rsplit('/').next().unwrap_or_default();
+    let copy = format!("{pool}/bmac-restore/copy-{at_s}/{leaf}");
+    let snapshot = format!("{disk}@bmac-copy-{at_s}");
+    let origin_name = origin.split_once('@').map_or("", |(_, n)| n);
+    cx.flow().info(format!(
+        "{slot}: {disk} is a clone of {origin}, another disk's snapshot; copying it \
+         so that replication can send it."
+    ));
+    host.snapshot(&snapshot).await.map_err(failed)?;
+    host.ensure_parent(&copy).await.map_err(failed)?;
+    host.copy_clone(origin, &snapshot, &copy)
+        .await
+        .map_err(failed)?;
+    let copied = host
+        .guid(&format!("{copy}@{origin_name}"))
+        .await
+        .map_err(failed)?;
+    let wanted = host.guid(origin).await.map_err(failed)?;
+    let last = host
+        .guid(&format!("{copy}@bmac-copy-{at_s}"))
+        .await
+        .map_err(failed)?;
+    if copied.is_none() || copied != wanted || last != host.guid(&snapshot).await.map_err(failed)? {
+        return Err(failed(format!(
+            "{slot}: the copy {copy} doesn't have the snapshots of {disk}; {disk} is \
+             unchanged"
+        )));
+    }
+    host.destroy(disk).await.map_err(failed)?;
+    host.rename(&copy, disk).await.map_err(failed)?;
+    host.inherit_volmode(disk).await.map_err(failed)?;
+    for leftover in [
+        format!("{disk}@bmac-copy-{at_s}"),
+        format!("{pool}/bmac-restore/copy-{at_s}"),
+    ] {
+        if let Err(e) = host.destroy(&leftover).await {
+            cx.flow()
+                .warning(format!("{slot}: could not remove {leftover} ({e})"));
+        }
+    }
+    cx.flow()
+        .info(format!("{slot}: {disk} owns its history now."));
+    Ok(())
 }
 
 /// The VM's current disks: the ZFS dataset of each by slot.
@@ -1777,6 +1888,8 @@ impl ReplaceHost for RealHost<'_> {
                 failing: row["fail_count"].as_u64().unwrap_or(0) != 0
                     || row.get("error").is_some_and(|e| !e.is_null()),
                 last_sync_s: row["last_sync"].as_i64().unwrap_or(0),
+                fail_count: row["fail_count"].as_u64().unwrap_or(0),
+                error: row["error"].as_str().map(str::to_string),
             })
         })
     }
@@ -1886,6 +1999,39 @@ impl ReplaceHost for RealHost<'_> {
             .await
             .map(drop)
         })
+    }
+
+    fn snapshot(&self, name: &str) -> BoxFuture<'_, Result<(), String>> {
+        let name = name.to_string();
+        Box::pin(async move { self.quick(ZFS, &["snapshot", &name]).await.map(drop) })
+    }
+
+    fn copy_clone(
+        &self,
+        origin: &str,
+        snapshot: &str,
+        target: &str,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        let [origin, snapshot, target] = [origin, snapshot, target].map(str::to_string);
+        Box::pin(async move {
+            let args = ["-c", COPY_CLONE, "bmac", &origin, &snapshot, &target];
+            self.run(BASH, &args, COPY_TIMEOUT).await.map(drop)
+        })
+    }
+
+    fn guid(&self, snapshot: &str) -> BoxFuture<'_, Result<Option<String>, String>> {
+        let snapshot = snapshot.to_string();
+        Box::pin(async move {
+            Ok(self
+                .value("guid", &snapshot)
+                .await?
+                .filter(|g| !g.is_empty() && g != "-"))
+        })
+    }
+
+    fn destroy(&self, name: &str) -> BoxFuture<'_, Result<(), String>> {
+        let name = name.to_string();
+        Box::pin(async move { self.quick(ZFS, &["destroy", "-r", &name]).await.map(drop) })
     }
 
     fn rescan(&self, vmid: u32) -> BoxFuture<'_, Result<(), String>> {

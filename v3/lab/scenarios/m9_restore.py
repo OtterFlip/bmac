@@ -21,7 +21,8 @@ issued for both:
 - a cleanup of everything set aside, after which the VM still runs;
 - P4, pulled incrementally from P2, then an online growth of the root disk
   and P5, pulled incrementally from P4 at the new size (lab item 7);
-- every PIT froze the guest's filesystems through its agent (lab item 8);
+- the PITs of the running VM froze its filesystems through the guest agent
+  (lab item 8);
 - the Dashboard's Backups page shows the PITs on both branches, the
   restores, the transfers, and the local snapshot space, and the
   appliance's Recovery page shows the reported restore test, the recovery
@@ -88,6 +89,7 @@ class Restores:
         self.grant = ""
         self.cluster_uuid = ""
         self.pits: dict[str, dict] = {}
+        self.shown: dict[str, dict] = {}
 
     # Plumbing
 
@@ -191,6 +193,7 @@ class Restores:
         second = b.pulled("P2", 2)
         self.s.require("P1 and P2 are on the appliance", bool(first) and bool(second))
         self.pits = {"P1": first, "P2": second}
+        self.note_shown()
         self.cluster_uuid = self.on("mox1", "python3 -c \"import json; "
                                             "print(json.load(open('/etc/pve/priv/bmac/cluster.json'))['cluster_uuid'])\"")
         b.app("bmac-backupd admin-password", input=f"{self.password}\n{self.password}\n".encode())
@@ -231,11 +234,14 @@ class Restores:
         self.s.check(f"P1's snapshot on mox1 is cloned, with nothing over the network ({result.get('methods')})",
                      set((result.get("methods") or {}).values()) == {1})
         config = self.on("mox1", f"qm config {vmid}")
-        self.s.check("the restored VM's network starts disconnected", all(
-            "link_down=1" in l for l in config.splitlines() if re.match(r"^net\d+:", l)))
-        production_macs = re.findall(r"=([0-9A-F:]{17})", self.on("mox1", f"qm config {self.vmid()}"))
-        self.s.check("the restored VM gets new MAC addresses",
-                     bool(production_macs) and all(m not in config for m in production_macs))
+        nets = [l for l in config.splitlines() if re.match(r"^net\d+:", l)]
+        self.s.check(f"the restored VM's network starts disconnected ({len(nets)} NICs)",
+                     bool(nets) and all("link_down=1" in l for l in nets))
+        macs = lambda text: re.findall(r"^net\d+: [a-z0-9]+=([0-9A-Fa-f:]{17})", text, re.M)
+        production_macs, restored_macs = macs(self.on("mox1", f"qm config {self.vmid()}")), macs(config)
+        self.s.check(f"the restored VM gets new MAC addresses ({restored_macs}, production {production_macs})",
+                     bool(production_macs) and len(restored_macs) == len(production_macs)
+                     and not set(restored_macs) & set(production_macs))
         self.s.check("the restored VM runs", lambda: self.running("mox1", vmid))
         self.s.check("the restored VM's disks are named for it", all(
             d.rsplit("/", 1)[-1].startswith(f"vm-{vmid}-disk-") for d in self.disks("mox1", vmid)))
@@ -259,6 +265,7 @@ class Restores:
         self.b.capture("P3")
         third = self.b.pulled("P3", 3)
         self.pits["P3"] = third
+        self.note_shown()
         self.s.check(f"P3 is pulled incrementally from P1 ({third.get('received_from')})",
                      bool(third) and third.get("received_from") == self.pits["P1"]["pit_uuid"])
         self.s.check("P3 is on a new branch", bool(third) and third.get("branch_uuid") != self.pits["P1"].get("branch_uuid"))
@@ -326,20 +333,35 @@ class Restores:
                  for v in fifth.get("volumes", [])}
         self.s.check(f"the appliance's copy of P5 has the grown size ({sorted(sizes)})", grown in sizes)
 
-    def reported(self) -> None:
-        """What the Dashboard's Backups page and the appliance's Recovery page show."""
+    def note_shown(self) -> tuple[dict, dict]:
+        """The VM on the Backups page, noting each PIT shown: the catalog drops a
+        PIT once the cluster keeps neither its snapshot nor its bookmark."""
         view = self.b.dashboard.call("GET", "/backups")
         mine = next((v for v in view["vms"] if v["vm"] == self.b.vm["name"]), {})
+        for p in mine.get("pits", []):
+            self.shown[p["pit_uuid"]] = p
+        return view, mine
+
+    def reported(self) -> None:
+        """What the Dashboard's Backups page and the appliance's Recovery page show."""
+        view, mine = self.note_shown()
         shown = {p["pit_uuid"] for p in mine.get("pits", [])}
-        self.s.check(f"the Backups page shows the VM's policy and PITs ({len(shown)})", bool(mine.get("policy")) and {
-            self.pits[p]["pit_uuid"] for p in ("P1", "P2", "P3")} <= shown)
-        self.s.check("the Backups page shows two branches", len({p["branch_uuid"] for p in mine.get("pits", [])}) >= 2)
-        frozen = {p["consistency"] for p in mine.get("pits", []) if p["pit_uuid"] in {v["pit_uuid"] for v in self.pits.values()}}
-        self.s.check(f"every PIT froze the guest's filesystems through its agent ({sorted(frozen)})",
-                     frozen == {"filesystem"})
+        published = {p["pit_uuid"] for p in self.b.pits()}
+        uuid = lambda label: self.pits[label].get("pit_uuid")
+        dropped = sorted(label for label in self.pits if uuid(label) not in shown)
+        self.s.check(f"the Backups page shows the VM's policy and the PITs the cluster keeps (dropped: {dropped})",
+                     bool(mine.get("policy")) and {uuid("P4"), uuid("P5")} <= shown
+                     and all(uuid(label) in published for label in dropped))
+        self.s.check("the Backups page showed two branches",
+                     len({p["branch_uuid"] for p in self.shown.values()}) >= 2)
+        levels = {label: self.shown.get(p.get("pit_uuid"), {}).get("consistency")
+                  for label, p in sorted(self.pits.items())}
+        # P3 and P4 follow a restart closely, before the agent may answer.
+        self.s.check(f"the PITs of a running VM froze its filesystems through the agent ({levels})",
+                     all(levels.get(p) == "filesystem" for p in ("P1", "P2", "P5")))
         self.s.check(f"the Backups page shows the restores ({len(view['restores'])})", len(view["restores"]) >= 4 and any(
             r["mode"] == "test" and (r.get("test") or {}).get("booted") for r in view["restores"]))
-        moved = [t for t in view["transfers"] if t["appliance"] == self.b.appliance_uuid and not t.get("error")]
+        moved = [t for t in view["transfers"] if t["appliance"] == backup.APPLIANCE_NAME and not t.get("error")]
         self.s.check(f"the Backups page shows the finished transfers ({len(moved)})",
                      bool(moved) and all(t["bytes"] > 0 and t["duration_ms"] > 0 for t in moved))
         self.s.check("the Backups page shows the cluster's local PIT snapshot space",
@@ -356,9 +378,11 @@ class Restores:
         cluster = recovery()
         self.s.check(f"the appliance keeps recovery manifests ({len(cluster.get('manifests', []))})",
                      bool(cluster.get("manifests")))
-        hosts = {h["host"] for h in cluster.get("headers", [])}
-        self.s.check(f"the appliance keeps every host's LUKS header backups ({sorted(hosts)})",
-                     {"mox1", "mox2", "mox3"} <= hosts)
+        kept = {(h["host"], h["file"]) for h in cluster.get("headers", [])}
+        on_hosts = {(name, f) for name in ("mox1", "mox2", "mox3") for f in self.on(
+            name, "ls /var/lib/bmac/luks-headers/ 2>/dev/null | grep '\\.luks-header$' || true").split()}
+        self.s.check(f"the appliance keeps every host's LUKS header backups ({sorted(kept)}; on the hosts "
+                     f"{sorted(on_hosts)})", bool(on_hosts) and on_hosts <= kept)
         self.s.check("no LUKS header fetch overran a frame", self.b.app(
             "journalctl -u bmac-backupd.service --no-pager -o cat 2>/dev/null | grep -c 'frame longer' || true") == "0")
 

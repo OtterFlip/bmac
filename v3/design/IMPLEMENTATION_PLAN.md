@@ -2203,6 +2203,30 @@ appliance keeps it and each host's LUKS headers (`bmac-backupd`'s
 appliance, pinned to one host certificate. Restore-test results are kept
 on the cluster and reported to the appliance in the check-in reply (M9.5).
 
+**As built (lab):** `lab/lab scenario m9_restore` runs on the SATA lab with
+the "small" VM placed on mox1 and mox3: a restore test of P2 on mox2 from
+full streams (it boots and the agent answers in about 13 s), P1 restored
+as a new isolated VM by a clone with new MACs, its promotion (HA starts
+production with its VMID, MACs and HA resource, and P3 is pulled
+incrementally from P1 on a new branch), a rollback to P3, a restore of P2
+into the VM with replication converging again, a cleanup, P4 incremental
+from P2, an online growth of 1 GiB followed by P5 incremental at the new
+size (lab item 7), and the Backups and Recovery pages (M9.5). The fourth
+run passed 151 checks of 153 in 57 minutes; both failures were the
+scenario expecting the catalog to keep P1 after the cluster had dropped
+its snapshot and bookmark, as `BACKUP.md` says it should.
+
+The runs found five bugs. The appliance trusts a host on 8445 only when the
+presented chain includes the cluster CA, so `bmac-source` sends the leaf and
+the CA. A whole host's LUKS headers overran the socket frame, so headers
+are listed and fetched one at a time. Proxmox replication can't send a
+clone, so a swapped-in disk is promoted repeatedly over BMAC's own set-aside
+datasets until it owns its history; a clone of another live disk is copied
+locally (a full send of the origin, then an incremental to the PIT), and the
+replication wait stops with Proxmox's error after three failures, where it
+used to wait 12 hours. Unattended upgrades let needrestart restart
+`bmac-backupd` mid-stream, so the package ships a needrestart override.
+
 ### M9.5 Dashboard backup pages
 
 **Builds:** the Backups page: policies per VM with the appliance

@@ -619,14 +619,20 @@ that snapshot's GUID, so a restored volume never needs a blank zvol
 created first. Method 2's clone and incremental also end at a snapshot of
 its own with the PIT's GUID. Method 1's clone owns no snapshot; it descends
 from the cluster snapshot it was cloned from, which is enough for an
-isolated restore or a restore test. Replication would send that clone to the
-other placement hosts as a plain full copy without the PIT snapshot, so a
-method 1 volume that is to be backed up is first made to own the snapshot.
-When the VM it came from is stopped and set aside (promotion, restore into
-the existing VM), `zfs promote` moves the snapshot to it, keeping the GUID,
-and the old disk becomes the clone. Otherwise, it is copied locally with
-`zfs send | zfs receive`, which also keeps the GUID and leaves production's
-disk untouched. On the cluster:
+isolated restore or a restore test. Proxmox replication can't send a clone
+at all (its stream needs the origin on the target: "local origin for clone
+does not exist"), so a method 1 volume that is to be backed up is first
+made to own the snapshot. When the VM it came from is stopped and set aside
+(promotion, restore into the existing VM), `zfs promote` moves the snapshot
+to it, keeping the GUID, and the old disk becomes the clone. A PIT whose
+snapshot survives only on a disk set aside by an earlier restore gives a
+clone of a clone: it is promoted once per level, over BMAC's set-aside and
+staging datasets only, until it has no origin. A clone of another live
+disk is never promoted over it, since that would take the other disk's
+history; it is copied locally with `zfs send | zfs receive`, which also
+keeps the GUID and leaves that disk untouched. A replication job that fails
+three times while the job waits for its first sync stops the wait with
+Proxmox's error. On the cluster:
 
 1. Each volume is received (or cloned) under a staging name,
    `<pool>/bmac-restore/<job_id>/<volume_uuid>`, with `volmode=none`, so

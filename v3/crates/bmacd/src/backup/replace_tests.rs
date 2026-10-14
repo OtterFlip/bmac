@@ -190,11 +190,14 @@ impl ReplaceHost for Fake {
             .iter()
             .find(|(_, j, _)| j.id == id)
             .map(|(_, _, l)| *l);
+        let fail_count = w.sync_fails.get(id).copied().unwrap_or(0);
         ok(last
             .map(|last_sync_s| JobState {
                 busy: false,
-                failing: false,
+                failing: fail_count > 0,
                 last_sync_s,
+                fail_count,
+                error: w.sync_error.clone().filter(|_| fail_count > 0),
             })
             .ok_or_else(|| format!("no job {id}")))
     }
@@ -202,6 +205,10 @@ impl ReplaceHost for Fake {
     fn schedule_now(&self, id: &str) -> BoxFuture<'_, Result<(), String>> {
         let mut w = self.w();
         w.log.push(format!("schedule {id}"));
+        if w.sync_error.is_some() {
+            *w.sync_fails.entry(id.to_string()).or_default() += 1;
+            return ok(Ok(()));
+        }
         for (_, j, last) in w.jobs.iter_mut() {
             if j.id == id {
                 *last = NOW_MS / 1000;
@@ -233,15 +240,77 @@ impl ReplaceHost for Fake {
     fn promote(&self, dataset: &str) -> BoxFuture<'_, Result<(), String>> {
         let mut w = self.w();
         w.log.push(format!("promote {dataset}"));
-        let origin = w.datasets.get_mut(dataset).and_then(|d| d.origin.take());
+        let origin = w.datasets.get(dataset).and_then(|d| d.origin.clone());
         if let Some((old, snap)) = origin.as_deref().and_then(|o| o.split_once('@')) {
-            let guid = w.snapshots.remove(&format!("{old}@{snap}"));
-            if let Some(guid) = guid {
-                w.snapshots.insert(format!("{dataset}@{snap}"), guid);
+            // As ZFS does: the origin's snapshots up to the branch point
+            // move over, and the clone takes the origin's own origin.
+            let prefix = format!("{old}@");
+            let moving: Vec<String> = w
+                .snapshots
+                .keys()
+                .filter(|n| n.strip_prefix(&prefix).is_some_and(|s| s <= snap))
+                .cloned()
+                .collect();
+            for name in moving {
+                let guid = w.snapshots.remove(&name).unwrap();
+                w.snapshots
+                    .insert(format!("{dataset}@{}", &name[prefix.len()..]), guid);
+            }
+            let above = w.datasets.get(old).and_then(|d| d.origin.clone());
+            if let Some(d) = w.datasets.get_mut(dataset) {
+                d.origin = above;
             }
             if let Some(d) = w.datasets.get_mut(old) {
                 d.origin = Some(format!("{dataset}@{snap}"));
             }
+        }
+        ok(Ok(()))
+    }
+
+    fn snapshot(&self, name: &str) -> BoxFuture<'_, Result<(), String>> {
+        let mut w = self.w();
+        w.log.push(format!("snapshot {name}"));
+        let guid = SnapshotGuid::new(5000 + w.snapshots.len() as u64);
+        w.snapshots.insert(name.to_string(), guid);
+        ok(Ok(()))
+    }
+
+    fn copy_clone(
+        &self,
+        origin: &str,
+        snapshot: &str,
+        target: &str,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        let mut w = self.w();
+        w.log.push(format!("copy {origin} {snapshot} {target}"));
+        let source = snapshot.split('@').next().unwrap();
+        let volsize = w.datasets[source].volsize;
+        w.datasets.insert(
+            target.to_string(),
+            Dataset {
+                volsize,
+                ..Dataset::default()
+            },
+        );
+        for from in [origin, snapshot] {
+            let guid = w.snapshots[from];
+            let name = from.split('@').nth(1).unwrap();
+            w.snapshots.insert(format!("{target}@{name}"), guid);
+        }
+        ok(Ok(()))
+    }
+
+    fn guid(&self, snapshot: &str) -> BoxFuture<'_, Result<Option<String>, String>> {
+        ok(Ok(self.w().snapshots.get(snapshot).map(|g| g.to_string())))
+    }
+
+    fn destroy(&self, name: &str) -> BoxFuture<'_, Result<(), String>> {
+        let mut w = self.w();
+        w.log.push(format!("destroy {name}"));
+        if w.snapshots.remove(name).is_none() {
+            let prefix = format!("{name}@");
+            w.datasets.remove(name);
+            w.snapshots.retain(|n, _| !n.starts_with(&prefix));
         }
         ok(Ok(()))
     }
@@ -435,6 +504,143 @@ async fn a_restore_into_the_vm_sets_the_disks_aside_and_swaps_in_the_pit() {
         "the PIT stays on its own branch"
     );
     assert!(ran.said("Backups continue from the PIT on a new branch"));
+}
+
+#[tokio::test]
+async fn a_disk_cloned_from_one_set_aside_earlier_is_promoted_until_it_owns_its_history() {
+    let r = rig();
+    let earlier = format!("rpool/bmac-replaced/100/{}-5", id(0xd0));
+    {
+        // An earlier promotion set aside the disk that holds the PIT, a
+        // clone of the current disk's older snapshot.
+        let mut w = r.fake.w();
+        production(&mut w);
+        w.datasets.insert(
+            earlier.clone(),
+            Dataset {
+                volsize: 8 << 30,
+                origin: Some(format!("{DISK0}@bmac-pit-20251201T000000Z-000000")),
+                resume_token: None,
+            },
+        );
+        w.snapshots
+            .insert(format!("{earlier}@{PIT_NAME}"), SnapshotGuid::new(300));
+    }
+    let ran = run(
+        &r,
+        RESTORE_INTO,
+        vec![source("bmac-grant-good"), pit(3), yes()],
+    )
+    .await;
+    ran.outcome.as_ref().unwrap();
+
+    let w = r.fake.w();
+    assert!(
+        w.log
+            .iter()
+            .any(|l| l.starts_with(&format!("clone {earlier}@{PIT_NAME} "))),
+        "method 1, from the disk set aside: {:#?}",
+        w.log
+    );
+    let promotes = w
+        .log
+        .iter()
+        .filter(|l| **l == format!("promote {DISK0}"))
+        .count();
+    assert_eq!(
+        promotes, 2,
+        "over the earlier disk, then the one set aside now"
+    );
+    assert_eq!(w.datasets[DISK0].origin, None, "replication can send it");
+    assert_eq!(
+        w.snapshots.get(&format!("{DISK0}@{PIT_NAME}")),
+        Some(&SnapshotGuid::new(300))
+    );
+    assert_eq!(
+        w.snapshots
+            .get(&format!("{DISK0}@bmac-pit-20251201T000000Z-000000")),
+        Some(&SnapshotGuid::new(999))
+    );
+    assert!(w.running.contains(&100));
+}
+
+#[tokio::test]
+async fn a_disk_cloned_from_another_vms_disk_is_copied_and_that_disk_is_left_alone() {
+    let r = rig();
+    let other = "rpool/data/vm-200-disk-0";
+    {
+        let mut w = r.fake.w();
+        production(&mut w);
+        w.datasets.insert(
+            other.into(),
+            Dataset {
+                volsize: 8 << 30,
+                ..Dataset::default()
+            },
+        );
+        w.snapshots
+            .insert(format!("{other}@{PIT_NAME}"), SnapshotGuid::new(300));
+    }
+    let ran = run(
+        &r,
+        RESTORE_INTO,
+        vec![source("bmac-grant-good"), pit(3), yes()],
+    )
+    .await;
+    ran.outcome.as_ref().unwrap();
+
+    let w = r.fake.w();
+    assert!(
+        !w.log.iter().any(|l| l.starts_with("promote")),
+        "never promoted over another VM's disk: {:#?}",
+        w.log
+    );
+    assert!(
+        w.log
+            .iter()
+            .any(|l| l.starts_with(&format!("copy {other}@{PIT_NAME} {DISK0}@bmac-copy-")))
+    );
+    assert_eq!(w.datasets[DISK0].origin, None, "replication can send it");
+    assert_eq!(
+        w.snapshots.get(&format!("{DISK0}@{PIT_NAME}")),
+        Some(&SnapshotGuid::new(300)),
+        "the copy keeps the PIT's GUID"
+    );
+    assert_eq!(
+        w.snapshots.get(&format!("{other}@{PIT_NAME}")),
+        Some(&SnapshotGuid::new(300)),
+        "the other disk keeps its snapshot"
+    );
+    assert!(w.datasets.contains_key(other));
+    assert!(w.snapshots.keys().all(|n| !n.contains("@bmac-copy-")));
+    assert!(w.datasets.keys().all(|d| !d.contains("bmac-restore")));
+    assert!(w.running.contains(&100));
+}
+
+#[tokio::test]
+async fn a_replication_that_keeps_failing_stops_the_wait_with_its_error() {
+    let r = rig();
+    {
+        let mut w = r.fake.w();
+        production(&mut w);
+        w.sync_error = Some("cannot receive: local origin for clone does not exist".into());
+    }
+    let ran = run(
+        &r,
+        RESTORE_INTO,
+        vec![source("bmac-grant-good"), pit(3), yes()],
+    )
+    .await;
+    let message = ran.message();
+    assert!(
+        message.contains("failed 3 times: cannot receive: local origin"),
+        "{message}"
+    );
+    assert!(message.contains("it carries on in Proxmox"));
+    assert_eq!(
+        ran.leases,
+        vec!["acquire prod1 172800", "release prod1 nonce"]
+    );
 }
 
 #[tokio::test]
@@ -814,4 +1020,17 @@ async fn cleanup_offers_nothing_a_restore_in_progress_depends_on() {
     };
     assert!(message.contains("restore in progress"), "{message}");
     assert!(r.fake.w().datasets.contains_key(aside));
+}
+
+#[test]
+fn the_copy_script_parses() {
+    let checked = std::process::Command::new("bash")
+        .args(["-n", "-c", COPY_CLONE])
+        .output()
+        .unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
 }
