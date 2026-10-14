@@ -49,6 +49,14 @@ const SUBJECTS: &[(&str, &str)] = &[
         "bmac-watchdog-up-v1",
         include_str!("../../../notify/templates/bmac-watchdog-up-v1/subject.txt"),
     ),
+    (
+        "bmac-url-down-v1",
+        include_str!("../../../notify/templates/bmac-url-down-v1/subject.txt"),
+    ),
+    (
+        "bmac-url-up-v1",
+        include_str!("../../../notify/templates/bmac-url-up-v1/subject.txt"),
+    ),
 ];
 
 const BODIES: &[(&str, &str, &str)] = files!(
@@ -59,6 +67,8 @@ const BODIES: &[(&str, &str, &str)] = files!(
     "bmac-test-v1",
     "bmac-watchdog-down-v1",
     "bmac-watchdog-up-v1",
+    "bmac-url-down-v1",
+    "bmac-url-up-v1",
 );
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -313,6 +323,31 @@ impl Model for WatchdogUp {
     const ALIAS: &'static str = "bmac-watchdog-up-v1";
 }
 
+/// A public production URL the appliance checks from outside failing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UrlDown {
+    pub appliance_name: String,
+    pub url: String,
+    pub failing_since: String,
+    pub error: String,
+}
+
+impl Model for UrlDown {
+    const ALIAS: &'static str = "bmac-url-down-v1";
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UrlUp {
+    pub appliance_name: String,
+    pub url: String,
+    pub failing_since: String,
+    pub up_at: String,
+}
+
+impl Model for UrlUp {
+    const ALIAS: &'static str = "bmac-url-up-v1";
+}
+
 /// Every alias this version sends with, and the layout they use.
 pub const USED: &[&str] = &[
     LAYOUT,
@@ -322,6 +357,8 @@ pub const USED: &[&str] = &[
     TestEmail::ALIAS,
     WatchdogDown::ALIAS,
     WatchdogUp::ALIAS,
+    UrlDown::ALIAS,
+    UrlUp::ALIAS,
 ];
 
 #[cfg(test)]
@@ -390,6 +427,8 @@ mod tests {
         check::<TestEmail>();
         check::<WatchdogDown>();
         check::<WatchdogUp>();
+        check::<UrlDown>();
+        check::<UrlUp>();
         let layout = serde_json::to_value(Layout::new("a", "b", "c")).unwrap();
         assert_eq!(shape(&layout), manifest_shape(&entry(LAYOUT).fields));
     }

@@ -14,8 +14,8 @@ use std::process::ExitCode;
 
 use bmac_core::job;
 use bmac_proto::{
-    alerts, api, certificate, deployer, inventory, joins, logs, operations, settings, status,
-    stream,
+    alerts, api, appliance_ui, backups, certificate, deployer, inventory, joins, logs, operations,
+    settings, status, stream,
 };
 use ts_rs::{Config, TS};
 
@@ -67,6 +67,10 @@ fn export(cfg: &Config) -> Result<(), ts_rs::ExportError> {
         joins::IssueJoin,
         joins::IssuedJoin,
         joins::JoinList,
+        backups::IssueEnroll,
+        backups::IssuedEnroll,
+        backups::ApproveAppliance,
+        backups::ApplianceList,
         status::ClusterSnapshot,
         status::HostsSnapshot,
         status::VmsSnapshot,
@@ -91,6 +95,31 @@ fn export(cfg: &Config) -> Result<(), ts_rs::ExportError> {
         inventory::ClearReport,
         job::RequestForm,
         job::EventBody,
+        appliance_ui::ApplianceHello,
+        appliance_ui::ApplianceLogin,
+        appliance_ui::ApplianceSession,
+        appliance_ui::ChangePassword,
+        appliance_ui::ApplianceStatusView,
+        appliance_ui::PitsView,
+        appliance_ui::ThroughputView,
+        appliance_ui::ApplianceRetentionView,
+        appliance_ui::SetRetention,
+        appliance_ui::RetentionChange,
+        appliance_ui::SetHold,
+        appliance_ui::PruneResult,
+        appliance_ui::GrantView,
+        appliance_ui::IssueGrant,
+        appliance_ui::IssuedGrant,
+        appliance_ui::RevokeGrant,
+        appliance_ui::PeersView,
+        appliance_ui::TrustPeer,
+        appliance_ui::TrustResult,
+        appliance_ui::UntrustPeer,
+        appliance_ui::PlatformView,
+        appliance_ui::SavePlatform,
+        appliance_ui::SetApplianceToken,
+        appliance_ui::ApplianceTestEmail,
+        appliance_ui::AuditView,
     );
     Ok(())
 }
@@ -99,12 +128,13 @@ fn constants() -> String {
     format!(
         "{HEADER}\nexport const API_PREFIX = {:?};\nexport const KEEPALIVE_SECONDS = {};\n\
          export const DEPLOYER_TASK_EVENT = {:?};\nexport const DEPLOYER_TASK_UPDATED = {:?};\n\
-         export const DEPLOYER_CLOSE_REQUESTED = {:?};\n",
+         export const DEPLOYER_CLOSE_REQUESTED = {:?};\nexport const APPLIANCE_API = {:?};\n",
         api::API_PREFIX,
         stream::KEEPALIVE_SECONDS,
         deployer::events::TASK_EVENT,
         deployer::events::TASK_UPDATED,
         deployer::events::CLOSE_REQUESTED,
+        appliance_ui::APPLIANCE_API,
     )
 }
 

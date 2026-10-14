@@ -10,7 +10,7 @@ use tokio::io::{AsyncWriteExt, DuplexStream};
 use super::*;
 
 #[derive(Clone, Default)]
-pub(super) struct Shared(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Shared(Arc<Mutex<Vec<u8>>>);
 
 impl Write for Shared {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -25,7 +25,7 @@ impl Write for Shared {
 
 impl Shared {
     /// Every line written so far, each checked as the supervisor checks it.
-    pub(super) fn events(&self) -> Vec<WorkflowEvent> {
+    pub(crate) fn events(&self) -> Vec<WorkflowEvent> {
         String::from_utf8(self.0.lock().unwrap().clone())
             .unwrap()
             .lines()
@@ -34,7 +34,7 @@ impl Shared {
     }
 }
 
-pub(super) fn workflow(work: &Path) -> (Workflow, Shared, DuplexStream) {
+pub(crate) fn workflow(work: &Path) -> (Workflow, Shared, DuplexStream) {
     let out = Shared::default();
     let (ours, theirs) = tokio::io::duplex(4096);
     let flow = Workflow::new(
@@ -45,7 +45,7 @@ pub(super) fn workflow(work: &Path) -> (Workflow, Shared, DuplexStream) {
     (flow, out, ours)
 }
 
-pub(super) async fn send(input: &mut DuplexStream, line: Value) {
+pub(crate) async fn send(input: &mut DuplexStream, line: Value) {
     input
         .write_all(format!("{line}\n").as_bytes())
         .await

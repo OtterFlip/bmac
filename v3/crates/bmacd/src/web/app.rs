@@ -192,6 +192,27 @@ pub fn router_with(state: AppState) -> Router {
         .route("/certificate", get(api::certificate))
         .route("/joins", get(api::joins).post(api::issue_join))
         .route("/joins/{host}/revoke", post(api::revoke_join))
+        .route("/appliances", get(api::appliances).post(api::issue_enroll))
+        .route(
+            "/appliances/requests/{id}/approve",
+            post(api::approve_appliance),
+        )
+        .route(
+            "/appliances/requests/{id}/reject",
+            post(api::reject_appliance),
+        )
+        .route(
+            "/appliances/{appliance}/revoke",
+            post(api::revoke_appliance),
+        )
+        .route(
+            "/backups/policies",
+            get(api::backup_policies).post(api::save_backup_policy),
+        )
+        .route(
+            "/backups/policies/{vm}/delete",
+            post(api::delete_backup_policy),
+        )
         .route("/certificate/rotate", post(api::rotate_certificate))
         .route("/certificate/switch", post(api::switch_certificate))
         .route("/certificate/discard", post(api::discard_certificate))

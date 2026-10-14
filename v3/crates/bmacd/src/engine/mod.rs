@@ -110,6 +110,8 @@ pub struct Engine {
     mesh: Option<Arc<crate::mesh::Mesh>>,
     setup: Option<crate::native::setup::Paths>,
     joins: Option<Arc<crate::joins::Joins>>,
+    appliances: Option<Arc<crate::backup::enrollment::Appliances>>,
+    policies: Option<Arc<crate::backup::policies::PolicyAdmin>>,
 }
 
 /// Where the Settings page's records live.
@@ -154,6 +156,8 @@ impl Engine {
             mesh: None,
             setup: None,
             joins: None,
+            appliances: None,
+            policies: None,
         }
     }
 
@@ -221,6 +225,200 @@ impl Engine {
                 .record(
                     self.auth.now(),
                     AuditKind::JoinChanged,
+                    Some(&session.user),
+                    Some(client),
+                    message,
+                )
+                .await;
+        }
+        match outcome {
+            Ok(value) => {
+                replies.ok(value).await;
+            }
+            Err(error) => {
+                replies.err(error).await;
+            }
+        }
+    }
+
+    /// Issues enrollment bundles and approves and revokes appliances.
+    pub fn with_appliances(
+        mut self,
+        appliances: Arc<crate::backup::enrollment::Appliances>,
+    ) -> Engine {
+        self.appliances = Some(appliances);
+        self
+    }
+
+    /// Lists, saves, and deletes backup policies.
+    pub fn with_policies(mut self, policies: Arc<crate::backup::policies::PolicyAdmin>) -> Engine {
+        self.policies = Some(policies);
+        self
+    }
+
+    async fn policy_call(
+        &self,
+        session: &SessionInfo,
+        client: std::net::IpAddr,
+        call: EngineCall,
+        replies: &Replies,
+    ) {
+        let Some(policies) = self.policies.clone() else {
+            replies
+                .err(ApiError::new(
+                    ErrorCode::Unavailable,
+                    "backup policies are not available on this host",
+                ))
+                .await;
+            return;
+        };
+        if !matches!(call, EngineCall::BackupPolicies {}) && session.role != Role::Admin {
+            replies
+                .err(ApiError::new(
+                    ErrorCode::Forbidden,
+                    "changing backup policies needs the admin role",
+                ))
+                .await;
+            return;
+        }
+        let user = session.user.clone();
+        let (outcome, message) = tokio::task::spawn_blocking(
+            move || -> (Result<serde_json::Value, ApiError>, Option<String>) {
+                match call {
+                    EngineCall::SaveBackupPolicy { request } => match policies.save(request, &user)
+                    {
+                        Ok(policy) => (
+                            Ok(body(&policy)),
+                            Some(format!("saved the backup policy of {}", policy.vm)),
+                        ),
+                        Err(e) => (Err(e), None),
+                    },
+                    EngineCall::DeleteBackupPolicy { vm_uuid, revision } => {
+                        match policies.delete(&vm_uuid, revision) {
+                            Ok(()) => (
+                                Ok(serde_json::json!({})),
+                                Some(format!("deleted the backup policy of VM {vm_uuid}")),
+                            ),
+                            Err(e) => (Err(e), None),
+                        }
+                    }
+                    _ => (
+                        policies.list().map(|p| serde_json::json!({"policies": p})),
+                        None,
+                    ),
+                }
+            },
+        )
+        .await
+        .unwrap_or_else(|e| (Err(ApiError::new(ErrorCode::Internal, e.to_string())), None));
+        if let Some(message) = message {
+            self.auth
+                .audit()
+                .record(
+                    self.auth.now(),
+                    AuditKind::SettingsChanged,
+                    Some(&session.user),
+                    Some(client),
+                    message,
+                )
+                .await;
+        }
+        match outcome {
+            Ok(value) => {
+                replies.ok(value).await;
+            }
+            Err(error) => {
+                replies.err(error).await;
+            }
+        }
+    }
+
+    async fn appliance_call(
+        &self,
+        session: &SessionInfo,
+        client: std::net::IpAddr,
+        call: EngineCall,
+        replies: &Replies,
+    ) {
+        let Some(appliances) = self.appliances.clone() else {
+            replies
+                .err(ApiError::new(
+                    ErrorCode::Unavailable,
+                    "backup appliances are not available on this host",
+                ))
+                .await;
+            return;
+        };
+        let admin = session.role == Role::Admin;
+        if !matches!(call, EngineCall::Appliances {}) && !admin {
+            replies
+                .err(ApiError::new(
+                    ErrorCode::Forbidden,
+                    "managing backup appliances needs the admin role",
+                ))
+                .await;
+            return;
+        }
+        let user = session.user.clone();
+        let answered = tokio::task::spawn_blocking(
+            move || -> (Result<serde_json::Value, ApiError>, Option<String>) {
+                match call {
+                    EngineCall::IssueEnroll { request } => {
+                        match appliances.issue(&request, &user) {
+                            Ok(issued) => (
+                                Ok(body(issued)),
+                                Some("issued an appliance enrollment bundle".into()),
+                            ),
+                            Err(e) => (Err(e), None),
+                        }
+                    }
+                    EngineCall::ApproveAppliance {
+                        request_id,
+                        request,
+                    } => match appliances.approve(&request_id, &request) {
+                        Ok(record) => (
+                            Ok(serde_json::json!({"appliance_uuid": record.appliance_uuid})),
+                            Some(format!(
+                                "approved appliance {} ({}), certificate {}",
+                                record.name, record.appliance_uuid, record.fingerprint
+                            )),
+                        ),
+                        Err(e) => (Err(e), None),
+                    },
+                    EngineCall::RejectAppliance { request_id } => {
+                        match appliances.reject(&request_id) {
+                            Ok(()) => (
+                                Ok(serde_json::json!({})),
+                                Some(format!("rejected enrollment request {request_id}")),
+                            ),
+                            Err(e) => (Err(e), None),
+                        }
+                    }
+                    EngineCall::RevokeAppliance { appliance_uuid } => {
+                        match appliances.revoke(&appliance_uuid) {
+                            Ok(record) => (
+                                Ok(serde_json::json!({})),
+                                Some(format!(
+                                    "revoked appliance {} ({appliance_uuid})",
+                                    record.name
+                                )),
+                            ),
+                            Err(e) => (Err(e), None),
+                        }
+                    }
+                    _ => (appliances.list(admin).map(body), None),
+                }
+            },
+        )
+        .await
+        .unwrap_or_else(|e| (Err(ApiError::new(ErrorCode::Internal, e.to_string())), None));
+        let (outcome, message) = answered;
+        if let Some(message) = message {
+            self.auth
+                .audit()
+                .record(
+                    self.auth.now(),
+                    AuditKind::ApplianceChanged,
                     Some(&session.user),
                     Some(client),
                     message,
@@ -1092,6 +1290,18 @@ impl Handler for Engine {
             | EngineCall::IssueJoin { .. }
             | EngineCall::RevokeJoin { .. }) => {
                 self.join_call(&session, client, call, &replies).await;
+            }
+            call @ (EngineCall::Appliances {}
+            | EngineCall::IssueEnroll { .. }
+            | EngineCall::ApproveAppliance { .. }
+            | EngineCall::RejectAppliance { .. }
+            | EngineCall::RevokeAppliance { .. }) => {
+                self.appliance_call(&session, client, call, &replies).await;
+            }
+            call @ (EngineCall::BackupPolicies {}
+            | EngineCall::SaveBackupPolicy { .. }
+            | EngineCall::DeleteBackupPolicy { .. }) => {
+                self.policy_call(&session, client, call, &replies).await;
             }
             EngineCall::SearchLogs { query } => self.search_logs(query, &replies).await,
             EngineCall::LogReplication {} => self.log_replication(&replies).await,

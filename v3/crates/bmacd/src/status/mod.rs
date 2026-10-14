@@ -22,11 +22,11 @@ use bmac_adapters::layout::LocalHost;
 use bmac_core::HostSlot;
 use bmac_exec::CommandRunner;
 use bmac_proto::status::{
-    AGENTS_COLLECTOR, CERTIFICATES_COLLECTOR, CLEANUP_COLLECTOR, CLOCK_COLLECTOR,
-    CLUSTER_COLLECTOR, ClusterSnapshot, Condition, GUESTS_COLLECTOR, HOST_COLLECTOR, HostsSnapshot,
-    INGRESS_COLLECTOR, PMXCFS_COLLECTOR, QDEVICE_COLLECTOR, REGISTRY_COLLECTOR, SMART_COLLECTOR,
-    STORAGE_COLLECTOR, StorageSnapshot, TAILSCALE_COLLECTOR, UNITS_COLLECTOR, VRRP_COLLECTOR,
-    VmsSnapshot,
+    AGENTS_COLLECTOR, BACKUPS_COLLECTOR, CERTIFICATES_COLLECTOR, CLEANUP_COLLECTOR,
+    CLOCK_COLLECTOR, CLUSTER_COLLECTOR, ClusterSnapshot, Condition, GUESTS_COLLECTOR,
+    HOST_COLLECTOR, HostsSnapshot, INGRESS_COLLECTOR, PMXCFS_COLLECTOR, QDEVICE_COLLECTOR,
+    REGISTRY_COLLECTOR, SMART_COLLECTOR, STORAGE_COLLECTOR, StorageSnapshot, TAILSCALE_COLLECTOR,
+    UNITS_COLLECTOR, VRRP_COLLECTOR, VmsSnapshot,
 };
 use bmac_proto::stream::StreamBody;
 use bmac_registry::Registry;
@@ -56,6 +56,7 @@ pub const SCHEDULE: &[(&str, Duration)] = &[
     (QDEVICE_COLLECTOR, Duration::from_secs(60)),
     (CLEANUP_COLLECTOR, Duration::from_secs(5 * 60)),
     (REGISTRY_COLLECTOR, Duration::from_secs(5 * 60)),
+    (BACKUPS_COLLECTOR, Duration::from_secs(60)),
     (CLOCK_COLLECTOR, Duration::from_secs(5 * 60)),
     (PMXCFS_COLLECTOR, Duration::from_secs(5 * 60)),
     (SMART_COLLECTOR, Duration::from_secs(60 * 60)),
@@ -439,6 +440,18 @@ pub fn spawn_collectors(
                         if c.is_duty() {
                             publisher
                                 .publish(name, health::registry(runner, &c.registry, at).await);
+                        }
+                    }
+                    BACKUPS_COLLECTOR => {
+                        if c.is_duty() {
+                            publisher.publish(
+                                name,
+                                crate::backup::status::observe(
+                                    &crate::backup::store::BackupStore::system(),
+                                    &crate::schedules::Schedules::system(),
+                                    at,
+                                ),
+                            );
                         }
                     }
                     CLOCK_COLLECTOR => publisher.publish(name, health::clock(runner, at).await),

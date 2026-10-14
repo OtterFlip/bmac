@@ -16,7 +16,12 @@ package is built by Tauri from `deployer/`.
   the engine and sandboxed. It gets the HTTPS key and certificate through
   `LoadCredential` and cannot see `/etc/pve`, `/etc/bmac`, or
   `/var/lib/bmac`.
-- `sysusers.d/bmacd.conf`: creates the `bmac-web` user.
+- `systemd/bmac-source.service`: the backup source endpoint on port 8445,
+  as `bmac-source`, bound to the engine like the front end. It gets the
+  node's Proxmox certificate, key, and cluster CA through `LoadCredential`,
+  talks to the engine on `/run/bmac-source/engine.sock`, and reaches only
+  `/dev/zfs`, for the sends ZFS delegation allows it.
+- `sysusers.d/bmacd.conf`: creates the `bmac-web` and `bmac-source` users.
 
 `crates/bmacd/tests/units.rs` keeps these files in step with the code.
 
@@ -32,6 +37,6 @@ The host's first boot installs the package with `dpkg -i` before the
 network is up, so it `Depends` only on what Proxmox VE already has
 (`systemd`, `pve-manager`). The programs the legacy scripts call, listed in
 `bmacd.depends`, are `Recommends`; host setup installs them with apt once
-the host is online. The postinst creates the `bmac-web` user, puts the
+the host is online. The postinst creates the `bmac-web` and `bmac-source` users, puts the
 guest-role hook in `/var/lib/vz/snippets`, and enables `bmacd.service` and
 the deferred-cleanup timer. Release signing comes with M10.

@@ -42,7 +42,7 @@ are started by hand; there are no scheduled restores.
 | Party | Holds | Can |
 | --- | --- | --- |
 | `bmacd` on each host | Full authority on the cluster | Run the backup schedule; create PITs, bookmarks, and local snapshots and prune them; maintain the PIT catalog; record appliance check-ins; run restores using appliance-issued grants |
-| `bmac-source` on each host | ZFS `send` and `hold` delegated on guest datasets (a send from a bookmark needs nothing more); the enrolled appliances' certificate fingerprints | Answer appliance check-ins (passing them to the local `bmacd`), stream BMAC PIT snapshots, and serve the PIT catalog to enrolled appliances. Nothing else |
+| `bmac-source` on each host | ZFS `send`, `hold`, and `release` delegated on guest datasets (a send from a bookmark needs nothing more); the enrolled appliances' certificate fingerprints | Answer appliance check-ins (passing them to the local `bmacd`), stream BMAC PIT snapshots, and serve the PIT catalog to enrolled appliances. Nothing else |
 | Appliance (`bmac-backupd`) | Its client key; pinned Proxmox cluster CA; its trusted-peer list | Check in; pull the PITs it is offered; write its own pool; serve exports only to restore jobs under its grants and to the peers it trusts; repair only from peers it trusts |
 | Appliance administrator | Appliance UI and console credentials | Retention policy, branch retirement, restore grants, the trusted-peer list, unlock, scrubs |
 
@@ -276,8 +276,15 @@ for their time estimate.
 <pool>/bmac/                                  filesystem
 <pool>/bmac/metadata/                         manifests, journal, audit, recovery manifests
 <pool>/bmac/clusters/<cluster_uuid>/          namespace with quota
-<pool>/bmac/clusters/<cluster_uuid>/vms/<vm_uuid>/<branch_uuid>/<volume_uuid>   zvols
+<pool>/bmac/clusters/<cluster_uuid>/vms/<vm_uuid>/<lineage>/<volume_uuid>   zvols
 ```
+
+A lineage is `<branch_uuid>`, or `<branch_uuid>-<n>` once a full send
+reseeds the branch (its old zvols can't take the new stream's snapshots,
+and are pruned as their PITs expire). `bmac-backupd init` creates `bmac`
+with compression on and deduplication off, and mounts `metadata` at
+`/var/lib/bmac-backupd/metadata`; the service never mounts it itself, since
+its own mount namespace would hide the mount from everyone else.
 
 Each received zvol accumulates one snapshot per published PIT. A new branch's
 zvols are ZFS clones of the branch point's snapshots, so a branch stores only
@@ -463,9 +470,9 @@ all. Only peers that trust each other repair from each other.
   page of the appliance UI. The cluster can't add to it (it has no
   credential for any appliance), and neither can another appliance.
 - An entry is the peer's `appliance_uuid`, its certificate fingerprint
-  (SHA-256), and its address, nothing more. An appliance uses one
-  certificate as client and server on 8445, so one fingerprint identifies it
-  both ways. The fingerprint is never learned from the peer, or from the
+  (SHA-256), and its address (see "Appliance addresses"), nothing more. An
+  appliance uses one certificate as client and server on 8445, so one
+  fingerprint identifies it both ways. The fingerprint is never learned from the peer, or from the
   cluster, on first use.
 - Trust goes one way. A serves B only if A trusts B, and B repairs from A
   only if B trusts A, so B never receives data from an appliance its
@@ -512,6 +519,25 @@ The Trusted peers page:
 Each trust or untrust needs the administrator's password again, and goes to
 the audit log.
 
+### Appliance addresses
+
+Where an appliance's 8445 answers, for the cluster's restore jobs (the
+appliance's record in the cluster's backup settings) and for its trusted
+peers (each entry on the Trusted peers page), is an IP address or a DNS
+name, with an optional port (8445 by default): `203.0.113.5`,
+`[2001:db8::1]:9445`, `backup.example.org`, or a dynamic DNS name such as
+`vault.example.dyndns.org:9445` for an appliance on a changing address.
+An enrolling appliance may suggest its address, and the administrator can
+change it when approving and at any time after. Backups don't need it:
+appliances check in and pull on their own.
+
+A name is resolved again on every connection, so a dynamic DNS update is
+followed without any change in BMAC. The name is never the appliance's
+identity: every connection checks the certificate fingerprint recorded at
+enrollment or typed on the Trusted peers page, so whoever controls the DNS
+record can make connections fail, but can't stand in for the appliance or
+receive a grant's data.
+
 ## Appliance retention
 
 Retention runs only on the appliance, under its own policy, which only the
@@ -545,7 +571,8 @@ administrator's approval. On the appliance UI the administrator selects PITs
 and issues a grant: a random token bound to those PITs, the requesting
 cluster, and an expiry (default 24 hours). It is shown once and pasted into
 the cluster Dashboard's restore wizard. The cluster's restore job uses it to
-pull the PIT's streams from the appliance's export endpoint.
+pull the PIT's streams from the appliance's export endpoint, at the
+appliance's address (see "Appliance addresses").
 
 **Moving only what's needed.** Every restore uses the cheapest method that the
 snapshots on hand allow, per volume, in this order:
@@ -788,22 +815,45 @@ and each host's headers from that host's `bmac-source`
 - Ubuntu Server LTS, amd64, installed by the Deployer's appliance ISO or from
   the `.deb` (`DEPLOYMENT.md`).
 - The OS is on its own disk or disks. The backup pool uses LUKS2 under ZFS,
-  with any layout (`STORAGE.md`).
+  with any layout (`STORAGE.md`). `bmac-backupd create-pool POOL LAYOUT
+  DISK...` (disks named by `/dev/disk/by-id/`, erased after the operator
+  types the pool's name) formats every disk with a LUKS2 label naming the
+  pool, so `unlock` finds the members with nothing from the OS disk. The
+  pool's cache file is `none` and nothing is in crypttab.
 - After a reboot the pool stays locked until the operator runs
-  `bmac-backupd unlock` at the console. One prompt unlocks every member, then
-  the pool is imported. Until then the appliance reports `LOCKED` in its
-  check-ins and does nothing else. There is no unattended unlock.
+  `bmac-backupd unlock` at the console (it refuses to run over SSH). One
+  prompt unlocks every member, then the pool is imported by GUID and its
+  metadata dataset mounted. Until then the appliance checks in as locked, its
+  UI answers only `hello` and login, and it does nothing else. There is no
+  unattended unlock.
 - Identity is by appliance UUID and pool GUID, never pool name or path. A
-  missing pool is never recreated automatically.
+  missing pool is never recreated automatically. `bmac-backupd init NAME
+  POOL` binds an imported pool by GUID and makes the appliance's identity:
+  a self-signed ECDSA P-256 certificate whose DNS name is the appliance's
+  name and whose `urn:uuid:` name is its UUID.
+- The administrator's password (`bmac-backupd admin-password`, at least 12
+  characters, stored as SHA-512 crypt) and the appliance's name are kept in
+  the metadata dataset, so they are encrypted with the pool and survive an
+  OS reinstall.
 - After an OS reinstall with the pool intact: unlock, import, and run
   `bmac-backupd adopt`, which rebuilds the catalog from the metadata dataset
   and requires the administrator's credentials and a new enrollment.
-- The appliance's own HTTPS UI (`v3/applianceui/`, built from the shared
-  React components and embedded in `bmac-backupd`) follows the same login
-  rule as the Web Dashboard: the token lives only in page memory. It covers
-  status, the PIT browser and graph, transfer throughput, retention policy,
-  prunes, restore grants, trusted peers (trust and untrust, see "Trusted
-  peers"), scrubs, notification settings, unlock status, and the audit log.
+- The appliance's own HTTPS UI on port 8443 (`v3/applianceui/`, built from
+  the shared React components and embedded in `bmac-backupd`) presents the
+  appliance's own certificate, whose fingerprint the login page and the
+  console show so the administrator can compare it with the browser's. It
+  follows the same login rule as the Web Dashboard: the token lives only in
+  page memory, is sent as a bearer token, and no cookie is ever set.
+  Sessions are kept only in the daemon's memory (30 minutes idle, 12 hours
+  at most, 64 at once), so a restart ends them all and a password change
+  ends every other one. Logins are limited per address and in total; a
+  request from another origin, or a `POST` that isn't JSON, is refused. It
+  covers status, the PIT browser and graph, transfer throughput, retention
+  policy (a weakening change waits out the delay), holds, prunes, restore
+  grants (the token is shown once), trusted peers (trust and untrust, see
+  "Trusted peers"; untrust needs the password again), scrubs (with "Scrub
+  now"), the I/O policy, the watchdog and notification settings, unlock
+  status, and the audit log.
 - Appliance audit log: every pull (with bytes, duration, and average rate),
   publish, prune, grant, trust and untrust, export to a peer, refused peer,
   and policy change, with IDs and GUIDs, never data or secrets.
@@ -822,10 +872,10 @@ restore jobs and trusted peers only).
 | `POST /v1/claim` | `bmac-source` | Enrolled appliance | Claim an offered PIT before the claim window ends |
 | `POST /v1/index` | `bmac-source` | Enrolled appliance | The appliance's PIT index (metadata only), when asked |
 | `GET /v1/catalog` | `bmac-source` | Enrolled appliance | PIT manifests for this cluster |
-| `GET /v1/locate` | `bmac-source` | Enrolled appliance | Which hosts hold given snapshot or bookmark GUIDs |
+| `POST /v1/locate` | `bmac-source` | Enrolled appliance | Which hosts hold given snapshot or bookmark GUIDs |
 | `POST /v1/send` | `bmac-source` | Enrolled appliance | Stream a full, incremental (from a snapshot or bookmark), or resumed send of a BMAC snapshot that exists on this host |
 | `GET /v1/recovery-manifest` | `bmac-source` | Enrolled appliance | Cluster recovery manifest |
-| `GET /v1/luks-headers` | `bmac-source` | Enrolled appliance | This host's LUKS header backups (`DEPLOYMENT.md`), read from `/var/lib/bmac/luks-headers/` through a group `bmac-source` belongs to |
+| `GET /v1/luks-headers` | `bmac-source` | Enrolled appliance | This host's LUKS header backups (`DEPLOYMENT.md`), which `bmacd` reads from `/var/lib/bmac/luks-headers/` and hands over the source socket; `bmac-source` cannot read `/var/lib/bmac` |
 | `GET /v1/heartbeat` | `bmac-source` | Enrolled appliance | Host and cluster liveness for the watchdog (`MONITORING.md`) |
 | `POST /v1/export` | Appliance | Cluster restore job (with grant) or trusted peer | Stream a published PIT volume, full or incremental from a given GUID, or its size estimate |
 | `GET /v1/peer-index` | Appliance | Trusted peer | Published PITs (metadata only) |

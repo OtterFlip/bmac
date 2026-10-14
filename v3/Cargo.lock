@@ -407,8 +407,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "bmac-backup"
+version = "3.0.0-dev.0"
+dependencies = [
+ "bmac-core",
+ "jiff",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
 name = "bmac-backupd"
 version = "3.0.0-dev.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bmac-backup",
+ "bmac-core",
+ "bmac-exec",
+ "bmac-notify",
+ "bmac-proto",
+ "bytes",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jiff",
+ "rcgen",
+ "rustix",
+ "rustls",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "sha-crypt",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "uuid",
+ "x509-parser",
+]
 
 [[package]]
 name = "bmac-cli"
@@ -568,6 +610,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "ts-rs",
+ "uuid",
 ]
 
 [[package]]
@@ -614,6 +657,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bmac-adapters",
+ "bmac-backup",
  "bmac-core",
  "bmac-exec",
  "bmac-inventory",

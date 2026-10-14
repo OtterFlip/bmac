@@ -1,0 +1,5 @@
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+
+{{ url }} is answering backup appliance {{ appliance_name }} again, since
+{{ up_at }}. It started failing at {{ failing_since }}.

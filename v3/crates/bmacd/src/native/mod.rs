@@ -697,6 +697,12 @@ pub fn main(args: &[String]) -> ExitCode {
             setup::OPERATION => setup::run(&Workflow::stdio(), rest).await,
             join::OPERATION => join::run(&Workflow::stdio(), rest).await,
             id if disks::OPERATIONS.contains(&id) => disks::run(id, &Workflow::stdio(), rest).await,
+            crate::backup::capture::OPERATION => {
+                crate::backup::capture::run(&Workflow::stdio(), rest).await
+            }
+            crate::backup::restore::OPERATION => {
+                crate::backup::restore::run(&Workflow::stdio(), rest).await
+            }
             other => {
                 eprintln!("{other} is not a native operation");
                 ExitCode::from(2)
@@ -710,4 +716,4 @@ pub fn main(args: &[String]) -> ExitCode {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

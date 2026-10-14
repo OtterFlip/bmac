@@ -78,6 +78,11 @@ pub struct PendingRecord {
     pub ssh_host_key: Option<String>,
     pub https_fingerprint: Option<String>,
     pub certificate: Option<String>,
+    /// The address an enrolling appliance suggested for restore jobs.
+    #[serde(default)]
+    pub appliance_address: Option<bmac_core::ApplianceAddress>,
+    #[serde(default)]
+    pub appliance_uuid: Option<uuid::Uuid>,
     /// Where the request came from.
     pub address: String,
     pub received_by: HostSlot,
@@ -274,6 +279,8 @@ impl Tokens {
         self.redeem(&request.token, TokenKind::Enroll, from, |pending, _| {
             pending.name = Some(request.name.clone());
             pending.certificate = Some(request.certificate.clone());
+            pending.appliance_address = request.address.clone();
+            pending.appliance_uuid = Some(request.appliance_uuid);
             Ok(())
         })
     }
@@ -344,6 +351,8 @@ impl Tokens {
                 ssh_host_key: None,
                 https_fingerprint: None,
                 certificate: None,
+                appliance_address: None,
+                appliance_uuid: None,
                 address: address.clone(),
                 received_by: self.host,
                 created_at_ms: now,
@@ -434,5 +443,68 @@ impl Tokens {
         }
         out.sort_by_key(|r| r.created_at_ms);
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn an_enrollment_keeps_the_address_the_appliance_suggested() {
+        let dir = tempfile::tempdir().unwrap();
+        let pmxcfs = Pmxcfs::new(dir.path(), Arc::new(bmac_pmxcfs::RealFs));
+        let tokens = Tokens::new(
+            pmxcfs,
+            dir.path().join("priv/bmac/enrollment"),
+            HostSlot::new(1).unwrap(),
+            Arc::new(|| 1_000),
+        );
+        let key = rcgen::KeyPair::generate().unwrap();
+        let certificate = rcgen::CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .self_signed(&key)
+            .unwrap()
+            .pem();
+        let request = |token: String, address: serde_json::Value| -> EnrollRequest {
+            serde_json::from_value(serde_json::json!({
+                "token": token, "name": "vault", "certificate": certificate, "address": address,
+                "appliance_uuid": "00000000-0000-0000-0000-000000000009",
+            }))
+            .unwrap()
+        };
+        let from: IpAddr = "100.64.0.9".parse().unwrap();
+        let token = tokens
+            .issue(TokenKind::Enroll, None, 60_000, "root@pam")
+            .unwrap();
+        tokens
+            .redeem_enroll(
+                &request(token, "Vault.Example.DynDNS.org:9445".into()),
+                from,
+            )
+            .unwrap();
+        let token = tokens
+            .issue(TokenKind::Enroll, None, 60_000, "root@pam")
+            .unwrap();
+        tokens
+            .redeem_enroll(&request(token, serde_json::Value::Null), from)
+            .unwrap();
+
+        let addresses: Vec<_> = tokens
+            .pending()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.appliance_address.map(|a| a.to_string()))
+            .collect();
+        assert!(addresses.contains(&Some("vault.example.dyndns.org:9445".into())));
+        assert!(addresses.contains(&None));
+        assert!(
+            serde_json::from_value::<EnrollRequest>(serde_json::json!({
+                "token": "t", "name": "vault", "certificate": "c",
+                "address": "https://vault.example.org",
+            }))
+            .is_err()
+        );
     }
 }

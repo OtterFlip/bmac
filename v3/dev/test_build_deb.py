@@ -99,6 +99,47 @@ class BuildDebTest(unittest.TestCase):
             self.assertIn("root/root", listing)
             self.assertIn("./usr/lib/bmac/bmacd", listing)
 
+    def test_the_appliance_package_lays_out_the_daemon_and_its_unit(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bmac-deb-") as scratch:
+            root = Path(scratch)
+            binary = root / "bmac-backupd"
+            binary.write_bytes(b"\x7fELF fake GLIBC_2.39\0")
+            tree = root / "tree"
+            tool.stage_appliance(tree, binary, "3.0.0-dev.0")
+            for path in (
+                "usr/sbin/bmac-backupd",
+                "usr/lib/systemd/system/bmac-backupd.service",
+                "usr/share/doc/bmac-backupd/README.md",
+                "DEBIAN/control",
+            ):
+                self.assertTrue((tree / path).is_file(), path)
+            self.assertFalse((tree / "usr/lib/systemd/system/bmacd.service").exists())
+            control = (tree / "DEBIAN/control").read_text()
+            self.assertIn("Package: bmac-backupd\n", control)
+            self.assertIn("Depends: systemd, zfsutils-linux, cryptsetup-bin\n", control)
+            for script in ("postinst", "prerm", "postrm"):
+                path = tree / "DEBIAN" / script
+                if shutil.which("sh"):
+                    subprocess.run(["sh", "-n", str(path)], check=True)
+            self.assertNotIn("zfs destroy", (tree / "DEBIAN/postrm").read_text())
+
+            binary.write_bytes(b"\x7fELF fake GLIBC_2.40\0")
+            with self.assertRaises(SystemExit) as raised:
+                tool.stage_appliance(root / "newer", binary, "3.0.0-dev.0")
+            self.assertIn("Ubuntu 24.04", str(raised.exception))
+
+            if not shutil.which("dpkg-deb"):
+                self.skipTest("dpkg-deb is not installed")
+            deb = tool.build_deb(tree, root / "out", "3.0.0-dev.0", package=tool.APPLIANCE)
+            self.assertEqual(deb.name, "bmac-backupd_3.0.0~dev.0_amd64.deb")
+
+    def test_the_host_package_holds_no_appliance_unit(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bmac-deb-") as scratch:
+            root = Path(scratch)
+            tree = root / "tree"
+            tool.stage(tree, fake_binaries(root), "3.0.0-dev.0")
+            self.assertFalse((tree / "usr/lib/systemd/system/bmac-backupd.service").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

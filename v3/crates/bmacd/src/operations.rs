@@ -54,6 +54,8 @@ pub fn native_operations() -> Vec<Operation> {
         crate::native::join::operation(),
     ];
     operations.extend(crate::native::disks::operations());
+    operations.push(crate::backup::capture::operation());
+    operations.push(crate::backup::restore::operation());
     operations
 }
 

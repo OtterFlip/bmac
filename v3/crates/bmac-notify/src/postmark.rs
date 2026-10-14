@@ -225,30 +225,35 @@ impl std::fmt::Debug for Https {
     }
 }
 
+/// A TLS client that verifies servers against the system's CA bundle.
+pub fn system_tls() -> Result<Arc<rustls::ClientConfig>, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    let certificates =
+        CertificateDer::pem_file_iter(CA_BUNDLE).map_err(|e| format!("{CA_BUNDLE}: {e}"))?;
+    for certificate in certificates {
+        let certificate = certificate.map_err(|e| format!("{CA_BUNDLE}: {e}"))?;
+        let _ = roots.add(certificate);
+    }
+    if roots.is_empty() {
+        return Err(format!("{CA_BUNDLE} holds no certificates"));
+    }
+    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| e.to_string())?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Ok(Arc::new(tls))
+}
+
 impl Https {
     /// Postmark with the system's CA bundle.
     pub fn new(token: &str) -> Result<Https, String> {
-        let mut roots = rustls::RootCertStore::empty();
-        let certificates =
-            CertificateDer::pem_file_iter(CA_BUNDLE).map_err(|e| format!("{CA_BUNDLE}: {e}"))?;
-        for certificate in certificates {
-            let certificate = certificate.map_err(|e| format!("{CA_BUNDLE}: {e}"))?;
-            let _ = roots.add(certificate);
-        }
-        if roots.is_empty() {
-            return Err(format!("{CA_BUNDLE} holds no certificates"));
-        }
-        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
         Ok(Https {
             token: token.trim().to_string(),
             host: API_HOST.to_string(),
-            tls: Arc::new(tls),
+            tls: system_tls()?,
         })
     }
 

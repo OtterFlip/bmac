@@ -1,0 +1,39 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[Unit]
+Description=BMAC backup appliance
+Documentation=file:///usr/share/doc/bmac-backupd/README.md
+Wants=network-online.target zfs.target
+After=network-online.target zfs.target zfs-import.target
+# init writes the pool binding; until then there is nothing to run.
+ConditionPathExists=/var/lib/bmac-backupd/pool.json
+
+[Service]
+Type=exec
+ExecStart=/usr/sbin/bmac-backupd run
+Restart=on-failure
+RestartSec=10s
+# Receives write the pool through /dev/zfs; nothing else is touched.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/bmac-backupd
+ProtectHome=yes
+PrivateTmp=yes
+DevicePolicy=closed
+DeviceAllow=/dev/zfs rw
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_SETUID CAP_SETGID CAP_SYS_RESOURCE
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

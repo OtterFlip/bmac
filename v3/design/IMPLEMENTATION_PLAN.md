@@ -1957,6 +1957,15 @@ the appliance's copy. The results decide whether M9.1 ships bookmarks or the
 snapshot fallback, and whether backups after a restore continue
 incrementally or start with a full send.
 
+**As built (lab):** `lab/lab scenario m9_spike` runs on the SATA lab from
+stage `m8-storage` with the small VM's two volumes (one a tiny EFI disk),
+receiving on the appliance VM's Ubuntu OpenZFS 2.2 from the hosts' 2.4: 100
+checks passed, and every lab item 1 to 4 and 6 holds, so bookmarks ship
+(`BOOKMARKS_PROVEN`) and backups after a restore continue incrementally from
+the restored PIT's bookmark, received as a clone of the appliance's copy.
+The HA move is a relocate: an online migrate is refused by the guest hook
+for prod VMs. Item 5 (the delegation) is proved with `bmac-source` in M9.3.
+
 ### M9.1 Cluster side: policies, schedule, capture, and snapshot lifetime
 
 **Builds:** per-VM backup policies in pmxcfs (schedule, assigned
@@ -1998,6 +2007,28 @@ are made on every placement host before the snapshot is destroyed; a
 delinquent appliance's bookmarks are released; LATE after 3 minutes without
 a check-in.
 
+**As built:** the pure rules live in the `bmac-backup` crate: PIT names,
+the manifest and its disk list, appliance states, local and appliance
+retention, and the snapshot lifetime planner (which snapshots and
+bookmarks each PIT still needs, and why). `bmacd/src/backup/` holds the
+records in `/etc/pve/priv/bmac/backup` (`store.rs`), the cluster commands
+(`cluster.rs`), the `backup.capture` operation (`capture.rs`, also "Back up
+now"), the per-host upkeep loop that releases snapshots, keeps and drops
+bookmarks, and retries blocked releases every minute (`upkeep.rs`), the
+policies and the schedule each one owns, `backup-<vm uuid>`, run by the
+ordinary scheduler (`policies.rs`), and the duty host's `backups`
+observation (`status.rs`), from which the `backup.*` conditions come; each
+can be switched off with the notification settings' `disabled_conditions`.
+The capture takes the VM's orchestration lease, as every other VM
+operation does, and checks the owner again after replication, so a move
+during the capture fails it and destroys its snapshots. Appliance check-in
+times are written to pmxcfs when the state changes or the stored time falls
+half a ready window behind, not shared only in memory as `BACKUP.md` says,
+because the capture runs as a separate process. Application-consistent
+hooks are not built; `Consistency::Application` is reserved. Quota alerts
+wait for appliances to report space (M9.3). The API and pages for policies
+and settings are M9.5's.
+
 ### M9.2 `bmac-source`
 
 **Builds:** a third process from the `bmacd` binary, in its own unit
@@ -2010,6 +2041,27 @@ appliance, incrementals from a bookmark only along the catalog's lineage, no
 `-R` streams, resumable sends, transfer byte counts into the metric history
 and a per-transfer log event (bytes, duration, average rate), and the
 delegated or root fallback from lab item 5.
+
+**As built:** `bmacd source` (`backup/daemon.rs`) holds no records and
+decides nothing. Its TLS handshake admits only the certificates on the
+allowlist the engine gives it every 10 seconds, and admits no one once that
+list is a minute old. Every request goes to the engine over
+`/run/bmac-source/engine.sock` (`source_socket.rs`), a directory apart from
+`/run/bmac` so the front end's group can't reach it, with one call per
+request naming the certificate's fingerprint. The engine's answers
+(`source.rs`, `source_engine.rs`) check enrollment, the assignment, the
+offer, the placement, the manifest's volume, the GUID, the base's lineage,
+and a resume token's target. A send names IDs only, never a dataset, and the
+engine turns them into a plan; the daemon holds the snapshot, streams
+`zfs send` as the response body, releases the hold, and reports the bytes
+and time back, which the engine logs. `bmac-source` can't read `/etc/pve`, so
+the engine also hands it its listen addresses and this host's LUKS header
+backups. The engine applies the ZFS delegation (`send,hold,release`) to every
+`zfspool` storage of the host at start and every ten minutes; there is no
+root fallback in the code, so the lab proves the delegation. `POST
+/v1/locate` replaces `GET`, since it takes a body. The recovery manifest
+waits for M9.4's recovery job, and transfer rates in the metric history for
+M9.5's pages.
 
 ### M9.3 Appliance daemon
 
@@ -2040,8 +2092,37 @@ Dashboard issues an enrollment bundle (M3.4); on first boot, or from
 Tailscale, certificate), the appliance presents the token and its client
 certificate to `POST /v1/enroll` (M2.9); the administrator approves the
 pending request in the Dashboard, which records the certificate fingerprint
-in pmxcfs for `bmac-source`; revoking removes it, and `bmac-source` refuses
-that appliance from the next connection on.
+in pmxcfs for `bmac-source`, and the appliance's address, an IP address or
+a DNS name such as a dynamic DNS name (`BACKUP.md`, "Appliance addresses"),
+which the appliance may suggest and the administrator may change then or
+later; revoking removes it, and `bmac-source` refuses that appliance from
+the next connection on.
+
+**As built:** `crates/bmac-backupd` is one binary with the console commands
+(`create-pool`, `unlock`, `init`, `enroll`, `admin-password`, `adopt`,
+`settings`, `scrub`) and `run`, the service. The OS disk holds only the
+identity, the certificate, the pool binding by GUID, and one record per
+enrolled cluster (`state.rs`); everything else is in the pool's metadata
+dataset: the journal (`journal.rs`, replaced in one rename after the
+manifest is fsynced, and changed only under its lock), the audit log, the
+administrator's password, the trusted peers, the grants (SHA-256 only), and
+the platform settings. The Postmark token is apart, in a 0600 file. `run`
+starts an agent per enrolled cluster (`checkin.rs`), with the puller
+(`pull.rs`) apart so a long pull never delays a check-in; every zvol is
+received resumably (`zfs receive -s -u -o volmode=none`), checked against
+the manifest's GUIDs, then published in two phases with a `bmac-retain`
+hold; until then the journal lists it as a receive in progress.
+Scrubs (`scrub.rs`) start when due or when asked (`bmac-backupd scrub now`,
+or "Scrub now" in the UI, which wakes the loop), and mark the PITs whose
+datasets ZFS names as suspect. The UI (`ui/`) is axum over rustls on 8443
+with the appliance's own certificate, the same CSP and per-load style nonce
+as the Dashboard, and sessions only in memory; its API types are in
+`bmac_proto::appliance_ui` and exported to TypeScript. Every change made in
+the UI is audited as `ui from <address>`; a retention change from the UI
+counts as unconfirmed, so a weakening one waits out the delay. `unlock` and
+`create-pool` refuse to run over SSH; the lab stands in for the console by
+running them with the SSH variables unset and the answers on stdin. The
+package depends on `cryptsetup-bin` as well as `zfsutils-linux`.
 
 ### M9.4 Restore
 

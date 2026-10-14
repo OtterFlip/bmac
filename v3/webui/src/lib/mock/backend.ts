@@ -81,7 +81,7 @@ export class MockBackend implements Backend {
   templatesData: TemplatesView = {
     server_name: "bmac_lab",
     delivery_type: "Sandbox",
-    templates: ["bmac-layout-v1", "bmac-alert-opened-v1", "bmac-alert-resolved-v1", "bmac-digest-v1", "bmac-test-v1", "bmac-watchdog-down-v1", "bmac-watchdog-up-v1"].map((alias) => ({
+    templates: ["bmac-layout-v1", "bmac-alert-opened-v1", "bmac-alert-resolved-v1", "bmac-digest-v1", "bmac-test-v1", "bmac-watchdog-down-v1", "bmac-watchdog-up-v1", "bmac-url-down-v1", "bmac-url-up-v1"].map((alias) => ({
       alias,
       presence: "missing" as const,
     })),

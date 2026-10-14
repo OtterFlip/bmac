@@ -35,7 +35,7 @@ use super::{Stop, Workflow};
 pub const KEY_FILE: &str = "/run/bmac/luks-passphrase";
 pub const HEADER_DIR: &str = "/var/lib/bmac/luks-headers";
 pub(crate) const CRYPTTAB: &str = "/etc/crypttab";
-const STORAGE_CFG: &str = "/etc/pve/storage.cfg";
+pub(crate) const STORAGE_CFG: &str = "/etc/pve/storage.cfg";
 const DECRYPT_KEYCTL: &str = "/usr/lib/cryptsetup/scripts/decrypt_keyctl";
 const KEYCTL: &str = "/usr/bin/keyctl";
 const OSRELEASE: &str = "/proc/sys/kernel/osrelease";

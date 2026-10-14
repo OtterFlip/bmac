@@ -349,6 +349,151 @@ pub async fn revoke_join(
     .await
 }
 
+pub async fn appliances(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    get(
+        &state,
+        client,
+        &headers,
+        &uri,
+        Ok(EngineCall::Appliances {}),
+    )
+    .await
+}
+
+pub async fn issue_enroll(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    post_json(&state, client, &headers, &uri, || {
+        Ok(EngineCall::IssueEnroll {
+            request: parse_optional::<bmac_proto::backups::IssueEnroll>(&body)?,
+        })
+    })
+    .await
+}
+
+fn request_id(id: &str) -> Result<String, ApiError> {
+    if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(invalid("not a request id"));
+    }
+    Ok(id.to_string())
+}
+
+pub async fn approve_appliance(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    post_json(&state, client, &headers, &uri, || {
+        Ok(EngineCall::ApproveAppliance {
+            request_id: request_id(&id)?,
+            request: parse_body::<bmac_proto::backups::ApproveAppliance>(&body)?,
+        })
+    })
+    .await
+}
+
+pub async fn reject_appliance(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    post_json(&state, client, &headers, &uri, || {
+        parse_optional::<NoParameters>(&body)?;
+        Ok(EngineCall::RejectAppliance {
+            request_id: request_id(&id)?,
+        })
+    })
+    .await
+}
+
+pub async fn revoke_appliance(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    Path(appliance): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    post_json(&state, client, &headers, &uri, || {
+        parse_optional::<NoParameters>(&body)?;
+        Ok(EngineCall::RevokeAppliance {
+            appliance_uuid: appliance
+                .parse()
+                .map_err(|_| invalid("not an appliance ID"))?,
+        })
+    })
+    .await
+}
+
+pub async fn backup_policies(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    get(
+        &state,
+        client,
+        &headers,
+        &uri,
+        Ok(EngineCall::BackupPolicies {}),
+    )
+    .await
+}
+
+pub async fn save_backup_policy(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    post_json(&state, client, &headers, &uri, || {
+        Ok(EngineCall::SaveBackupPolicy {
+            request: parse_body::<serde_json::Value>(&body)?,
+        })
+    })
+    .await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeletePolicy {
+    revision: u64,
+}
+
+pub async fn delete_backup_policy(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    Path(vm): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    post_json(&state, client, &headers, &uri, || {
+        Ok(EngineCall::DeleteBackupPolicy {
+            vm_uuid: vm.parse().map_err(|_| invalid("not a VM ID"))?,
+            revision: parse_body::<DeletePolicy>(&body)?.revision,
+        })
+    })
+    .await
+}
+
 pub async fn certificate(
     State(state): State<AppState>,
     Extension(client): Extension<ClientAddr>,

@@ -3,19 +3,25 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Build the development bmacd .deb, unsigned, for the Deployer's host ISOs.
+"""Build the development .debs, unsigned: bmacd for the Deployer's host ISOs and
+bmac-backupd for backup appliances.
 
     v3/dev/build_deb.py                    build the web app and binaries, then the package
     v3/dev/build_deb.py --no-build         package the binaries already in target/release
-    v3/dev/build_deb.py --out DIR          write it to DIR (default target/deployer-bundle/packages)
+    v3/dev/build_deb.py --out DIR          write bmacd to DIR (default target/deployer-bundle/packages)
+    v3/dev/build_deb.py --appliance-out DIR
+                                           write bmac-backupd to DIR (default
+                                           target/deployer-bundle/appliance-packages)
 
 The default output directory is the one `BMAC_DEPLOYER_BUNDLE=target/deployer-bundle`
-points the Deployer at. Signed release packages and their bundle are M10's.
+points the Deployer at; every package in it goes onto a host's ISO, so the
+appliance's package is kept apart. Signed release packages and their bundle are M10's.
 
 A host installs the package at first boot, before its network is up, so
 `dpkg -i` must succeed on a fresh Proxmox VE install: the package depends
 only on what Proxmox VE itself provides, and the legacy runtime's other
 commands (packaging/bmacd.depends) are Recommends for host setup to install.
+The appliance runs Ubuntu 24.04 LTS with its own OpenZFS.
 """
 
 from __future__ import annotations
@@ -31,8 +37,11 @@ from pathlib import Path
 
 V3_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = "bmacd"
+APPLIANCE = "bmac-backupd"
 # Proxmox VE 9 is Debian trixie; a binary needing a newer glibc wouldn't start.
 MAX_GLIBC = (2, 41)
+# Ubuntu 24.04 LTS, the appliance's system.
+APPLIANCE_MAX_GLIBC = (2, 39)
 LIB = "usr/lib/bmac"
 HOOK = "legacy/scripts/host_runtime/bmac-guest-role-hook.sh"
 SNIPPETS = "/var/lib/vz/snippets"
@@ -77,6 +86,39 @@ if [ "$1" = purge ]; then
 fi
 """
 
+APPLIANCE_POSTINST = """#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+  install -d -m 0700 /var/lib/bmac-backupd
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    # It starts once bmac-backupd init has bound a pool.
+    systemctl enable bmac-backupd.service >/dev/null 2>&1
+    if [ -n "$2" ]; then
+      systemctl try-restart bmac-backupd.service || true
+    fi
+  fi
+fi
+"""
+
+APPLIANCE_PRERM = """#!/bin/sh
+set -e
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+  systemctl disable --now bmac-backupd.service >/dev/null 2>&1 || true
+fi
+"""
+
+# The pool and its metadata dataset hold the backups; purging the package
+# never touches them, nor the identity they are bound to.
+APPLIANCE_POSTRM = """#!/bin/sh
+set -e
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+  fi
+fi
+"""
+
 
 def debian_version(version: str) -> str:
     """3.0.0-dev.0 becomes 3.0.0~dev.0, which dpkg sorts before 3.0.0."""
@@ -114,6 +156,32 @@ def control(version: str, installed_kib: int, root: Path = V3_ROOT) -> str:
     )
 
 
+def appliance_control(version: str, installed_kib: int) -> str:
+    return (
+        f"Package: {APPLIANCE}\n"
+        f"Version: {debian_version(version)}\n"
+        "Architecture: amd64\n"
+        "Maintainer: BEENTHERE VENTURES, INC.\n"
+        "Homepage: https://github.com/OtterFlip/bmac\n"
+        f"Installed-Size: {installed_kib}\n"
+        "Section: admin\n"
+        "Priority: optional\n"
+        "Depends: systemd, zfsutils-linux, cryptsetup-bin\n"
+        "Description: BMAC backup appliance\n"
+        " bmac-backupd checks in with the BMAC clusters it is enrolled with and\n"
+        " pulls their backups into its own ZFS pool. This is a development build.\n"
+    )
+
+
+def check_glibc(path: Path, data: bytes, ceiling: tuple[int, int], system: str) -> None:
+    needed = glibc_needed(data)
+    if needed and needed > ceiling:
+        raise SystemExit(
+            f"{path} needs glibc {needed[0]}.{needed[1]}, newer than {system}'s "
+            f"{ceiling[0]}.{ceiling[1]}; build on an older system."
+        )
+
+
 def _write(path: Path, data: bytes | str, mode: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data.encode() if isinstance(data, str) else data)
@@ -123,13 +191,7 @@ def _write(path: Path, data: bytes | str, mode: int) -> None:
 def stage(tree: Path, binaries: dict[str, Path], version: str, root: Path = V3_ROOT) -> None:
     """Lays out the package's files and its DEBIAN directory under tree."""
     for name, path in binaries.items():
-        data = path.read_bytes()
-        needed = glibc_needed(data)
-        if needed and needed > MAX_GLIBC:
-            raise SystemExit(
-                f"{path} needs glibc {needed[0]}.{needed[1]}, newer than Proxmox VE's "
-                f"{MAX_GLIBC[0]}.{MAX_GLIBC[1]}; build on an older system."
-            )
+        check_glibc(path, path.read_bytes(), MAX_GLIBC, "Proxmox VE")
     _write(tree / LIB / "bmacd", binaries["bmacd"].read_bytes(), 0o755)
     _write(tree / "usr/sbin/bmac", binaries["bmac"].read_bytes(), 0o755)
     units = root / "packaging" / "systemd"
@@ -159,9 +221,29 @@ def stage(tree: Path, binaries: dict[str, Path], version: str, root: Path = V3_R
             path.chmod(0o755)
 
 
-def build_deb(tree: Path, out_dir: Path, version: str, dpkg_deb: str = "dpkg-deb") -> Path:
+def stage_appliance(tree: Path, binary: Path, version: str, root: Path = V3_ROOT) -> None:
+    """Lays out the appliance package under tree."""
+    data = binary.read_bytes()
+    check_glibc(binary, data, APPLIANCE_MAX_GLIBC, "Ubuntu 24.04")
+    _write(tree / "usr/sbin/bmac-backupd", data, 0o755)
+    units = root / "packaging" / "appliance" / "systemd"
+    for unit in sorted(p for p in units.rglob("*") if p.is_file()):
+        _write(tree / "usr/lib/systemd/system" / unit.relative_to(units), unit.read_bytes(), 0o644)
+    doc = tree / "usr/share/doc" / APPLIANCE
+    _write(doc / "README.md", (root / "packaging" / "README.md").read_bytes(), 0o644)
+    size = sum(p.stat().st_size for p in tree.rglob("*") if p.is_file())
+    debian = tree / "DEBIAN"
+    _write(debian / "control", appliance_control(version, (size + 1023) // 1024), 0o644)
+    for name, text in (("postinst", APPLIANCE_POSTINST), ("prerm", APPLIANCE_PRERM), ("postrm", APPLIANCE_POSTRM)):
+        _write(debian / name, text, 0o755)
+    for path in sorted(tree.rglob("*"), reverse=True):
+        if path.is_dir():
+            path.chmod(0o755)
+
+
+def build_deb(tree: Path, out_dir: Path, version: str, dpkg_deb: str = "dpkg-deb", package: str = PACKAGE) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{PACKAGE}_{debian_version(version)}_amd64.deb"
+    out = out_dir / f"{package}_{debian_version(version)}_amd64.deb"
     epoch = os.environ.get("SOURCE_DATE_EPOCH")
     if epoch:
         stamp = int(epoch)
@@ -175,30 +257,36 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--no-build", action="store_true", help="package the existing release binaries")
     parser.add_argument("--out", type=Path, default=V3_ROOT / "target/deployer-bundle/packages")
+    parser.add_argument("--appliance-out", type=Path, default=V3_ROOT / "target/deployer-bundle/appliance-packages")
     args = parser.parse_args(argv)
     if not shutil.which("dpkg-deb"):
         print("dpkg-deb is needed: sudo apt install dpkg", file=sys.stderr)
         return 1
     version = (V3_ROOT / "dev" / "VERSION").read_text(encoding="utf-8").strip()
     if not args.no_build:
-        subprocess.run(["pnpm", "--filter", "@bmac/webui", "build"], cwd=V3_ROOT, check=True)
-        subprocess.run(["cargo", "build", "--release", "--locked", "-p", "bmacd", "-p", "bmac-cli"], cwd=V3_ROOT, check=True)
-    if not (V3_ROOT / "webui/dist/index.html").is_file():
-        print("webui/dist has no build, so bmacd would serve a placeholder; build it first", file=sys.stderr)
-        return 1
+        subprocess.run(["pnpm", "--filter", "@bmac/webui", "--filter", "@bmac/applianceui", "build"], cwd=V3_ROOT, check=True)
+        subprocess.run(["cargo", "build", "--release", "--locked", "-p", "bmacd", "-p", "bmac-cli", "-p", "bmac-backupd"], cwd=V3_ROOT, check=True)
+    for app, server in (("webui", "bmacd"), ("applianceui", "bmac-backupd")):
+        if not (V3_ROOT / app / "dist/index.html").is_file():
+            print(f"{app}/dist has no build, so {server} would serve a placeholder; build it first", file=sys.stderr)
+            return 1
     target = Path(os.environ.get("CARGO_TARGET_DIR", V3_ROOT / "target")) / "release"
     binaries = {"bmacd": target / "bmacd", "bmac": target / "bmac"}
-    for path in binaries.values():
+    appliance = target / "bmac-backupd"
+    for path in [*binaries.values(), appliance]:
         if not path.is_file():
             print(f"{path} is missing; run without --no-build", file=sys.stderr)
             return 1
-    for stale in args.out.glob(f"{PACKAGE}_*.deb") if args.out.is_dir() else []:
-        stale.unlink()
+    for package, out in ((PACKAGE, args.out), (APPLIANCE, args.out), (APPLIANCE, args.appliance_out)):
+        for stale in out.glob(f"{package}_*.deb") if out.is_dir() else []:
+            stale.unlink()
     with tempfile.TemporaryDirectory(prefix="bmacd-deb-") as scratch:
         tree = Path(scratch) / "root"
         stage(tree, binaries, version)
-        out = build_deb(tree, args.out, version)
-    print(out)
+        print(build_deb(tree, args.out, version))
+        tree = Path(scratch) / "appliance"
+        stage_appliance(tree, appliance, version)
+        print(build_deb(tree, args.appliance_out, version, package=APPLIANCE))
     return 0
 
 

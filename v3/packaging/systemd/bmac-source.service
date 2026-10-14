@@ -1,0 +1,54 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+
+[Unit]
+Description=BMAC backup source endpoint (port 8445, enrolled appliances only)
+Documentation=file:///usr/share/doc/bmacd/README.md
+BindsTo=bmacd.service
+PartOf=bmacd.service
+After=bmacd.service
+
+[Service]
+Type=notify
+ExecStart=/usr/lib/bmac/bmacd source
+User=bmac-source
+Group=bmac-source
+LoadCredential=node.pem:/etc/pve/local/pve-ssl.pem
+LoadCredential=node.key:/etc/pve/local/pve-ssl.key
+LoadCredential=ca.pem:/etc/pve/pve-root-ca.pem
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# zfs send, hold, and release go through /dev/zfs, under ZFS delegation.
+DevicePolicy=closed
+DeviceAllow=/dev/zfs rw
+InaccessiblePaths=-/etc/pve -/etc/bmac -/var/lib/bmac -/root
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

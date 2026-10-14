@@ -271,14 +271,19 @@ logout, failure, refusal, rate limit, and ended session is an audit event.
 | --- | --- | --- |
 | `bmacd` HTTPS front end | `bmac-web`, no shell, no sudo | Terminate TLS, serve the web app, relay API requests and event streams |
 | `bmacd` engine | root | Everything BMAC does |
-| `bmac-source` (backup source endpoint, `BACKUP.md`) | `bmac-source`, with ZFS `send` and `hold` delegated on guest datasets only | Stream BMAC snapshots to enrolled appliances |
+| `bmac-source` (backup source endpoint, `BACKUP.md`) | `bmac-source`, with ZFS `send`, `hold`, and `release` delegated on guest datasets only | Stream BMAC snapshots to enrolled appliances |
 | `bmac-hook` | root (Proxmox runs it) | Lifecycle admission and cleanup queueing |
 
 The engine, the front end, and `bmac-source` all come from the one `bmacd`
 binary and package. The front end runs as its own systemd unit
 (`bmacd-web.service`, bound to `bmacd.service` so they start and stop
-together), and `bmac-source` as `bmac-source.service`. It talks to the engine over
-`/run/bmac/engine.sock`. The engine checks the peer's UID with `SO_PEERCRED`.
+together), and `bmac-source` as `bmac-source.service`, bound the same way.
+The front end talks to the engine over `/run/bmac/engine.sock`, and
+`bmac-source` over `/run/bmac-source/engine.sock`, a separate directory only
+its group may enter, with its own fixed set of calls: the enrolled
+fingerprints, the listen addresses, and one call per appliance request,
+naming the certificate it came with. The engine checks the peer's UID with
+`SO_PEERCRED` on both.
 Every request carries the caller's token, and the engine resolves the user
 and role itself, so a compromised front end can act only within sessions it
 sees. The request set is fixed: the API's typed calls and event

@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod auth;
+pub mod backup;
 pub mod certificate;
 pub mod cluster;
 pub mod db;

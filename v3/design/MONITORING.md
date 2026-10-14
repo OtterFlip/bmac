@@ -192,7 +192,8 @@ token belongs to.
   it, so the layout is created first and retired last.
 - **Aliases are versioned and prefixed:** `bmac-alert-opened-v1`,
   `bmac-alert-resolved-v1`, `bmac-digest-v1`, `bmac-test-v1`, and the
-  appliance's `bmac-watchdog-down-v1` and `bmac-watchdog-up-v1`. **A
+  appliance's `bmac-watchdog-down-v1`, `bmac-watchdog-up-v1`,
+  `bmac-url-down-v1`, and `bmac-url-up-v1`. **A
   released template never changes,** because Postmark applies an edit to
   every later send at once, including from clusters still on the previous
   release. Any change after release creates the next version (`-v2`), and
@@ -272,8 +273,10 @@ therefore watches the cluster:
 - It reports which hosts stopped answering and when, and sends a recovery
   notification when they return.
 - Optionally, it checks configured public URLs of the production
-  applications from outside, and alerts when they fail. This is the only
-  BMAC check made from outside the cluster.
+  applications from outside, every minute, and alerts when one has given
+  no good answer (a 2xx or 3xx status within 15 seconds) for the same
+  number of minutes, with `bmac-url-down-v1` and `bmac-url-up-v1`. This
+  is the only BMAC check made from outside the cluster.
 
 The cluster watches each appliance in return, from its check-ins: late,
 delinquent, `LOCKED`, pool health, capacity, scrub errors, and backup age are

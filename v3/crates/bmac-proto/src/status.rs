@@ -33,6 +33,7 @@ pub const INGRESS_COLLECTOR: &str = "ingress";
 pub const AGENTS_COLLECTOR: &str = "agents";
 pub const QDEVICE_COLLECTOR: &str = "qdevice";
 pub const REGISTRY_COLLECTOR: &str = "registry";
+pub const BACKUPS_COLLECTOR: &str = "backups";
 /// Not a collector: the host sending notifications reports on them.
 pub const NOTIFY_COLLECTOR: &str = "notify";
 
@@ -434,6 +435,66 @@ pub struct RegistryIssue {
 pub struct RegistryObservation {
     pub at_ms: i64,
     pub issues: Vec<RegistryIssue>,
+    pub errors: Vec<String>,
+}
+
+/// One enrolled appliance as the cluster sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct BackupApplianceStatus {
+    pub appliance_uuid: String,
+    pub name: String,
+    /// `PENDING`, `SEEDING`, `ACTIVE`, `LATE`, `DELINQUENT`, `REPAIRING`,
+    /// `RESEED_REQUIRED`, `PAUSED`, or `RETIRED` (`BACKUP.md`, "Check-ins").
+    pub state: String,
+    pub locked: bool,
+    pub last_checkin_ms: Option<i64>,
+    /// Unrepairable errors its last scrub reported.
+    #[serde(default)]
+    pub scrub_errors: u64,
+    #[serde(default)]
+    pub suspect_pits: u32,
+    /// Other appliances that hold any of those PITs.
+    #[serde(default)]
+    pub other_copies: Vec<String>,
+}
+
+/// The last capture attempt of a VM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct BackupAttempt {
+    /// `captured`, `skipped`, or `failed`.
+    pub outcome: String,
+    pub at_ms: i64,
+    pub message: Option<String>,
+}
+
+/// One VM with a backup policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct BackupVmStatus {
+    pub vm: String,
+    pub vm_uuid: String,
+    pub enabled: bool,
+    pub last_attempt: Option<BackupAttempt>,
+    /// PITs in the catalog, and how many of them still have snapshots.
+    pub pits: u32,
+    pub snapshots: u32,
+    /// `PIT: reason` for each snapshot that can't be released yet.
+    pub release_blocked: Vec<String>,
+    pub healthy_appliances: u32,
+    pub min_healthy: u32,
+    /// Appliances whose newest published PIT is older than the schedule
+    /// allows.
+    pub overdue: Vec<String>,
+    /// Appliances that failed the newest PIT or let its claim window pass.
+    pub unclaimed: Vec<String>,
+}
+
+/// `backups`: appliances and policies, from the backup records. Only the
+/// duty host makes this observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct BackupsObservation {
+    pub at_ms: i64,
+    pub appliances: Vec<BackupApplianceStatus>,
+    pub vms: Vec<BackupVmStatus>,
     pub errors: Vec<String>,
 }
 

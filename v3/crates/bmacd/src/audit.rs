@@ -29,6 +29,7 @@ pub enum AuditKind {
     SilenceChanged,
     NotificationsChanged,
     JoinChanged,
+    ApplianceChanged,
 }
 
 impl AuditKind {
@@ -52,6 +53,7 @@ impl AuditKind {
             AuditKind::SilenceChanged => "silence_changed",
             AuditKind::NotificationsChanged => "notifications_changed",
             AuditKind::JoinChanged => "join_changed",
+            AuditKind::ApplianceChanged => "appliance_changed",
         }
     }
 }

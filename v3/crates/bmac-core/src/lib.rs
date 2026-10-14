@@ -3,6 +3,7 @@
 
 //! Shared types: identifiers, units, disk identity, job events, ports, and SSH keys.
 
+pub mod address;
 pub mod disk;
 pub mod ids;
 pub mod job;
@@ -10,6 +11,7 @@ pub mod ports;
 pub mod sshkey;
 pub mod units;
 
+pub use address::{AddressHost, ApplianceAddress};
 pub use disk::DiskIdentity;
 pub use ids::{
     DatasetName, DomainLabel, GuestName, HostSlot, JobId, MacAddress, OperationId, PoolName,

@@ -41,6 +41,7 @@ const SCRIPT_CONFIG_REFRESH: std::time::Duration = std::time::Duration::from_sec
 
 const USAGE: &str = "usage: bmacd engine [--socket PATH] [--web-user NAME]
        bmacd web [--socket PATH]
+       bmacd source
        bmacd render-config
        bmacd native OPERATION --json [ARGS...]
        bmacd --version";
@@ -333,6 +334,10 @@ async fn run_engine(options: Options) -> Result<(), String> {
             );
             collectors.cluster = Some(cluster.clone());
             tasks.push(status::spawn_collectors(collectors, engine.hub().clone()));
+            match bmacd::backup::source_engine::spawn(host, cluster.clone(), listen_rx.clone()) {
+                Ok(source_tasks) => tasks.extend(source_tasks),
+                Err(e) => log::warning(&format!("no backup source endpoint: {e}")),
+            }
             let (sink, changes) =
                 runner::EngineSink::new(engine.hub().clone(), engine.auth().store().clone());
             let known = registry.clone();
@@ -409,6 +414,22 @@ async fn run_engine(options: Options) -> Result<(), String> {
                     clock: auth::system_clock(),
                     ca: std::path::PathBuf::from(bmacd::joins::CLUSTER_CA),
                 }));
+                engine = engine.with_appliances(Arc::new(bmacd::backup::enrollment::Appliances {
+                    store: bmacd::backup::store::BackupStore::system(),
+                    joins: bmacd::joins::JoinStore::system(),
+                    tokens: mesh.tokens().clone(),
+                    settings: settings::Settings::system(),
+                    identities: identity::Identities::system(),
+                    clock: auth::system_clock(),
+                    ca: std::path::PathBuf::from(bmacd::joins::CLUSTER_CA),
+                }));
+                engine = engine.with_policies(Arc::new(bmacd::backup::policies::PolicyAdmin {
+                    store: bmacd::backup::store::BackupStore::system(),
+                    schedules: schedules::Schedules::system(),
+                    pmxcfs: bmac_pmxcfs::Pmxcfs::system(),
+                    registry: std::path::PathBuf::from(bmac_registry::DEFAULT_ROOT),
+                    clock: auth::system_clock(),
+                }));
                 engine = engine.with_mesh(mesh);
             }
             let scheduler = schedules::Scheduler::new(
@@ -418,6 +439,7 @@ async fn run_engine(options: Options) -> Result<(), String> {
             )
             .with_runner(runner.clone());
             tasks.push(Arc::new(scheduler).spawn());
+            tasks.push(bmacd::backup::upkeep::spawn(host));
             engine = engine.with_runner(runner);
         }
         Err(_) => log::warning(&format!(
@@ -554,6 +576,37 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
         return bmacd::native::main(&args[1..]);
+    }
+    if mode == "source" {
+        if args.len() > 1 {
+            eprintln!("bmacd: source takes no options\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        if rustix::process::geteuid().is_root() {
+            eprintln!("bmacd source must not run as root");
+            return ExitCode::FAILURE;
+        }
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                log::error(&format!("cannot start the runtime: {e}"));
+                return ExitCode::FAILURE;
+            }
+        };
+        let options = bmacd::backup::daemon::Options {
+            socket: PathBuf::from(bmacd::backup::source_socket::SOURCE_SOCKET),
+            zfs: PathBuf::from(bmacd::backup::daemon::ZFS),
+        };
+        return match runtime.block_on(bmacd::backup::daemon::run(options, terminated())) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(message) => {
+                log::error(&format!("bmacd source: {message}"));
+                ExitCode::FAILURE
+            }
+        };
     }
     #[cfg(feature = "lab")]
     if mode == "import-settings" {

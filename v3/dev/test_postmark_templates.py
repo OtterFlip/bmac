@@ -162,7 +162,7 @@ class ToolTest(unittest.TestCase):
 
         self.assertEqual(self.run_tool("sync", "--apply", "--server", "bmac_lab"), 0, self.output())
         created = [path for method, path in self.changes() if method == "POST"]
-        self.assertEqual(len(created), 7)
+        self.assertEqual(len(created), 9)
         self.assertEqual(list(self.api.templates)[0], "bmac-layout-v1")
         self.assertEqual(self.api.templates["bmac-test-v1"]["LayoutTemplate"], "bmac-layout-v1")
 

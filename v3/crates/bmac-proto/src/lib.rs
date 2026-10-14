@@ -6,6 +6,8 @@
 pub mod alerts;
 pub mod api;
 pub mod appliance;
+pub mod appliance_ui;
+pub mod backups;
 pub mod bmac_ui;
 pub mod bootstrap;
 pub mod certificate;

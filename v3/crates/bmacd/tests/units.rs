@@ -9,7 +9,13 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use bmac_proto::engine::ENGINE_SOCKET;
+use bmacd::backup::daemon::{
+    CA_CREDENTIAL as SOURCE_CA, CERT_CREDENTIAL as SOURCE_CERT, KEY_CREDENTIAL as SOURCE_KEY,
+};
+use bmacd::backup::source_socket::{SOURCE_SOCKET, SOURCE_USER};
 use bmacd::peers::WEB_USER;
+
+const ZFS_DEVICE: &str = "/dev/zfs";
 use bmacd::settings::{INSTALLED, RUN_CONFIG_DIR};
 use bmacd::supervisor::LEGACY_ROOT;
 use bmacd::web::{CERT_CREDENTIAL, KEY_CREDENTIAL};
@@ -187,11 +193,69 @@ fn front_end_unit_is_sandboxed() {
 }
 
 #[test]
-fn sysusers_creates_the_front_end_user() {
+fn sysusers_creates_the_front_end_and_source_users() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/sysusers.d/bmacd.conf");
     let text = std::fs::read_to_string(path).unwrap();
-    let entry = text.lines().find(|l| l.starts_with("u ")).unwrap();
-    let fields: Vec<&str> = entry.split_whitespace().collect();
-    assert_eq!(fields[1], WEB_USER);
-    assert!(entry.ends_with("/ /usr/sbin/nologin"));
+    let users: Vec<&str> = text.lines().filter(|l| l.starts_with("u ")).collect();
+    let names: Vec<&str> = users
+        .iter()
+        .map(|entry| entry.split_whitespace().nth(1).unwrap())
+        .collect();
+    assert_eq!(names, [WEB_USER, SOURCE_USER]);
+    for entry in users {
+        assert!(entry.ends_with("/ /usr/sbin/nologin"), "{entry}");
+    }
+}
+
+#[test]
+fn source_unit_is_sandboxed_and_reaches_only_zfs() {
+    let source = unit("systemd/bmac-source.service");
+    assert_eq!(one(&source, "ExecStart"), "/usr/lib/bmac/bmacd source");
+    assert_eq!(one(&source, "Type"), "notify");
+    assert_eq!(one(&source, "User"), SOURCE_USER);
+    assert_eq!(one(&source, "Group"), SOURCE_USER);
+    assert_eq!(one(&source, "BindsTo"), "bmacd.service");
+    assert_eq!(one(&source, "PartOf"), "bmacd.service");
+    assert_eq!(
+        source["LoadCredential"],
+        [
+            format!("{SOURCE_CERT}:/etc/pve/local/pve-ssl.pem"),
+            format!("{SOURCE_KEY}:/etc/pve/local/pve-ssl.key"),
+            format!("{SOURCE_CA}:/etc/pve/pve-root-ca.pem"),
+        ]
+    );
+    assert_eq!(one(&source, "DevicePolicy"), "closed");
+    assert_eq!(one(&source, "DeviceAllow"), format!("{ZFS_DEVICE} rw"));
+    for (key, value) in [
+        ("NoNewPrivileges", "yes"),
+        ("CapabilityBoundingSet", ""),
+        ("AmbientCapabilities", ""),
+        ("ProtectSystem", "strict"),
+        ("ProtectHome", "yes"),
+        ("PrivateTmp", "yes"),
+        ("RestrictAddressFamilies", "AF_INET AF_INET6 AF_UNIX"),
+        ("RestrictSUIDSGID", "yes"),
+        ("MemoryDenyWriteExecute", "yes"),
+        ("SystemCallArchitectures", "native"),
+    ] {
+        assert_eq!(one(&source, key), value, "{key}");
+    }
+    let hidden: Vec<&str> = one(&source, "InaccessiblePaths").split(' ').collect();
+    for path in ["-/etc/pve", "-/etc/bmac", "-/var/lib/bmac"] {
+        assert!(hidden.contains(&path), "{path} must be inaccessible");
+    }
+    assert_eq!(
+        source["SystemCallFilter"],
+        ["@system-service", "~@privileged @resources"]
+    );
+    for forbidden in ["ReadWritePaths", "SupplementaryGroups", "PrivilegedMode"] {
+        assert!(!source.contains_key(forbidden), "{forbidden}");
+    }
+    let engine = unit("systemd/bmacd.service");
+    assert!(
+        one(&engine, "Wants")
+            .split(' ')
+            .any(|u| u == "bmac-source.service")
+    );
+    assert!(SOURCE_SOCKET.starts_with("/run/bmac-source/"));
 }

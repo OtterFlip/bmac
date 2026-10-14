@@ -25,6 +25,7 @@ lab = []
 axum.workspace = true
 base64.workspace = true
 bmac-adapters.workspace = true
+bmac-backup.workspace = true
 bmac-core.workspace = true
 bmac-exec.workspace = true
 bmac-inventory.workspace = true

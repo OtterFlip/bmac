@@ -9,3 +9,4 @@ export const KEEPALIVE_SECONDS = 15;
 export const DEPLOYER_TASK_EVENT = "bmac://task-event";
 export const DEPLOYER_TASK_UPDATED = "bmac://task-updated";
 export const DEPLOYER_CLOSE_REQUESTED = "bmac://close-requested";
+export const APPLIANCE_API = "/api/v1";

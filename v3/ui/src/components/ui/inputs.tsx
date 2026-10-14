@@ -65,15 +65,18 @@ export function Checkbox({
   onCheckedChange,
   disabled,
   id,
+  "aria-label": ariaLabel,
 }: {
   checked: boolean;
   onCheckedChange: (v: boolean) => void;
   disabled?: boolean;
   id?: string;
+  "aria-label"?: string;
 }) {
   return (
     <RCheckbox.Root
       id={id}
+      aria-label={ariaLabel}
       checked={checked}
       onCheckedChange={(v) => onCheckedChange(v === true)}
       disabled={disabled}

@@ -1,0 +1,9 @@
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+
+Backup appliance {{ appliance_name }} has had no good answer from
+{{ url }} since {{ failing_since }}.
+
+Last error: {{ error }}
+
+This check runs from outside the cluster, from the backup appliance.

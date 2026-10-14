@@ -7,8 +7,10 @@
 
 use std::collections::BTreeMap;
 
-use bmac_core::{DatasetName, HostSlot, SnapshotGuid, SnapshotName};
+use bmac_core::{ApplianceAddress, HostSlot, SnapshotGuid};
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+use uuid::Uuid;
 
 pub const SOURCE_PROTOCOL: &str = "bmac-source";
 pub const APPLIANCE_PROTOCOL: &str = "bmac-appliance";
@@ -34,6 +36,7 @@ pub mod on_source {
 pub mod on_appliance {
     pub const EXPORT: &str = "/v1/export";
     pub const PEER_INDEX: &str = "/v1/peer-index";
+    pub const GRANTED: &str = "/v1/granted";
 }
 
 /// One entry of an appliance's trusted-peer list. Only that appliance's
@@ -46,7 +49,8 @@ pub struct TrustedPeer {
     pub appliance_uuid: String,
     /// SHA-256 of the peer's certificate, typed from the peer's own UI.
     pub fingerprint: String,
-    pub address: String,
+    /// Where the peer's 8445 answers: an IP address or a DNS name.
+    pub address: ApplianceAddress,
 }
 
 /// The trusted peer a client certificate belongs to, if any. Anything else
@@ -83,29 +87,106 @@ pub struct LocateResponse {
     pub hosts: BTreeMap<SnapshotGuid, Vec<HostSlot>>,
 }
 
-/// `POST /v1/send`: a full, incremental, or resumed send of one BMAC
-/// snapshot on this host. Never a replication (`-R`) stream.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum SendRequest {
-    Full {
-        dataset: DatasetName,
-        snapshot: SnapshotName,
-    },
-    /// From the appliance's head, which the cluster keeps as a snapshot or,
-    /// once the appliances have it, as a bookmark of the same name.
-    Incremental {
-        dataset: DatasetName,
-        snapshot: SnapshotName,
-        from: SnapshotName,
-        from_kind: BaseKind,
-        from_guid: SnapshotGuid,
-    },
-    Resume {
-        token: String,
-    },
+/// Whether an appliance is catching up normally, repairing from a peer, or
+/// needs a full send (`BACKUP.md`, "Repairing an appliance that fell
+/// behind").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplianceProgress {
+    #[default]
+    Normal,
+    Repairing,
+    ReseedRequired,
 }
 
+/// The appliance's newest published PIT of one VM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadReport {
+    pub vm_uuid: Uuid,
+    pub branch_uuid: Uuid,
+    pub pit_uuid: Uuid,
+}
+
+/// A pull in progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferReport {
+    pub transfer_uuid: Uuid,
+    pub vm_uuid: Uuid,
+    pub pit_uuid: Uuid,
+    /// Received so far, over every volume of the PIT.
+    pub bytes: u64,
+}
+
+/// An offered PIT the appliance gave up on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailedReport {
+    pub vm_uuid: Uuid,
+    pub pit_uuid: Uuid,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Capacity {
+    pub pool_size_bytes: u64,
+    pub pool_free_bytes: u64,
+    /// The cluster's namespace quota on the appliance, if it has one.
+    pub quota_bytes: Option<u64>,
+    pub used_bytes: u64,
+}
+
+/// `POST /v1/checkin`, once per check-in interval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckinRequest {
+    pub appliance_uuid: Uuid,
+    pub version: String,
+    /// The pool waits for the console passphrase.
+    pub locked: bool,
+    pub pool_health: String,
+    pub capacity: Capacity,
+    pub progress: ApplianceProgress,
+    pub heads: Vec<HeadReport>,
+    pub transfers: Vec<TransferReport>,
+    #[serde(default)]
+    pub failed: Vec<FailedReport>,
+    pub index_revision: u64,
+    #[serde(default)]
+    pub scrub: Option<ScrubReport>,
+}
+
+/// The appliance pool's last or current scrub (`BACKUP.md`, "Scrubs and
+/// integrity").
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScrubReport {
+    /// `running`, `paused`, `finished`, or `canceled`.
+    pub state: String,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
+    /// Thousandths done, while it runs.
+    pub done_permille: Option<u32>,
+    pub repaired_bytes: u64,
+    /// Unrepairable errors ZFS reports for the pool.
+    pub errors: u64,
+    /// The datasets ZFS names for them.
+    pub affected: Vec<String>,
+    /// Published PITs that may hold a damaged block.
+    pub suspect_pits: Vec<Uuid>,
+}
+
+/// Where a PIT can be pulled from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceHost {
+    pub host: HostSlot,
+    /// Names or addresses its `bmac-source` answers on, best first.
+    pub addresses: Vec<String>,
+}
+
+/// What the cluster still has of a base PIT on the volume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BaseKind {
@@ -113,53 +194,296 @@ pub enum BaseKind {
     Bookmark,
 }
 
-impl SendRequest {
-    /// Whether `bmac-source` may serve it: only BMAC snapshots.
-    pub fn names_bmac_snapshots(&self) -> bool {
-        let pit = |name: &SnapshotName| name.as_str().starts_with(PIT_SNAPSHOT_PREFIX);
-        match self {
-            SendRequest::Full { snapshot, .. } => pit(snapshot),
-            SendRequest::Incremental { snapshot, from, .. } => pit(snapshot) && pit(from),
-            SendRequest::Resume { .. } => true,
-        }
+/// The base an incremental pull starts from: the appliance's head.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfferBase {
+    pub pit_uuid: Uuid,
+    pub kind: BaseKind,
+}
+
+/// One PIT the appliance should pull.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfferedPit {
+    pub vm_uuid: Uuid,
+    pub pit_uuid: Uuid,
+    pub branch_uuid: Uuid,
+    pub name: String,
+    pub taken_s: i64,
+    pub parent: Option<Uuid>,
+    /// `None` is a full send: the first PIT of a branch for this appliance.
+    /// An appliance with a head on the branch that gets `None` has fallen
+    /// too far behind; it repairs from a peer or reseeds.
+    pub base: Option<OfferBase>,
+    pub hosts: Vec<SourceHost>,
+    /// The sealed manifest, as the catalog holds it.
+    pub manifest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckinReply {
+    pub cluster_uuid: String,
+    pub now_ms: i64,
+    pub checkin_interval_s: i64,
+    /// The appliance's state as the cluster sees it, such as `ACTIVE`.
+    pub state: String,
+    pub offers: Vec<OfferedPit>,
+    /// Send the PIT index next (`POST /v1/index`).
+    pub want_index: bool,
+}
+
+/// `POST /v1/claim`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimRequest {
+    pub vm_uuid: Uuid,
+    pub pit_uuid: Uuid,
+}
+
+/// One published PIT in an appliance's index: metadata only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct IndexedPit {
+    pub vm_uuid: String,
+    pub branch_uuid: String,
+    pub pit_uuid: String,
+    pub parent: Option<String>,
+    pub name: String,
+    pub taken_s: i64,
+    pub bytes: u64,
+}
+
+/// `POST /v1/index`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndexRequest {
+    pub revision: u64,
+    pub pits: Vec<IndexedPit>,
+}
+
+/// `POST /v1/send`: one volume of an offered PIT, full, incremental from a
+/// base PIT the catalog shows as one of its ancestors (on its branch or a
+/// branch it descends from), or resumed. The cluster resolves every name
+/// itself; never a replication (`-R`) stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendRequest {
+    pub transfer_uuid: Uuid,
+    pub vm_uuid: Uuid,
+    pub pit_uuid: Uuid,
+    pub volume_uuid: Uuid,
+    pub base: Option<Uuid>,
+    /// `receive_resume_token` from the appliance's partial receive.
+    pub resume_token: Option<String>,
+    /// `-L` and `-c`, when the appliance's OpenZFS takes them.
+    #[serde(default)]
+    pub large_blocks: bool,
+    #[serde(default)]
+    pub compressed: bool,
+}
+
+/// `POST /v1/export` on an appliance: one volume of a published PIT, full,
+/// incremental from the snapshot with `from_guid` (which the client holds),
+/// or resumed; or with `estimate`, only the stream's size. A cluster host
+/// must present a restore grant naming the PIT; a trusted peer presents
+/// none. Never a replication stream, never the appliance's properties.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportRequest {
+    pub cluster_uuid: String,
+    pub pit_uuid: Uuid,
+    pub volume_uuid: Uuid,
+    pub from_guid: Option<SnapshotGuid>,
+    pub resume_token: Option<String>,
+    #[serde(default)]
+    pub estimate: bool,
+    #[serde(default)]
+    pub grant: Option<String>,
+}
+
+impl std::fmt::Debug for ExportRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportRequest")
+            .field("cluster_uuid", &self.cluster_uuid)
+            .field("pit_uuid", &self.pit_uuid)
+            .field("volume_uuid", &self.volume_uuid)
+            .field("from_guid", &self.from_guid)
+            .field("estimate", &self.estimate)
+            .field("grant", &self.grant.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
+    }
+}
+
+/// The answer to an export with `estimate`: `zfs send -nP`'s size.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportEstimate {
+    pub bytes: u64,
+}
+
+/// One volume of a PIT in a peer index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerVolume {
+    pub volume_uuid: Uuid,
+    pub guid: SnapshotGuid,
+    pub volsize: u64,
+    pub volblocksize: u64,
+}
+
+/// One published PIT in a peer index, with its sealed manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerPit {
+    pub cluster_uuid: String,
+    pub vm_uuid: Uuid,
+    pub branch_uuid: Uuid,
+    pub pit_uuid: Uuid,
+    pub parent: Option<Uuid>,
+    pub name: String,
+    pub taken_s: i64,
+    pub volumes: Vec<PeerVolume>,
+    pub manifest: String,
+}
+
+/// `GET /v1/peer-index`: every published PIT, metadata only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerIndex {
+    pub appliance_uuid: Uuid,
+    pub revision: u64,
+    pub pits: Vec<PeerPit>,
+}
+
+/// `POST /v1/granted` on an appliance, from a cluster host: what a restore
+/// grant lets that cluster read.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantedRequest {
+    pub cluster_uuid: String,
+    pub grant: String,
+}
+
+impl std::fmt::Debug for GrantedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrantedRequest")
+            .field("cluster_uuid", &self.cluster_uuid)
+            .field("grant", &"<redacted>")
+            .finish()
+    }
+}
+
+/// An earlier published PIT of a granted PIT's VM: an incremental base the
+/// restore may already hold, by its volumes' GUIDs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantedBase {
+    pub vm_uuid: Uuid,
+    pub branch_uuid: Uuid,
+    pub pit_uuid: Uuid,
+    pub parent: Option<Uuid>,
+    pub taken_s: i64,
+    pub volumes: Vec<PeerVolume>,
+}
+
+/// The answer to `POST /v1/granted`: the granted PITs with their manifests,
+/// and the earlier PITs of the same VMs, metadata only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantedIndex {
+    pub appliance_uuid: Uuid,
+    pub grant_id: String,
+    pub expires_at_ms: i64,
+    pub pits: Vec<PeerPit>,
+    pub bases: Vec<GrantedBase>,
+}
+
+/// `GET /v1/heartbeat`, for the appliance's watchdog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Heartbeat {
+    pub host: HostSlot,
+    pub now_ms: i64,
+    pub quorate: bool,
+    pub online: Vec<HostSlot>,
+}
+
+/// `GET /v1/luks-headers`: this host's LUKS header backups.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LuksHeaders {
+    pub host: HostSlot,
+    /// File name and its contents, base64.
+    pub headers: BTreeMap<String, String>,
+}
+
+/// The enrollment bundle the Dashboard issues for a new appliance, shown
+/// once. `bmac-backupd enroll` presents its token to a host's
+/// `POST /v1/enroll` (port 8444), checking the host's chain against the
+/// Proxmox CA fingerprint first, and keeps everything but the token.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollBundle {
+    pub version: u32,
+    pub cluster_uuid: String,
+    pub cluster_name: String,
+    pub enroll_token: String,
+    pub expires_ms: i64,
+    /// SHA-256 of the Proxmox cluster CA, lowercase hex, which the
+    /// appliance pins for every connection to the cluster.
+    pub proxmox_ca_fingerprint: String,
+    pub hosts: Vec<SourceHost>,
+}
+
+pub const ENROLL_BUNDLE_VERSION: u32 = 1;
+
+impl std::fmt::Debug for EnrollBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnrollBundle")
+            .field("cluster_uuid", &self.cluster_uuid)
+            .field("cluster_name", &self.cluster_name)
+            .field("expires_ms", &self.expires_ms)
+            .field("hosts", &self.hosts)
+            .finish_non_exhaustive()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_enrollment_bundle_never_prints_its_token() {
+        let bundle = EnrollBundle {
+            version: ENROLL_BUNDLE_VERSION,
+            cluster_uuid: "c".into(),
+            cluster_name: "lab".into(),
+            enroll_token: "secret-token-value".into(),
+            expires_ms: 1,
+            proxmox_ca_fingerprint: "ab".into(),
+            hosts: vec![],
+        };
+        assert!(!format!("{bundle:?}").contains("secret-token-value"));
+    }
     use serde_json::json;
 
     #[test]
-    fn only_bmac_snapshots_are_sendable() {
-        let send = |value| serde_json::from_value::<SendRequest>(value).unwrap();
-        assert!(
-            send(json!({"kind": "full", "dataset": "rpool/data/vm-101-disk-0", "snapshot": "bmac-pit-20261011"}))
-                .names_bmac_snapshots()
-        );
-        assert!(
-            !send(json!({"kind": "incremental", "dataset": "rpool/data/vm-101-disk-0", "snapshot": "bmac-pit-2",
-                         "from": "daily-1", "from_kind": "snapshot", "from_guid": "123"}))
-            .names_bmac_snapshots()
-        );
-        assert!(
-            send(json!({"kind": "incremental", "dataset": "rpool/data/vm-101-disk-0", "snapshot": "bmac-pit-2",
-                         "from": "bmac-pit-1", "from_kind": "bookmark", "from_guid": "123"}))
-            .names_bmac_snapshots()
-        );
-        assert!(
-            serde_json::from_value::<SendRequest>(
-                json!({"kind": "full", "dataset": "rpool", "snapshot": "bmac-pit-1", "flags": "-R"})
-            )
-            .is_err()
-        );
+    fn a_send_names_ids_and_nothing_else() {
+        let send = json!({"transfer_uuid": "6f9619ff-8b86-4011-b42d-00c04fc964ff",
+                          "vm_uuid": "6f9619ff-8b86-4011-b42d-00c04fc964fe",
+                          "pit_uuid": "6f9619ff-8b86-4011-b42d-00c04fc964fd",
+                          "volume_uuid": "6f9619ff-8b86-4011-b42d-00c04fc964fc",
+                          "base": null, "resume_token": null});
+        assert!(serde_json::from_value::<SendRequest>(send.clone()).is_ok());
+        let mut flags = send.clone();
+        flags["flags"] = json!("-R");
+        assert!(serde_json::from_value::<SendRequest>(flags).is_err());
+        let mut dataset = send;
+        dataset["dataset"] = json!("rpool");
+        assert!(serde_json::from_value::<SendRequest>(dataset).is_err());
     }
 
     fn peer(fingerprint: &str) -> TrustedPeer {
         TrustedPeer {
             appliance_uuid: "b".into(),
             fingerprint: fingerprint.into(),
-            address: "bmac-appliance-b".into(),
+            address: "bmac-appliance-b".parse().unwrap(),
         }
     }
 

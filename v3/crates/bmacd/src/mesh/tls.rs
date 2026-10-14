@@ -33,7 +33,7 @@ pub fn node_cert_paths(node: &str) -> (PathBuf, PathBuf) {
     (dir.join("pve-ssl.pem"), dir.join("pve-ssl.key"))
 }
 
-fn provider() -> Arc<CryptoProvider> {
+pub(crate) fn provider() -> Arc<CryptoProvider> {
     let mut provider = default_provider();
     provider.cipher_suites = vec![
         cipher_suite::TLS13_AES_256_GCM_SHA384,
@@ -44,7 +44,7 @@ fn provider() -> Arc<CryptoProvider> {
     Arc::new(provider)
 }
 
-fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsError> {
+pub(crate) fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsError> {
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem)
         .collect::<Result<_, _>>()
         .map_err(|e| TlsError::Certificate(e.to_string()))?;

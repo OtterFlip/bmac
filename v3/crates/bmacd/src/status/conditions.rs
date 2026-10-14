@@ -11,14 +11,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bmac_core::HostSlot;
 use bmac_proto::status::{
-    AGENTS_COLLECTOR, AgentsObservation, CERTIFICATES_COLLECTOR, CLEANUP_COLLECTOR,
-    CLOCK_COLLECTOR, CLUSTER_COLLECTOR, CertificatesObservation, CleanupObservation,
-    ClockObservation, ClusterObservation, Condition, ConditionSeverity, HOST_COLLECTOR,
-    HostObservation, INGRESS_COLLECTOR, IngressObservation, LOGS_COLLECTOR, LogObservation,
-    NOTIFY_COLLECTOR, NextStep, NotifyObservation, PMXCFS_COLLECTOR, PmxcfsObservation,
-    QDEVICE_COLLECTOR, QdeviceObservation, REGISTRY_COLLECTOR, RegistryObservation,
-    SMART_COLLECTOR, STORAGE_COLLECTOR, SmartObservation, StorageObservation, TAILSCALE_COLLECTOR,
-    TailscaleObservation, UNITS_COLLECTOR, UnitsObservation, VRRP_COLLECTOR, VrrpObservation,
+    AGENTS_COLLECTOR, AgentsObservation, BACKUPS_COLLECTOR, BackupsObservation,
+    CERTIFICATES_COLLECTOR, CLEANUP_COLLECTOR, CLOCK_COLLECTOR, CLUSTER_COLLECTOR,
+    CertificatesObservation, CleanupObservation, ClockObservation, ClusterObservation, Condition,
+    ConditionSeverity, HOST_COLLECTOR, HostObservation, INGRESS_COLLECTOR, IngressObservation,
+    LOGS_COLLECTOR, LogObservation, NOTIFY_COLLECTOR, NextStep, NotifyObservation,
+    PMXCFS_COLLECTOR, PmxcfsObservation, QDEVICE_COLLECTOR, QdeviceObservation, REGISTRY_COLLECTOR,
+    RegistryObservation, SMART_COLLECTOR, STORAGE_COLLECTOR, SmartObservation, StorageObservation,
+    TAILSCALE_COLLECTOR, TailscaleObservation, UNITS_COLLECTOR, UnitsObservation, VRRP_COLLECTOR,
+    VrrpObservation,
 };
 
 use super::assemble::{View, condition};
@@ -591,7 +592,154 @@ pub fn vm_health(view: &View) -> Vec<Condition> {
             ));
         }
     }
+    backups(view, &mut found);
     found
+}
+
+/// `BACKUP.md`, "Alerts". The duty host observes the backup records.
+fn backups(view: &View, found: &mut Vec<Condition>) {
+    let duty = view.membership.as_ref().and_then(|m| m.duty());
+    let Some(seen) = duty.and_then(|h| view.observed::<BackupsObservation>(h, BACKUPS_COLLECTOR))
+    else {
+        return;
+    };
+    for appliance in &seen.appliances {
+        let name = &appliance.name;
+        let resource = format!("appliance/{}", appliance.appliance_uuid);
+        match appliance.state.as_str() {
+            "LATE" => found.push(condition(
+                "backup.appliance.late",
+                &resource,
+                ConditionSeverity::Warning,
+                format!("backup appliance {name} hasn't checked in"),
+                vec![],
+            )),
+            "DELINQUENT" => found.push(condition(
+                "backup.appliance.delinquent",
+                &resource,
+                ConditionSeverity::Critical,
+                format!(
+                    "backup appliance {name} is delinquent; the cluster no longer keeps \
+                     snapshots for it"
+                ),
+                vec![],
+            )),
+            "RESEED_REQUIRED" => found.push(condition(
+                "backup.appliance.reseed",
+                &resource,
+                ConditionSeverity::Critical,
+                format!("backup appliance {name} needs a full send to continue"),
+                vec![],
+            )),
+            _ => {}
+        }
+        if appliance.locked {
+            found.push(condition(
+                "backup.appliance.locked",
+                &resource,
+                ConditionSeverity::Warning,
+                format!("backup appliance {name} is locked and can't receive backups"),
+                vec![],
+            ));
+        }
+        if appliance.scrub_errors > 0 || appliance.suspect_pits > 0 {
+            let copies = if appliance.suspect_pits == 0 {
+                String::new()
+            } else if appliance.other_copies.is_empty() {
+                format!(
+                    "; {} PITs are suspect and no other appliance holds them",
+                    appliance.suspect_pits
+                )
+            } else {
+                format!(
+                    "; {} PITs are suspect; other copies are on {}",
+                    appliance.suspect_pits,
+                    appliance.other_copies.join(", ")
+                )
+            };
+            found.push(condition(
+                "backup.appliance.scrub_errors",
+                &resource,
+                ConditionSeverity::Critical,
+                format!(
+                    "backup appliance {name}'s scrub found {} unrepairable errors{copies}",
+                    appliance.scrub_errors
+                ),
+                vec![],
+            ));
+        }
+    }
+    for vm in &seen.vms {
+        let name = &vm.vm;
+        let resource = format!("vm/{name}");
+        let back_up = || {
+            vec![NextStep::run(
+                format!("Back up {name} now."),
+                "backup.capture",
+                &[("vm", name)],
+            )]
+        };
+        match &vm.last_attempt {
+            Some(a) if a.outcome == "failed" => found.push(condition(
+                "backup.capture.failed",
+                &resource,
+                ConditionSeverity::Critical,
+                format!(
+                    "{name}'s last backup failed: {}",
+                    a.message.as_deref().unwrap_or("no reason given")
+                ),
+                back_up(),
+            )),
+            Some(a) if a.outcome == "skipped" => found.push(condition(
+                "backup.skipped",
+                &resource,
+                ConditionSeverity::Info,
+                format!("{name}'s last scheduled backup was skipped; no retention slot needed it"),
+                vec![],
+            )),
+            _ => {}
+        }
+        for appliance in &vm.unclaimed {
+            found.push(condition(
+                "backup.unclaimed",
+                format!("{resource}/{appliance}"),
+                ConditionSeverity::Warning,
+                format!("{appliance} didn't take {name}'s newest backup"),
+                vec![],
+            ));
+        }
+        for appliance in &vm.overdue {
+            found.push(condition(
+                "backup.overdue",
+                format!("{resource}/{appliance}"),
+                ConditionSeverity::Critical,
+                format!("{name}'s newest backup on {appliance} is older than its schedule allows"),
+                back_up(),
+            ));
+        }
+        if vm.enabled && vm.healthy_appliances < vm.min_healthy {
+            found.push(condition(
+                "backup.too_few",
+                &resource,
+                ConditionSeverity::Critical,
+                format!(
+                    "{name} has {} healthy backup appliance(s); at least {} are wanted",
+                    vm.healthy_appliances, vm.min_healthy
+                ),
+                vec![],
+            ));
+        }
+        for blocked in &vm.release_blocked {
+            found.push(condition(
+                "backup.release_blocked",
+                &resource,
+                ConditionSeverity::Warning,
+                format!("{name}: a backup snapshot can't be released ({blocked})"),
+                vec![],
+            ));
+        }
+    }
+    view.errors(BACKUPS_COLLECTOR, found);
 }
 
 /// Conditions about pools, disks, and encryption, beyond pool health and
@@ -1047,6 +1195,46 @@ mod tests {
             [
                 "vm.agent prod1 Warning: prod1's guest agent on mox2 isn't answering",
                 "registry.disagrees prod/web/vm-missing Warning: prod/web: the VM is missing (vm-missing)",
+            ]
+        );
+    }
+
+    #[test]
+    fn backup_alerts_from_the_duty_host_only() {
+        let mut v = view(&[1, 2, 3]);
+        let seen = |name: &str| {
+            json!({"at_ms": 1, "appliances": [
+                {"appliance_uuid": "a1", "name": name, "state": "LATE", "locked": true,
+                 "last_checkin_ms": 1},
+                {"appliance_uuid": "a2", "name": "vault", "state": "DELINQUENT", "locked": false,
+                 "last_checkin_ms": null},
+                {"appliance_uuid": "a3", "name": "fresh", "state": "ACTIVE", "locked": false,
+                 "last_checkin_ms": 1, "scrub_errors": 2, "suspect_pits": 3,
+                 "other_copies": ["vault"]},
+            ], "vms": [{
+                "vm": "prod1", "vm_uuid": "u", "enabled": true,
+                "last_attempt": {"outcome": "failed", "at_ms": 1, "message": "replication timed out"},
+                "pits": 2, "snapshots": 1, "release_blocked": ["p1: dataset is busy"],
+                "healthy_appliances": 1, "min_healthy": 2,
+                "overdue": ["vault"], "unclaimed": ["offsite"],
+            }], "errors": ["policy unreadable"]})
+        };
+        observe(&mut v, 1, BACKUPS_COLLECTOR, seen("offsite"));
+        observe(&mut v, 2, BACKUPS_COLLECTOR, seen("other"));
+        assert_eq!(
+            listed(&vm_health(&v)),
+            [
+                "backup.appliance.late appliance/a1 Warning: backup appliance offsite hasn't checked in",
+                "backup.appliance.locked appliance/a1 Warning: backup appliance offsite is locked and can't receive backups",
+                "backup.appliance.delinquent appliance/a2 Critical: backup appliance vault is delinquent; the cluster no longer keeps snapshots for it",
+                "backup.appliance.scrub_errors appliance/a3 Critical: backup appliance fresh's scrub found 2 unrepairable errors; 3 PITs are suspect; other copies are on vault",
+                "backup.capture.failed vm/prod1 Critical: prod1's last backup failed: replication timed out",
+                "backup.unclaimed vm/prod1/offsite Warning: offsite didn't take prod1's newest backup",
+                "backup.overdue vm/prod1/vault Critical: prod1's newest backup on vault is older than its schedule allows",
+                "backup.too_few vm/prod1 Critical: prod1 has 1 healthy backup appliance(s); at least 2 are wanted",
+                "backup.release_blocked vm/prod1 Warning: prod1: a backup snapshot can't be released (p1: dataset is busy)",
+                "collector.backups mox1 Warning: mox1: policy unreadable",
+                "collector.backups mox2 Warning: mox2: policy unreadable",
             ]
         );
     }

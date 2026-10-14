@@ -152,6 +152,29 @@ pub enum EngineCall {
     RevokeJoin {
         host: HostSlot,
     },
+    Appliances {},
+    IssueEnroll {
+        request: crate::backups::IssueEnroll,
+    },
+    ApproveAppliance {
+        request_id: String,
+        request: crate::backups::ApproveAppliance,
+    },
+    RejectAppliance {
+        request_id: String,
+    },
+    RevokeAppliance {
+        appliance_uuid: uuid::Uuid,
+    },
+    BackupPolicies {},
+    /// The policy as the Dashboard edits it, checked by the engine.
+    SaveBackupPolicy {
+        request: serde_json::Value,
+    },
+    DeleteBackupPolicy {
+        vm_uuid: uuid::Uuid,
+        revision: u64,
+    },
 }
 
 impl EngineCall {
@@ -205,6 +228,14 @@ impl EngineCall {
             EngineCall::Joins {} => "joins",
             EngineCall::IssueJoin { .. } => "issue_join",
             EngineCall::RevokeJoin { .. } => "revoke_join",
+            EngineCall::Appliances {} => "appliances",
+            EngineCall::IssueEnroll { .. } => "issue_enroll",
+            EngineCall::ApproveAppliance { .. } => "approve_appliance",
+            EngineCall::RejectAppliance { .. } => "reject_appliance",
+            EngineCall::RevokeAppliance { .. } => "revoke_appliance",
+            EngineCall::BackupPolicies {} => "backup_policies",
+            EngineCall::SaveBackupPolicy { .. } => "save_backup_policy",
+            EngineCall::DeleteBackupPolicy { .. } => "delete_backup_policy",
         }
     }
 }

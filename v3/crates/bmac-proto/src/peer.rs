@@ -152,9 +152,15 @@ pub struct JoinRequest {
 #[serde(deny_unknown_fields)]
 pub struct EnrollRequest {
     pub token: String,
+    /// The appliance's own ID, which every check-in carries.
+    pub appliance_uuid: uuid::Uuid,
     pub name: String,
     /// The appliance's client certificate, PEM.
     pub certificate: String,
+    /// Where restore jobs reach the appliance, if it knows: an IP address
+    /// or a DNS name. The administrator can change it when approving.
+    #[serde(default)]
+    pub address: Option<bmac_core::ApplianceAddress>,
 }
 
 /// The only answer a valid join or enrollment token gets: a pending request

@@ -194,6 +194,44 @@
           }
         ]
       }
+    },
+    {
+      "alias": "bmac-url-down-v1",
+      "name": "BMAC watchdog: public URL failing v1",
+      "type": "Standard",
+      "layout": "bmac-layout-v1",
+      "state": "draft",
+      "fields": {
+        "appliance_name": "string",
+        "url": "string",
+        "failing_since": "string",
+        "error": "string"
+      },
+      "test_model": {
+        "appliance_name": "backup1",
+        "url": "https://shop.example.com/health",
+        "failing_since": "2026-10-11 18:00 UTC",
+        "error": "HTTP 503"
+      }
+    },
+    {
+      "alias": "bmac-url-up-v1",
+      "name": "BMAC watchdog: public URL answering v1",
+      "type": "Standard",
+      "layout": "bmac-layout-v1",
+      "state": "draft",
+      "fields": {
+        "appliance_name": "string",
+        "url": "string",
+        "failing_since": "string",
+        "up_at": "string"
+      },
+      "test_model": {
+        "appliance_name": "backup1",
+        "url": "https://shop.example.com/health",
+        "failing_since": "2026-10-11 18:00 UTC",
+        "up_at": "2026-10-11 18:20 UTC"
+      }
     }
   ]
 }

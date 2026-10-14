@@ -5,7 +5,7 @@
 Description=BMAC engine
 Documentation=file:///usr/share/doc/bmacd/README.md
 After=network-online.target pve-cluster.service
-Wants=network-online.target pve-cluster.service bmacd-web.service
+Wants=network-online.target pve-cluster.service bmacd-web.service bmac-source.service
 # The lifecycle hook reads the script config the engine renders before it
 # reports ready.
 Before=pve-guests.service pve-ha-lrm.service
