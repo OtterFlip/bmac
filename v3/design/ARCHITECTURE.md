@@ -99,7 +99,9 @@ Browser (any machine) -- HTTPS ----->  |    log store, live peer streams        
   - the **engine**, as root: jobs, workflows, the scheduler, health
     collectors, alert evaluation, notifications, PIT capture, the host-local
     log store, and live streams to and from peers;
-  - **`bmac-source`**, the backup source endpoint on port 8445, as the user
+  - **`bmac-source`**, the backup source endpoint, which dials each
+    approved appliance's port 8445 and answers its requests over that
+    connection (`BACKUP.md`, "Connections"), as the user
     `bmac-source` with only ZFS `send` and `hold` delegated on guest datasets
     (`BACKUP.md`, `SECURITY.md`);
   - the **HTTPS front end**, as the unprivileged user `bmac-web` in a

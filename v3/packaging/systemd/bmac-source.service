@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 [Unit]
-Description=BMAC backup source endpoint (port 8445, enrolled appliances only)
+Description=BMAC backup source (dials approved appliances on port 8445)
 Documentation=file:///usr/share/doc/bmacd/README.md
 BindsTo=bmacd.service
 PartOf=bmacd.service

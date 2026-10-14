@@ -9,7 +9,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
-use bmac_backup::retention::{AppliancePit, ApplianceRetention, KeepReason, appliance_keep};
+use bmac_backup::retention::{
+    AppliancePit, ApplianceRetention, Calendar, Clock, KeepReason, appliance_keep,
+};
+use jiff::tz::TimeZone;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -44,6 +47,16 @@ pub struct AdminHold {
     pub at_ms: i64,
 }
 
+/// When a VM's first PIT here was taken: its day starts the VM's weeks,
+/// months and years, and never moves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VmStart {
+    pub cluster_uuid: String,
+    pub vm_uuid: Uuid,
+    pub taken_s: i64,
+}
+
 /// `retention.json` in the metadata dataset, so it moves with the pool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -54,6 +67,9 @@ pub struct Settings {
     pub delay_hours: u32,
     pub pending: Option<Pending>,
     pub holds: Vec<AdminHold>,
+    pub starts: Vec<VmStart>,
+    /// For tests only, set at the console: days last this many seconds.
+    pub test_day_s: Option<i64>,
 }
 
 impl Default for Settings {
@@ -64,10 +80,13 @@ impl Default for Settings {
                 daily: 1,
                 weekly: 0,
                 monthly: 0,
+                ..ApplianceRetention::default()
             },
             delay_hours: DEFAULT_DELAY_HOURS,
             pending: None,
             holds: Vec::new(),
+            starts: Vec::new(),
+            test_day_s: None,
         }
     }
 }
@@ -82,8 +101,12 @@ pub enum Change {
     },
 }
 
+/// Whether `policy` keeps fewer of any tier than `floor`; without yearly it
+/// keeps every month.
 fn below(policy: &ApplianceRetention, floor: &ApplianceRetention) -> bool {
-    policy.daily < floor.daily || policy.weekly < floor.weekly || policy.monthly < floor.monthly
+    policy.daily < floor.daily
+        || policy.weekly < floor.weekly
+        || (policy.yearly && policy.monthly < floor.monthly)
 }
 
 impl Settings {
@@ -114,6 +137,7 @@ impl Settings {
         now_ms: i64,
         confirmed: bool,
     ) -> Result<Change, String> {
+        policy.validate()?;
         if below(&policy, &self.floor) {
             return Err(format!(
                 "the retention floor is {} daily, {} weekly, {} monthly",
@@ -169,10 +193,124 @@ impl Settings {
         self.holds.len() != before
     }
 
+    pub fn start(&self, cluster: &str, vm: &Uuid) -> Option<i64> {
+        self.starts
+            .iter()
+            .find(|s| s.cluster_uuid == cluster && &s.vm_uuid == vm)
+            .map(|s| s.taken_s)
+    }
+
+    /// Records the start of every VM in `journal` that has none yet, from
+    /// its oldest PIT; whether any was new.
+    pub fn note_starts(&mut self, journal: &Journal) -> bool {
+        let mut oldest: BTreeMap<(&str, Uuid), i64> = BTreeMap::new();
+        for pit in &journal.pits {
+            let t = oldest
+                .entry((pit.cluster_uuid.as_str(), pit.vm_uuid))
+                .or_insert(pit.taken_s);
+            *t = (*t).min(pit.taken_s);
+        }
+        let mut noted = false;
+        for ((cluster, vm), taken_s) in oldest {
+            if self.start(cluster, &vm).is_none() {
+                self.starts.push(VmStart {
+                    cluster_uuid: cluster.to_string(),
+                    vm_uuid: vm,
+                    taken_s,
+                });
+                noted = true;
+            }
+        }
+        noted
+    }
+
     fn held(&self, cluster: &str, pit: &Uuid) -> bool {
         self.holds
             .iter()
             .any(|h| h.cluster_uuid == cluster && &h.pit_uuid == pit)
+    }
+}
+
+/// A cluster's time zone as its check-ins report it. A different zone
+/// shifts every day, so it waits out the weakening delay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterZone {
+    pub zone: String,
+    pub pending: Option<PendingZone>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingZone {
+    pub zone: String,
+    pub effective_at_ms: i64,
+}
+
+/// `zones.json` in the metadata dataset, written only by the check-ins.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Zones {
+    pub clusters: BTreeMap<String, ClusterZone>,
+}
+
+impl Zones {
+    pub fn load(metadata: &Metadata) -> io::Result<Zones> {
+        Ok(fsx::read_json(&metadata.root.join("zones.json"))?.unwrap_or_default())
+    }
+
+    pub fn save(&self, metadata: &Metadata) -> io::Result<()> {
+        fsx::write_json(&metadata.root.join("zones.json"), self, 0o600)
+    }
+
+    /// Records the zone `cluster` reported: its first at once, a different
+    /// one after `delay_hours`, and a pending one that came due. Whether
+    /// anything changed.
+    pub fn report(
+        &mut self,
+        cluster: &str,
+        zone: &str,
+        delay_hours: u32,
+        now_ms: i64,
+    ) -> Result<bool, String> {
+        TimeZone::get(zone).map_err(|_| format!("{zone:?} isn't a time zone"))?;
+        let Some(known) = self.clusters.get_mut(cluster) else {
+            self.clusters.insert(
+                cluster.to_string(),
+                ClusterZone {
+                    zone: zone.to_string(),
+                    pending: None,
+                },
+            );
+            return Ok(true);
+        };
+        if let Some(p) = known.pending.take_if(|p| p.effective_at_ms <= now_ms) {
+            known.zone = p.zone;
+            return Ok(true);
+        }
+        if known.zone == zone {
+            return Ok(known.pending.take().is_some());
+        }
+        if known.pending.as_ref().is_some_and(|p| p.zone == zone) {
+            return Ok(false);
+        }
+        known.pending = Some(PendingZone {
+            zone: zone.to_string(),
+            effective_at_ms: now_ms + i64::from(delay_hours) * HOUR_MS,
+        });
+        Ok(true)
+    }
+
+    /// The zone `cluster`'s days follow now; UTC until it reports one.
+    pub fn zone(&self, cluster: &str, now_ms: i64) -> TimeZone {
+        self.clusters
+            .get(cluster)
+            .map(|c| match &c.pending {
+                Some(p) if p.effective_at_ms <= now_ms => p.zone.as_str(),
+                _ => c.zone.as_str(),
+            })
+            .and_then(|z| TimeZone::get(z).ok())
+            .unwrap_or(TimeZone::UTC)
     }
 }
 
@@ -231,6 +369,7 @@ impl Plan {
 pub fn plan(
     journal: &Journal,
     settings: &Settings,
+    zones: &Zones,
     pins: &BTreeMap<PitRef, BTreeSet<KeepReason>>,
     now_ms: i64,
 ) -> Plan {
@@ -268,7 +407,13 @@ pub fn plan(
                 parent: p.received_from,
             })
             .collect();
-        let keep = appliance_keep(&candidates, &settings.policy, &pinned);
+        let calendar = Calendar::new(zones.zone(cluster, now_ms), settings.test_day_s);
+        let clock = Clock {
+            calendar: &calendar,
+            start_day: settings.start(cluster, &vm).map(|t| calendar.day(t)),
+            now_s: now_ms.div_euclid(1000),
+        };
+        let keep = appliance_keep(&candidates, &settings.policy, &clock, &pinned);
         let mut kept_times = Vec::new();
         for pit in pits {
             match keep.get(&pit.pit_uuid) {
@@ -359,7 +504,13 @@ pub async fn prune(
         .map_err(|e| format!("journal: {e}"))?
         .ok_or("the metadata dataset has no journal")?;
     let mut settings = Settings::load(metadata).map_err(|e| format!("retention: {e}"))?;
+    let zones = Zones::load(metadata).map_err(|e| format!("zones: {e}"))?;
     let mut report = Report::default();
+    if settings.note_starts(&journal) {
+        settings
+            .save(metadata)
+            .map_err(|e| format!("retention: {e}"))?;
+    }
     if let Some(pending) = settings.settle(now_ms) {
         settings
             .save(metadata)
@@ -372,7 +523,7 @@ pub async fn prune(
             serde_json::json!({"retention": pending.policy, "delayed_from_ms": pending.requested_at_ms}),
         );
     }
-    let mut plan = plan(&journal, &settings, pins, now_ms);
+    let mut plan = plan(&journal, &settings, &zones, pins, now_ms);
     if plan.is_empty() {
         return Ok(report);
     }

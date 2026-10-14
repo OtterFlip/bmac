@@ -86,7 +86,10 @@ impl CommandRunner for Cluster {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let args = command.arguments().to_vec();
+        let mut args = command.arguments().to_vec();
+        if program == "ssh" && args.first().is_some_and(|a| a == "-F") {
+            args.drain(..2);
+        }
         self.calls
             .lock()
             .unwrap()
@@ -223,6 +226,7 @@ fn lab(hosts: &[&str], unreachable: &[&str]) -> Lab {
         poll: Duration::from_millis(1),
         discovery_sources: discovery_sources(None),
         dashboard_port: 8006,
+        time_zone: "America/Denver".into(),
     });
     Lab {
         _dir: dir,

@@ -82,6 +82,17 @@ pub struct Env {
     pub discovery_sources: (Pinned, Pinned),
     /// The port a new host's Dashboard answers on.
     pub dashboard_port: u16,
+    /// The workstation's time zone (IANA), a new cluster's unless its
+    /// settings file names one.
+    pub time_zone: String,
+}
+
+/// The workstation's time zone as an IANA name, or UTC.
+pub fn workstation_zone() -> String {
+    jiff::tz::TimeZone::system()
+        .iana_name()
+        .unwrap_or("UTC")
+        .to_string()
 }
 
 /// The sources a real Deployer builds discovery ISOs from: the operator's

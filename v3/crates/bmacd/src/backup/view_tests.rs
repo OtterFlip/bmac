@@ -149,6 +149,7 @@ fn the_view_joins_catalog_offers_space_restores_and_transfers() {
     };
     let view = assemble(Inputs {
         now_ms: 99,
+        time_zone: None,
         appliances: Some(ApplianceList {
             appliances: vec![appliance(vault)],
             requests: vec![],
@@ -269,6 +270,7 @@ fn a_policy_shows_its_schedule_and_retention() {
             days: 7,
             weeks: 0,
         },
+        started_s: None,
         freeze: bmac_backup::records::Freeze::Required,
         accept_multi_pool: false,
         enabled: true,
@@ -280,7 +282,7 @@ fn a_policy_shows_its_schedule_and_retention() {
         vms: BTreeMap::from([(
             id(7),
             VmRecords {
-                policy: Some(policy),
+                policy: Some(policy.clone()),
                 every: Some(every.clone()),
                 ..Default::default()
             },
@@ -297,6 +299,23 @@ fn a_policy_shows_its_schedule_and_retention() {
         (3, 2, 7)
     );
     assert_eq!(shown.every, "every 15 minutes");
+    let daily = assemble(Inputs {
+        vms: BTreeMap::from([(
+            id(7),
+            VmRecords {
+                policy: Some(policy),
+                every: Some(Recurrence::Daily { at: "03:00".into() }),
+                ..Default::default()
+            },
+        )]),
+        time_zone: Some("America/Denver".into()),
+        ..Default::default()
+    });
+    assert_eq!(
+        daily.vms[0].policy.as_ref().unwrap().every,
+        "daily at 03:00 America/Denver",
+        "a time of day is the cluster's"
+    );
     assert_eq!(
         serde_json::from_str::<Recurrence>(&shown.every_json).unwrap(),
         every

@@ -39,6 +39,8 @@ pub struct Upkeep<'a> {
     pub guests: &'a dyn Guests,
     pub now_ms: &'a (dyn Fn() -> i64 + Send + Sync),
     pub bookmarks_proven: bool,
+    /// The cluster's time zone, for local retention's days.
+    pub zone: jiff::tz::TimeZone,
 }
 
 /// What one pass did for one VM.
@@ -158,7 +160,11 @@ impl Upkeep<'_> {
                 .collect(),
             heads,
             local_retention: policy
-                .map(|p| p.local_retention.keep(&local, now_s))
+                .map(|p| {
+                    let calendar = settings.calendar(self.zone.clone());
+                    let start_day = p.started_s.map(|s| calendar.day(s));
+                    p.local_retention.keep(&local, &calendar, start_day, now_s)
+                })
                 .unwrap_or_default(),
             staging_origins: BTreeSet::new(),
             restores: continuity.restores.clone(),
@@ -397,6 +403,7 @@ pub fn spawn(node: bmac_core::HostSlot) -> tokio::task::JoinHandle<()> {
                 guests: &guests,
                 now_ms: &now,
                 bookmarks_proven: BOOKMARKS_PROVEN,
+                zone: jiff::tz::TimeZone::system(),
             };
             for report in upkeep.run().await {
                 for name in &report.released {

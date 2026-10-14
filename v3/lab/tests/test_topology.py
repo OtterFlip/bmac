@@ -29,9 +29,14 @@ class CheckedInTopologyTest(unittest.TestCase):
     def setUp(self) -> None:
         self.topology = load(CONFIG)
 
-    def test_has_three_hosts_an_appliance_and_a_qdevice(self) -> None:
+    def test_has_three_hosts_two_appliances_and_a_qdevice(self) -> None:
         roles = [vm.role for vm in self.topology.vms]
-        self.assertEqual(roles, ["host", "host", "host", "appliance", "qdevice"])
+        self.assertEqual(roles, ["host", "host", "host", "appliance", "qdevice", "appliance"])
+
+    def test_the_appliances_share_the_hosts_vlan_outside_the_clusters_ranges(self) -> None:
+        for name, address in (("appliance", "10.213.0.220"), ("applianceb", "10.213.0.221")):
+            self.assertEqual(self.topology.vm(name).vlan_ip, address)
+            self.assertEqual(self.topology.vm(name).nic("vlan").network, "vlan")
 
     def test_each_host_has_nvme_sata_and_scsi_disks(self) -> None:
         for host in self.topology.hosts:
@@ -144,7 +149,7 @@ class RejectedTopologyTest(unittest.TestCase):
 
     def test_vlan_address_on_a_role_without_the_vlan(self) -> None:
         raw = data()
-        raw["vm"][3]["vlan_ip"] = "10.213.0.99"
+        raw["vm"][4]["vlan_ip"] = "10.213.0.99"
         self.assertRejected(raw, "has no vlan network")
 
     def test_too_many_sata_disks(self) -> None:
@@ -159,7 +164,7 @@ class RejectedTopologyTest(unittest.TestCase):
 
     def test_carrier_delay_needs_a_vlan(self) -> None:
         raw = data()
-        raw["vm"][3]["carrier_delay_seconds"] = 30
+        raw["vm"][4]["carrier_delay_seconds"] = 30
         self.assertRejected(raw, "needs a vlan network")
 
     def test_networks_must_start_with_the_uplink(self) -> None:

@@ -42,7 +42,7 @@ are started by hand; there are no scheduled restores.
 | Party | Holds | Can |
 | --- | --- | --- |
 | `bmacd` on each host | Full authority on the cluster | Run the backup schedule; create PITs, bookmarks, and local snapshots and prune them; maintain the PIT catalog; record appliance check-ins; run restores using appliance-issued grants |
-| `bmac-source` on each host | ZFS `send`, `hold`, and `release` delegated on guest datasets (a send from a bookmark needs nothing more); the enrolled appliances' certificate fingerprints | Answer appliance check-ins (passing them to the local `bmacd`), stream BMAC PIT snapshots, and serve the PIT catalog to enrolled appliances. Nothing else |
+| `bmac-source` on each host | ZFS `send`, `hold`, and `release` delegated on guest datasets (a send from a bookmark needs nothing more); the enrolled appliances' certificate fingerprints and addresses | Dial each approved appliance's address, and over that connection answer appliance check-ins (passing them to the local `bmacd`), stream BMAC PIT snapshots, and serve the PIT catalog to enrolled appliances. Nothing else |
 | Appliance (`bmac-backupd`) | Its client key; pinned Proxmox cluster CA; its trusted-peer list | Check in; pull the PITs it is offered; write its own pool; serve exports only to restore jobs under its grants and to the peers it trusts; repair only from peers it trusts |
 | Appliance administrator | Appliance UI and console credentials | Retention policy, branch retirement, restore grants, the trusted-peer list, unlock, scrubs |
 
@@ -112,8 +112,9 @@ Every alert below has its own on/off switch in the alert settings
 
 ## Check-ins
 
-Each appliance calls `POST /v1/checkin` on any reachable host's
-`bmac-source` once per check-in interval. The request is small: appliance
+Each appliance calls `POST /v1/checkin` on any connected host's
+`bmac-source` once per check-in interval, over a connection the host
+opened (see "Connections"). The request is small: appliance
 UUID and version, lock state, pool health, capacity and namespace quota, its
 published head for each assigned VM (branch, PIT, and snapshot GUIDs per
 volume), transfers in progress with bytes so far, and the revision of its PIT
@@ -121,7 +122,7 @@ index. The reply lists the PITs offered to it, for each the hosts that hold
 the snapshots and the base it should pull from, the pending branch roots of
 restores of its VMs (see "Backups continue from the restored PIT"), and
 whether the cluster wants its PIT index (sent next with `POST /v1/index`,
-metadata only).
+metadata only), and the cluster's time zone (see "Calendar").
 
 `bmac-source` hands each check-in to the host's `bmacd` over its local
 socket. `bmacd` keeps last-seen times in memory, shares them over the mesh,
@@ -155,7 +156,13 @@ PITs are taken by the VM's scheduled job, admitted like any job
 0. **Is anyone there?** If none of the VM's appliances is available (checked
    in within the ready window), don't take the snapshot, unless local
    retention claims this slot. Raise the alert "backup skipped: no appliance
-   available" for the VM. The next slot tries again.
+   available" for the VM. The next slot tries again. **Is the last one
+   still moving?** If any of the VM's appliances is still pulling one of
+   its PITs, and that transfer isn't stalled (it moved within the stalled
+   transfer period), skip the slot: no snapshot, no alert, and a line in
+   the job's log naming the appliance, the PIT and the bytes so far. A
+   long first seed thus never piles up PITs no one can take. A stalled
+   transfer doesn't stop the slot.
 1. Take the VM's resource intent in the registry. This blocks disk growth,
    placement and owner changes, staging creation, and removal for the
    duration.
@@ -361,7 +368,10 @@ history. Per policy, an administrator can keep:
 
 - the newest N backed-up PITs;
 - one PIT for each of the last D days;
-- one PIT for each of the last W ISO weeks.
+- one PIT for each of the last W weeks.
+
+Days and weeks are the cluster's (see "Calendar"), counted from the day of
+the VM's first PIT on the cluster; the newest PIT of each wins it.
 
 The setting explains the trade-off. Keeping a PIT's snapshot lets you clone
 or roll back to it in seconds, and lets a restore of a nearby PIT move only
@@ -482,8 +492,8 @@ all. Only peers that trust each other repair from each other.
   administrator didn't choose. A repair needs both, set separately by each
   administrator.
 - The appliance's export listener (8445) accepts a client certificate only
-  if it belongs to a trusted peer or to a cluster host presenting a restore
-  grant. Any other appliance is refused during the TLS handshake, before a
+  if it belongs to a trusted peer, or to a cluster host (presenting a
+  restore grant, or opening its `bmac-source/1` connection). Any other appliance is refused during the TLS handshake, before a
   request is read: it gets no exports, no index of published PITs, no size
   estimates, and no error detail beyond the refusal. The refusal is written
   to the audit log, at most once per peer per hour.
@@ -524,15 +534,40 @@ the audit log.
 
 ### Appliance addresses
 
-Where an appliance's 8445 answers, for the cluster's restore jobs (the
+Where an appliance's 8445 answers, for the cluster's hosts (the
 appliance's record in the cluster's backup settings) and for its trusted
 peers (each entry on the Trusted peers page), is an IP address or a DNS
-name, with an optional port (8445 by default): `203.0.113.5`,
-`[2001:db8::1]:9445`, `backup.example.org`, or a dynamic DNS name such as
-`vault.example.dyndns.org:9445` for an appliance on a changing address.
+name, with an optional port (8445 by default): a private address on the
+hosts' network such as `10.10.0.50`, a public one such as `203.0.113.5`
+or `[2001:db8::1]:9445`, `backup.example.org`, or a dynamic DNS name such
+as `vault.example.dyndns.org:9445` for an appliance on a changing address.
 An enrolling appliance may suggest its address, and the administrator can
-change it when approving and at any time after. Backups don't need it:
-appliances check in and pull on their own.
+change it when approving and at any time after. An approved appliance
+without an address gets no backups, since no host can reach it.
+
+Any address the hosts can reach will do, a Tailscale one included; BMAC
+doesn't refuse it. A Tailscale address carries backup data through
+Tailscale, though, and over its relay whenever a direct path fails, at a
+fraction of the network's speed, so a private or public address is the
+usual choice. The lab never gives an appliance a Tailscale address: its
+appliances use their addresses on the hosts' VLAN, and the scenarios check
+that every backup connection comes from a host's VLAN address.
+
+### Connections
+
+The appliance never connects to the cluster. Each host's `bmac-source`
+dials every approved appliance that has an address and keeps one
+connection open, reconnecting with backoff: TLS 1.3 with mutual
+authentication, the host presenting its certificate from the cluster CA
+and checking the appliance's fingerprint, with the ALPN protocol
+`bmac-source/1`. Over that connection the roles turn around: the appliance
+is the HTTP/2 client and makes the requests in "Protocol" (check-ins,
+claims, sends), and `bmac-source` answers them as it would any client.
+The appliance takes the host's name from its certificate, admitted only
+under a cluster CA it enrolled with, and sends each request on a
+connection from a host that can answer it. Hosts thus listen on no
+address for backups, and an appliance on the hosts' network or across the
+internet is reached the same way.
 
 A name is resolved again on every connection, so a dynamic DNS update is
 followed without any change in BMAC. The name is never the appliance's
@@ -546,13 +581,33 @@ receive a grant's data.
 Retention runs only on the appliance, under its own policy, which only the
 appliance administrator can change (on the appliance UI).
 
-Defaults: 7 daily, 4 weekly, 12 monthly. The latest published PIT is always
-kept.
+A VM's history on the appliance reads like a calendar: every PIT of today,
+one for each earlier day of the last week, one for each earlier week, one
+for each earlier month, and one for each earlier year. The policy:
 
-- Buckets use UTC: days, ISO weeks starting Monday 00:00, calendar months.
-  For each bucket the newest published PIT wins, and the newest K buckets in
-  each tier are kept. A PIT that wins in several tiers is kept once.
-- The keep set is the union of: bucket winners, each branch's head, branch
+| Setting | Default | Keeps |
+| --- | --- | --- |
+| Daily | 7 | The newest PIT of each of the 7 days before today |
+| Weekly | 4 | The newest PIT of each of the 4 weeks before this week |
+| Month length | 30 days | How many days make a month |
+| Monthly | 12 | The newest PIT of each of the 12 months before this month |
+| Yearly | On | The newest PIT of every year (12 months) before this year; off keeps every month's newest PIT forever instead, and the monthly count is unused |
+
+Every PIT taken today is kept, and so is the latest published PIT.
+
+- Periods follow the calendar of the PIT's cluster (see "Calendar"). Days
+  are its calendar days. Weeks, months and years count whole days from the
+  VM's calendar start, the day of the first PIT of the VM the appliance
+  published. The appliance records that day itself and never moves it, so
+  the cluster can't shift the history's periods.
+- The newest PIT of a period wins it. Each tier also keeps the current
+  period's winner, which while backups run is today's newest PIT, so it
+  costs nothing then; after backups stop, it keeps the last PIT of the
+  current week, month and year. Since a week's, month's or year's newest
+  PIT is also the newest of its last day, a PIT kept as a daily stays kept
+  as it ages into a weekly, monthly or yearly, and a PIT once pruned would
+  never have been kept again.
+- The keep set is the union of: period winners, each branch's head, branch
   roots and common ancestors (including pending branch roots of restores),
   PITs named in live restore grants, clone origins, administrator holds,
   repair bookmarks kept for trusted peers, and transfers in progress.
@@ -565,7 +620,26 @@ kept.
 - Weakening retention, or retiring a branch, takes effect after a delay
   (default 72 hours), shown on the appliance UI and reported to the cluster,
   unless confirmed again at the appliance console. A configurable minimum
-  retention floor can't be lowered from the UI.
+  retention floor can't be lowered from the UI. Weakening is a lower count,
+  a different month length, or turning yearly on; a cluster reporting a new
+  time zone counts as weakening too, so the new zone applies only after
+  the delay.
+
+### Calendar
+
+The cluster's time zone is chosen when its first host is deployed (the
+Deployer offers the workstation's zone) and every host installed after
+it, by join or by recovery, takes the same one. Schedules run, and the
+Dashboard shows them, in that zone. Each check-in reply carries the zone;
+the appliance applies each cluster's retention in that cluster's zone and
+shows the cluster's PITs and schedules in it, and its own events (audit
+log, scrubs) in its system zone, set at its console.
+
+For tests only, a day can be given a length in seconds: on the cluster a
+backup setting, for local retention; on the appliance, only at its
+console (`bmac-backupd test-day-seconds`). A compressed day starts every
+multiple of its length since the Unix epoch, and weeks, months and years
+are counted in those days as above.
 
 ## Restore
 
@@ -919,9 +993,10 @@ time and version count, and the reported restore tests.
 
 Everything is TLS 1.3 with mutual authentication, using HTTP/2 from the
 `hyper`/`rustls` stack. Version negotiation comes first on every connection.
-`bmac-source` listens on port 8445 on each host's private and Tailscale
-addresses; the appliance listens on 8443 (its UI) and 8445 (exports, to
-restore jobs and trusted peers only).
+`bmac-source` listens on nothing: it answers the appliance over the
+connections it opens (see "Connections"). The appliance listens on 8443
+(its UI) and 8445, which takes the hosts' connections (`bmac-source/1`)
+and exports to restore jobs and trusted peers.
 
 | Endpoint | Served by | Client | Purpose |
 | --- | --- | --- | --- |
@@ -1025,14 +1100,16 @@ Each item has a safe fallback that is used until it's proven.
 8. Guest agent freeze and thaw on the supported guest OS.
 9. VM recreation from the manifest, including EFI, TPM, and Secure Boot, on a
    fresh cluster.
-10. Throughput over Tailscale versus direct TCP for large seeds, measured with
-   the transfer metrics. Fallback: direct TCP between the appliance and the
-   hosts' private or public addresses, still mutually authenticated.
+10. Throughput of large seeds over the hosts' connections to the
+   appliance's private address, measured with the transfer metrics. The
+   lab never sends backup data over Tailscale (see "Appliance addresses").
 
 ## Acceptance scenarios
 
 Before release, the lab runs this continuous scenario, and then it runs on
-hardware:
+hardware. During development it runs in compressed time, in about an
+hour (short backup settings, schedules every few minutes, and a test day,
+see "Calendar"); its soak run uses the defaults and real days for 8 days:
 
 1. full seed to appliances A and B, with VM 1 on both and VM 2 on B only;
 2. scheduled incrementals, with snapshots bookmarked and released after the

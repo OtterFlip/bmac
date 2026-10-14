@@ -334,7 +334,7 @@ async fn run_engine(options: Options) -> Result<(), String> {
             );
             collectors.cluster = Some(cluster.clone());
             tasks.push(status::spawn_collectors(collectors, engine.hub().clone()));
-            match bmacd::backup::source_engine::spawn(host, cluster.clone(), listen_rx.clone()) {
+            match bmacd::backup::source_engine::spawn(host, cluster.clone()) {
                 Ok(source_tasks) => tasks.extend(source_tasks),
                 Err(e) => log::warning(&format!("no backup source endpoint: {e}")),
             }

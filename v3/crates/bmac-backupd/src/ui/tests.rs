@@ -517,7 +517,7 @@ async fn pits_throughput_and_retention_show_the_journal() {
         .post(
             "/retention",
             &token,
-            json!({"policy": {"daily": 2, "weekly": 1, "monthly": 1}}),
+            json!({"policy": {"daily": 2, "weekly": 1, "monthly": 1, "month_days": 30, "yearly": true}}),
         )
         .await;
     assert_eq!(weaker.status, 200, "{}", weaker.text);
@@ -537,7 +537,7 @@ async fn pits_throughput_and_retention_show_the_journal() {
         .post(
             "/retention",
             &token,
-            json!({"policy": {"daily": 0, "weekly": 0, "monthly": 0}}),
+            json!({"policy": {"daily": 0, "weekly": 0, "monthly": 0, "month_days": 30, "yearly": true}}),
         )
         .await;
     assert_eq!(below.status, 422);
@@ -626,7 +626,7 @@ async fn trusting_a_peer_needs_its_certificate_and_untrusting_the_password() {
         .post(
             "/peers/trust",
             &token,
-            json!({"appliance_uuid": peer, "fingerprint": typed, "address": "100.64.0.9"}),
+            json!({"appliance_uuid": peer, "fingerprint": typed, "address": "10.40.0.21"}),
         )
         .await;
     assert_eq!(refused.status, 200, "{}", refused.text);

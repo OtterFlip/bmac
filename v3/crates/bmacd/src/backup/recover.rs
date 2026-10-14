@@ -291,11 +291,8 @@ async fn connect(cx: &Context<'_>) -> Result<(ApplianceRecord, String, RecoveryI
                 vec![address, pin, grant],
                 |v| {
                     let mut errors = BTreeMap::new();
-                    if text(v, "address").parse::<ApplianceAddress>().is_err() {
-                        errors.insert(
-                            "address".into(),
-                            "An IP address or a DNS name, with an optional port.".into(),
-                        );
+                    if let Err(e) = text(v, "address").parse::<ApplianceAddress>() {
+                        errors.insert("address".into(), e.to_string());
                     }
                     if normalized_fingerprint(&text(v, "fingerprint")).is_none() {
                         errors.insert("fingerprint".into(), "A SHA-256 fingerprint.".into());
@@ -311,9 +308,9 @@ async fn connect(cx: &Context<'_>) -> Result<(ApplianceRecord, String, RecoveryI
                 },
             )
             .await?;
-        let address: ApplianceAddress = text(&values, "address")
-            .parse()
-            .map_err(|_| failed("the address isn't valid"))?;
+        let address = text(&values, "address")
+            .parse::<ApplianceAddress>()
+            .map_err(|e| failed(e.to_string()))?;
         let fingerprint = normalized_fingerprint(&text(&values, "fingerprint"))
             .ok_or_else(|| failed("the fingerprint isn't a SHA-256"))?;
         let grant = text(&values, "grant");

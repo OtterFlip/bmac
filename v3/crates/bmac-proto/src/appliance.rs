@@ -15,6 +15,10 @@ use uuid::Uuid;
 pub const SOURCE_PROTOCOL: &str = "bmac-source";
 pub const APPLIANCE_PROTOCOL: &str = "bmac-appliance";
 pub const SOURCE_PORT: u16 = 8445;
+/// The ALPN protocol of a host's connection to an appliance's
+/// [`SOURCE_PORT`], over which the appliance makes its requests to the
+/// host's `bmac-source` (`BACKUP.md`, "Connections").
+pub const SOURCE_ALPN: &[u8] = b"bmac-source/1";
 pub const APPLIANCE_UI_PORT: u16 = 8443;
 
 /// Served by `bmac-source` to an enrolled appliance. The cluster never
@@ -243,6 +247,10 @@ pub struct CheckinReply {
     /// appliance, newest first (`BACKUP.md`, "Restore tests").
     #[serde(default)]
     pub restore_tests: Vec<RestoreTestReport>,
+    /// The cluster's time zone (IANA), whose days the appliance's retention
+    /// and UI follow (`BACKUP.md`, "Calendar").
+    #[serde(default)]
+    pub time_zone: Option<String>,
 }
 
 pub const REPORTED_TESTS: usize = 20;

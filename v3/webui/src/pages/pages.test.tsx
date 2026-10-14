@@ -336,9 +336,9 @@ describe("the Backups page", () => {
     await user.click(await screen.findByRole("button", { name: "Set vault's address" }));
     const address = await screen.findByLabelText("Address");
     await user.clear(address);
-    await user.type(address, "100.64.0.99");
+    await user.type(address, "10.40.0.21");
     await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(mock.calls.some((c) => c.method === "setApplianceAddress" && c.args[1] === "100.64.0.99")).toBe(true));
+    await waitFor(() => expect(mock.calls.some((c) => c.method === "setApplianceAddress" && c.args[1] === "10.40.0.21")).toBe(true));
   });
 
   it("approves an enrollment only with the fingerprint read on the appliance", async () => {

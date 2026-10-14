@@ -46,6 +46,7 @@ uuid.workspace = true
 x509-parser.workspace = true
 
 [dev-dependencies]
+hyper = { workspace = true, features = ["client", "server"] }
 tempfile.workspace = true
 
 [lints]

@@ -40,6 +40,7 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("check", help="report what this machine is missing to run the lab")
     create = sub.add_parser("create", help="build the lab from nothing and install every VM")
     create.add_argument("--no-install", action="store_true", help="stop after creating blank disks (snapshot `blank`)")
+    sub.add_parser("update", help="create VMs added to the topology and give the Ubuntu VMs their current settings")
     rebuild = sub.add_parser("rebuild", help="destroy the lab, then create it again")
     rebuild.add_argument("--no-install", action="store_true")
     destroy = sub.add_parser("destroy", help="power off and delete every VM, disk, and snapshot")
@@ -172,6 +173,8 @@ def dispatch(lab: Lab, args: argparse.Namespace) -> int:
         return 1 if problems else 0
     if command == "create":
         lab.create(install=not args.no_install)
+    elif command == "update":
+        lab.update()
     elif command == "rebuild":
         lab.destroy()
         lab.create(install=not args.no_install)

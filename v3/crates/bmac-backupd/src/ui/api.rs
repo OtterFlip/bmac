@@ -115,6 +115,8 @@ fn counts(p: &ApplianceRetention) -> RetentionCounts {
         daily: p.daily,
         weekly: p.weekly,
         monthly: p.monthly,
+        month_days: p.month_days,
+        yearly: p.yearly,
     }
 }
 
@@ -356,6 +358,7 @@ async fn status(call: &Call<'_>) -> Answer {
     });
     let mut clusters = Vec::new();
     let mut transfers = Vec::new();
+    let zones = retention::Zones::load(&ui.metadata).unwrap_or_default();
     for c in (ui.clusters)() {
         for t in &c.transfers {
             transfers.push(LiveTransfer {
@@ -365,6 +368,7 @@ async fn status(call: &Call<'_>) -> Answer {
                 bytes: t.bytes,
             });
         }
+        let time_zone = zone_name(&zones, &c.status.cluster_uuid, call.now());
         clusters.push(ClusterView {
             cluster_uuid: c.status.cluster_uuid,
             cluster_name: c.status.cluster_name,
@@ -372,6 +376,7 @@ async fn status(call: &Call<'_>) -> Answer {
             last_checkin_ms: c.status.last_checkin_ms,
             last_error: c.status.last_error,
             offers: c.status.offers as u32,
+            time_zone,
             pulling: c.status.pulling,
             hosts: c.hosts,
         });
@@ -420,10 +425,20 @@ fn cluster_names(call: &Call<'_>) -> std::collections::BTreeMap<String, String> 
         .collect()
 }
 
+/// A cluster's time zone as an IANA name.
+fn zone_name(zones: &retention::Zones, cluster: &str, now_ms: i64) -> String {
+    zones
+        .zone(cluster, now_ms)
+        .iana_name()
+        .unwrap_or("UTC")
+        .to_string()
+}
+
 fn pits(call: &Call<'_>) -> Answer {
     let journal = call.journal()?;
     let now = call.now();
     let names = cluster_names(call);
+    let zones = retention::Zones::load(&call.ui.metadata).map_err(internal)?;
     let settings = Settings::load(&call.ui.metadata).map_err(internal)?;
     let held: BTreeSet<Uuid> = settings.holds.iter().map(|h| h.pit_uuid).collect();
     let suspect: BTreeSet<Uuid> = ScrubState::load(&call.ui.metadata)
@@ -461,6 +476,7 @@ fn pits(call: &Call<'_>) -> Answer {
             held: held.contains(&p.pit_uuid),
             suspect: suspect.contains(&p.pit_uuid),
             granted: granted.contains(&p.pit_uuid),
+            time_zone: zone_name(&zones, &p.cluster_uuid, now),
         })
         .collect();
     list.sort_by(|a, b| {
@@ -536,7 +552,8 @@ async fn show_retention(call: &Call<'_>) -> Answer {
     let pins = Grants::load(&call.ui.metadata)
         .map_err(internal)?
         .pins(call.now());
-    let mut plan = retention::plan(&journal, &settings, &pins, call.now());
+    let zones = retention::Zones::load(&call.ui.metadata).map_err(internal)?;
+    let mut plan = retention::plan(&journal, &settings, &zones, &pins, call.now());
     retention::estimate(call.ui.pool.as_ref(), &mut plan).await;
     json(ApplianceRetentionView {
         policy: counts(&settings.policy),
@@ -568,6 +585,7 @@ async fn show_retention(call: &Call<'_>) -> Answer {
                 pits: c.pits as u32,
                 oldest_s: c.oldest_s,
                 newest_s: c.newest_s,
+                time_zone: zone_name(&zones, &c.cluster_uuid, call.now()),
             })
             .collect(),
     })
@@ -598,6 +616,8 @@ async fn set_retention(call: &Call<'_>) -> Answer {
         daily: request.policy.daily,
         weekly: request.policy.weekly,
         monthly: request.policy.monthly,
+        month_days: request.policy.month_days,
+        yearly: request.policy.yearly,
     };
     let (by, now) = (call.by(), call.now());
     let change = change_retention(
@@ -891,9 +911,9 @@ fn show_peers(call: &Call<'_>) -> Answer {
 async fn trust(call: &Call<'_>) -> Answer {
     let request: TrustPeer = call.body()?;
     let appliance = uuid(&request.appliance_uuid, "an appliance UUID")?;
-    let address: bmac_core::ApplianceAddress = request
+    let address = request
         .address
-        .parse()
+        .parse::<bmac_core::ApplianceAddress>()
         .map_err(|e| invalid(format!("{}: {e}", request.address)))?;
     let wanted = bmac_proto::appliance::normalized_fingerprint(&request.fingerprint)
         .ok_or_else(|| invalid("a fingerprint is 64 hexadecimal digits"))?;

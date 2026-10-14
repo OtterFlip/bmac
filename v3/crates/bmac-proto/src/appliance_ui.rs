@@ -87,6 +87,9 @@ pub struct ClusterView {
     pub offers: u32,
     pub pulling: Option<String>,
     pub hosts: Vec<String>,
+    /// The cluster's time zone (IANA), which its PITs and retention's days
+    /// are shown in; UTC until it reports one.
+    pub time_zone: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -121,11 +124,14 @@ pub struct WatchView {
     pub last_error: Option<String>,
 }
 
+/// An appliance retention policy (`BACKUP.md`, "Appliance retention").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct RetentionCounts {
     pub daily: u32,
     pub weekly: u32,
     pub monthly: u32,
+    pub month_days: u32,
+    pub yearly: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -169,6 +175,8 @@ pub struct PitView {
     pub suspect: bool,
     /// A live restore grant names it.
     pub granted: bool,
+    /// Its cluster's time zone, which its time is shown in.
+    pub time_zone: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -231,6 +239,8 @@ pub struct CoverageView {
     pub pits: u32,
     pub oldest_s: i64,
     pub newest_s: i64,
+    /// The cluster's time zone, which retention's days are counted in.
+    pub time_zone: String,
 }
 
 /// `GET /retention`: the policy and what a prune would do now.

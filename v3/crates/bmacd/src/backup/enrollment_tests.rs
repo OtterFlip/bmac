@@ -10,7 +10,14 @@ use bmac_proto::peer::EnrollRequest;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::backup::source::enrolled_fingerprints;
+use crate::backup::source::enrolled_targets;
+
+fn enrolled_fingerprints(store: &BackupStore) -> Result<Vec<String>, ApiError> {
+    Ok(enrolled_targets(store)?
+        .into_iter()
+        .map(|t| t.fingerprint)
+        .collect())
+}
 
 fn record(record_type: &str, extra: Value) -> Value {
     let mut value = json!({
@@ -297,5 +304,53 @@ fn an_appliance_enrolling_again_keeps_its_record_with_the_new_certificate() {
     assert_eq!(
         enrolled_fingerprints(&appliances.store).unwrap(),
         [normalized_fingerprint(&fingerprint).unwrap()]
+    );
+}
+
+#[test]
+fn an_appliance_address_is_any_ip_address_or_dns_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let appliances = fixture(dir.path());
+    let issued = appliances
+        .issue(&IssueEnroll::default(), "root@pam")
+        .unwrap();
+    let bundle: EnrollBundle = serde_json::from_str(&issued.content).unwrap();
+    let id = Uuid::new_v4();
+    let cert = self_signed("vault");
+    let request = EnrollRequest {
+        token: bundle.enroll_token,
+        appliance_uuid: id,
+        name: "vault".into(),
+        certificate: cert.clone(),
+        address: Some("100.100.7.7".parse().unwrap()),
+    };
+    let pending = appliances.tokens.redeem_enroll(&request, from()).unwrap();
+    let fingerprint = normalized_fingerprint(&ca_fingerprint(cert.as_bytes()).unwrap()).unwrap();
+    let record = appliances
+        .approve(&pending.request_id, &ApproveAppliance { fingerprint })
+        .unwrap();
+    assert_eq!(
+        record.address.unwrap().to_string(),
+        "100.100.7.7",
+        "the suggested address is kept"
+    );
+
+    for address in [
+        "10.213.0.220",
+        "203.0.113.5:9445",
+        "[fd7a:115c:a1e0::9]:8445",
+        "vault.tail1234.ts.net",
+        "backup.example.org",
+    ] {
+        let record = appliances.set_address(&id, Some(address)).unwrap();
+        assert_eq!(record.address.unwrap().to_string(), address);
+    }
+    let error = appliances
+        .set_address(&id, Some("not an address!"))
+        .unwrap_err();
+    assert!(error.field_errors.contains_key("address"));
+    assert_eq!(
+        appliances.set_address(&id, Some(" ")).unwrap().address,
+        None
     );
 }

@@ -1,7 +1,7 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# The nested lab: three Proxmox hosts, one appliance, one QDevice.
+# The nested lab: three Proxmox hosts, two appliances, one QDevice.
 # `lab/lab --config FILE` uses another topology; `BMAC_LAB_DIR` moves the
 # disks, images, and sockets (default ~/.local/share/bmac-lab/<name>).
 
@@ -68,7 +68,8 @@ disks = [
   { bus = "virtio", size_gib = 40 },
   { bus = "scsi", size_gib = 64 },
 ]
-networks = ["uplink", "mgmt"]
+# Backup data goes over the VLAN, never the tailnet (BACKUP.md, "Connections").
+networks = ["uplink", "mgmt", "vlan"]
 
 [roles.qdevice]
 image = "ubuntu"
@@ -99,8 +100,17 @@ vlan_ip = "10.213.0.13"
 name = "appliance"
 role = "appliance"
 mgmt_ip = "100.64.0.100"
+# Above the cluster's ranges (.11-.200) and below its replication ones.
+vlan_ip = "10.213.0.220"
 
 [[vm]]
 name = "qdevice"
 role = "qdevice"
 mgmt_ip = "100.64.0.101"
+
+# The trusted peer that repairs the first appliance and recovers the cluster.
+[[vm]]
+name = "applianceb"
+role = "appliance"
+mgmt_ip = "100.64.0.102"
+vlan_ip = "10.213.0.221"

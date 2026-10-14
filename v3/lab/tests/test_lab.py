@@ -54,6 +54,8 @@ FAKE_QEMU_IMG = textwrap.dedent("""\
                 sys.exit(f"qemu-img: Could not apply snapshot '{args[2]}'")
             disk.write_text(tags[args[2]])
         tags_file.write_text(json.dumps(tags))
+    elif args[0] == "create":
+        Path(args[-2]).write_text("created")
 """)
 
 
@@ -289,6 +291,44 @@ class SnapshotTest(LabTestCase):
         self.assertIn("changed since the lab was created", self.out.getvalue())
 
 
+class UpdateTest(LabTestCase):
+    def test_an_added_appliance_gets_disks_and_the_labs_snapshots_and_every_ubuntu_vm_a_new_seed(self) -> None:
+        self.lab.snapshot("installed")
+        added = self.topology.vm("applianceb")
+        shutil.rmtree(self.paths.vm(added.name))
+        (self.paths.snapshots / "installed" / f"{added.name}.fd").unlink()
+        firmware = self.paths.root / "OVMF_VARS.fd"
+        firmware.write_text("blank vars")
+        self.lab.firmware = (self.paths.root / "OVMF_CODE.fd", firmware)
+        self.lab.require_tools = lambda: None  # type: ignore[method-assign]
+        (self.paths.ssh_key.with_suffix(".pub")).write_text("ssh-ed25519 AAAA lab\n")
+        seeded = []
+        with mock.patch("bmaclab.provision.fetch", return_value=self.paths.root / "ubuntu.img"), \
+                mock.patch("bmaclab.provision.password_hash", return_value="$6$x"), \
+                mock.patch("bmaclab.provision.build_seed", side_effect=lambda t, vm, *a: seeded.append(vm.name)):
+            self.lab.update()
+        calls = self.calls.read_text().splitlines()
+        system, backup = (self.paths.disk(d) for d in added.disks)
+        self.assertIn(f"create -q -f qcow2 -F qcow2 -b {self.paths.root / 'ubuntu.img'} {system} 40G", calls)
+        self.assertIn(f"create -q -f qcow2 {backup} 64G", calls)
+        for disk in (system, backup):
+            self.assertIn(f"snapshot -c installed {disk}", calls)
+        self.assertEqual((self.paths.snapshots / "installed" / f"{added.name}.fd").read_text(), "blank vars")
+        self.assertEqual(sorted(seeded), ["appliance", "applianceb", "qdevice"])
+        self.assertFalse(any("create" in c and "mox1" in c for c in calls), "no host is touched")
+        self.lab.reset("installed")
+        self.assertEqual(json.loads(self.paths.state.read_text())["topology_sha256"], self.lab.topology_digest)
+
+    def test_a_new_host_needs_a_rebuild(self) -> None:
+        shutil.rmtree(self.paths.vm("mox3"))
+        self.lab.firmware = (self.paths.root / "code", self.paths.root / "vars")
+        self.lab.require_tools = lambda: None  # type: ignore[method-assign]
+        (self.paths.ssh_key.with_suffix(".pub")).write_text("ssh-ed25519 AAAA lab\n")
+        with mock.patch("bmaclab.provision.password_hash", return_value="$6$x"):
+            with self.assertRaisesRegex(LabError, "mox3 is a new Proxmox host"):
+                self.lab.update()
+
+
 class LinkAndAccessTest(LabTestCase):
     def test_links_are_held_and_released_while_the_vm_is_off(self) -> None:
         mox2 = self.topology.vm("mox2")
@@ -316,7 +356,7 @@ class LinkAndAccessTest(LabTestCase):
         self.assertEqual(self.lab.carrier_delay(mox3), 45)
         self.assertEqual(self.lab.status()[2]["carrier_delay"], 45)
         with self.assertRaisesRegex(LabError, "no VLAN NIC"):
-            self.lab.set_carrier_delay(self.topology.vm("appliance"), 5)
+            self.lab.set_carrier_delay(self.topology.vm("qdevice"), 5)
 
     def test_vms_without_a_pidfile_are_not_running(self) -> None:
         mox1 = self.topology.vm("mox1")

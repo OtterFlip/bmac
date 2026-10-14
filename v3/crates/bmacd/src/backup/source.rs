@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use super::capture::Guests;
 use super::cluster::BackupCluster;
+use super::source_socket::SourceTarget;
 use super::status::{overall, state_text};
 use super::store::{BackupStore, IndexRecord};
 
@@ -104,14 +105,20 @@ fn internal(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorCode::Internal, message)
 }
 
-/// The fingerprints `bmac-source` lets through the handshake: approved
-/// appliances that aren't retired.
-pub fn enrolled_fingerprints(store: &BackupStore) -> Result<Vec<String>, ApiError> {
+/// The appliances `bmac-source` keeps a connection to: approved ones that
+/// aren't retired.
+pub fn enrolled_targets(store: &BackupStore) -> Result<Vec<SourceTarget>, ApiError> {
     Ok(store
         .appliances()?
         .into_iter()
         .filter(|a| a.enrollment == Enrollment::Approved && !a.retired)
-        .filter_map(|a| normalized_fingerprint(&a.fingerprint))
+        .filter_map(|a| {
+            Some(SourceTarget {
+                fingerprint: normalized_fingerprint(&a.fingerprint)?,
+                name: a.name,
+                address: a.address,
+            })
+        })
         .collect())
 }
 
@@ -127,10 +134,10 @@ pub struct Source<'a> {
     pub store: &'a BackupStore,
     pub cluster: &'a dyn BackupCluster,
     pub guests: &'a dyn Guests,
-    /// Where each host's `bmac-source` answers, best first.
-    pub addresses: &'a (dyn Fn(HostSlot) -> Vec<String> + Send + Sync),
     pub cluster_uuid: String,
     pub now_ms: &'a (dyn Fn() -> i64 + Send + Sync),
+    /// The cluster's time zone, told to the appliances.
+    pub time_zone: Option<String>,
 }
 
 impl Source<'_> {
@@ -315,6 +322,7 @@ impl Source<'_> {
             branch_roots,
             recovery_revision: None,
             restore_tests,
+            time_zone: self.time_zone.clone(),
         })
     }
 
@@ -365,7 +373,7 @@ impl Source<'_> {
                 .into_iter()
                 .map(|host| SourceHost {
                     host,
-                    addresses: (self.addresses)(host),
+                    addresses: Vec::new(),
                 })
                 .collect(),
             manifest: pit.manifest.clone(),

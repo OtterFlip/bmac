@@ -38,13 +38,21 @@ pub const MAX_REPLY_FRAME: usize = 32 * 1024 * 1024;
 /// The largest LUKS header backup served; LUKS2's default header is 16 MiB.
 pub const MAX_HEADER: u64 = 20 * 1024 * 1024;
 
+/// An approved appliance: the certificate it must present, and where it
+/// answers, if the cluster knows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceTarget {
+    pub name: String,
+    /// SHA-256, lowercase hex.
+    pub fingerprint: String,
+    pub address: Option<bmac_core::ApplianceAddress>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "call", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SourceCall {
-    /// The fingerprints to let through the TLS handshake.
-    Fingerprints,
-    /// The private and Tailscale addresses to listen on.
-    Listen,
+    /// The approved appliances to keep a connection to.
+    Appliances,
     Checkin {
         fingerprint: String,
         request: Box<CheckinRequest>,

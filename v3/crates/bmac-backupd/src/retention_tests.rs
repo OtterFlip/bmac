@@ -22,6 +22,7 @@ fn weak(daily: u32) -> ApplianceRetention {
         daily,
         weekly: 0,
         monthly: 0,
+        ..ApplianceRetention::default()
     }
 }
 
@@ -95,8 +96,9 @@ fn rig(count: u128, policy: ApplianceRetention) -> Rig {
     }
 }
 
+/// The start of day 7, the day after PIT 6 and before PITs 7 and 8.
 fn now() -> i64 {
-    (MONDAY + 30 * DAY) * 1000
+    (MONDAY + 7 * DAY) * 1000
 }
 
 #[test]
@@ -156,7 +158,7 @@ fn a_plan_keeps_bucket_winners_branch_roots_holds_and_transfer_bases() {
         (CLUSTER.to_string(), id(5)),
         BTreeSet::from([KeepReason::RestoreGrant]),
     )]);
-    let plan = plan(&journal, &settings, &pins, now());
+    let plan = plan(&journal, &settings, &Zones::default(), &pins, now());
     let pruned: Vec<Uuid> = plan.prune.iter().map(|d| d.pit_uuid).collect();
     assert_eq!(pruned, [id(3)]);
     let why = |n| {
@@ -315,4 +317,52 @@ async fn an_emptied_lineage_and_old_quarantines_go() {
             .unwrap()
             .contains(&"-r bk/bmac/clusters/c1/vms/v/q/d".to_string())
     );
+}
+
+#[test]
+fn a_clusters_new_time_zone_waits_out_the_delay() {
+    let mut zones = Zones::default();
+    let hour = 3_600_000;
+    assert_eq!(zones.zone(CLUSTER, 0), TimeZone::UTC);
+    assert!(zones.report(CLUSTER, "America/Denver", 72, 0).unwrap());
+    let denver = TimeZone::get("America/Denver").unwrap();
+    assert_eq!(zones.zone(CLUSTER, 0), denver);
+    assert!(!zones.report(CLUSTER, "America/Denver", 72, hour).unwrap());
+
+    assert!(zones.report(CLUSTER, "Europe/Berlin", 72, hour).unwrap());
+    assert!(
+        !zones
+            .report(CLUSTER, "Europe/Berlin", 72, 2 * hour)
+            .unwrap()
+    );
+    assert_eq!(zones.zone(CLUSTER, 73 * hour - 1), denver);
+    let berlin = TimeZone::get("Europe/Berlin").unwrap();
+    assert_eq!(zones.zone(CLUSTER, 73 * hour), berlin);
+    assert!(
+        zones
+            .report(CLUSTER, "Europe/Berlin", 72, 73 * hour)
+            .unwrap()
+    );
+    assert_eq!(zones.clusters[CLUSTER].zone, "Europe/Berlin");
+    assert!(zones.clusters[CLUSTER].pending.is_none());
+
+    // Reporting the old zone again before the delay ends cancels the move.
+    assert!(zones.report(CLUSTER, "Asia/Tokyo", 72, 74 * hour).unwrap());
+    assert!(
+        zones
+            .report(CLUSTER, "Europe/Berlin", 72, 75 * hour)
+            .unwrap()
+    );
+    assert!(zones.clusters[CLUSTER].pending.is_none());
+    assert!(zones.report(CLUSTER, "Mars/Olympus", 72, 0).is_err());
+}
+
+#[tokio::test]
+async fn a_prune_records_each_vms_start_before_it_deletes_anything() {
+    let r = rig(6, weak(2));
+    prune(&r.pool, &r.metadata, &r.audit, &BTreeMap::new(), now())
+        .await
+        .unwrap();
+    let settings = Settings::load(&r.metadata).unwrap();
+    assert_eq!(settings.start(CLUSTER, &id(0x7)), Some(pit(1).taken_s));
 }

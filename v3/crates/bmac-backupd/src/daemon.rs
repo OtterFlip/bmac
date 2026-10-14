@@ -95,6 +95,7 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, EXPORT_PORT))
         .await
         .map_err(|e| format!("exports: port {EXPORT_PORT}: {e}"))?;
+    let tunnels = exporter.tunnels.clone();
     let exports = tokio::spawn(Arc::new(exporter).serve(listener));
     let agents: Arc<Mutex<Agents>> = Arc::default();
     let scrub_now = Arc::new(Notify::new());
@@ -198,7 +199,7 @@ pub async fn run(
                     Some((&cert, &key)),
                     SOURCE_PORT,
                 ) {
-                    Ok(c) => c,
+                    Ok(c) => c.via(tunnels.clone(), &enrollment.cluster_uuid),
                     Err(e) => {
                         eprintln!("bmac-backupd: cluster {}: {e}", enrollment.cluster_name);
                         continue;

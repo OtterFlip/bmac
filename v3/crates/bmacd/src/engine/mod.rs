@@ -350,6 +350,7 @@ impl Engine {
             let mut inputs = crate::backup::view::Inputs {
                 now_ms: (policies.clock)(),
                 can_manage: admin,
+                time_zone: jiff::tz::TimeZone::system().iana_name().map(str::to_string),
                 ..Default::default()
             };
             if let Some(appliances) = appliances {

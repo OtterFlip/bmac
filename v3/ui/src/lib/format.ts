@@ -60,24 +60,25 @@ export function elapsedMs(startMs: number, endMs?: number | null, now = Date.now
 }
 
 /** dateTime for an epoch in milliseconds. */
-export function dateTimeMs(ms: number | null | undefined): string {
-  return ms ? dateTime(new Date(ms).toISOString()) : "—";
+export function dateTimeMs(ms: number | null | undefined, timeZone?: string | null): string {
+  return ms ? dateTime(new Date(ms).toISOString(), timeZone) : "—";
 }
 
-export function clock(iso: string | null | undefined): string {
+export function clock(iso: string | null | undefined, timeZone?: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: timeZone ?? undefined });
 }
 
-export function dateTime(iso: string | null | undefined): string {
+/** A time, with its date unless it is today; in `timeZone`, or the browser's. */
+export function dateTime(iso: string | null | undefined, timeZone?: string | null, now = new Date()): string {
   if (!iso) return "—";
   const d = new Date(iso);
-  const today = new Date();
-  const sameDay = d.toDateString() === today.toDateString();
-  return sameDay
-    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const zone = timeZone ?? undefined;
+  const day = (t: Date) => t.toLocaleDateString("en-CA", { timeZone: zone });
+  return day(d) === day(now)
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: zone })
+    : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: zone });
 }
 
 export function percent(fraction: number | null | undefined, digits = 0): string {

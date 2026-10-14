@@ -230,10 +230,14 @@ def cloud_init(topology: Topology, vm: Vm, hashed_password: str, public_key: str
             address = vm.mgmt_ip if nic.network == "mgmt" else vm.vlan_ip
             entry["addresses"] = [f"{address}/{topology.networks[nic.network].prefixlen}"]
         ethernets[nic.network] = entry
+    network = json.dumps({"version": 2, "ethernets": ethernets}, indent=2) + "\n"
+    # cloud-init applies a seed's network only to a new instance, so the ID
+    # changes with the network: `lab/lab update` then reaches a built VM.
+    instance = f"{topology.name}-{vm.name}-{hashlib.sha256(network.encode()).hexdigest()[:12]}"
     return {
         "user-data": "#cloud-config\n" + json.dumps(user, indent=2) + "\n",
-        "meta-data": json.dumps({"instance-id": f"{topology.name}-{vm.name}", "local-hostname": vm.name}) + "\n",
-        "network-config": json.dumps({"version": 2, "ethernets": ethernets}, indent=2) + "\n",
+        "meta-data": json.dumps({"instance-id": instance, "local-hostname": vm.name}) + "\n",
+        "network-config": network,
     }
 
 

@@ -31,6 +31,7 @@ pub mod scrub;
 pub mod setup;
 pub mod state;
 pub mod terminal;
+pub mod tunnels;
 pub mod ui;
 pub mod urlcheck;
 pub mod watchdog;

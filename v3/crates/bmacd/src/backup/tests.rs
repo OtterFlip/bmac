@@ -369,6 +369,7 @@ pub(crate) fn policy(appliances: Vec<Uuid>) -> Policy {
         schedule_id: Policy::schedule_id_for(&vm_uuid()),
         appliances,
         local_retention: LocalRetention::default(),
+        started_s: None,
         freeze: Freeze::IfAvailable,
         accept_multi_pool: false,
         enabled: true,
@@ -430,6 +431,7 @@ impl Setup {
             replication_timeout: Duration::from_millis(200),
             replication_ask_every: Duration::ZERO,
             thaw_after: Duration::from_secs(60),
+            zone: jiff::tz::TimeZone::UTC,
         };
         let outcome = capture::capture(&cx, &"prod1".parse().unwrap()).await;
         let text = out
@@ -532,6 +534,11 @@ async fn a_capture_snapshots_every_disk_replicates_and_offers_the_pit() {
         Manifest::open(&s.store.pit(&vm_uuid(), &second).unwrap().unwrap().manifest).unwrap();
     assert_eq!(next.parent_pit_uuid, Some(pit_uuid.to_string()));
     assert_eq!(
+        s.store.policy(&vm_uuid()).unwrap().unwrap().started_s,
+        Some(pit.taken_s),
+        "the first PIT starts the VM's weeks, and the second doesn't move it"
+    );
+    assert_eq!(
         next.volumes
             .iter()
             .map(|v| v.volume_uuid.clone())
@@ -583,6 +590,50 @@ async fn no_available_appliance_skips_unless_local_retention_claims_the_slot() {
         outcome,
         Ok(Captured::Skipped),
         "the day already has its PIT"
+    );
+}
+
+#[tokio::test]
+async fn a_slot_while_an_appliance_still_pulls_the_last_pit_is_skipped_without_an_alert() {
+    let s = setup();
+    s.save(
+        policy(vec![appliance_uuid(1)]),
+        vec![appliance(1, Some(NOW_MS))],
+    );
+    let pit = s.captured().await;
+    let name = s.store.pit(&vm_uuid(), &pit).unwrap().unwrap().name;
+    s.set_offer(
+        pit,
+        appliance_uuid(1),
+        Offer::Claimed {
+            progress_s: NOW_MS / 1000 - 30,
+            bytes: 4096,
+        },
+    );
+    let (outcome, text) = s.capture().await;
+    assert_eq!(outcome, Ok(Captured::Skipped));
+    assert!(
+        text.contains(&format!("is still pulling {name} (4096 bytes so far")),
+        "{text}"
+    );
+    assert_eq!(s.store.pits(&vm_uuid()).unwrap().len(), 1, "no new PIT");
+    assert!(
+        matches!(s.attempt(), Some(Attempt::Captured { pit_uuid, .. }) if pit_uuid == pit),
+        "a healthy transfer isn't a skipped backup"
+    );
+
+    s.set_offer(
+        pit,
+        appliance_uuid(1),
+        Offer::Claimed {
+            progress_s: NOW_MS / 1000 - 601,
+            bytes: 4096,
+        },
+    );
+    let (outcome, _) = s.capture().await;
+    assert!(
+        matches!(outcome, Ok(Captured::Pit { .. })),
+        "a stalled transfer doesn't stop the slot: {outcome:?}"
     );
 }
 
@@ -745,6 +796,7 @@ impl Setup {
             guests: &self.guests,
             now_ms: &now,
             bookmarks_proven: true,
+            zone: jiff::tz::TimeZone::UTC,
         };
         let mut reports = upkeep.run().await;
         assert!(reports.len() <= 1, "{reports:?}");
@@ -1128,7 +1180,16 @@ async fn the_backups_observation_names_who_is_behind() {
 
 mod source_service {
     use super::*;
-    use crate::backup::source::{Source, enrolled_fingerprints};
+    use crate::backup::source::{Source, enrolled_targets};
+
+    fn enrolled_fingerprints(
+        store: &BackupStore,
+    ) -> Result<Vec<String>, bmac_proto::api::ApiError> {
+        Ok(enrolled_targets(store)?
+            .into_iter()
+            .map(|t| t.fingerprint)
+            .collect())
+    }
     use bmac_proto::api::ErrorCode;
     use bmac_proto::appliance::{
         ApplianceProgress, BaseKind, Capacity, CheckinRequest, ClaimRequest, HeadReport,
@@ -1137,18 +1198,14 @@ mod source_service {
 
     const FP: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
-    fn addresses(host: HostSlot) -> Vec<String> {
-        vec![format!("bmaclab-{host}")]
-    }
-
     fn source<'a>(s: &'a Setup, now: &'a (dyn Fn() -> i64 + Send + Sync)) -> Source<'a> {
         Source {
             store: &s.store,
             cluster: &s.cluster,
             guests: &s.guests,
-            addresses: &addresses,
             cluster_uuid: "c0ffee".into(),
             now_ms: now,
+            time_zone: Some("America/Denver".into()),
         }
     }
 
@@ -1213,6 +1270,11 @@ mod source_service {
 
         let reply = src.checkin(FP, &checkin(vec![], vec![])).unwrap();
         assert_eq!(reply.state, "SEEDING");
+        assert_eq!(
+            reply.time_zone.as_deref(),
+            Some("America/Denver"),
+            "the appliance learns the cluster's zone for retention"
+        );
         let [offer] = &reply.offers[..] else {
             panic!("{reply:?}")
         };
@@ -1221,8 +1283,12 @@ mod source_service {
             (p1, None),
             "a first pull is a full send"
         );
-        let hosts: Vec<_> = offer.hosts.iter().map(|h| h.addresses[0].clone()).collect();
-        assert_eq!(hosts, ["bmaclab-mox1", "bmaclab-mox3"]);
+        let hosts: Vec<_> = offer.hosts.iter().map(|h| h.host.to_string()).collect();
+        assert_eq!(hosts, ["mox1", "mox3"], "the placement hosts");
+        assert!(
+            offer.hosts.iter().all(|h| h.addresses.is_empty()),
+            "the hosts dial the appliance; it never dials them"
+        );
         assert!(!reply.want_index);
 
         src.claim(

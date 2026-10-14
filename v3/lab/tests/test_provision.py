@@ -8,6 +8,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import io
+import dataclasses
 import json
 import subprocess
 import sys
@@ -129,7 +130,12 @@ class AnswerFileTest(unittest.TestCase):
         network = json.loads(files["network-config"])
         self.assertEqual(network["ethernets"]["uplink"], {"match": {"macaddress": appliance.nic("uplink").mac}, "dhcp4": True})
         self.assertEqual(network["ethernets"]["mgmt"]["addresses"], ["100.64.0.100/24"])
-        self.assertEqual(json.loads(files["meta-data"])["instance-id"], "bmaclab-appliance")
+        self.assertEqual(network["ethernets"]["vlan"]["addresses"], ["10.213.0.220/24"])
+        instance = json.loads(files["meta-data"])["instance-id"]
+        self.assertRegex(instance, r"^bmaclab-appliance-[0-9a-f]{12}$")
+        moved = provision.cloud_init(self.topology, dataclasses.replace(appliance, vlan_ip="10.213.0.222"), HASH, KEY)
+        self.assertNotEqual(json.loads(moved["meta-data"])["instance-id"], instance,
+                            "a changed network is a new instance, so cloud-init applies it")
 
 
 if __name__ == "__main__":

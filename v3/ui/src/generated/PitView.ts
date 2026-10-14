@@ -13,4 +13,8 @@ received_from: string | null, held: boolean, suspect: boolean,
 /**
  * A live restore grant names it.
  */
-granted: boolean, };
+granted: boolean, 
+/**
+ * Its cluster's time zone, which its time is shown in.
+ */
+time_zone: string, };

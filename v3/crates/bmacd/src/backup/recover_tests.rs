@@ -418,6 +418,7 @@ async fn a_cluster_with_backup_policies_is_not_recovered_over() {
                 schedule_id: Policy::schedule_id_for(&id(9)),
                 appliances: Vec::new(),
                 local_retention: Default::default(),
+                started_s: None,
                 freeze: Default::default(),
                 accept_multi_pool: false,
                 enabled: true,

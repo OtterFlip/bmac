@@ -26,4 +26,9 @@ transfers: Array<TransferView>,
 /**
  * The caller may change policies and appliances (admins only).
  */
-can_manage: boolean, errors: Array<string>, };
+can_manage: boolean, errors: Array<string>, 
+/**
+ * The cluster's time zone (IANA): schedules run in it, and the
+ * Backups page shows times in it.
+ */
+time_zone: string | null, };

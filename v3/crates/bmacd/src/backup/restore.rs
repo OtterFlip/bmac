@@ -392,8 +392,8 @@ pub(super) async fn source(
         .collect();
     if appliances.is_empty() {
         return Err(Stop::failed(
-            "No approved appliance has an address. Set one in the appliance's settings, so a \
-             restore can reach its port 8445.",
+            "No approved appliance has an address. Set its private or public address in the \
+             appliance's settings, so the hosts and a restore can reach its port 8445.",
         ));
     }
     let mut problem: Option<String> = None;

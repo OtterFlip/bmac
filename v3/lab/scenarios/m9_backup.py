@@ -5,7 +5,9 @@
 appliance VM, end to end. It starts from the cluster with production VMs
 (m8_storage.staged) and backs up the "small" VM, placed on mox1 and mox3.
 
-- The appliance joins the tailnet as a deployed one would, installs the
+- The appliance joins the tailnet as a deployed one would (for its
+  administrator only: the lab's backup data never goes over Tailscale, so
+  the cluster reaches it on its VLAN address), installs the
   bmac-backupd package, binds a pool by GUID, and enrolls with a bundle the
   Dashboard issued. The administrator approves it after comparing the
   certificate fingerprint the appliance printed with the Dashboard's.
@@ -21,6 +23,7 @@ The appliance and the hosts are put back as they were."""
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import secrets
@@ -120,8 +123,9 @@ class Backup:
         self.appliance_uuid = ""
         self.fingerprint = ""
         self.disk = ""
-        # Where restore jobs reach the appliance, suggested at enrollment.
-        self.address: str | None = None
+        # Where the hosts and restore jobs reach the appliance, suggested at
+        # enrollment: on the VLAN, never Tailscale (`lab_address`).
+        self.address = self.appliance.vlan_ip
         self.local_retention: dict | None = None
         # Made up for this run and never printed.
         self.passphrase = secrets.token_urlsafe(24)
@@ -155,6 +159,41 @@ class Backup:
 
     def pits(self) -> list[dict]:
         return self.journal().get("pits") or []
+
+    def lab_address(self, address: str | None) -> str:
+        """The lab's rule: an appliance's address is on the hosts' VLAN, so
+        backup data never goes over Tailscale. BMAC itself accepts any."""
+        vlan = self.lab.topology.networks["vlan"]
+        try:
+            on_vlan = address is not None and ipaddress.ip_address(address) in vlan
+        except ValueError:
+            on_vlan = False
+        self.s.require(f"the lab gives the appliance an address on the hosts' VLAN {vlan}, never a "
+                       f"Tailscale one ({address})", on_vlan)
+        return str(address)
+
+    def connections(self) -> set[str]:
+        """Where the backup connections open on the appliance's 8445 come from."""
+        peers = set()
+        for line in self.app("ss -Htn state established '( sport = :8445 )'").splitlines():
+            fields = line.split()
+            if len(fields) >= 4:
+                host = fields[3].rsplit(":", 1)[0].strip("[]").removeprefix("::ffff:")
+                peers.add(host)
+        return peers
+
+    def over_the_vlan(self, label: str) -> None:
+        """Every connection to the appliance's 8445 comes from a host's VLAN
+        address: the lab's backup data never goes over Tailscale."""
+        hosts = {vm.vlan_ip for vm in self.lab.topology.hosts}
+        seen: set[str] = set()
+
+        def connected() -> bool:
+            seen.clear()
+            seen.update(self.connections())
+            return bool(seen) and seen <= hosts
+        self.s.check(f"{label}: every connection to the appliance's 8445 comes from a host's VLAN address "
+                     f"({sorted(seen)})", lambda: m6.wait_until(connected, 120))
 
     def wait(self, what: str, test, timeout: float) -> bool:
         return self.s.check(what, lambda: m6.wait_until(test, timeout))
@@ -219,8 +258,9 @@ class Backup:
             == self.app(f"zpool get -Hp -o value guid {POOL}"))
         self.s.check("the metadata dataset is mounted in the state directory", lambda: self.app(
             f"zfs get -H -o value mounted,mountpoint {POOL}/bmac/metadata").split() == ["yes", "/var/lib/bmac-backupd/metadata"])
-        address = f" --address {self.address}" if self.address else ""
-        out = self.app(f"bmac-backupd enroll /root/enroll.json{address}; status=$?; rm -f /root/enroll.json; exit $status",
+        address = self.lab_address(self.address)
+        out = self.app(f"bmac-backupd enroll /root/enroll.json --address {address}; status=$?; "
+                       "rm -f /root/enroll.json; exit $status",
                        timeout=180)
         self.s.check("enroll names the same fingerprint", fingerprint in out)
 
@@ -239,9 +279,9 @@ class Backup:
         approved = self.dashboard.call("POST", f"/appliances/requests/{request['request_id']}/approve",
                                        {"fingerprint": fingerprint})
         self.appliance_uuid = approved["appliance_uuid"]
-        self.s.check("the appliance is approved", any(
+        self.s.check(f"the appliance is approved with the address it suggested ({approved.get('address')})", any(
             a["appliance_uuid"] == self.appliance_uuid and a["enrollment"] == "approved"
-            for a in self.dashboard.call("GET", "/appliances")["appliances"]))
+            and a.get("address") == address for a in self.dashboard.call("GET", "/appliances")["appliances"]))
         self.app("systemctl start bmac-backupd.service")
         self.wait("the appliance checks in", lambda: any(
             a["appliance_uuid"] == self.appliance_uuid and a.get("last_checkin_ms")
@@ -319,9 +359,9 @@ class Backup:
                     name, f"zfs allow {pool} | sed -n 's/^[[:space:]]*user bmac-source //p'").replace(" ", "").split(","))
                 self.s.check(f"item 5: {pool} delegates only send, hold, and release to bmac-source on {name}",
                              lambda: delegated() == ["hold", "release", "send"])
-        host = f"{self.lab.topology.tailnet_prefix}mox1"
-        self.s.check("item 5: bmac-source refuses a client without an enrolled certificate", lambda: self.app(
-            f"curl -sk --max-time 15 -o /dev/null https://{host}:8445/v1/catalog; echo $?") != "0")
+        for name in ("mox1", "mox2", "mox3"):
+            self.s.check(f"item 5: bmac-source listens on nothing on {name}; it dials the appliance", lambda: self.on(
+                name, "ss -Htln '( sport = :8445 )'") == "")
 
     def ui(self) -> None:
         """The appliance's UI on 8443: its own certificate, a login with the
@@ -420,6 +460,7 @@ def then(hosts) -> None:
         second = backup.pulled("P2", 2)
         s.check("P2 is pulled incrementally from P1", bool(second) and second.get("received_from") == first.get("pit_uuid"))
         s.check("P2 moved less than P1", bool(second) and second.get("bytes", 0) < first.get("bytes", 0))
+        backup.over_the_vlan("P1 and P2")
         s.check("the appliance's audit log records both publishes", lambda: backup.app(
             "grep -c '\"publish\"' /var/lib/bmac-backupd/metadata/audit.jsonl || true") == "2")
         backup.delegation()

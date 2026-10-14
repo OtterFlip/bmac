@@ -31,10 +31,12 @@ const USAGE: &str = "usage:
   bmac-backupd run                 check in with the enrolled clusters and pull their PITs
   bmac-backupd status              this appliance's identity, pool and clusters
   bmac-backupd retention           the retention policy and what a prune would delete
-  bmac-backupd retention set DAILY WEEKLY MONTHLY
+  bmac-backupd retention set DAILY WEEKLY MONTHLY [MONTH_DAYS yearly|no-yearly]
                                    change the policy (typed here, it needs no delay)
   bmac-backupd retention floor DAILY WEEKLY MONTHLY
                                    the least the appliance UI may set
+  bmac-backupd test-day-seconds SECONDS|off
+                                   for tests only: retention's days last SECONDS
   bmac-backupd hold PIT            keep a PIT whatever the policy says
   bmac-backupd unhold PIT
   bmac-backupd prune               prune now, as the service does every hour
@@ -106,7 +108,7 @@ async fn enroll(paths: &Paths, bundle: &str, address: Option<&str>) -> Result<()
     let text = std::fs::read_to_string(bundle).map_err(|e| format!("{bundle}: {e}"))?;
     let bundle = enroll::read_bundle(&text, now_ms())?;
     let address = address
-        .map(|a| a.parse::<bmac_core::ApplianceAddress>())
+        .map(str::parse::<bmac_core::ApplianceAddress>)
         .transpose()
         .map_err(|e| format!("--address: {e}"))?;
     let enrolled =
@@ -166,25 +168,47 @@ fn console() -> String {
     )
 }
 
-fn policy(daily: &str, weekly: &str, monthly: &str) -> Result<ApplianceRetention, String> {
+/// `D W M [MONTH_DAYS yearly|no-yearly]`; without the last two, `base`'s.
+fn policy(counts: &[&str], base: &ApplianceRetention) -> Result<ApplianceRetention, String> {
     let n = |s: &str| {
         s.parse::<u32>()
             .ok()
             .filter(|n| *n <= 1000)
             .ok_or_else(|| format!("{s:?} isn't a count from 0 to 1000"))
     };
-    Ok(ApplianceRetention {
-        daily: n(daily)?,
-        weekly: n(weekly)?,
-        monthly: n(monthly)?,
-    })
+    let (month_days, yearly) = match counts {
+        [_, _, _] => (base.month_days, base.yearly),
+        [_, _, _, days, yearly] => (
+            n(days)?,
+            match *yearly {
+                "yearly" => true,
+                "no-yearly" => false,
+                other => return Err(format!("{other:?} isn't yearly or no-yearly")),
+            },
+        ),
+        _ => return Err("give D W M, or D W M MONTH_DAYS yearly|no-yearly".into()),
+    };
+    let policy = ApplianceRetention {
+        daily: n(counts[0])?,
+        weekly: n(counts[1])?,
+        monthly: n(counts[2])?,
+        month_days,
+        yearly,
+    };
+    policy.validate()?;
+    Ok(policy)
 }
 
 fn describe(p: &ApplianceRetention) -> String {
-    format!(
-        "{} daily, {} weekly, {} monthly",
-        p.daily, p.weekly, p.monthly
-    )
+    let months = if p.yearly {
+        format!(
+            "{} monthly of {} days, then yearly",
+            p.monthly, p.month_days
+        )
+    } else {
+        format!("every month of {} days", p.month_days)
+    };
+    format!("{} daily, {} weekly, {months}", p.daily, p.weekly)
 }
 
 fn bound(paths: &Paths) -> Result<(PoolBinding, Metadata), String> {
@@ -266,7 +290,22 @@ async fn show_retention(paths: &Paths) -> Result<(), String> {
         runner: &RUNNER,
         pool: binding.pool,
     };
-    let mut plan = retention::plan(&journal, &settings, &Default::default(), now_ms());
+    let zones = retention::Zones::load(&metadata).map_err(|e| e.to_string())?;
+    for (cluster, zone) in &zones.clusters {
+        match &zone.pending {
+            Some(p) => println!(
+                "cluster {cluster}: days in {}, then {} from {}",
+                zone.zone,
+                p.zone,
+                jiff::Timestamp::from_millisecond(p.effective_at_ms).map_err(|e| e.to_string())?
+            ),
+            None => println!("cluster {cluster}: days in {}", zone.zone),
+        }
+    }
+    if let Some(day) = settings.test_day_s {
+        println!("for tests, a day lasts {day} seconds");
+    }
+    let mut plan = retention::plan(&journal, &settings, &zones, &Default::default(), now_ms());
     retention::estimate(&pool, &mut plan).await;
     for c in &plan.coverage {
         println!(
@@ -363,8 +402,9 @@ async fn trust(paths: &Paths, uuid: &str, fingerprint: &str, address: &str) -> R
     let uuid: uuid::Uuid = uuid
         .parse()
         .map_err(|_| format!("{uuid:?} isn't an appliance UUID"))?;
-    let address: bmac_core::ApplianceAddress =
-        address.parse().map_err(|e| format!("{address}: {e}"))?;
+    let address = address
+        .parse::<bmac_core::ApplianceAddress>()
+        .map_err(|e| format!("{address}: {e}"))?;
     let wanted = bmac_proto::appliance::normalized_fingerprint(fingerprint)
         .ok_or("a fingerprint is 64 hexadecimal digits")?;
     let cert = std::fs::read_to_string(paths.cert()).map_err(|e| e.to_string())?;
@@ -794,9 +834,9 @@ async fn dispatch(args: &[String]) -> Result<(), String> {
         ["run"] => daemon::run(paths, terminated()).await,
         ["status"] => status(&paths),
         ["retention"] => show_retention(&paths).await,
-        ["retention", "set", d, w, m] => {
-            let new = policy(d, w, m)?;
+        ["retention", "set", counts @ ..] => {
             settings(&paths, serde_json::json!({"change": "policy"}), |s, _| {
+                let new = policy(counts, &s.policy)?;
                 Ok(match s.change(new, &console(), now_ms(), true)? {
                     Change::Applied => format!("retention is now {}", describe(&new)),
                     Change::Delayed { .. } => unreachable!("confirmed at the console"),
@@ -805,11 +845,34 @@ async fn dispatch(args: &[String]) -> Result<(), String> {
             .await
         }
         ["retention", "floor", d, w, m] => {
-            let floor = policy(d, w, m)?;
             settings(&paths, serde_json::json!({"change": "floor"}), |s, _| {
+                let floor = policy(&[*d, *w, *m], &s.floor)?;
                 s.set_floor(floor)?;
                 Ok(format!("the floor is now {}", describe(&floor)))
             })
+            .await
+        }
+        ["test-day-seconds", seconds] => {
+            let day = match *seconds {
+                "off" => None,
+                n => Some(
+                    n.parse::<i64>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| format!("{n:?} isn't a number of seconds or off"))?,
+                ),
+            };
+            settings(
+                &paths,
+                serde_json::json!({"change": "test_day_s", "test_day_s": day}),
+                |s, _| {
+                    s.test_day_s = day;
+                    Ok(match day {
+                        Some(n) => format!("for tests, a day now lasts {n} seconds"),
+                        None => "days are calendar days again".into(),
+                    })
+                },
+            )
             .await
         }
         ["hold", pit] => {

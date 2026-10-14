@@ -134,6 +134,8 @@ pub struct Context<'a> {
     pub replication_ask_every: Duration,
     /// How long the guest may stay frozen before the timer thaws it.
     pub thaw_after: Duration,
+    /// The cluster's time zone, for local retention's days.
+    pub zone: jiff::tz::TimeZone,
 }
 
 impl Context<'_> {
@@ -182,6 +184,29 @@ pub fn available_appliances(
         .collect()
 }
 
+/// One of the policy's appliances still pulling a PIT of the VM, with bytes
+/// moved within the stalled transfer period: `(appliance, PIT, bytes)`.
+pub fn still_pulling<'a>(
+    policy: &Policy,
+    pits: &'a [PitRecord],
+    now_s: i64,
+    settings: &BackupSettings,
+) -> Option<(Uuid, &'a PitRecord, u64)> {
+    pits.iter().rev().find_map(|pit| {
+        pit.offers
+            .iter()
+            .find_map(|(appliance, offer)| match offer {
+                Offer::Claimed { progress_s, bytes }
+                    if policy.appliances.contains(appliance)
+                        && now_s - progress_s <= settings.stalled_after_s =>
+                {
+                    Some((*appliance, pit, *bytes))
+                }
+                _ => None,
+            })
+    })
+}
+
 pub async fn capture(cx: &Context<'_>, vm: &GuestName) -> Result<Captured, Stop> {
     cx.flow.phase(
         "check",
@@ -200,12 +225,30 @@ pub async fn capture(cx: &Context<'_>, vm: &GuestName) -> Result<Captured, Stop>
     let settings = cx.store.settings().map_err(|e| Stop::failed(e.message))?;
     let appliances = cx.store.appliances().map_err(|e| Stop::failed(e.message))?;
     let now_s = cx.now_s();
+    let records = cx
+        .store
+        .pits(&production.vm_uuid)
+        .map_err(|e| Stop::failed(e.message))?;
+    if let Some((appliance, pit, bytes)) = still_pulling(&policy, &records, now_s, &settings) {
+        let name = appliances
+            .iter()
+            .find(|a| a.appliance_uuid == appliance)
+            .map_or_else(|| appliance.to_string(), |a| a.name.clone());
+        cx.flow.info(format!(
+            "No PIT of {vm} this time: appliance {name} is still pulling {} ({} bytes so far, \
+             moving within the last {} seconds). The next slot tries again.",
+            pit.name, bytes, settings.stalled_after_s
+        ));
+        cx.flow.phase(
+            "check",
+            "Check the policy and the appliances",
+            PhaseStatus::Skipped,
+        );
+        return Ok(Captured::Skipped);
+    }
     let available = available_appliances(&policy, &appliances, now_s, &settings);
     if available.is_empty() {
-        let pits: Vec<LocalPit> = cx
-            .store
-            .pits(&production.vm_uuid)
-            .map_err(|e| Stop::failed(e.message))?
+        let pits: Vec<LocalPit> = records
             .iter()
             .map(|p| LocalPit {
                 pit_uuid: p.pit_uuid,
@@ -213,7 +256,12 @@ pub async fn capture(cx: &Context<'_>, vm: &GuestName) -> Result<Captured, Stop>
                 backed_up: p.backed_up(),
             })
             .collect();
-        if !policy.local_retention.claims_slot(&pits, now_s) {
+        let calendar = settings.calendar(cx.zone.clone());
+        let start_day = policy.started_s.map(|s| calendar.day(s));
+        if !policy
+            .local_retention
+            .claims_slot(&pits, &calendar, start_day, now_s)
+        {
             cx.flow.warning(format!(
                 "No PIT of {vm}: none of its appliances checked in within the last {} seconds.",
                 settings.ready_window_s
@@ -666,8 +714,15 @@ async fn finish(
             release_blocked: None,
         };
         lineage.head = Some(pit_uuid);
+        let taken_s = pit.taken_s;
         l.save_pit(pit)?;
         l.save_lineage(lineage)?;
+        if let Some(mut policy) = l.store().policy(&vm_uuid)?
+            && policy.started_s.is_none()
+        {
+            policy.started_s = Some(taken_s);
+            l.save_policy(policy)?;
+        }
         Ok(())
     });
     written.map_err(|e| Stop::failed(format!("could not record the PIT: {}", e.message)))?;
@@ -973,6 +1028,7 @@ pub async fn run(flow: &Workflow, args: &[String]) -> ExitCode {
             replication_timeout: Duration::from_secs(15 * 60),
             replication_ask_every: REPLICATION_ASK_EVERY,
             thaw_after: Duration::from_secs(60),
+            zone: jiff::tz::TimeZone::system(),
         };
         capture(&cx, &vm).await.map(drop)
     }

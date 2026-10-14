@@ -146,6 +146,7 @@ pub fn save(
             schedule_id,
             appliances: assigned,
             local_retention: change.local_retention,
+            started_s: current.as_ref().and_then(|p| p.started_s),
             freeze: change.freeze,
             accept_multi_pool: change.accept_multi_pool,
             enabled: change.enabled,

@@ -114,7 +114,37 @@ fn host_values(values: &Values) -> SettingValues {
         .collect()
 }
 
-fn host_form(cluster: &SettingValues) -> RequestForm {
+/// The new cluster's time zone: the settings file's, or the workstation's.
+fn zone_field(cluster: &SettingValues, workstation: &str) -> bmac_core::job::Field {
+    let zone = cluster
+        .get("PROXMOX_TIMEZONE")
+        .map_or(workstation, String::as_str);
+    field("PROXMOX_TIMEZONE", FieldType::String, "Cluster time zone")
+        .required()
+        .default_value(json!(zone))
+        .help(
+            "An IANA name such as America/Denver. Backup schedules run in it and retention \
+             counts its calendar days; hosts that join and enrolled appliances take it from \
+             the cluster.",
+        )
+}
+
+/// The time zone the operator chose, if it is a real one.
+fn chosen_zone(values: &Values) -> Result<String, FieldErrors> {
+    let zone = text(values, "PROXMOX_TIMEZONE").unwrap_or_default();
+    match jiff::tz::TimeZone::get(zone.trim()) {
+        Ok(_) => Ok(zone.trim().to_string()),
+        Err(_) => Err((
+            BTreeMap::from([(
+                "PROXMOX_TIMEZONE".into(),
+                "Enter an IANA time zone, such as America/Denver or UTC.".into(),
+            )]),
+            None,
+        )),
+    }
+}
+
+fn host_form(cluster: &SettingValues, workstation_zone: &str) -> RequestForm {
     let hosts: u8 = cluster
         .get("MAX_MOX_HOSTS")
         .and_then(|v| v.parse().ok())
@@ -144,6 +174,7 @@ fn host_form(cluster: &SettingValues) -> RequestForm {
         };
         fields.push(f);
     }
+    fields.push(zone_field(cluster, workstation_zone));
     RequestForm::InputGroup {
         title: "Host settings".into(),
         description: Some(
@@ -798,7 +829,7 @@ pub async fn run(ctx: &TaskContext, env: &Env) -> TaskResult {
             |values| load_origin(values, now).map(|_| ()),
         )
         .await?;
-    let start = load_origin(&values, now)
+    let mut start = load_origin(&values, now)
         .map_err(|(_, m)| Stop::failed(m.unwrap_or_else(|| "The file isn't valid.".into())))?;
     let (host, host_settings) = match &start.origin {
         Origin::Join(bundle) => {
@@ -811,14 +842,22 @@ pub async fn run(ctx: &TaskContext, env: &Env) -> TaskResult {
         Origin::NewCluster { .. } => {
             let cluster = start.cluster.clone();
             let values = ctx
-                .values(host_form(&start.cluster), move |values| {
+                .values(host_form(&start.cluster, &env.time_zone), move |values| {
                     let host = slot_of(values)?;
+                    chosen_zone(values)?;
                     let mut settings = host_values(values);
                     placeholders(&mut settings);
                     bmac_settings::validate_host(host, &settings, &cluster).map_err(api_errors)
                 })
                 .await?;
             let host = slot_of(&values).map_err(|_| Stop::failed("No host was chosen."))?;
+            let zone =
+                chosen_zone(&values).map_err(|_| Stop::failed("No time zone was chosen."))?;
+            ctx.output(format!("The cluster's time zone is {zone}."));
+            start.cluster.insert("PROXMOX_TIMEZONE".into(), zone);
+            start.origin = Origin::NewCluster {
+                cluster_settings: start.cluster.clone(),
+            };
             (host, host_values(&values))
         }
     };

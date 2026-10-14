@@ -47,6 +47,8 @@ pub struct Inputs {
     pub names: BTreeMap<Uuid, (String, u32)>,
     pub can_manage: bool,
     pub errors: Vec<String>,
+    /// The cluster's time zone, which schedules run in.
+    pub time_zone: Option<String>,
 }
 
 /// An enum's name on the wire, such as `if_available`.
@@ -89,7 +91,15 @@ pub fn describe(every: &Recurrence) -> String {
     }
 }
 
-fn policy_view(policy: &Policy, every: Option<&Recurrence>) -> PolicyView {
+/// [`describe`], naming the zone of a time of day.
+fn describe_in(every: &Recurrence, zone: Option<&str>) -> String {
+    match (every, zone) {
+        (Recurrence::Interval { .. }, _) | (_, None) => describe(every),
+        (_, Some(zone)) => format!("{} {zone}", describe(every)),
+    }
+}
+
+fn policy_view(policy: &Policy, every: Option<&Recurrence>, zone: Option<&str>) -> PolicyView {
     PolicyView {
         revision: policy.revision,
         enabled: policy.enabled,
@@ -97,7 +107,9 @@ fn policy_view(policy: &Policy, every: Option<&Recurrence>) -> PolicyView {
         local_newest: policy.local_retention.newest,
         local_days: policy.local_retention.days,
         local_weeks: policy.local_retention.weeks,
-        every: every.map(describe).unwrap_or_else(|| "no schedule".into()),
+        every: every
+            .map(|e| describe_in(e, zone))
+            .unwrap_or_else(|| "no schedule".into()),
         every_json: every
             .and_then(|e| serde_json::to_string(e).ok())
             .unwrap_or_default(),
@@ -307,7 +319,7 @@ pub fn assemble(mut inputs: Inputs) -> BackupsView {
             policy: records
                 .policy
                 .as_ref()
-                .map(|p| policy_view(p, records.every.as_ref())),
+                .map(|p| policy_view(p, records.every.as_ref(), inputs.time_zone.as_deref())),
             status: vm_statuses.get(&vm_uuid.to_string()).cloned(),
             pits: records.pits.iter().map(pit_view).collect(),
             branch_uuid: records.lineage.as_ref().map(|l| l.branch_uuid.to_string()),
@@ -344,6 +356,7 @@ pub fn assemble(mut inputs: Inputs) -> BackupsView {
         transfers,
         can_manage: inputs.can_manage,
         errors: inputs.errors,
+        time_zone: inputs.time_zone,
     }
 }
 

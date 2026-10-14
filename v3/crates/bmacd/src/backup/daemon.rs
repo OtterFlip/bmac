@@ -2,20 +2,22 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! `bmacd source`, run by `bmac-source.service` as the user `bmac-source`
-//! (`SECURITY.md`, "Process separation"): port 8445 for enrolled
-//! appliances, with mutual TLS. The handshake lets through only the
-//! certificates of approved appliances, which the engine lists; every
-//! request is then decided by the engine, and a send runs `zfs send` under
-//! ZFS's `send`, `hold`, and `release` delegation on the guest datasets,
-//! nothing more.
+//! (`SECURITY.md`, "Process separation"; `BACKUP.md`, "Connections"). It
+//! listens on nothing: it dials every approved appliance's address on port
+//! 8445, accepts only the certificate the cluster recorded when it approved
+//! the appliance, presents the node's certificate, and serves the
+//! appliance's requests over that connection (HTTP/2, ALPN
+//! `bmac-source/1`). Every request is decided by the engine, and a send runs
+//! `zfs send` under ZFS's `send`, `hold`, and `release` delegation on the
+//! guest datasets, nothing more.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -23,27 +25,31 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use bmac_core::{AddressHost, ApplianceAddress};
 use bmac_proto::api::{ApiError, ErrorCode};
 use bmac_proto::appliance::{
-    CheckinRequest, ClaimRequest, IndexRequest, LocateRequest, SendRequest, on_source,
+    CheckinRequest, ClaimRequest, IndexRequest, LocateRequest, SOURCE_ALPN, SOURCE_PORT,
+    SendRequest, on_source,
 };
 use bytes::Bytes;
 use http_body::Frame;
-use rustls::client::danger::HandshakeSignatureValid;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
-use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::{DigitallySignedStruct, DistinguishedName, ServerConfig, SignatureScheme};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use super::source::{SendPlan, TransferDone};
-use super::source_socket::{MAX_FRAME, SourceCall, SourceClient};
+use super::source_socket::{MAX_FRAME, SourceCall, SourceClient, SourceTarget};
 use crate::log;
 use crate::web::api::api_error;
-use crate::web::https::{ClientCertificate, HttpsServer, Listeners};
+use crate::web::https::ClientCertificate;
 use crate::web::tls::TlsError;
 
 /// The credentials the unit passes with `LoadCredential`: the node's
@@ -52,28 +58,17 @@ pub const CERT_CREDENTIAL: &str = "node.pem";
 pub const KEY_CREDENTIAL: &str = "node.key";
 pub const CA_CREDENTIAL: &str = "ca.pem";
 pub const ZFS: &str = "/usr/sbin/zfs";
-const FINGERPRINTS_EVERY: Duration = Duration::from_secs(10);
-/// Without a fresh list from the engine for this long, everyone is refused.
-const FINGERPRINTS_STALE: Duration = Duration::from_secs(60);
-const LISTEN_EVERY: Duration = Duration::from_secs(30);
+/// How often the engine is asked which appliances to keep a connection to.
+const APPLIANCES_EVERY: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// The wait before dialing again, doubling from the first to the second.
+const REDIAL: (Duration, Duration) = (Duration::from_secs(2), Duration::from_secs(60));
+/// A connection that lasted this long was healthy: the next dial is quick.
+const HEALTHY: Duration = Duration::from_secs(120);
+const KEEPALIVE: Duration = Duration::from_secs(30);
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 const CHUNK: usize = 256 * 1024;
 const MAX_STDERR: usize = 4096;
-
-/// The approved appliances' fingerprints, lowercase hex.
-#[derive(Debug, Default)]
-pub struct Allowlist(RwLock<(BTreeSet<String>, Option<Instant>)>);
-
-impl Allowlist {
-    pub fn set(&self, fingerprints: impl IntoIterator<Item = String>) {
-        let mut inner = self.0.write().unwrap_or_else(|p| p.into_inner());
-        *inner = (fingerprints.into_iter().collect(), Some(Instant::now()));
-    }
-
-    pub fn allows(&self, fingerprint: &str) -> bool {
-        let inner = self.0.read().unwrap_or_else(|p| p.into_inner());
-        inner.1.is_some_and(|at| at.elapsed() < FINGERPRINTS_STALE) && inner.0.contains(fingerprint)
-    }
-}
 
 pub fn fingerprint(der: &[u8]) -> String {
     Sha256::digest(der)
@@ -82,38 +77,29 @@ pub fn fingerprint(der: &[u8]) -> String {
         .collect()
 }
 
-/// Lets through the handshake only a certificate on the allowlist. An
-/// appliance's certificate is its own, self-signed; its fingerprint, from
-/// enrollment, is the trust.
+/// Accepts only the appliance's own certificate, by the fingerprint the
+/// cluster recorded at enrollment; the certificate is self-signed.
 #[derive(Debug)]
-struct EnrolledVerifier {
-    allow: Arc<Allowlist>,
+struct AppliancePin {
+    fingerprint: String,
     provider: Arc<CryptoProvider>,
 }
 
-impl ClientCertVerifier for EnrolledVerifier {
-    fn offer_client_auth(&self) -> bool {
-        true
-    }
-
-    fn client_auth_mandatory(&self) -> bool {
-        true
-    }
-
-    fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        &[]
-    }
-
-    fn verify_client_cert(
+impl ServerCertVerifier for AppliancePin {
+    fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
         _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
         _now: UnixTime,
-    ) -> Result<ClientCertVerified, rustls::Error> {
-        if self.allow.allows(&fingerprint(end_entity)) {
-            Ok(ClientCertVerified::assertion())
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        if fingerprint(end_entity) == self.fingerprint {
+            Ok(ServerCertVerified::assertion())
         } else {
-            Err(rustls::Error::General("not an enrolled appliance".into()))
+            Err(rustls::Error::General(
+                "the appliance presented another certificate than the one approved".into(),
+            ))
         }
     }
 
@@ -147,28 +133,30 @@ impl ClientCertVerifier for EnrolledVerifier {
     }
 }
 
-/// TLS 1.3 with the node certificate, followed by the cluster CA so an
-/// appliance that pins the CA can verify the chain.
-pub fn server_config(
+/// TLS 1.3 to the appliance whose certificate has `appliance` as its
+/// fingerprint, presenting the node certificate followed by the cluster CA
+/// so the appliance can check the chain against the CA it pinned.
+pub fn client_config(
     cert_pem: &[u8],
     key_pem: &[u8],
     ca_pem: &[u8],
-    allow: Arc<Allowlist>,
-) -> Result<Arc<ServerConfig>, TlsError> {
+    appliance: &str,
+) -> Result<Arc<ClientConfig>, TlsError> {
     let provider = crate::mesh::tls::provider();
     let mut chain = crate::mesh::tls::certificates(cert_pem)?;
     chain.extend(crate::mesh::tls::certificates(ca_pem)?);
     let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| TlsError::Key(e.to_string()))?;
-    let verifier = Arc::new(EnrolledVerifier {
-        allow,
+    let pin = Arc::new(AppliancePin {
+        fingerprint: appliance.to_ascii_lowercase(),
         provider: provider.clone(),
     });
-    let mut server = ServerConfig::builder_with_provider(provider)
+    let mut client = ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(chain, key)?;
-    server.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    Ok(Arc::new(server))
+        .dangerous()
+        .with_custom_certificate_verifier(pin)
+        .with_client_auth_cert(chain, key)?;
+    client.alpn_protocols = vec![SOURCE_ALPN.to_vec()];
+    Ok(Arc::new(client))
 }
 
 pub struct App {
@@ -474,13 +462,181 @@ async fn stream(
     }
 }
 
-async fn refresh(client: &SourceClient, allow: &Allowlist) -> Result<(), String> {
-    let fingerprints: Vec<String> = client
-        .typed(&SourceCall::Fingerprints)
+/// Where `address` answers.
+pub(crate) async fn resolve(address: &ApplianceAddress) -> Result<Vec<SocketAddr>, String> {
+    let port = address.port_or(SOURCE_PORT);
+    let found: Vec<SocketAddr> = tokio::net::lookup_host((address.host_text(), port))
         .await
-        .map_err(|e| e.message)?;
-    allow.set(fingerprints);
-    Ok(())
+        .map_err(|e| format!("{address}: {e}"))?
+        .collect();
+    if found.is_empty() {
+        return Err(format!("{address} doesn't resolve"));
+    }
+    Ok(found)
+}
+
+/// Opens one connection to the appliance at `address` and serves its
+/// requests over it until either side closes it.
+pub async fn connect(
+    app: Arc<App>,
+    tls: Arc<ClientConfig>,
+    name: &str,
+    address: &ApplianceAddress,
+) -> Result<(), String> {
+    let mut last = format!("{address} has no address");
+    let mut tcp = None;
+    for socket in resolve(address).await? {
+        match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(socket)).await {
+            Ok(Ok(stream)) => {
+                tcp = Some(stream);
+                break;
+            }
+            Ok(Err(e)) => last = format!("{socket}: {e}"),
+            Err(_) => last = format!("{socket}: timed out"),
+        }
+    }
+    let tcp = tcp.ok_or(last)?;
+    let _ = tcp.set_nodelay(true);
+    let server_name = match &address.host {
+        AddressHost::Ip(ip) => ServerName::IpAddress((*ip).into()),
+        AddressHost::Name(host) => {
+            ServerName::try_from(host.clone()).map_err(|e| format!("{address}: {e}"))?
+        }
+    };
+    let tls = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        tokio_rustls::TlsConnector::from(tls).connect(server_name, tcp),
+    )
+    .await
+    .map_err(|_| format!("{address}: the TLS handshake timed out"))?
+    .map_err(|e| format!("{address}: {e}"))?;
+    let (_, session) = tls.get_ref();
+    if session.alpn_protocol() != Some(SOURCE_ALPN) {
+        return Err(format!("{address} doesn't speak bmac-source/1"));
+    }
+    let certificate = session
+        .peer_certificates()
+        .and_then(|chain| chain.first())
+        .map(|c| c.clone().into_owned());
+    log::info(&format!(
+        "bmac-source: connected to appliance {name} at {address}"
+    ));
+    let service = hyper_util::service::TowerToHyperService::new(
+        router(app).layer(Extension(ClientCertificate(certificate))),
+    );
+    hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+        .timer(TokioTimer::new())
+        .keep_alive_interval(Some(KEEPALIVE))
+        .keep_alive_timeout(KEEPALIVE_TIMEOUT)
+        .serve_connection(TokioIo::new(tls), service)
+        .await
+        .map_err(|e| format!("{address}: {e}"))
+}
+
+/// Keeps a connection to one appliance, dialing again when it ends.
+async fn keep_connected(app: Arc<App>, tls: Arc<ClientConfig>, target: SourceTarget) {
+    let Some(address) = target.address.clone() else {
+        return;
+    };
+    let mut wait = REDIAL.0;
+    let mut failing = false;
+    loop {
+        let started = Instant::now();
+        let outcome = connect(app.clone(), tls.clone(), &target.name, &address).await;
+        if started.elapsed() >= HEALTHY {
+            wait = REDIAL.0;
+        }
+        match outcome {
+            Ok(()) => {
+                log::info(&format!(
+                    "bmac-source: appliance {} closed its connection",
+                    target.name
+                ));
+                failing = false;
+            }
+            Err(e) if !failing => {
+                log::warning(&format!(
+                    "bmac-source: no connection to appliance {} at {address}: {e}",
+                    target.name
+                ));
+                failing = true;
+            }
+            Err(_) => {}
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(REDIAL.1);
+    }
+}
+
+/// The node's credentials, PEM.
+pub struct Credentials {
+    pub cert: Vec<u8>,
+    pub key: Vec<u8>,
+    pub ca: Vec<u8>,
+}
+
+/// One task per appliance with an address, by fingerprint.
+#[derive(Default)]
+pub struct Dialers(BTreeMap<String, (SourceTarget, JoinHandle<()>)>);
+
+impl Dialers {
+    /// Starts a connection to each appliance that wants one, and drops the
+    /// connections to those no longer approved or now somewhere else.
+    pub fn reconcile(&mut self, targets: &[SourceTarget], app: &Arc<App>, node: &Credentials) {
+        let wanted: BTreeMap<&str, &SourceTarget> = targets
+            .iter()
+            .filter(|t| t.address.is_some())
+            .map(|t| (t.fingerprint.as_str(), t))
+            .collect();
+        self.0.retain(|fingerprint, (target, task)| {
+            let keep = wanted.get(fingerprint.as_str()) == Some(&&*target);
+            if !keep {
+                task.abort();
+            }
+            keep
+        });
+        for (fingerprint, target) in wanted {
+            if self.0.contains_key(fingerprint) {
+                continue;
+            }
+            let tls = match client_config(&node.cert, &node.key, &node.ca, fingerprint) {
+                Ok(tls) => tls,
+                Err(e) => {
+                    log::warning(&format!(
+                        "bmac-source: no connection to appliance {}: {e}",
+                        target.name
+                    ));
+                    continue;
+                }
+            };
+            let task = tokio::spawn(keep_connected(app.clone(), tls, target.clone()));
+            self.0
+                .insert(fingerprint.to_string(), (target.clone(), task));
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Drop for Dialers {
+    fn drop(&mut self) {
+        for (_, task) in self.0.values() {
+            task.abort();
+        }
+    }
+}
+
+async fn appliances(client: &SourceClient) -> Result<Vec<SourceTarget>, String> {
+    client
+        .typed(&SourceCall::Appliances)
+        .await
+        .map_err(|e| e.message)
 }
 
 pub struct Options {
@@ -497,73 +653,61 @@ pub async fn run(
         let path = crate::systemd::credential(name).map_err(|e| e.to_string())?;
         std::fs::read(&path).map_err(|e| format!("cannot read credential {name}: {e}"))
     };
-    let (cert, key, ca) = (
-        read(CERT_CREDENTIAL)?,
-        read(KEY_CREDENTIAL)?,
-        read(CA_CREDENTIAL)?,
-    );
-    let allow = Arc::new(Allowlist::default());
+    let node = Credentials {
+        cert: read(CERT_CREDENTIAL)?,
+        key: read(KEY_CREDENTIAL)?,
+        ca: read(CA_CREDENTIAL)?,
+    };
     let client = SourceClient::new(&options.socket);
     let mut tries = 0;
-    while let Err(e) = refresh(&client, &allow).await {
-        tries += 1;
-        if tries >= 40 {
-            return Err(format!("the engine doesn't answer: {e}"));
+    let mut targets = loop {
+        match appliances(&client).await {
+            Ok(targets) => break targets,
+            Err(e) => {
+                tries += 1;
+                if tries >= 40 {
+                    return Err(format!("the engine doesn't answer: {e}"));
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    let tls = server_config(&cert, &key, &ca, allow.clone()).map_err(|e| e.to_string())?;
+    };
     let app = Arc::new(App {
         client: client.clone(),
         zfs: options.zfs,
     });
-    let mut listeners = Listeners::new(HttpsServer::new(tls, router(app)));
     log::info(&format!(
         "bmac-source {} running",
         env!("CARGO_PKG_VERSION")
     ));
     crate::systemd::notify_ready().map_err(|e| format!("cannot notify systemd: {e}"))?;
     tokio::pin!(shutdown);
-    let mut last_listen: Option<Instant> = None;
+    let mut dialers = Dialers::default();
     let mut failing = false;
     loop {
-        if last_listen.is_none_or(|t| t.elapsed() >= LISTEN_EVERY) {
-            match client
-                .typed::<Vec<std::net::IpAddr>>(&SourceCall::Listen)
-                .await
-            {
-                Ok(ips) => {
-                    let wanted: Vec<SocketAddr> = ips
-                        .into_iter()
-                        .map(|ip| SocketAddr::new(ip, bmac_proto::appliance::SOURCE_PORT))
-                        .collect();
-                    for (address, e) in listeners.reconcile(&wanted) {
-                        log::warning(&format!("bmac-source: cannot listen on {address}: {e}"));
-                    }
-                    last_listen = Some(Instant::now());
-                }
-                Err(e) => log::warning(&format!("bmac-source: no listen addresses: {}", e.message)),
-            }
+        dialers.reconcile(&targets, &app, &node);
+        tokio::select! {
+            () = &mut shutdown => break,
+            () = tokio::time::sleep(APPLIANCES_EVERY) => {}
         }
-        match refresh(&client, &allow).await {
-            Ok(()) if failing => {
-                log::info("bmac-source: the engine answers again");
-                failing = false;
+        match appliances(&client).await {
+            Ok(next) => {
+                if failing {
+                    log::info("bmac-source: the engine answers again");
+                    failing = false;
+                }
+                targets = next;
             }
             Err(e) if !failing => {
                 log::warning(&format!(
-                    "bmac-source: cannot refresh the enrolled appliances: {e}"
+                    "bmac-source: cannot list the approved appliances: {e}"
                 ));
                 failing = true;
             }
-            _ => {}
-        }
-        tokio::select! {
-            () = &mut shutdown => break,
-            () = tokio::time::sleep(FINGERPRINTS_EVERY) => {}
+            Err(_) => {}
         }
     }
-    drop(listeners);
+    drop(dialers);
     log::info("bmac-source stopped");
     Ok(())
 }

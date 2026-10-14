@@ -678,3 +678,166 @@ async fn a_recovering_host_reads_the_namespace_and_binds_it_to_its_cluster() {
         "the grant's end closes the door"
     );
 }
+
+/// Trusts any appliance: the test plays a host that already pinned it.
+#[derive(Debug)]
+struct AnyAppliance(Arc<rustls::crypto::CryptoProvider>);
+
+impl rustls::client::danger::ServerCertVerifier for AnyAppliance {
+    fn verify_server_cert(
+        &self,
+        _: &CertificateDer<'_>,
+        _: &[CertificateDer<'_>],
+        _: &rustls::pki_types::ServerName<'_>,
+        _: &[u8],
+        _: UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("TLS 1.2 is not offered".into()))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Opens a backup connection to `a` presenting `chain`, and answers each
+/// request the appliance makes over it with the request's path.
+async fn open_backup_connection(
+    a: &Appliance,
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<tokio::task::JoinHandle<()>, String> {
+    let provider = provider();
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AnyAppliance(provider)))
+        .with_client_auth_cert(chain, key)
+        .unwrap();
+    tls.alpn_protocols = vec![SOURCE_ALPN.to_vec()];
+    let tcp = tokio::net::TcpStream::connect(a.address.to_string())
+        .await
+        .map_err(|e| e.to_string())?;
+    let stream = tokio_rustls::TlsConnector::from(Arc::new(tls))
+        .connect("vault1".try_into().unwrap(), tcp)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(tokio::spawn(async move {
+        let service = hyper::service::service_fn(|request: hyper::Request<_>| async move {
+            let path = serde_json::json!({ "path": request.uri().path() }).to_string();
+            Ok::<_, std::convert::Infallible>(hyper::Response::new(http_body_util::Full::new(
+                Bytes::from(path),
+            )))
+        });
+        let _ = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+            .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+            .await;
+    }))
+}
+
+#[tokio::test]
+async fn a_host_opens_a_backup_connection_and_the_appliances_calls_go_over_it() {
+    let a = appliance().await;
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca_cert = ca.self_signed(&ca_key).unwrap();
+    let host_key = rcgen::KeyPair::generate().unwrap();
+    let mut host = rcgen::CertificateParams::new(vec!["mox2".to_string()]).unwrap();
+    host.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+    let host_cert = host.signed_by(&host_key, &ca_cert, &ca_key).unwrap();
+    let ca_fingerprint = fingerprint(ca_cert.der());
+    state::save(
+        &a.exporter.paths.enrollment(CLUSTER),
+        &state::Enrollment {
+            schema_version: state::SCHEMA,
+            cluster_uuid: CLUSTER.into(),
+            cluster_name: "lab".into(),
+            proxmox_ca_fingerprint: ca_fingerprint.clone(),
+            hosts: Vec::new(),
+            request_id: None,
+            enrolled_at_ms: 0,
+            quota_bytes: None,
+        },
+    )
+    .unwrap();
+    let mox2 = bmac_proto::appliance::SourceHost {
+        host: "mox2".parse().unwrap(),
+        addresses: Vec::new(),
+    };
+    let client = ClusterClient::new(&ca_fingerprint, None, 8443)
+        .unwrap()
+        .via(a.exporter.tunnels.clone(), CLUSTER);
+    let unreachable = client
+        .call::<(), serde_json::Value>(&mox2, "GET", "/before", None)
+        .await;
+    assert!(
+        matches!(unreachable, Err(CallError::Unreachable(_))),
+        "{unreachable:?}"
+    );
+
+    let key = || PrivateKeyDer::try_from(host_key.serialize_der()).unwrap();
+    let server = open_backup_connection(
+        &a,
+        vec![host_cert.der().clone(), ca_cert.der().clone()],
+        key(),
+    )
+    .await
+    .unwrap();
+    eventually(|| (client.connected() == [mox2.host]).then_some(())).await;
+    let answer: serde_json::Value = client
+        .call::<(), _>(&mox2, "GET", "/api/catalog", None)
+        .await
+        .unwrap();
+    assert_eq!(answer["path"], "/api/catalog");
+
+    // A trusted peer is no host: it can't open one.
+    let (peer_cert, peer_key) = state::certificate("vault2", &id(2)).unwrap();
+    trust(&a, id(2), &peer_cert);
+    let peer = open_backup_connection(
+        &a,
+        vec![der(&peer_cert)],
+        PrivateKeyDer::from_pem_slice(peer_key.as_bytes()).unwrap(),
+    )
+    .await;
+    if let Ok(task) = peer {
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the appliance hangs up on a peer's backup connection")
+            .unwrap();
+    }
+    assert_eq!(client.connected(), [mox2.host]);
+
+    server.abort();
+    eventually(|| client.connected().is_empty().then_some(())).await;
+    assert!(
+        client
+            .call::<(), serde_json::Value>(&mox2, "GET", "/after", None)
+            .await
+            .is_err()
+    );
+}

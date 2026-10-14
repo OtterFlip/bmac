@@ -90,8 +90,9 @@ pub struct ApplianceList {
     pub can_manage: bool,
 }
 
-/// The body of `POST /api/v1/appliances/<uuid>/address`: where restore
-/// jobs reach the appliance's port 8445, or none.
+/// The body of `POST /api/v1/appliances/<uuid>/address`: the address or
+/// DNS name where the hosts and restore jobs reach the appliance's port
+/// 8445, or none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct SetApplianceAddress {
@@ -113,6 +114,9 @@ pub struct BackupsView {
     /// The caller may change policies and appliances (admins only).
     pub can_manage: bool,
     pub errors: Vec<String>,
+    /// The cluster's time zone (IANA): schedules run in it, and the
+    /// Backups page shows times in it.
+    pub time_zone: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

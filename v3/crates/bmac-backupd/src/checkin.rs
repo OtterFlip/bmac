@@ -29,6 +29,7 @@ use crate::pool::{Pool, Stream};
 use crate::pull::{Link, Progress, Published, PullError, Puller};
 use crate::recovery;
 use crate::repair::{self, PeerLink};
+use crate::retention;
 use crate::roots::Roots;
 use crate::scrub::{IoGate, ScrubState};
 use crate::state::{self, Enrollment, Identity, Paths};
@@ -88,12 +89,25 @@ impl Agent {
             .clone()
     }
 
+    /// The cluster's hosts, those connected now first.
     fn hosts(&self) -> Vec<SourceHost> {
-        self.enrollment
+        let mut hosts = self
+            .enrollment
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .hosts
-            .clone()
+            .clone();
+        let connected = self.client.connected();
+        for host in &connected {
+            if !hosts.iter().any(|h| h.host == *host) {
+                hosts.push(SourceHost {
+                    host: *host,
+                    addresses: Vec::new(),
+                });
+            }
+        }
+        hosts.sort_by_key(|h| !connected.contains(&h.host));
+        hosts
     }
 
     fn journal(&self) -> Option<Journal> {
@@ -109,9 +123,12 @@ impl Agent {
     ) -> Result<A, CallError> {
         let mut hosts = self.hosts();
         let mut last = CallError::Unreachable("no host is known".into());
-        // Rotate so a dead first host doesn't slow every call.
-        let start = (self.now_ms)().unsigned_abs() as usize % hosts.len().max(1);
-        hosts.rotate_left(start);
+        // Rotate among the connected hosts so one doesn't take every call.
+        let connected = self.client.connected().len();
+        if connected > 1 {
+            let start = (self.now_ms)().unsigned_abs() as usize % connected;
+            hosts[..connected].rotate_left(start);
+        }
         for host in &hosts {
             match self.client.call(host, method, path, body).await {
                 Ok(answer) => return Ok(answer),
@@ -319,6 +336,11 @@ impl Agent {
                     if let Err(e) = self.tests(&reply.restore_tests).await {
                         status.last_error = Some(format!("the restore tests: {e}"));
                     }
+                    if let Some(zone) = &reply.time_zone
+                        && let Err(e) = self.zone(zone, now).await
+                    {
+                        status.last_error = Some(format!("the cluster's time zone: {e}"));
+                    }
                     *self.offers.lock().unwrap_or_else(|p| p.into_inner()) = reply.offers;
                     self.offered.notify_one();
                 }
@@ -352,6 +374,20 @@ impl Agent {
         let mut roots = Roots::load(&self.metadata)?;
         if roots.named(&self.cluster_uuid(), named, now_ms) {
             roots.save(&self.metadata)?;
+        }
+        Ok(())
+    }
+
+    /// Records the cluster's time zone; a new one waits out the retention
+    /// weakening delay.
+    async fn zone(&self, zone: &str, now_ms: i64) -> Result<(), String> {
+        let _guard = self.metadata.lock().await.map_err(|e| e.to_string())?;
+        let delay = retention::Settings::load(&self.metadata)
+            .map_err(|e| e.to_string())?
+            .delay_hours;
+        let mut zones = retention::Zones::load(&self.metadata).map_err(|e| e.to_string())?;
+        if zones.report(&self.cluster_uuid(), zone, delay, now_ms)? {
+            zones.save(&self.metadata).map_err(|e| e.to_string())?;
         }
         Ok(())
     }

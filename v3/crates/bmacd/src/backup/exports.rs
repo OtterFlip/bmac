@@ -15,7 +15,7 @@ use bmac_core::ApplianceAddress;
 use bmac_proto::api::ApiError;
 use bmac_proto::appliance::{
     ExportEstimate, ExportRequest, GrantedIndex, GrantedRequest, RecoveryBind, RecoveryIndex,
-    RecoveryRequest, SOURCE_PORT, normalized_fingerprint, on_appliance,
+    RecoveryRequest, normalized_fingerprint, on_appliance,
 };
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -182,10 +182,9 @@ impl ApplianceClient {
         path: &str,
         body: Vec<u8>,
     ) -> Result<hyper::Response<Incoming>, String> {
-        let port = self.address.port_or(SOURCE_PORT);
-        let host = self.address.host_text();
         let connect = async {
-            let tcp = TcpStream::connect((host.as_str(), port))
+            let sockets = super::daemon::resolve(&self.address).await?;
+            let tcp = TcpStream::connect(sockets.as_slice())
                 .await
                 .map_err(|e| e.to_string())?;
             let _ = tcp.set_nodelay(true);
@@ -212,7 +211,7 @@ impl ApplianceClient {
         let request = hyper::Request::builder()
             .method("POST")
             .uri(path)
-            .header(hyper::header::HOST, host)
+            .header(hyper::header::HOST, self.address.host_text())
             .header(hyper::header::CONTENT_TYPE, "application/json")
             .body(Full::new(Bytes::from(body)))
             .map_err(|e| e.to_string())?;

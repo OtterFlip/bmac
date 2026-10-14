@@ -2271,10 +2271,22 @@ whole host's headers in one reply exceeded the 16 MiB socket frame.
 
 **Builds:** the remaining lab proofs in `BACKUP.md` ("To prove in the
 lab"), each with its fallback wired in until it passes, then the acceptance
-scenario run continuously for a week.
+scenario. First, four changes decided at the start of M9.6: retention by
+the cluster's calendar (`BACKUP.md`, "Appliance retention" and
+"Calendar"), the cluster's time zone chosen in the Deployer and carried to
+the appliances, hosts dialing the appliances so backup data never crosses
+Tailscale ("Connections"), and skipping a slot while the VM's previous PIT
+is still being pulled (capture step 0). The lab gets appliance B, puts
+both appliances on the hosts' network, and runs in `America/Denver`.
 
-**M9 done when:** the acceptance scenario passes in the lab, including a
-whole-cluster loss recovered from appliance B.
+The acceptance scenario runs in compressed time, in about an hour, with
+the backup settings in seconds, schedules every few minutes, and a test
+day of a few minutes on the cluster and the appliances. The same
+scenario has a soak option with default settings and real days, to run
+for 8 days once development is done; it isn't run in M9.
+
+**M9 done when:** the compressed acceptance scenario passes in the lab,
+including a whole-cluster loss recovered from appliance B.
 
 ---
 

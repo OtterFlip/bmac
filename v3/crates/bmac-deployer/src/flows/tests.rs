@@ -54,7 +54,10 @@ impl CommandRunner for Machine {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let args = command.arguments().to_vec();
+        let mut args = command.arguments().to_vec();
+        if program == "ssh" && args.first().is_some_and(|a| a == "-F") {
+            args.drain(..2);
+        }
         self.calls
             .lock()
             .unwrap()
@@ -214,6 +217,7 @@ fn setup(inventory: Inventory, dns_name: &str, dashboard_port: u16) -> Setup {
         isos: book.clone(),
         clock: Arc::new(|| 1_000),
         poll: Duration::from_millis(10),
+        time_zone: "America/Denver".into(),
         discovery_sources: (
             Pinned {
                 url: "https://example.test/ubuntu.iso".into(),
@@ -381,7 +385,7 @@ async fn boot(s: &Setup, tasks: &Tasks, id: &str, tag: &str) -> Vec<Instruction>
             .to_string_lossy()
             .into_owned()
     } else {
-        "mox1".to_string()
+        crate::hostiso::tailscale_name("mox1".parse().unwrap())
     };
     *s.machine.peer.lock().unwrap() = Some((name, tag.to_string()));
     send(tasks, id, &rid, Answer::Acknowledge);
@@ -576,6 +580,7 @@ async fn a_host_whose_certificate_differs_gets_no_dashboard_link() {
         "https://example.test/proxmox-ve_9.2-1.iso".into(),
     );
     settings.insert("PROXMOX_ISO_FILE_SHA256".into(), sha(source));
+    settings.remove("PROXMOX_TIMEZONE");
     let cluster_file = s.root.join("cluster.conf");
     std::fs::write(
         &cluster_file,
@@ -609,16 +614,23 @@ async fn a_host_whose_certificate_differs_gets_no_dashboard_link() {
         panic!("expected the host settings");
     };
     assert!(
-        fields.iter().all(|f| !f.id.starts_with("PROXMOX_")),
+        fields
+            .iter()
+            .all(|f| !f.id.starts_with("PROXMOX_") || f.id == "PROXMOX_TIMEZONE"),
         "the network is chosen after discovery"
     );
-    send(
-        &tasks,
-        &id,
-        &rid,
-        values(json!({"slot": "mox1", "MAX_PROD_VM_COUNT_ON_THIS_HOST": 1,
-                      "MAX_STAGING_VM_COUNT_ON_THIS_HOST": 4})),
+    let zone = fields.iter().find(|f| f.id == "PROXMOX_TIMEZONE").unwrap();
+    assert_eq!(
+        zone.default,
+        Some(json!("America/Denver")),
+        "the workstation's zone when the file names none"
     );
+    let mut host = json!({"slot": "mox1", "MAX_PROD_VM_COUNT_ON_THIS_HOST": 1,
+                          "MAX_STAGING_VM_COUNT_ON_THIS_HOST": 4,
+                          "PROXMOX_TIMEZONE": "Mars/Olympus"});
+    refused(&tasks, &id, &rid, values(host.clone()), "PROXMOX_TIMEZONE").await;
+    host["PROXMOX_TIMEZONE"] = json!("America/Phoenix");
+    send(&tasks, &id, &rid, values(host));
     let (rid, _) = request(&tasks, &id).await;
     send(
         &tasks,
@@ -735,6 +747,10 @@ async fn a_host_whose_certificate_differs_gets_no_dashboard_link() {
     );
     let recorded = serde_json::to_string(&view.events).unwrap();
     assert!(!recorded.contains(PASSWORD) && !recorded.contains(TS_KEY));
+    assert!(
+        recorded.contains("The cluster's time zone is America/Phoenix."),
+        "the operator's choice becomes the cluster's"
+    );
     for call in s.machine.calls.lock().unwrap().iter() {
         assert!(!call.contains(PASSWORD) && !call.contains(TS_KEY));
     }

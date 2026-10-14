@@ -263,6 +263,12 @@ The Deployer collects:
   cluster exists**: hosts, guests, and proxies already hold addresses from
   it, so bmacd refuses any change to those keys and the Settings page
   shows them read-only. Choose it with room to grow;
+- the cluster's **time zone** (`PROXMOX_TIMEZONE`, an IANA name such as
+  `America/Denver`), prefilled with the settings file's value or, without
+  one, the workstation's zone. Every host is installed in it; joining hosts
+  take it from the join bundle and aren't asked. Schedules, the
+  Dashboard's schedule times and backup retention's days follow it
+  (`BACKUP.md`, "Calendar");
 - host settings: the content of v2's `moxN.conf`: first the slot, the VM
   counts, and optionally the iDRAC address (used only to link to its web
   interface in the instructions);
@@ -651,9 +657,13 @@ Installation:
 
 On first boot, `bmac-backupd` joins Tailscale, connects to the cluster, checks
 the CA fingerprint, and presents the enrollment token together with its
-client certificate. The Dashboard shows the appliance as pending. An
-administrator approves it, which records the appliance's certificate
-fingerprint in the cluster (`BACKUP.md`). Until then no backup data moves.
+client certificate and the address it suggests for itself. The Dashboard
+shows the appliance as pending. An administrator approves it and sets its
+address (a private or public IP or a DNS name, never a Tailscale one),
+which records the appliance's certificate fingerprint in the cluster
+(`BACKUP.md`). Until then no backup data moves; after it, the hosts
+connect to the appliance at that address, and backup data never crosses
+Tailscale.
 
 The Deployer does the same handoff as for hosts: it checks the appliance's
 certificate and withholds the link on a mismatch. It then shows the link to

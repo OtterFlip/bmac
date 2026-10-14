@@ -773,7 +773,10 @@ mod tests {
     impl CommandRunner for FakeSsh {
         fn run(&self, command: Command) -> BoxFuture<'_, Result<Output, ExecError>> {
             Box::pin(async move {
-                let args = command.arguments().to_vec();
+                let mut args = command.arguments().to_vec();
+                if args.first().is_some_and(|a| a == "-F") {
+                    args.drain(..2);
+                }
                 if args[0] == "-G" {
                     if let Some(text) = &self.effective {
                         return Ok(Output {

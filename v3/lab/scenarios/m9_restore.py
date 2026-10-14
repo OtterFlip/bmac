@@ -182,7 +182,6 @@ class Restores:
     def start(self) -> None:
         b = self.b
         b.prepare()
-        b.address = b.app("tailscale ip -4 | head -n 1")
         b.find_vm()
         join.ready(self.s, b.dashboard)
         b.enroll()
@@ -192,6 +191,7 @@ class Restores:
         b.capture("P2")
         second = b.pulled("P2", 2)
         self.s.require("P1 and P2 are on the appliance", bool(first) and bool(second))
+        b.over_the_vlan("P1 and P2")
         self.pits = {"P1": first, "P2": second}
         self.note_shown()
         self.cluster_uuid = self.on("mox1", "python3 -c \"import json; "

@@ -281,8 +281,10 @@ together), and `bmac-source` as `bmac-source.service`, bound the same way.
 The front end talks to the engine over `/run/bmac/engine.sock`, and
 `bmac-source` over `/run/bmac-source/engine.sock`, a separate directory only
 its group may enter, with its own fixed set of calls: the enrolled
-fingerprints, the listen addresses, and one call per appliance request,
-naming the certificate it came with. The engine checks the peer's UID with
+appliances (name, certificate fingerprint, and address), and one call per
+appliance request, naming the certificate it came with. `bmac-source`
+listens on nothing; it dials each approved appliance's address
+(`BACKUP.md`, "Connections"). The engine checks the peer's UID with
 `SO_PEERCRED` on both.
 Every request carries the caller's token, and the engine resolves the user
 and role itself, so a compromised front end can act only within sessions it

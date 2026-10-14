@@ -112,7 +112,7 @@ class Lab:
             raise LabError(f"no lab at {self.paths.root}; run `lab/lab create` first")
         state = json.loads(self.paths.state.read_text())
         if state.get("topology_sha256") != self.topology_digest:
-            self.log(f"WARNING: {self.topology.source} changed since the lab was created; `lab/lab rebuild` applies it")
+            self.log(f"WARNING: {self.topology.source} changed since the lab was created; `lab/lab update` applies an added VM or an Ubuntu VM's network, `lab/lab rebuild` anything else")
 
     # Processes
 
@@ -560,6 +560,47 @@ class Lab:
         self.snapshot("blank")
         if install:
             self.install()
+
+    def update(self) -> None:
+        """Applies lab.toml changes that need no reinstall: creates each VM
+        added since the lab was built, with every lab snapshot taken of it as
+        created, and writes each Ubuntu VM's cloud-init seed again, which its
+        next boot applies. Another change to a Proxmox host needs a rebuild."""
+        self.require_created()
+        self.require_tools()
+        assert self.firmware is not None
+        public_key = self.paths.ssh_key.with_suffix(".pub").read_text().strip()
+        hashed = provision.password_hash(self.topology)
+        added = [vm for vm in self.topology.vms if not self.paths.disk(vm.disks[0]).exists()]
+        for vm in added:
+            if vm.image != "ubuntu":
+                raise LabError(f"{vm.name} is a new Proxmox host; `lab/lab rebuild` installs it")
+        image = None
+        if any(vm.image == "ubuntu" for vm in self.topology.vms):
+            spec = self.topology.images["ubuntu"]
+            image = provision.fetch(spec["url"], spec["sha256"], self.paths.images, self.log)
+        snapshots = self.snapshot_names()
+        for vm in added:
+            self.paths.vm(vm.name).mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.firmware[1], self.paths.vars(vm.name))
+            for position, disk in enumerate(vm.disks):
+                target = str(self.paths.disk(disk))
+                if position == 0:
+                    provision.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", str(image), target, f"{disk.size_gib}G"])
+                else:
+                    provision.run(["qemu-img", "create", "-q", "-f", "qcow2", target, f"{disk.size_gib}G"])
+                for name in snapshots:
+                    provision.run(["qemu-img", "snapshot", "-c", name, target])
+            for name in snapshots:
+                shutil.copyfile(self.paths.vars(vm.name), self.paths.snapshots / name / f"{vm.name}.fd")
+            self.log(f"Created {vm.name}")
+        for vm in self.topology.vms:
+            if vm.image == "ubuntu":
+                provision.build_seed(self.topology, vm, self.paths, hashed, public_key)
+        state = json.loads(self.paths.state.read_text())
+        state["topology_sha256"] = self.topology_digest
+        self.paths.state.write_text(json.dumps(state) + "\n")
+        self.log("Updated the lab; a running Ubuntu VM takes its new seed when it boots again")
 
     def install(self) -> None:
         """Installs Proxmox on every host and boots the rest, then snapshots `installed`."""

@@ -97,6 +97,7 @@ async fn main() -> Result<(), String> {
         poll: Duration::from_secs(5),
         discovery_sources: flows::discovery_sources(None),
         dashboard_port: bmac_deployer::hostiso::DASHBOARD_PORT,
+        time_zone: flows::workstation_zone(),
     };
     let tasks = Arc::new(Tasks::new(lines.clone(), Arc::new(bmac_deployer::now_ms)));
     let id = flows::start(&tasks, kind, Arc::new(env)).id;

@@ -10,7 +10,9 @@
 //! grant names (a cluster rebuilt on new hardware) reads its namespace's
 //! recovery manifest and every PIT of it, and may bind the namespace to its
 //! cluster. Untrusting a peer, a cluster's enrollment going, or a recovery
-//! grant ending closes its open connections.
+//! grant ending closes its open connections. A cluster host's connection
+//! with ALPN `bmac-source/1` is the host's backup connection, handed to
+//! [`Tunnels`].
 
 use std::collections::BTreeMap;
 use std::io;
@@ -33,8 +35,8 @@ use bmac_exec::BoxFuture;
 use bmac_proto::api::{ApiError, ErrorCode};
 use bmac_proto::appliance::{
     ExportEstimate, ExportRequest, GrantedBase, GrantedIndex, GrantedRequest, PeerIndex, PeerPit,
-    PeerVolume, RecoveryBind, RecoveryIndex, RecoveryRequest, TrustedPeer, on_appliance,
-    trusted_peer,
+    PeerVolume, RecoveryBind, RecoveryIndex, RecoveryRequest, SOURCE_ALPN, TrustedPeer,
+    on_appliance, trusted_peer,
 };
 use bytes::Bytes;
 use http_body::Frame;
@@ -58,6 +60,7 @@ use crate::journal::{Journal, Metadata, StoredPit};
 use crate::peers::{Peers, Refusal};
 use crate::pool::{Pool, ZFS};
 use crate::state::{self, Identity, Paths};
+use crate::tunnels::{self, Tunnels};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONNECTIONS: usize = 64;
@@ -412,6 +415,8 @@ pub struct Exporter {
     pub unlocked: Arc<dyn Fn() -> BoxFuture<'static, bool> + Send + Sync>,
     pub now_ms: Arc<dyn Fn() -> i64 + Send + Sync>,
     pub zfs: PathBuf,
+    /// The cluster hosts' backup connections.
+    pub tunnels: Arc<Tunnels>,
     cert: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
     provider: Arc<CryptoProvider>,
@@ -446,6 +451,7 @@ impl Exporter {
             unlocked,
             now_ms,
             zfs: PathBuf::from(ZFS),
+            tunnels: Arc::default(),
             cert,
             key,
             provider: provider(),
@@ -528,7 +534,7 @@ impl Exporter {
             .with_protocol_versions(&[&rustls::version::TLS13])?
             .with_client_cert_verifier(verifier)
             .with_single_cert(self.cert.clone(), self.key.clone_key())?;
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = vec![SOURCE_ALPN.to_vec(), b"http/1.1".to_vec()];
         // Every connection is verified afresh: no resumed sessions.
         config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
         config.send_tls13_tickets = 0;
@@ -566,17 +572,30 @@ impl Exporter {
             _ => return,
         };
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        let app = router(self.clone()).layer(Extension(client.clone()));
-        let serve = tokio::spawn(async move {
-            let _ = hyper::server::conn::http1::Builder::new()
-                .timer(TokioTimer::new())
-                .header_read_timeout(HANDSHAKE_TIMEOUT)
-                .serve_connection(
-                    TokioIo::new(tls),
-                    hyper_util::service::TowerToHyperService::new(app),
-                )
-                .await;
-        });
+        let serve = if tls.get_ref().1.alpn_protocol() == Some(SOURCE_ALPN) {
+            let Some((cluster, host)) = self.backup_connection(&client, &tls, from) else {
+                return;
+            };
+            let exporter = self.clone();
+            tokio::spawn(async move {
+                eprintln!("bmac-backupd: {host} of cluster {cluster} connected from {from}");
+                let ended = exporter.tunnels.serve(&cluster, host, tls).await;
+                let why = ended.err().unwrap_or_else(|| "closed".into());
+                eprintln!("bmac-backupd: {host} of cluster {cluster}: the connection ended: {why}");
+            })
+        } else {
+            let app = router(self.clone()).layer(Extension(client.clone()));
+            tokio::spawn(async move {
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .timer(TokioTimer::new())
+                    .header_read_timeout(HANDSHAKE_TIMEOUT)
+                    .serve_connection(
+                        TokioIo::new(tls),
+                        hyper_util::service::TowerToHyperService::new(app),
+                    )
+                    .await;
+            })
+        };
         self.open
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -586,6 +605,37 @@ impl Exporter {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&id);
+    }
+
+    /// The cluster and host of a backup connection, if it may be one: a
+    /// cluster host's, naming its slot.
+    fn backup_connection(
+        &self,
+        client: &Client,
+        tls: &tokio_rustls::server::TlsStream<TcpStream>,
+        from: SocketAddr,
+    ) -> Option<(String, bmac_core::HostSlot)> {
+        let Client::Cluster { cluster_uuid, .. } = client else {
+            eprintln!(
+                "bmac-backupd: exports: {} from {from} asked for a backup connection; only \
+                 cluster hosts open one",
+                client.label()
+            );
+            return None;
+        };
+        let host = tls
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|chain| chain.first())
+            .and_then(|cert| tunnels::host_of(cert));
+        if host.is_none() {
+            eprintln!(
+                "bmac-backupd: exports: a certificate of cluster {cluster_uuid} from {from} names \
+                 no host"
+            );
+        }
+        Some((cluster_uuid.clone(), host?))
     }
 
     async fn refused(&self, fingerprint: String, claimed: String, from: SocketAddr) {

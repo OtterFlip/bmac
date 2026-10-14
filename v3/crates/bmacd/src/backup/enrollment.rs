@@ -244,6 +244,7 @@ impl Appliances {
             .clone()
             .ok_or_else(|| invalid("the request has no name"))?;
         let now = (self.clock)();
+        let suggested = pending.appliance_address.clone();
         let saved = self.store.locked(|l| {
             let others = l.store().appliances()?;
             if let Some(clash) = others
@@ -272,8 +273,8 @@ impl Appliances {
                     existing.enrollment = Enrollment::Approved;
                     existing.retired = false;
                     existing.enrolled_at_ms = now;
-                    if pending.appliance_address.is_some() {
-                        existing.address = pending.appliance_address.clone();
+                    if suggested.is_some() {
+                        existing.address = suggested.clone();
                     }
                     existing
                 }
@@ -284,7 +285,7 @@ impl Appliances {
                     appliance_uuid,
                     name: name.clone(),
                     fingerprint: fingerprint.clone(),
-                    address: pending.appliance_address.clone(),
+                    address: suggested.clone(),
                     enrollment: Enrollment::Approved,
                     enrolled_at_ms: now,
                     paused: false,
@@ -322,7 +323,8 @@ impl Appliances {
         })
     }
 
-    /// Where restore jobs reach the appliance's port 8445; none clears it.
+    /// Where the hosts and restore jobs reach the appliance's port 8445;
+    /// none clears it, and the hosts stop connecting to it.
     pub fn set_address(
         &self,
         appliance: &Uuid,

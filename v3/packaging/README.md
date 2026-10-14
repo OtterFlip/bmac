@@ -16,8 +16,10 @@ package is built by Tauri from `deployer/`.
   the engine and sandboxed. It gets the HTTPS key and certificate through
   `LoadCredential` and cannot see `/etc/pve`, `/etc/bmac`, or
   `/var/lib/bmac`.
-- `systemd/bmac-source.service`: the backup source endpoint on port 8445,
-  as `bmac-source`, bound to the engine like the front end. It gets the
+- `systemd/bmac-source.service`: the backup source, as `bmac-source`, bound
+  to the engine like the front end. It listens on nothing: it dials each
+  approved appliance's address on port 8445 and serves the appliance's
+  requests over that connection. It gets the
   node's Proxmox certificate, key, and cluster CA through `LoadCredential`,
   talks to the engine on `/run/bmac-source/engine.sock`, and reaches only
   `/dev/zfs`, for the sends ZFS delegation allows it.

@@ -108,7 +108,7 @@ def conf_files(topology: Topology) -> dict[str, str]:
         ("STAGING_VM_BRIDGE", "vmbr-private"),
         ("ISO_STORAGE_ID", "local"),
         ("SNIPPETS_STORAGE_ID", "local"),
-        ("PROXMOX_TIMEZONE", "UTC"),
+        ("PROXMOX_TIMEZONE", "America/Denver"),
     ]
     files = {"cluster.conf": _conf(cluster)}
     uplink_cidr = "10.0.2.15/24"

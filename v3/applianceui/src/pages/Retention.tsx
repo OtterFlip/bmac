@@ -7,22 +7,30 @@
 
 import { useEffect, useState } from "react";
 import { Archive, Scissors } from "lucide-react";
-import { Button, Card, CardBody, CardHeader, Dialog, Input, KV, Label, bytes, type RetentionCounts } from "@bmac/ui";
+import { Button, Card, CardBody, CardHeader, Checkbox, Dialog, Input, KV, Label, bytes, type RetentionCounts } from "@bmac/ui";
 import { Done, PageBody, PageHeader, Problem, Warning, short, useAction, useApi, useLoad, when, whenSeconds } from "../parts";
 
 const TIERS = ["daily", "weekly", "monthly"] as const;
 
+/** Such as "7 daily, 4 weekly, 12 monthly of 30 days, then yearly". */
+export function describeRetention(p: RetentionCounts): string {
+  return `${p.daily} daily, ${p.weekly} weekly, ${p.monthly} monthly of ${p.month_days} days, ${p.yearly ? "then yearly" : "then every monthly"}`;
+}
+
 export function RetentionPage() {
   const api = useApi();
   const { data, error, reload } = useLoad((a) => a.retention());
-  const [form, setForm] = useState<Record<(typeof TIERS)[number], string>>({ daily: "", weekly: "", monthly: "" });
+  const [form, setForm] = useState<Record<(typeof TIERS)[number] | "month_days", string>>({ daily: "", weekly: "", monthly: "", month_days: "" });
+  const [yearly, setYearly] = useState(true);
   const [confirming, setConfirming] = useState(false);
   const action = useAction();
   useEffect(() => {
-    if (data) setForm({ daily: String(data.policy.daily), weekly: String(data.policy.weekly), monthly: String(data.policy.monthly) });
+    if (!data) return;
+    setForm({ daily: String(data.policy.daily), weekly: String(data.policy.weekly), monthly: String(data.policy.monthly), month_days: String(data.policy.month_days) });
+    setYearly(data.policy.yearly);
   }, [data]);
-  const policy: RetentionCounts = { daily: Number(form.daily), weekly: Number(form.weekly), monthly: Number(form.monthly) };
-  const valid = TIERS.every((t) => /^\d+$/.test(form[t]));
+  const policy: RetentionCounts = { daily: Number(form.daily), weekly: Number(form.weekly), monthly: Number(form.monthly), month_days: Number(form.month_days), yearly };
+  const valid = TIERS.every((t) => /^\d+$/.test(form[t])) && /^\d+$/.test(form.month_days) && policy.month_days >= 28 && policy.month_days <= 31;
   const save = () =>
     action.run(async () => {
       const change = await api.setRetention(policy);
@@ -31,13 +39,13 @@ export function RetentionPage() {
     });
   return (
     <>
-      <PageHeader title="Retention" subtitle="How many daily, weekly, and monthly PITs this appliance keeps of each VM" />
+      <PageHeader title="Retention" subtitle="Which PITs this appliance keeps of each VM: all of today's, then the newest of each day, week, month, and optionally year, on its cluster's calendar" />
       <PageBody>
         <Problem>{error ?? action.error}</Problem>
         <Done>{action.done}</Done>
         {data?.pending && (
           <Warning>
-            Pending: {data.pending.policy.daily} daily, {data.pending.policy.weekly} weekly, {data.pending.policy.monthly} monthly, from {when(data.pending.effective_at_ms)} (asked for by {data.pending.by}).{" "}
+            Pending: {describeRetention(data.pending.policy)}, from {when(data.pending.effective_at_ms)} (asked for by {data.pending.by}).{" "}
             <Button size="sm" variant="link" onClick={() => void action.run(async () => (await api.cancelRetention(), await reload(), "The pending change is canceled."))}>
               Cancel it
             </Button>
@@ -57,6 +65,18 @@ export function RetentionPage() {
                     </div>
                   ))}
                 </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <Label htmlFor="keep-month-days">days in a month</Label>
+                    <Input id="keep-month-days" value={form.month_days} inputMode="numeric" onChange={(e) => setForm({ ...form, month_days: e.target.value })} />
+                    <p className="mt-1 text-[11.5px] text-fg-subtle">28 to 31</p>
+                  </div>
+                  <label className="col-span-2 flex items-center gap-2 self-center text-[12.5px]">
+                    <Checkbox checked={yearly} onCheckedChange={(on) => setYearly(on === true)} aria-label="yearly" />
+                    Keep one PIT a year for months older than the monthly ones; off keeps every monthly PIT
+                  </label>
+                </div>
+                <p className="text-[12px] text-fg-subtle">Every PIT of today stays. Weeks, months, and years count from each VM's first PIT; days are its cluster's calendar days.</p>
                 <Button variant="primary" disabled={!valid || action.busy} onClick={() => void save()}>
                   Save
                 </Button>
@@ -95,6 +115,7 @@ export function RetentionPage() {
                   <th className="px-3 py-2 font-medium">PITs kept</th>
                   <th className="px-3 py-2 font-medium">Oldest</th>
                   <th className="px-3 py-2 font-medium">Newest</th>
+                  <th className="px-3 py-2 font-medium">Cluster's zone</th>
                 </tr>
               </thead>
               <tbody>
@@ -102,8 +123,9 @@ export function RetentionPage() {
                   <tr key={`${c.cluster_uuid}/${c.vm_uuid}`} className="border-b border-line/50">
                     <td className="px-3 py-1.5 font-mono">{short(c.vm_uuid)}</td>
                     <td className="px-3 py-1.5">{c.pits}</td>
-                    <td className="px-3 py-1.5">{whenSeconds(c.oldest_s)}</td>
-                    <td className="px-3 py-1.5">{whenSeconds(c.newest_s)}</td>
+                    <td className="px-3 py-1.5">{whenSeconds(c.oldest_s, c.time_zone)}</td>
+                    <td className="px-3 py-1.5">{whenSeconds(c.newest_s, c.time_zone)}</td>
+                    <td className="px-3 py-1.5 text-fg-subtle">{c.time_zone}</td>
                   </tr>
                 ))}
               </tbody>

@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 use super::capture::RegistryGuests;
 use super::cluster::RealCluster;
-use super::source::{Source, TransferDone, enrolled_fingerprints};
+use super::source::{Source, TransferDone, enrolled_targets};
 use super::source_socket::{MAX_HEADER, SourceCall, SourceHandler};
 use super::store::BackupStore;
 use crate::cluster::ClusterView;
@@ -32,8 +32,6 @@ pub struct EngineSource {
     pub luks_headers: PathBuf,
     /// `/etc/pve/priv/bmac`, for the recovery manifest.
     pub recovery_root: PathBuf,
-    /// The engine's own listen addresses, whose IPs 8445 binds too.
-    pub listen: Option<tokio::sync::watch::Receiver<Vec<std::net::SocketAddr>>>,
 }
 
 impl EngineSource {
@@ -45,22 +43,7 @@ impl EngineSource {
             settings: crate::settings::Settings::system(),
             luks_headers: PathBuf::from(crate::native::storage::HEADER_DIR),
             recovery_root: PathBuf::from(super::recovery::ROOT),
-            listen: None,
         }
-    }
-
-    fn addresses(&self) -> BTreeMap<HostSlot, Vec<String>> {
-        let mut out = BTreeMap::new();
-        for facts in self.settings.hosts().unwrap_or_default() {
-            if let Some(name) = facts
-                .values
-                .get("TAILSCALE_HOSTNAME")
-                .filter(|n| !n.is_empty())
-            {
-                out.insert(facts.host, vec![name.clone()]);
-            }
-        }
-        out
     }
 
     async fn answer(&self, call: SourceCall) -> Result<Value, ApiError> {
@@ -74,8 +57,6 @@ impl EngineSource {
             runner: &runner,
             owner: format!("bmac-source-{}", self.host),
         };
-        let known = self.addresses();
-        let addresses = move |host: HostSlot| known.get(&host).cloned().unwrap_or_default();
         let cluster_uuid = crate::joins::JoinStore::system()
             .cluster()?
             .map(|c| c.cluster_uuid)
@@ -85,22 +66,12 @@ impl EngineSource {
             store: &self.store,
             cluster: &cluster,
             guests: &guests,
-            addresses: &addresses,
             cluster_uuid: cluster_uuid.clone(),
             now_ms: &now,
+            time_zone: jiff::tz::TimeZone::system().iana_name().map(str::to_string),
         };
         match call {
-            SourceCall::Fingerprints => Ok(json(&enrolled_fingerprints(&self.store)?)),
-            SourceCall::Listen => {
-                let mut ips: Vec<std::net::IpAddr> = self
-                    .listen
-                    .as_ref()
-                    .map(|l| l.borrow().iter().map(|a| a.ip()).collect())
-                    .unwrap_or_default();
-                ips.sort();
-                ips.dedup();
-                Ok(json(&ips))
-            }
+            SourceCall::Appliances => Ok(json(&enrolled_targets(&self.store)?)),
             SourceCall::Checkin {
                 fingerprint,
                 request,
@@ -376,7 +347,6 @@ const DELEGATE_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
 pub fn spawn(
     host: HostSlot,
     cluster: Arc<dyn ClusterView>,
-    listen: tokio::sync::watch::Receiver<Vec<std::net::SocketAddr>>,
 ) -> Result<Vec<tokio::task::JoinHandle<()>>, String> {
     use super::source_socket::{SOURCE_DIRECTORY, SOURCE_SOCKET, SOURCE_USER};
     let account = crate::peers::lookup_account("/etc/passwd".as_ref(), SOURCE_USER)
@@ -385,8 +355,7 @@ pub fn spawn(
         .map_err(|e| format!("cannot prepare {SOURCE_DIRECTORY}: {e}"))?;
     let listener = crate::engine::server::bind(SOURCE_SOCKET.as_ref(), Some(account.gid))
         .map_err(|e| format!("cannot open {SOURCE_SOCKET}: {e}"))?;
-    let mut handler = EngineSource::system(host, cluster);
-    handler.listen = Some(listen);
+    let handler = EngineSource::system(host, cluster);
     let serve = tokio::spawn(super::source_socket::serve(
         listener,
         crate::peers::AllowedPeers::new([0, account.uid]),

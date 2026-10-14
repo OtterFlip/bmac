@@ -4,6 +4,7 @@
 import { Database, Radio, ShieldCheck, Waypoints } from "lucide-react";
 import { Badge, Card, CardBody, CardHeader, KV, Meter, StatusPill, bytes, type ApplianceStatusView, type Health } from "@bmac/ui";
 import { PageBody, PageHeader, Problem, Warning, short, useLoad, when } from "../parts";
+import { describeRetention } from "./Retention";
 
 function poolHealth(health: string): Health {
   if (health === "ONLINE") return "ok";
@@ -42,7 +43,7 @@ export function OverviewPage() {
             {data.notify_error && <Warning>The watchdog's email is stopped: {data.notify_error}</Warning>}
             {data.pending_retention && (
               <Warning>
-                A retention change that keeps less ({data.pending_retention.policy.daily} daily, {data.pending_retention.policy.weekly} weekly, {data.pending_retention.policy.monthly} monthly) takes effect {when(data.pending_retention.effective_at_ms)}.
+                A retention change that keeps less ({describeRetention(data.pending_retention.policy)}) takes effect {when(data.pending_retention.effective_at_ms)}.
               </Warning>
             )}
             <div className="grid gap-5 lg:grid-cols-2">
@@ -93,7 +94,9 @@ export function OverviewPage() {
                       {c.offers > 0 && <Badge tone="info">{c.offers} offered</Badge>}
                       <span className="ml-auto text-[12px] text-fg-subtle">last check-in {when(c.last_checkin_ms)}</span>
                     </div>
-                    <div className="mt-1 text-[12px] text-fg-muted">hosts: {c.hosts.join(", ") || "none yet"}</div>
+                    <div className="mt-1 text-[12px] text-fg-muted">
+                      hosts: {c.hosts.join(", ") || "none yet"} · time zone {c.time_zone}
+                    </div>
                     {c.last_error && <div className="mt-1 text-[12px] text-danger">{c.last_error}</div>}
                   </div>
                 ))}

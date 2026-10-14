@@ -9,4 +9,9 @@ export type ClusterView = { cluster_uuid: string, cluster_name: string,
 /**
  * This appliance's state as the cluster last said, such as `ACTIVE`.
  */
-state: string | null, last_checkin_ms: number | null, last_error: string | null, offers: number, pulling: string | null, hosts: Array<string>, };
+state: string | null, last_checkin_ms: number | null, last_error: string | null, offers: number, pulling: string | null, hosts: Array<string>, 
+/**
+ * The cluster's time zone (IANA), which its PITs and retention's days
+ * are shown in; UTC until it reports one.
+ */
+time_zone: string, };

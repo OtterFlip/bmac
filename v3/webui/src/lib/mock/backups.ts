@@ -68,8 +68,8 @@ export function demoAppliances(now = Date.now()): ApplianceList {
   });
   return {
     appliances: [
-      appliance(VAULT, "vault", "100.64.0.20", "3F:9A:11:C2:7B:0E:44:5D:A8:19:E2:6C:0B:93:7F:21:55:AC:D0:48:1E:6B:F2:39:C7:84:0A:5E:B1:66:2D:F3"),
-      appliance(OFFSITE, "offsite", "100.64.0.21", "A1:04:7C:3E:92:5B:D8:16:4F:E0:2A:B7:69:C3:08:5D:F1:4A:93:2E:B6:70:1C:D5:8F:3B:E9:62:07:A4:5C:D8"),
+      appliance(VAULT, "vault", "10.40.0.20", "3F:9A:11:C2:7B:0E:44:5D:A8:19:E2:6C:0B:93:7F:21:55:AC:D0:48:1E:6B:F2:39:C7:84:0A:5E:B1:66:2D:F3"),
+      appliance(OFFSITE, "offsite", "backup.example.net", "A1:04:7C:3E:92:5B:D8:16:4F:E0:2A:B7:69:C3:08:5D:F1:4A:93:2E:B6:70:1C:D5:8F:3B:E9:62:07:A4:5C:D8"),
     ],
     requests: [],
     can_manage: false,
@@ -190,6 +190,7 @@ export function demoBackups(now = Date.now()): BackupsView {
       error: null,
     })),
     can_manage: false,
+    time_zone: "America/Denver",
     errors: [],
   };
 }

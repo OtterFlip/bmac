@@ -107,11 +107,12 @@ export function short(uuid: string): string {
   return uuid.slice(0, 8);
 }
 
-export function when(ms: number | null | undefined): string {
+/** A time in `timeZone` (a cluster's), or the browser's. */
+export function when(ms: number | null | undefined, timeZone?: string): string {
   if (ms === null || ms === undefined) return "—";
-  return new Date(ms).toLocaleString();
+  return new Date(ms).toLocaleString([], { timeZone });
 }
 
-export function whenSeconds(s: number): string {
-  return new Date(s * 1000).toLocaleString();
+export function whenSeconds(s: number, timeZone?: string): string {
+  return when(s * 1000, timeZone);
 }

@@ -22,6 +22,7 @@ function pit(id: string, taken_s: number, branch: string, parent: string | null,
     held: false,
     suspect: false,
     granted: false,
+    time_zone: "America/Denver",
   };
 }
 

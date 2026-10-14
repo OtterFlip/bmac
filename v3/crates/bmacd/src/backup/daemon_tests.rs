@@ -4,17 +4,18 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use bmac_core::ApplianceAddress;
 use bmac_core::SnapshotGuid;
 use bmac_proto::api::{ApiError, ErrorCode};
-use bmac_proto::appliance::{SendRequest, on_source};
+use bmac_proto::appliance::{SOURCE_ALPN, SendRequest, on_source};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::{Value, json};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use super::*;
@@ -75,8 +76,9 @@ impl SourceHandler for FakeEngine {
         Box::pin(async move {
             self.calls.lock().unwrap().push(call.clone());
             match call {
-                SourceCall::Fingerprints => Ok(json!([self.allowed])),
-                SourceCall::Listen => Ok(json!([])),
+                SourceCall::Appliances => Ok(json!([{
+                    "name": "vault", "fingerprint": self.allowed, "address": "192.0.2.20",
+                }])),
                 SourceCall::AuthorizeSend { fingerprint, .. }
                     if fingerprint == self.allowed
                         && !self.refuse_sends.load(std::sync::atomic::Ordering::SeqCst) =>
@@ -128,8 +130,8 @@ const STREAM: &str = "a zfs send stream";
 struct Rig {
     _dir: tempfile::TempDir,
     certs: Certs,
-    address: std::net::SocketAddr,
     engine: Arc<FakeEngine>,
+    app: Arc<App>,
     log: PathBuf,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -164,64 +166,86 @@ async fn rig() -> Rig {
     let socket = dir.path().join("engine.sock");
     let listener = crate::engine::server::bind(&socket, None).unwrap();
     let uid = rustix::process::geteuid().as_raw();
-    let mut tasks = vec![tokio::spawn(serve(
+    let tasks = vec![tokio::spawn(serve(
         listener,
         AllowedPeers::new([uid]),
         engine.clone(),
         std::future::pending(),
     ))];
     let client = SourceClient::new(&socket);
-    let allow = Arc::new(Allowlist::default());
-    refresh(&client, &allow).await.unwrap();
-    let tls = server_config(
-        certs.node.as_bytes(),
-        certs.node_key.as_bytes(),
-        certs.ca.as_bytes(),
-        allow,
-    )
-    .unwrap();
+    assert_eq!(appliances(&client).await.unwrap().len(), 1);
     let app = Arc::new(App { client, zfs });
-    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = tcp.local_addr().unwrap();
-    tasks.push(tokio::spawn(HttpsServer::new(tls, router(app)).serve(tcp)));
     Rig {
         _dir: dir,
         certs,
-        address,
         engine,
+        app,
         log,
         tasks,
     }
 }
 
+type Sender = hyper::client::conn::http2::SendRequest<Full<Bytes>>;
+
 impl Rig {
-    /// A client pinning the cluster CA and presenting `who`'s certificate.
-    async fn connect(
-        &self,
-        who: &(String, String),
-    ) -> Result<hyper::client::conn::http1::SendRequest<Full<Bytes>>, String> {
+    fn node(&self) -> Credentials {
+        Credentials {
+            cert: self.certs.node.clone().into_bytes(),
+            key: self.certs.node_key.clone().into_bytes(),
+            ca: self.certs.ca.clone().into_bytes(),
+        }
+    }
+
+    /// Plays an appliance presenting `who`'s certificate: the host, pinning
+    /// `pinned`, dials it, and the appliance gets an HTTP/2 client over the
+    /// connection, or the host's reason for giving up.
+    async fn appliance(&mut self, who: &(String, String), pinned: &str) -> Result<Sender, String> {
         let mut roots = rustls::RootCertStore::empty();
         roots
             .add(CertificateDer::from_pem_slice(self.certs.ca.as_bytes()).unwrap())
             .unwrap();
-        let config = rustls::ClientConfig::builder_with_provider(crate::mesh::tls::provider())
+        let provider = crate::mesh::tls::provider();
+        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            roots.into(),
+            provider.clone(),
+        )
+        .build()
+        .unwrap();
+        let mut server = rustls::ServerConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13])
             .unwrap()
-            .with_root_certificates(roots)
-            .with_client_auth_cert(
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(
                 vec![CertificateDer::from_pem_slice(who.0.as_bytes()).unwrap()],
                 PrivateKeyDer::from_pem_slice(who.1.as_bytes()).unwrap(),
             )
             .unwrap();
-        let tcp = TcpStream::connect(self.address).await.unwrap();
-        let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
-            .connect(ServerName::try_from("localhost").unwrap(), tcp)
-            .await
-            .map_err(|e| e.to_string())?;
-        let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
-            .await
-            .map_err(|e| e.to_string())?;
-        tokio::spawn(connection);
+        server.alpn_protocols = vec![SOURCE_ALPN.to_vec()];
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address: ApplianceAddress = listener.local_addr().unwrap().to_string().parse().unwrap();
+        let node = self.node();
+        let tls = client_config(&node.cert, &node.key, &node.ca, pinned).unwrap();
+        let (done, outcome) = tokio::sync::oneshot::channel();
+        let app = self.app.clone();
+        self.tasks.push(tokio::spawn(async move {
+            let _ = done.send(connect(app, tls, "vault", &address).await);
+        }));
+        let (tcp, _) = listener.accept().await.unwrap();
+        let accepted = tokio_rustls::TlsAcceptor::from(Arc::new(server))
+            .accept(tcp)
+            .await;
+        let Ok(stream) = accepted else {
+            return Err(outcome.await.unwrap().unwrap_err());
+        };
+        let (_, session) = stream.get_ref();
+        assert_eq!(session.alpn_protocol(), Some(SOURCE_ALPN));
+        let (sender, connection) =
+            hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+                .await
+                .map_err(|e| e.to_string())?;
+        self.tasks.push(tokio::spawn(async move {
+            let _ = connection.await;
+        }));
         Ok(sender)
     }
 
@@ -235,7 +259,7 @@ impl Rig {
 }
 
 async fn request(
-    sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+    sender: &mut Sender,
     method: &str,
     path: &str,
     body: Option<Value>,
@@ -243,11 +267,11 @@ async fn request(
     let body = body.map(|b| b.to_string()).unwrap_or_default();
     let request = hyper::Request::builder()
         .method(method)
-        .uri(path)
-        .header("host", "localhost")
+        .uri(format!("https://mox1{path}"))
         .header("content-type", "application/json")
         .body(Full::new(Bytes::from(body)))
         .unwrap();
+    sender.ready().await.unwrap();
     let response = sender.send_request(request).await.unwrap();
     let status = response.status().as_u16();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
@@ -269,9 +293,13 @@ fn send_request() -> Value {
 }
 
 #[tokio::test]
-async fn an_enrolled_appliance_streams_a_held_send_and_the_engine_hears_how_it_went() {
-    let rig = rig().await;
-    let mut appliance = rig.connect(&rig.certs.appliance).await.unwrap();
+async fn the_host_dials_the_appliance_which_streams_a_held_send_and_the_engine_hears_how_it_went() {
+    let mut rig = rig().await;
+    let (who, pinned) = (
+        rig.certs.appliance.clone(),
+        pem_fingerprint(&rig.certs.appliance.0),
+    );
+    let mut appliance = rig.appliance(&who, &pinned).await.unwrap();
     let (status, body) = request(
         &mut appliance,
         "POST",
@@ -326,11 +354,15 @@ async fn an_enrolled_appliance_streams_a_held_send_and_the_engine_hears_how_it_w
 
 #[tokio::test]
 async fn a_send_the_engine_refuses_runs_no_zfs() {
-    let rig = rig().await;
+    let mut rig = rig().await;
     rig.engine
         .refuse_sends
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let mut appliance = rig.connect(&rig.certs.appliance).await.unwrap();
+    let (who, pinned) = (
+        rig.certs.appliance.clone(),
+        pem_fingerprint(&rig.certs.appliance.0),
+    );
+    let mut appliance = rig.appliance(&who, &pinned).await.unwrap();
     let (status, _) = request(
         &mut appliance,
         "POST",
@@ -351,15 +383,17 @@ async fn a_send_the_engine_refuses_runs_no_zfs() {
 }
 
 #[tokio::test]
-async fn a_certificate_that_isnt_enrolled_fails_the_handshake() {
-    let rig = rig().await;
-    let refused = match rig.connect(&rig.certs.stranger).await {
+async fn the_host_hangs_up_on_an_appliance_with_another_certificate() {
+    let mut rig = rig().await;
+    let (stranger, pinned) = (
+        rig.certs.stranger.clone(),
+        pem_fingerprint(&rig.certs.appliance.0),
+    );
+    let refused = match rig.appliance(&stranger, &pinned).await {
         Err(e) => e,
         Ok(mut sender) => {
-            // TLS 1.3 reports a refused client certificate on the first read.
             let request = hyper::Request::builder()
-                .uri(on_source::CATALOG)
-                .header("host", "localhost")
+                .uri(format!("https://mox1{}", on_source::CATALOG))
                 .body(Full::new(Bytes::new()))
                 .unwrap();
             match sender.send_request(request).await {
@@ -380,13 +414,30 @@ async fn a_certificate_that_isnt_enrolled_fails_the_handshake() {
     );
 }
 
-#[test]
-fn the_allowlist_admits_no_one_until_the_engine_has_answered() {
-    let allow = Allowlist::default();
-    assert!(!allow.allows("abc"));
-    allow.set(["abc".to_string()]);
-    assert!(allow.allows("abc"));
-    assert!(!allow.allows("abd"));
-    allow.set([]);
-    assert!(!allow.allows("abc"));
+#[tokio::test]
+async fn a_connection_is_kept_to_each_appliance_with_an_address() {
+    let rig = rig().await;
+    let target = |n: u8, address: Option<&str>| SourceTarget {
+        name: format!("vault{n}"),
+        fingerprint: format!("{n:02x}").repeat(32),
+        address: address.map(|a| a.parse().unwrap()),
+    };
+    let mut dialers = Dialers::default();
+    dialers.reconcile(
+        &[target(1, Some("192.0.2.1")), target(2, None)],
+        &rig.app,
+        &rig.node(),
+    );
+    assert_eq!(dialers.len(), 1, "no address, no connection");
+    dialers.reconcile(
+        &[target(1, Some("192.0.2.9")), target(2, Some("192.0.2.2"))],
+        &rig.app,
+        &rig.node(),
+    );
+    assert_eq!(dialers.len(), 2);
+    dialers.reconcile(&[], &rig.app, &rig.node());
+    assert!(
+        dialers.is_empty(),
+        "a revoked appliance's connection is dropped"
+    );
 }

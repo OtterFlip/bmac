@@ -24,6 +24,16 @@ pub struct BackupSettings {
     pub delinquency_s: i64,
     pub streams_per_appliance: u32,
     pub min_healthy_appliances: u32,
+    /// For tests only: local retention's days last this many seconds
+    /// instead of the cluster's calendar days.
+    pub test_day_s: Option<i64>,
+}
+
+impl BackupSettings {
+    /// The calendar local retention runs on, in the cluster's `zone`.
+    pub fn calendar(&self, zone: jiff::tz::TimeZone) -> crate::retention::Calendar {
+        crate::retention::Calendar::new(zone, self.test_day_s)
+    }
 }
 
 impl Default for BackupSettings {
@@ -37,6 +47,7 @@ impl Default for BackupSettings {
             delinquency_s: 72 * 3600,
             streams_per_appliance: 1,
             min_healthy_appliances: 1,
+            test_day_s: None,
         }
     }
 }
@@ -64,6 +75,9 @@ impl BackupSettings {
         }
         if self.delinquency_s <= self.late_after_s {
             return Err("the delinquency period must be longer than the late threshold".into());
+        }
+        if self.test_day_s.is_some_and(|s| s <= 0) {
+            return Err("test_day_s must be positive".into());
         }
         if self.streams_per_appliance == 0 {
             return Err("an appliance needs at least one stream".into());

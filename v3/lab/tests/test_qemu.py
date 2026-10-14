@@ -103,10 +103,11 @@ class QemuArgvTest(unittest.TestCase):
         args = qemu.argv(self.topology, self.topology.vm("mox1"), self.paths, self.code, Path("/isos/host.iso"), no_reboot=True)
         self.assertIn("-no-reboot", args)
 
-    def test_ubuntu_vms_get_their_seed_and_no_vlan(self) -> None:
-        args = self.argv("appliance")
-        self.assertTrue(any(a.endswith(f"file={self.paths.seed('appliance')}") for a in args))
-        self.assertFalse(any("id=vlan" in a for a in option_values(args, "-netdev")))
+    def test_ubuntu_vms_get_their_seed_and_only_appliances_the_vlan(self) -> None:
+        for name, vlan in (("appliance", True), ("qdevice", False)):
+            args = self.argv(name)
+            self.assertTrue(any(a.endswith(f"file={self.paths.seed(name)}") for a in args))
+            self.assertEqual(any("id=vlan" in a for a in option_values(args, "-netdev")), vlan, name)
 
     def test_monitors_console_and_firmware_live_in_the_vm_folder(self) -> None:
         args = self.argv("qdevice")

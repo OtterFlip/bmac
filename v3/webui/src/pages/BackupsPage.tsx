@@ -230,7 +230,7 @@ function AddressDialog({ appliance, close, done }: { appliance: BackupApplianceV
       }
     >
       <Label htmlFor="appliance-address">Address</Label>
-      <Input id="appliance-address" mono value={address} placeholder="100.64.0.20" onChange={(e) => setAddress(e.target.value)} />
+      <Input id="appliance-address" mono value={address} placeholder="10.40.0.20 or backup.example.net" onChange={(e) => setAddress(e.target.value)} />
       <Problem>{error}</Problem>
     </Dialog>
   );
@@ -632,7 +632,7 @@ function VmCard({ vm, view, reload }: { vm: BackupVmView; view: BackupsView; rel
             <ul className="min-w-0 flex-1" aria-label={`${vm.vm} PITs`}>
               {graph.nodes.map((n) => (
                 <li key={n.pit.pit_uuid} className="flex items-center gap-2 border-b border-line/50 px-2 text-[12.5px]" style={{ height: PIT_ROW }}>
-                  <span className="w-[150px] shrink-0 text-fg">{dateTimeMs(n.pit.taken_s * 1000)}</span>
+                  <span className="w-[150px] shrink-0 text-fg">{dateTimeMs(n.pit.taken_s * 1000, view.time_zone)}</span>
                   <span className="hidden truncate font-mono text-[11px] text-fg-subtle lg:inline">{n.pit.name}</span>
                   <span className="ml-auto flex shrink-0 items-center gap-1">
                     {n.pit.release_blocked && (
@@ -675,7 +675,7 @@ function Restores({ view }: { view: BackupsView }) {
       <Table label="Restores" head={["Started", "VM", "Kind", "On", "Disks", "Outcome"]}>
         {view.restores.map((r) => (
           <tr key={r.restore_uuid}>
-            <td className="text-[12px]">{dateTimeMs(r.started_at_ms)}</td>
+            <td className="text-[12px]">{dateTimeMs(r.started_at_ms, view.time_zone)}</td>
             <td>{r.vm ?? <span className="font-mono">{short(r.vm_uuid)}</span>}</td>
             <td>{MODE_LABEL[r.mode] ?? r.mode}</td>
             <td className="text-[12px]">
@@ -718,7 +718,7 @@ function Transfers({ view }: { view: BackupsView }) {
       <Table label="Transfers" head={["Finished", "From", "To", "VM", "Sent", "Rate", ""]}>
         {view.transfers.slice(0, 50).map((t, i) => (
           <tr key={`${t.at_ms}-${t.volume_uuid}-${i}`}>
-            <td className="text-[12px]">{dateTimeMs(t.at_ms)}</td>
+            <td className="text-[12px]">{dateTimeMs(t.at_ms, view.time_zone)}</td>
             <td className="font-mono text-[12px]">{t.host}</td>
             <td>{t.appliance}</td>
             <td>{vms.get(t.vm_uuid) ?? <span className="font-mono">{short(t.vm_uuid)}</span>}</td>
@@ -759,7 +759,7 @@ export function BackupsPage() {
     <>
       <PageHeader
         title="Backups"
-        subtitle="PITs on the backup appliances, the snapshots kept on the hosts, and restores"
+        subtitle={`PITs on the backup appliances, the snapshots kept on the hosts, and restores${view?.time_zone ? `; times in ${view.time_zone}` : ""}`}
         actions={
           <Button size="sm" variant="ghost" onClick={load} aria-label="Refresh backups">
             <RefreshCw />

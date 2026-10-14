@@ -26,7 +26,7 @@ export function PitGraph({ pits, selected, toggle }: { pits: PitView[]; selected
         {graph.nodes.map((n) => (
           <li key={n.pit.pit_uuid} className={cn("flex h-[32px] items-center gap-2 border-b border-line/50 px-2 text-[12.5px]", selected.has(n.pit.pit_uuid) && "bg-accent/8")}>
             <Checkbox checked={selected.has(n.pit.pit_uuid)} onCheckedChange={() => toggle(n.pit)} aria-label={`select ${n.pit.name}`} />
-            <span className="w-[170px] shrink-0 text-fg">{whenSeconds(n.pit.taken_s)}</span>
+            <span className="w-[170px] shrink-0 text-fg">{whenSeconds(n.pit.taken_s, n.pit.time_zone)}</span>
             <span className="truncate font-mono text-[11.5px] text-fg-subtle">{n.pit.name}</span>
             <span className="text-fg-subtle">{bytes(n.pit.bytes)}</span>
             <span className="ml-auto flex shrink-0 gap-1">
@@ -145,7 +145,7 @@ export function PitsPage() {
         {data && groups.length === 0 && <EmptyState icon={<GitBranch />} title="No PITs yet" body="PITs appear here once a cluster offers them and the pull is verified." />}
         {groups.map((g) => (
           <Card key={g.key}>
-            <CardHeader title={`VM ${short(g.vm)}`} subtitle={`${g.clusterName} · ${g.pits.length} PITs`} icon={<GitBranch />} />
+            <CardHeader title={`VM ${short(g.vm)}`} subtitle={`${g.clusterName} · ${g.pits.length} PITs · times in ${g.pits[0]?.time_zone ?? "UTC"}`} icon={<GitBranch />} />
             <div className="p-2">
               <PitGraph pits={g.pits} selected={new Set(selected.keys())} toggle={toggle} />
             </div>

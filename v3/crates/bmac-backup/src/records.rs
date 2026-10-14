@@ -55,6 +55,10 @@ pub struct Policy {
     pub appliances: Vec<Uuid>,
     #[serde(default)]
     pub local_retention: LocalRetention,
+    /// When the VM's first PIT on the cluster was taken; its day starts the
+    /// weeks of local retention.
+    #[serde(default)]
+    pub started_s: Option<i64>,
     #[serde(default)]
     pub freeze: Freeze,
     /// Snapshot disks on several pools, which isn't atomic across them.

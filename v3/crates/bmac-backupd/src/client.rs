@@ -1,15 +1,17 @@
 // Copyright (c) 2026 BEENTHERE VENTURES, INC.
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Connections to the cluster: TLS 1.3, the host's chain checked against
-//! the Proxmox CA whose fingerprint the enrollment bundle gave, the host's
-//! certificate checked for its name (`mox1`, whatever address reached it),
-//! and the appliance's certificate presented to `bmac-source`.
+//! Requests to the cluster. A cluster's check-ins, claims, and sends go
+//! over the connections its hosts keep open to this appliance
+//! ([`Tunnels`]); the appliance never dials a host for them. Enrollment
+//! dials a host: TLS 1.3, the host's chain checked against the Proxmox CA
+//! whose fingerprint the enrollment bundle gave, and the host's certificate
+//! checked for its name (`mox1`, whatever address reached it).
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use bmac_core::ApplianceAddress;
+use bmac_core::{ApplianceAddress, HostSlot};
 use bmac_proto::api::{ApiError, ErrorCode};
 use bmac_proto::appliance::SourceHost;
 use bytes::Bytes;
@@ -28,6 +30,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::pool::Stream;
+use crate::tunnels::Tunnels;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -160,6 +163,9 @@ pub struct ClusterClient {
     verifier: Arc<Pinned>,
     /// The port when an address names none.
     pub port: u16,
+    /// The hosts' connections and the cluster's UUID: requests to hosts go
+    /// over them, never to an address.
+    tunnels: Option<(Arc<Tunnels>, String)>,
 }
 
 impl std::fmt::Debug for ClusterClient {
@@ -227,7 +233,23 @@ impl ClusterClient {
             tls: Arc::new(tls),
             verifier,
             port,
+            tunnels: None,
         })
+    }
+
+    /// Sends requests to `cluster`'s hosts over the connections they keep
+    /// in `tunnels`.
+    pub fn via(mut self, tunnels: Arc<Tunnels>, cluster: &str) -> ClusterClient {
+        self.tunnels = Some((tunnels, cluster.to_string()));
+        self
+    }
+
+    /// The cluster's hosts connected now.
+    pub fn connected(&self) -> Vec<HostSlot> {
+        self.tunnels
+            .as_ref()
+            .map(|(tunnels, cluster)| tunnels.hosts(cluster))
+            .unwrap_or_default()
     }
 
     /// The fingerprint the last server presented, matched or not.
@@ -273,7 +295,8 @@ impl ClusterClient {
         }
     }
 
-    /// Sends one request to the first of the host's addresses that answers.
+    /// Sends one request to the host: over its connection, or else to the
+    /// first of its addresses that answers.
     async fn request(
         &self,
         host: &SourceHost,
@@ -281,8 +304,15 @@ impl ClusterClient {
         path: &str,
         body: Option<Vec<u8>>,
     ) -> Result<hyper::Response<Incoming>, CallError> {
-        self.request_to(&host.host.to_string(), &host.addresses, method, path, body)
-            .await
+        match &self.tunnels {
+            Some((tunnels, cluster)) => {
+                through(tunnels, cluster, host.host, method, path, body).await
+            }
+            None => {
+                self.request_to(&host.host.to_string(), &host.addresses, method, path, body)
+                    .await
+            }
+        }
     }
 
     /// `name` is the TLS server name and the `Host` header.
@@ -380,6 +410,41 @@ impl ClusterClient {
         let body = serde_json::to_vec(body).expect("requests serialize");
         let response = self.request(host, "POST", path, Some(body)).await?;
         chunks(response).await
+    }
+}
+
+/// One request over the connection `host` keeps open.
+async fn through(
+    tunnels: &Tunnels,
+    cluster: &str,
+    host: HostSlot,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+) -> Result<hyper::Response<Incoming>, CallError> {
+    let mut sender = tunnels.sender(cluster, host).ok_or_else(|| {
+        CallError::Unreachable(format!(
+            "{host} has no connection to this appliance; the cluster connects once it has \
+             approved the appliance and knows its address"
+        ))
+    })?;
+    let mut request = hyper::Request::builder()
+        .method(method)
+        .uri(format!("https://{host}{path}"));
+    if body.is_some() {
+        request = request.header(hyper::header::CONTENT_TYPE, "application/json");
+    }
+    let request = request
+        .body(Full::new(Bytes::from(body.unwrap_or_default())))
+        .map_err(|e| CallError::Unreachable(e.to_string()))?;
+    let sent = async {
+        sender.ready().await?;
+        sender.send_request(request).await
+    };
+    match tokio::time::timeout(CALL_TIMEOUT, sent).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(e)) => Err(CallError::Unreachable(format!("{host}: {e}"))),
+        Err(_) => Err(CallError::Unreachable(format!("{host}: no answer"))),
     }
 }
 

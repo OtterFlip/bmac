@@ -207,6 +207,7 @@ fn start_task(state: State<'_, AppState>, kind: TaskKind) -> Reply<TaskSummary> 
         poll: Duration::from_secs(5),
         discovery_sources: flows::discovery_sources(chosen.discovery_iso.as_ref()),
         dashboard_port: bmac_deployer::hostiso::DASHBOARD_PORT,
+        time_zone: flows::workstation_zone(),
     };
     Ok(flows::start(&state.tasks, kind, Arc::new(env)))
 }

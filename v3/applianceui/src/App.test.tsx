@@ -27,13 +27,14 @@ function pit(id: string, taken_s: number, parent: string | null): PitView {
     held: false,
     suspect: false,
     granted: false,
+    time_zone: "America/Denver",
   };
 }
 
 const STATUS: ApplianceStatusView = {
   hello: HELLO,
   pool: { name: "bk", guid: "123", health: "ONLINE", size_bytes: 1000, free_bytes: 400 },
-  clusters: [{ cluster_uuid: "c1", cluster_name: "prod", state: "ACTIVE", last_checkin_ms: 1, last_error: null, offers: 0, pulling: null, hosts: ["mox1"] }],
+  clusters: [{ cluster_uuid: "c1", cluster_name: "prod", state: "ACTIVE", last_checkin_ms: 1, last_error: null, offers: 0, pulling: null, hosts: ["mox1"], time_zone: "America/Denver" }],
   transfers: [],
   pits: 2,
   scrub: null,
@@ -66,6 +67,17 @@ function fakeApi(hello: ApplianceHello = HELLO) {
       token: "bmac-grant-secret",
     })),
     grants: vi.fn(async () => []),
+    retention: vi.fn(async () => ({
+      policy: { daily: 7, weekly: 4, monthly: 12, month_days: 30, yearly: true },
+      floor: { daily: 1, weekly: 1, monthly: 1, month_days: 30, yearly: true },
+      delay_hours: 72,
+      pending: null,
+      holds: [],
+      prune: [],
+      reclaim_bytes: 0,
+      coverage: [{ cluster_uuid: "c1", vm_uuid: "vm-0001", pits: 2, oldest_s: 100, newest_s: 200, time_zone: "America/Denver" }],
+    })),
+    setRetention: vi.fn(async () => ({ applied: false, effective_at_ms: 1 })),
     issueRecoveryGrant: vi.fn(async () => ({
       grant: { grant_id: "g2", cluster_uuid: "c1", pits: [], created_at_ms: 0, expires_at_ms: 1, by: "ui", state: "live", last_used_ms: null, kind: "recovery", host_fingerprint: "EF:01" },
       token: "bmac-grant-recovery-secret",
@@ -123,6 +135,7 @@ describe("the appliance UI", () => {
     await user.click(screen.getByRole("button", { name: /Log in/ }));
     await user.click(await screen.findByRole("button", { name: "PITs" }));
     expect(await screen.findByRole("img", { name: /PIT graph/ })).toBeInTheDocument();
+    expect(screen.getByText(/times in America\/Denver/)).toBeInTheDocument();
     await user.click(screen.getByRole("checkbox", { name: "select bmac-pit-p2" }));
     await user.click(screen.getByRole("button", { name: /Grant to a restore/ }));
     const dialog = await screen.findByRole("dialog");
@@ -131,6 +144,25 @@ describe("the appliance UI", () => {
     expect(api.issueGrant).toHaveBeenCalledWith({ cluster_uuid: "c1", hours: 24, pits: ["p2"] });
     await user.click(within(dialog).getByRole("button", { name: "Done" }));
     await waitFor(() => expect(screen.queryByText("bmac-grant-secret")).toBeNull());
+  });
+
+  it("sets the month length and yearly consolidation, and shows days in the cluster's zone", async () => {
+    const user = userEvent.setup();
+    const { api } = fakeApi();
+    render(<App api={api} />);
+    await user.type(await screen.findByLabelText(/Administrator password/), "right password");
+    await user.click(screen.getByRole("button", { name: /Log in/ }));
+    await user.click(await screen.findByRole("button", { name: "Retention" }));
+    const days = await screen.findByLabelText("days in a month");
+    expect(screen.getByRole("cell", { name: "America/Denver" })).toBeInTheDocument();
+    await user.clear(days);
+    await user.type(days, "32");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    await user.clear(days);
+    await user.type(days, "31");
+    await user.click(screen.getByRole("checkbox", { name: "yearly" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.setRetention).toHaveBeenCalledWith({ daily: 7, weekly: 4, monthly: 12, month_days: 31, yearly: false }));
   });
 
   it("issues a recovery grant for a new host and shows its token once", async () => {
