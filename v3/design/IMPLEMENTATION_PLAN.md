@@ -1890,7 +1890,7 @@ and its `used` is compared with `bmac capacity --json`. The inflation
 matched. The metadata allowance didn't: the planned `2 × 128 / b` made
 every 16K prediction 1.05–1.42% high, because ZFS compresses the indirect
 blocks. Measured metadata is 0.2–0.8 × `128 / b`, so the function now
-charges `m(b) = 128 / b`. All 44 predictions are then 0.1–0.7% above the
+charges `m(b) = 128 / b`. All 44 predictions are then 0.02–0.64% above the
 measurement and never below it. `bmac-storage`'s `tests/capacity_lab.rs`
 holds the function to that against the recorded measurements
 (`tests/fixtures/lab/capacity.json`).
@@ -1898,6 +1898,42 @@ holds the function to that against the recorded measurements
 **M8 done when:** in the lab, a raidz2 host and a mirror host are set up,
 disks are added, replaced, and removed (mirror only) through the Dashboard,
 and VMs with 16K and 64K disks are created with the suggested sizes.
+
+**As built (lab):** `lab/lab scenario m8_storage` runs on the SATA lab from
+the three-host cluster stage and saves stage `m8-storage` (106 checks).
+Everything goes through the Dashboard's API:
+
+- mox2 gets a raidz2 of its four blank disks, and then refuses every vdev
+  removal.
+- mox1 gets two plain mirrors. mox3 gets an encrypted mirror, unlocked by
+  typing `bmac luks-enter` at the serial console.
+- The 16K VM goes on mox1 and mox3, and the 64K VM (`bmac-zfs-64k`) on
+  mox2 and mox3. Both use the form's suggested size, and each replica keeps
+  its block size.
+- `storage.simulate_failure`, `storage.replace_disk`, and
+  `storage.inventory` run a drill on mox2's raidz2 and on mox3's encrypted
+  mirror.
+- A mirror is removed from mox1 and from mox3, then retired by
+  `storage.inventory`, which reports the disks safe to pull. mox3's crypttab
+  and open mappings drop to four.
+
+The removal's 50 GiB floor can't be met with 16 GiB disks, so the scenario
+first grows mox1's and mox3's SCSI disks to 96 GiB (QMP `block_resize`,
+then a SCSI rescan). SATA disks aren't resized, because libata may drop a
+disk whose size changed.
+
+The lab found three bugs, now fixed and covered by tests:
+
+- Disk names: `lsblk -p` gives `/dev/sdX` where the inventory had `sdX`.
+- `cryptsetup`: Proxmox doesn't install it, but unencrypted pools called it.
+- Mapper names: `lsblk -p` gives a member's mapper as `/dev/mapper/NAME`,
+  so a removal recorded mapper names crypttab didn't match. The mappers
+  closed, but their crypttab lines stayed, and the initramfs check passed
+  without testing anything.
+
+`attach_disk` and the console unlock after a restart
+(`BMAC_LAB_DRILLS=1`) aren't in this run, and the NVMe and SCSI labs come
+at the end, as planned.
 
 ---
 
