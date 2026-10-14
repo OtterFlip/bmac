@@ -285,6 +285,10 @@ pub struct GrantView {
     /// `live`, `revoked`, or `ended`.
     pub state: String,
     pub last_used_ms: Option<i64>,
+    /// `restore`, or `recovery` for a cluster rebuilt on new hardware.
+    pub kind: String,
+    /// A recovery grant's host certificate, SHA-256.
+    pub host_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -293,6 +297,17 @@ pub struct IssueGrant {
     pub cluster_uuid: String,
     pub hours: u32,
     pub pits: Vec<String>,
+}
+
+/// A recovery grant: the namespace's recovery manifest and every PIT of
+/// it, for the host of a rebuilt cluster whose certificate has
+/// `host_fingerprint`, which may then bind the namespace to that cluster.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct IssueRecoveryGrant {
+    pub cluster_uuid: String,
+    pub hours: u32,
+    pub host_fingerprint: String,
 }
 
 /// The token is shown once and kept only as a hash.
@@ -436,4 +451,52 @@ pub struct AuditEntryView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct AuditView {
     pub entries: Vec<AuditEntryView>,
+}
+
+/// `GET /recovery`: what this appliance keeps to rebuild each cluster, and
+/// the restore tests the cluster reported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RecoveryView {
+    pub clusters: Vec<ClusterRecoveryView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ClusterRecoveryView {
+    pub cluster_uuid: String,
+    pub cluster_name: String,
+    /// Newest first.
+    pub manifests: Vec<ManifestKept>,
+    pub headers: Vec<HeaderKept>,
+    /// Newest first.
+    pub restore_tests: Vec<ReportedRestoreTest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ManifestKept {
+    pub generated_at_ms: i64,
+    /// The start of its revision.
+    pub revision: String,
+}
+
+/// One LUKS header backup file of a host, kept by content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct HeaderKept {
+    pub host: String,
+    pub file: String,
+    pub newest_at_ms: i64,
+    pub versions: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ReportedRestoreTest {
+    pub restore_uuid: String,
+    pub vm_uuid: String,
+    pub pit_uuid: String,
+    pub host: String,
+    pub started_at_ms: i64,
+    pub finished_at_ms: Option<i64>,
+    pub booted: bool,
+    pub agent: bool,
+    pub agent_after_s: Option<u64>,
+    pub error: Option<String>,
 }

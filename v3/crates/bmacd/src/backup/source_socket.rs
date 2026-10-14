@@ -32,6 +32,11 @@ pub const SOURCE_DIRECTORY: &str = "/run/bmac-source";
 pub const SOURCE_SOCKET: &str = "/run/bmac-source/engine.sock";
 /// An appliance's index is the largest call.
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
+/// A reply may carry one LUKS header backup of up to `MAX_HEADER` bytes,
+/// base64 even when it doesn't compress.
+pub const MAX_REPLY_FRAME: usize = 32 * 1024 * 1024;
+/// The largest LUKS header backup served; LUKS2's default header is 16 MiB.
+pub const MAX_HEADER: u64 = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "call", rename_all = "snake_case", deny_unknown_fields)]
@@ -71,6 +76,13 @@ pub enum SourceCall {
         fingerprint: String,
     },
     LuksHeaders {
+        fingerprint: String,
+    },
+    LuksHeader {
+        fingerprint: String,
+        request: bmac_proto::appliance::LuksHeaderRequest,
+    },
+    RecoveryManifest {
         fingerprint: String,
     },
 }
@@ -182,7 +194,7 @@ impl SourceClient {
             .await
             .map_err(|e| unavailable(e.to_string()))?;
         let mut reader = BufReader::new(read);
-        match wire::read_frame::<SourceReply, _>(&mut reader, MAX_FRAME).await {
+        match wire::read_frame::<SourceReply, _>(&mut reader, MAX_REPLY_FRAME).await {
             Ok(Some(SourceReply::Ok { body })) => Ok(body),
             Ok(Some(SourceReply::Err { error })) => Err(error),
             Ok(None) => Err(unavailable("closed the connection".into())),

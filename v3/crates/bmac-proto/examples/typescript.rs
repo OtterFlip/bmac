@@ -71,6 +71,8 @@ fn export(cfg: &Config) -> Result<(), ts_rs::ExportError> {
         backups::IssuedEnroll,
         backups::ApproveAppliance,
         backups::ApplianceList,
+        backups::SetApplianceAddress,
+        backups::BackupsView,
         status::ClusterSnapshot,
         status::HostsSnapshot,
         status::VmsSnapshot,
@@ -109,6 +111,7 @@ fn export(cfg: &Config) -> Result<(), ts_rs::ExportError> {
         appliance_ui::PruneResult,
         appliance_ui::GrantView,
         appliance_ui::IssueGrant,
+        appliance_ui::IssueRecoveryGrant,
         appliance_ui::IssuedGrant,
         appliance_ui::RevokeGrant,
         appliance_ui::PeersView,
@@ -120,6 +123,7 @@ fn export(cfg: &Config) -> Result<(), ts_rs::ExportError> {
         appliance_ui::SetApplianceToken,
         appliance_ui::ApplianceTestEmail,
         appliance_ui::AuditView,
+        appliance_ui::RecoveryView,
     );
     Ok(())
 }

@@ -62,8 +62,27 @@ function fakeApi(hello: ApplianceHello = HELLO) {
     status: vi.fn(async () => STATUS),
     pits: vi.fn(async () => ({ pits: [pit("p1", 100, null), pit("p2", 200, "p1")], receiving: [], quarantined: [] })),
     issueGrant: vi.fn(async () => ({
-      grant: { grant_id: "g1", cluster_uuid: "c1", pits: ["p2"], created_at_ms: 0, expires_at_ms: 1, by: "ui", state: "live", last_used_ms: null },
+      grant: { grant_id: "g1", cluster_uuid: "c1", pits: ["p2"], created_at_ms: 0, expires_at_ms: 1, by: "ui", state: "live", last_used_ms: null, kind: "restore", host_fingerprint: null },
       token: "bmac-grant-secret",
+    })),
+    grants: vi.fn(async () => []),
+    issueRecoveryGrant: vi.fn(async () => ({
+      grant: { grant_id: "g2", cluster_uuid: "c1", pits: [], created_at_ms: 0, expires_at_ms: 1, by: "ui", state: "live", last_used_ms: null, kind: "recovery", host_fingerprint: "EF:01" },
+      token: "bmac-grant-recovery-secret",
+    })),
+    recovery: vi.fn(async () => ({
+      clusters: [
+        {
+          cluster_uuid: "c1",
+          cluster_name: "prod",
+          manifests: [{ generated_at_ms: 1_700_000_000_000, revision: "0123456789abcdef" }],
+          headers: [{ host: "mox1", file: "bmac-rpool-s1.img", newest_at_ms: 1_700_000_000_000, versions: 2 }],
+          restore_tests: [
+            { restore_uuid: "r1", vm_uuid: "v1", pit_uuid: "p2", host: "mox2", started_at_ms: 1_700_000_000_000, finished_at_ms: 1_700_000_060_000, booted: true, agent: true, agent_after_s: 21, error: null },
+            { restore_uuid: "r2", vm_uuid: "v1", pit_uuid: "p1", host: "mox2", started_at_ms: 1_690_000_000_000, finished_at_ms: null, booted: false, agent: false, agent_after_s: null, error: "the scratch VM didn't start" },
+          ],
+        },
+      ],
     })),
   } as unknown as Api;
   return { api, end: (message: string) => ended?.(message) };
@@ -112,5 +131,40 @@ describe("the appliance UI", () => {
     expect(api.issueGrant).toHaveBeenCalledWith({ cluster_uuid: "c1", hours: 24, pits: ["p2"] });
     await user.click(within(dialog).getByRole("button", { name: "Done" }));
     await waitFor(() => expect(screen.queryByText("bmac-grant-secret")).toBeNull());
+  });
+
+  it("issues a recovery grant for a new host and shows its token once", async () => {
+    const user = userEvent.setup();
+    const { api } = fakeApi();
+    render(<App api={api} />);
+    await user.type(await screen.findByLabelText(/Administrator password/), "right password");
+    await user.click(screen.getByRole("button", { name: /Log in/ }));
+    await user.click(await screen.findByRole("button", { name: "Grants" }));
+    await user.click(await screen.findByRole("button", { name: /Grant a recovery/ }));
+    const dialog = await screen.findByRole("dialog");
+    const issue = within(dialog).getByRole("button", { name: "Issue grant" });
+    expect(issue).toBeDisabled();
+    await user.type(within(dialog).getByLabelText(/certificate fingerprint/), " EF:01 ");
+    await user.click(issue);
+    expect(await within(dialog).findByText("bmac-grant-recovery-secret")).toBeInTheDocument();
+    expect(api.issueRecoveryGrant).toHaveBeenCalledWith({ cluster_uuid: "c1", hours: 24, host_fingerprint: "EF:01" });
+    await user.click(within(dialog).getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByText("bmac-grant-recovery-secret")).toBeNull());
+  });
+
+  it("shows each cluster's recovery manifests, LUKS header backups, and restore tests", async () => {
+    const user = userEvent.setup();
+    const { api } = fakeApi();
+    render(<App api={api} />);
+    await user.type(await screen.findByLabelText(/Administrator password/), "right password");
+    await user.click(screen.getByRole("button", { name: /Log in/ }));
+    await user.click(await screen.findByRole("button", { name: "Recovery" }));
+    expect(await screen.findByText(/1 kept/)).toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "prod LUKS header backups" })).getByText(/bmac-rpool-s1\.img \(2 kept/)).toBeInTheDocument();
+    const tests = within(screen.getByRole("list", { name: "prod restore tests" })).getAllByRole("listitem");
+    expect(tests[0]).toHaveTextContent("booted");
+    expect(tests[0]).toHaveTextContent("agent after 21 s");
+    expect(tests[1]).toHaveTextContent("failed");
+    expect(tests[1]).toHaveTextContent("the scratch VM didn't start");
   });
 });

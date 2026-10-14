@@ -11,6 +11,9 @@ pub mod daemon;
 pub mod enrollment;
 pub mod exports;
 pub mod policies;
+pub mod recover;
+pub mod recovery;
+pub mod replace;
 pub mod restore;
 pub mod source;
 pub mod source_engine;
@@ -18,6 +21,7 @@ pub mod source_socket;
 pub mod status;
 pub mod store;
 pub mod upkeep;
+pub mod view;
 
 #[cfg(test)]
 mod tests;

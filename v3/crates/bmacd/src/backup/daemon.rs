@@ -186,6 +186,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route(on_source::SEND, post(send))
         .route(on_source::HEARTBEAT, get(heartbeat))
         .route(on_source::LUKS_HEADERS, get(luks_headers))
+        .route(on_source::LUKS_HEADER, post(luks_header))
+        .route(on_source::RECOVERY_MANIFEST, get(recovery_manifest))
         .layer(DefaultBodyLimit::max(MAX_FRAME))
         .with_state(app)
 }
@@ -281,6 +283,25 @@ async fn heartbeat(State(app): State<Arc<App>>, Extension(cert): Cert) -> Respon
 
 async fn luks_headers(State(app): State<Arc<App>>, Extension(cert): Cert) -> Response {
     forward(&app, &cert, |fingerprint| SourceCall::LuksHeaders {
+        fingerprint,
+    })
+    .await
+}
+
+async fn luks_header(
+    State(app): State<Arc<App>>,
+    Extension(cert): Cert,
+    Json(request): Json<bmac_proto::appliance::LuksHeaderRequest>,
+) -> Response {
+    forward(&app, &cert, |fingerprint| SourceCall::LuksHeader {
+        fingerprint,
+        request,
+    })
+    .await
+}
+
+async fn recovery_manifest(State(app): State<Arc<App>>, Extension(cert): Cert) -> Response {
+    forward(&app, &cert, |fingerprint| SourceCall::RecoveryManifest {
         fingerprint,
     })
     .await

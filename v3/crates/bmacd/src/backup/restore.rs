@@ -29,7 +29,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use bmac_backup::manifest::Manifest;
-use bmac_backup::records::{ApplianceRecord, Enrollment, RECORD_SCHEMA, RestoreRecord};
+use bmac_backup::records::{
+    ApplianceRecord, Enrollment, RECORD_SCHEMA, RestoreRecord, TestOutcome,
+};
 use bmac_backup::restore::{
     self, Base, LocalSnapshot, Method, Mode, VmConfig, disk_name, human_bytes, staging,
 };
@@ -50,6 +52,7 @@ use crate::native::disks::{choice, field, text};
 use crate::native::{Stop, Workflow};
 
 pub const OPERATION: &str = "backup.restore";
+pub const TEST_OPERATION: &str = "backup.restore_test";
 const RECEIVE_PHASE: (&str, &str) = ("receive", "Bring each volume to the PIT");
 const CREATE_PHASE: (&str, &str) = ("create", "Create the VM");
 /// Interrupted receives are resumed this many times.
@@ -60,16 +63,34 @@ const PVESH: &str = "/usr/bin/pvesh";
 const STORAGE_CFG: &str = "/etc/pve/storage.cfg";
 
 pub fn operation() -> Operation {
+    spec(
+        OPERATION,
+        "Restore a PIT",
+        "Restore a PIT from a backup appliance as a new VM on this host.",
+        "Needs a restore grant from the appliance's administrator. Each volume comes by the \
+         cheapest method the snapshots on this host allow: a clone of the PIT's own snapshot, \
+         an incremental from an older one, or a full stream. The new VM gets new MAC \
+         addresses and IDs, and its network can stay disconnected until you choose.",
+    )
+}
+
+pub fn test_operation() -> Operation {
+    spec(
+        TEST_OPERATION,
+        "Test a restore",
+        "Restore a PIT into a scratch VM on this host, boot it, check it, and destroy it.",
+        "Needs a restore grant from the appliance's administrator. The scratch VM's network \
+         stays disconnected. The result (whether it booted and its guest agent answered) is \
+         kept with the cluster's restores; only the scratch VM is destroyed.",
+    )
+}
+
+fn spec(id: &str, title: &str, summary: &str, description: &str) -> Operation {
     Operation {
-        id: OPERATION.parse().expect("a valid operation id"),
-        title: "Restore a PIT".into(),
-        summary: "Restore a PIT from a backup appliance as a new VM on this host.".into(),
-        description: "Needs a restore grant from the appliance's administrator. Each volume \
-                      comes by the cheapest method the snapshots on this host allow: a clone \
-                      of the PIT's own snapshot, an incremental from an older one, or a full \
-                      stream. The new VM gets new MAC addresses and IDs, and its network can \
-                      stay disconnected until you choose."
-            .into(),
+        id: id.parse().expect("a valid operation id"),
+        title: title.into(),
+        summary: summary.into(),
+        description: description.into(),
         category: Category::Backups,
         kind: OperationKind::Native,
         script: None,
@@ -132,14 +153,17 @@ pub fn parse_storages(cfg: &str, node: &str) -> Vec<Storage> {
         let allowed = keys
             .get("nodes")
             .is_none_or(|n| n.split(',').any(|x| x.trim() == node));
-        if keys.get("disable").is_some() || !allowed {
+        if keys.contains_key("disable") || !allowed {
             return;
         }
         if let Some(pool) = keys.get("pool") {
             out.push(Storage {
                 id,
                 dataset: pool.clone(),
-                block: keys.get("blocksize").and_then(|b| block_bytes(b)).unwrap_or(16384),
+                block: keys
+                    .get("blocksize")
+                    .and_then(|b| block_bytes(b))
+                    .unwrap_or(16384),
             });
         }
     };
@@ -189,7 +213,11 @@ pub trait RestoreHost: Send + Sync {
     /// `zfs destroy -r`, when it exists.
     fn destroy_tree(&self, dataset: &str) -> BoxFuture<'_, Result<(), String>>;
     fn next_vmid(&self) -> BoxFuture<'_, Result<u32, String>>;
-    fn create_vm(&self, vmid: u32, options: &[(String, String)]) -> BoxFuture<'_, Result<(), String>>;
+    fn create_vm(
+        &self,
+        vmid: u32,
+        options: &[(String, String)],
+    ) -> BoxFuture<'_, Result<(), String>>;
     fn set_vm(&self, vmid: u32, key: &str, value: &str) -> BoxFuture<'_, Result<(), String>>;
     fn start_vm(&self, vmid: u32) -> BoxFuture<'_, Result<(), String>>;
     fn agent_answers(&self, vmid: u32) -> BoxFuture<'_, bool>;
@@ -254,6 +282,10 @@ pub struct Plan {
     pub name: String,
     pub isolate: bool,
     pub start: bool,
+    /// A restore test's scratch VM.
+    pub test: bool,
+    /// The VMID to take; otherwise the next free one.
+    pub vmid: Option<u32>,
     pub volumes: Vec<Planned>,
 }
 
@@ -261,15 +293,26 @@ pub struct Plan {
 pub struct Restored {
     pub vmid: u32,
     pub name: String,
+    pub booted: bool,
     pub agent: bool,
+    pub agent_after_s: Option<u64>,
+    /// Each slot's dataset.
+    pub datasets: BTreeMap<String, String>,
 }
 
-fn vm_name(manifest: &Manifest) -> String {
+pub(super) fn vm_name(manifest: &Manifest) -> String {
     manifest
         .config
         .get("name")
         .cloned()
         .unwrap_or_else(|| format!("vm{}", manifest.vmid))
+}
+
+/// A restore test's scratch VM's name.
+fn scratch_name(manifest: &Manifest) -> String {
+    let mut name = format!("bmac-test-{}", vm_name(manifest));
+    name.truncate(63);
+    name.trim_end_matches(['-', '.']).to_string()
 }
 
 fn is_vm_name(name: &str) -> bool {
@@ -283,7 +326,7 @@ fn is_vm_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
 }
 
-fn when(taken_s: i64) -> String {
+pub(super) fn when(taken_s: i64) -> String {
     jiff::Timestamp::from_second(taken_s)
         .map(|t| t.strftime("%Y-%m-%d %H:%M UTC").to_string())
         .unwrap_or_default()
@@ -314,7 +357,11 @@ pub fn bases_for(index: &GrantedIndex, pit: &PeerPit, volume_uuid: &Uuid) -> Vec
     out
 }
 
-fn request(cx: &Context<'_>, plan: &Plan, planned: &Planned) -> Result<ExportRequest, Stop> {
+pub(super) fn request(
+    cx: &Context<'_>,
+    plan: &Plan,
+    planned: &Planned,
+) -> Result<ExportRequest, Stop> {
     Ok(ExportRequest {
         cluster_uuid: cx.cluster_uuid.clone(),
         pit_uuid: plan.pit.pit_uuid,
@@ -333,7 +380,9 @@ fn request(cx: &Context<'_>, plan: &Plan, planned: &Planned) -> Result<ExportReq
     })
 }
 
-async fn source(cx: &Context<'_>) -> Result<(ApplianceRecord, String, GrantedIndex), Stop> {
+pub(super) async fn source(
+    cx: &Context<'_>,
+) -> Result<(ApplianceRecord, String, GrantedIndex), Stop> {
     let appliances: Vec<ApplianceRecord> = cx
         .store
         .appliances()
@@ -380,7 +429,11 @@ async fn source(cx: &Context<'_>) -> Result<(ApplianceRecord, String, GrantedInd
                     if !text(v, "grant").starts_with("bmac-grant-") {
                         errors.insert("grant".into(), "A grant starts with bmac-grant-.".into());
                     }
-                    if errors.is_empty() { Ok(()) } else { Err(errors) }
+                    if errors.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(errors)
+                    }
                 },
             )
             .await?;
@@ -400,9 +453,9 @@ async fn source(cx: &Context<'_>) -> Result<(ApplianceRecord, String, GrantedInd
             cx.flow.warning(p.clone());
         }
     }
-    Err(Stop::failed(
-        problem.unwrap_or_else(|| "the appliance didn't accept the grant".into()),
-    ))
+    Err(Stop::failed(problem.unwrap_or_else(|| {
+        "the appliance didn't accept the grant".into()
+    })))
 }
 
 async fn choose(
@@ -410,6 +463,7 @@ async fn choose(
     appliance: ApplianceRecord,
     grant: String,
     index: GrantedIndex,
+    test: bool,
 ) -> Result<Plan, Stop> {
     let mut pits = index.pits.clone();
     pits.sort_by_key(|p| std::cmp::Reverse((p.taken_s, p.pit_uuid)));
@@ -439,36 +493,60 @@ async fn choose(
         .collect();
     pit.default = Some(json!(pits[0].pit_uuid.to_string()));
     let mut name = field("name", FieldType::Hostname, "New VM's name");
-    name.default = Some(json!(format!("{}-restored", vm_name(&manifests[&pits[0].pit_uuid]))));
-    let mut isolate = field("isolate", FieldType::Boolean, "Keep its network disconnected");
+    name.default = Some(json!(format!(
+        "{}-restored",
+        vm_name(&manifests[&pits[0].pit_uuid])
+    )));
+    let mut isolate = field(
+        "isolate",
+        FieldType::Boolean,
+        "Keep its network disconnected",
+    );
     isolate.default = Some(json!(true));
     isolate.help = Some(
         "Every network link starts down, so the restored VM can't collide with production. \
          Bring them up in Proxmox when you choose."
             .into(),
     );
-    let mut start = field("start", FieldType::Boolean, "Start it and check its guest agent");
+    let mut start = field(
+        "start",
+        FieldType::Boolean,
+        "Start it and check its guest agent",
+    );
     start.default = Some(json!(true));
+    let fields = if test {
+        vec![pit]
+    } else {
+        vec![pit, name, isolate, start]
+    };
     let values = cx
         .flow
         .input_group(
-            "What to restore",
+            if test {
+                "What to test"
+            } else {
+                "What to restore"
+            },
             Some(&format!(
                 "The grant lets this cluster read {} PIT{} until {}.",
                 pits.len(),
                 if pits.len() == 1 { "" } else { "s" },
                 when(index.expires_at_ms.div_euclid(1000))
             )),
-            vec![pit, name, isolate, start],
+            fields,
             |v| {
                 let mut errors = BTreeMap::new();
-                if !is_vm_name(&text(v, "name")) {
+                if !test && !is_vm_name(&text(v, "name")) {
                     errors.insert(
                         "name".into(),
                         "Letters, digits, dots, and dashes, up to 63.".into(),
                     );
                 }
-                if errors.is_empty() { Ok(()) } else { Err(errors) }
+                if errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(errors)
+                }
             },
         )
         .await?;
@@ -478,22 +556,29 @@ async fn choose(
         .cloned()
         .ok_or_else(|| Stop::failed("that PIT is no longer offered"))?;
     let manifest = manifests.remove(&chosen.pit_uuid).expect("checked above");
-    let flag = |id: &str| values.get(id).and_then(Value::as_bool).unwrap_or(true);
+    let flag = |id: &str| test || values.get(id).and_then(Value::as_bool).unwrap_or(true);
+    let name = if test {
+        scratch_name(&manifest)
+    } else {
+        text(&values, "name")
+    };
     let mut plan = Plan {
         appliance,
         grant,
         pit: chosen,
         manifest,
-        name: text(&values, "name"),
+        name,
         isolate: flag("isolate"),
         start: flag("start"),
+        test,
+        vmid: None,
         volumes: Vec::new(),
     };
     plan.volumes = preflight(cx, &plan, &index).await?;
     Ok(plan)
 }
 
-async fn preflight(
+pub(super) async fn preflight(
     cx: &Context<'_>,
     plan: &Plan,
     index: &GrantedIndex,
@@ -501,8 +586,7 @@ async fn preflight(
     let me = cx.host.this_host();
     let storages = cx.host.storages().await.map_err(Stop::failed)?;
     let mut problems = Vec::new();
-    let mut snapshots: BTreeMap<String, Vec<LocalSnapshot>> = BTreeMap::new();
-    let mut out = Vec::new();
+    let mut placed = Vec::new();
     for volume in &plan.manifest.volumes {
         let Some(storage) = storages.iter().find(|s| s.block == volume.volblocksize) else {
             problems.push(format!(
@@ -513,6 +597,37 @@ async fn preflight(
             ));
             continue;
         };
+        placed.push((volume.clone(), storage.clone()));
+    }
+    let bridges = cx.host.bridges().await.map_err(Stop::failed)?;
+    for (key, value) in &plan.manifest.config {
+        if key.starts_with("net")
+            && let Some(bridge) = value.split(',').find_map(|p| p.strip_prefix("bridge="))
+            && !bridges.contains(bridge)
+        {
+            problems.push(format!("{key}: {me} has no bridge {bridge}"));
+        }
+    }
+    if !problems.is_empty() {
+        return Err(Stop::Failed {
+            message: format!("{me} can't take this restore: {}", problems.join("; ")),
+            details: None,
+        });
+    }
+    size_up(cx, plan, index, placed).await
+}
+
+/// Each volume's method in the storage chosen for it, the stream sizes,
+/// and a check that the storages have the space.
+pub(super) async fn size_up(
+    cx: &Context<'_>,
+    plan: &Plan,
+    index: &GrantedIndex,
+    placed: Vec<(bmac_backup::manifest::Volume, Storage)>,
+) -> Result<Vec<Planned>, Stop> {
+    let mut snapshots: BTreeMap<String, Vec<LocalSnapshot>> = BTreeMap::new();
+    let mut out = Vec::new();
+    for (volume, storage) in placed {
         let pool = storage.pool().to_string();
         if !snapshots.contains_key(&pool) {
             let found = cx.host.snapshots(&pool).await.map_err(Stop::failed)?;
@@ -523,33 +638,16 @@ async fn preflight(
             .parse()
             .map_err(|_| Stop::failed("the manifest's volume ID isn't a UUID"))?;
         let method = restore::choose(
-            volume,
+            &volume,
             &pool,
             &snapshots[&pool],
             &bases_for(index, &plan.pit, &volume_uuid),
         );
         out.push(Planned {
-            volume: volume.clone(),
-            storage: storage.clone(),
+            volume,
+            storage,
             method,
             bytes: 0,
-        });
-    }
-    let bridges = cx.host.bridges().await.map_err(Stop::failed)?;
-    for (key, value) in &plan.manifest.config {
-        if key.starts_with("net")
-            && let Some(bridge) = value
-                .split(',')
-                .find_map(|p| p.strip_prefix("bridge="))
-            && !bridges.contains(bridge)
-        {
-            problems.push(format!("{key}: {me} has no bridge {bridge}"));
-        }
-    }
-    if !problems.is_empty() {
-        return Err(Stop::Failed {
-            message: format!("{me} can't take this restore: {}", problems.join("; ")),
-            details: None,
         });
     }
     for planned in &mut out {
@@ -579,7 +677,7 @@ async fn preflight(
     Ok(out)
 }
 
-fn describe(p: &Planned, index_name: impl Fn(&Uuid) -> String) -> String {
+pub(super) fn describe(p: &Planned, index_name: impl Fn(&Uuid) -> String) -> String {
     match &p.method {
         Method::Local { snapshot } => format!(
             "{}: method 1, a clone of {snapshot}; nothing crosses the network",
@@ -599,7 +697,12 @@ fn describe(p: &Planned, index_name: impl Fn(&Uuid) -> String) -> String {
     }
 }
 
-async fn bring(cx: &Context<'_>, plan: &Plan, planned: &Planned, target: &str) -> Result<(), Stop> {
+pub(super) async fn bring(
+    cx: &Context<'_>,
+    plan: &Plan,
+    planned: &Planned,
+    target: &str,
+) -> Result<(), Stop> {
     let slot = &planned.volume.slot;
     match &planned.method {
         Method::Local { snapshot } => {
@@ -678,7 +781,7 @@ async fn bring(cx: &Context<'_>, plan: &Plan, planned: &Planned, target: &str) -
     Ok(())
 }
 
-fn record_restore(cx: &Context<'_>, record: &RestoreRecord) -> RestoreRecord {
+pub(super) fn record_restore(cx: &Context<'_>, record: &RestoreRecord) -> RestoreRecord {
     match cx.store.locked(|l| l.save_restore(record.clone())) {
         Ok(saved) => saved,
         Err(e) => {
@@ -689,11 +792,13 @@ fn record_restore(cx: &Context<'_>, record: &RestoreRecord) -> RestoreRecord {
     }
 }
 
-pub async fn restore(cx: &Context<'_>) -> Result<Restored, Stop> {
-    cx.flow.phase("plan", "Choose the PIT and plan", PhaseStatus::Running);
+pub async fn restore(cx: &Context<'_>, test: bool) -> Result<Restored, Stop> {
+    cx.flow
+        .phase("plan", "Choose the PIT and plan", PhaseStatus::Running);
     let (appliance, grant, index) = source(cx).await?;
-    let plan = choose(cx, appliance, grant, index.clone()).await?;
-    cx.flow.phase("plan", "Choose the PIT and plan", PhaseStatus::Complete);
+    let plan = choose(cx, appliance, grant, index.clone(), test).await?;
+    cx.flow
+        .phase("plan", "Choose the PIT and plan", PhaseStatus::Complete);
 
     let names: BTreeMap<Uuid, String> = index
         .bases
@@ -703,7 +808,13 @@ pub async fn restore(cx: &Context<'_>) -> Result<Restored, Stop> {
     let mut details: Vec<String> = plan
         .volumes
         .iter()
-        .map(|p| describe(p, |id| names.get(id).map_or_else(|| id.to_string(), |n| format!("the PIT of {n}"))))
+        .map(|p| {
+            describe(p, |id| {
+                names
+                    .get(id)
+                    .map_or_else(|| id.to_string(), |n| format!("the PIT of {n}"))
+            })
+        })
         .collect();
     let total: u64 = plan.volumes.iter().map(|p| p.bytes).sum();
     details.push(format!("{} to transfer in all", human_bytes(total)));
@@ -711,23 +822,43 @@ pub async fn restore(cx: &Context<'_>) -> Result<Restored, Stop> {
         details.push("A full stream may take a long time.".into());
     }
     let translated_preview = translate(&plan, 0)?;
-    details.extend(translated_preview.left_out.iter().map(|l| format!("Left out: {l}")));
+    details.extend(
+        translated_preview
+            .left_out
+            .iter()
+            .map(|l| format!("Left out: {l}")),
+    );
     let confirmed = cx
         .flow
         .confirm(
-            "Restore as a new VM",
-            &format!(
-                "{} at {} becomes {} on {}{}.",
-                vm_name(&plan.manifest),
-                when(plan.pit.taken_s),
-                plan.name,
-                cx.host.this_host(),
-                if plan.isolate {
-                    ", with its network disconnected"
-                } else {
-                    ""
-                }
-            ),
+            if test {
+                "Test a restore"
+            } else {
+                "Restore as a new VM"
+            },
+            &if test {
+                format!(
+                    "{} at {} is restored as {} on {}, with its network disconnected, booted, \
+                     checked, and destroyed.",
+                    vm_name(&plan.manifest),
+                    when(plan.pit.taken_s),
+                    plan.name,
+                    cx.host.this_host(),
+                )
+            } else {
+                format!(
+                    "{} at {} becomes {} on {}{}.",
+                    vm_name(&plan.manifest),
+                    when(plan.pit.taken_s),
+                    plan.name,
+                    cx.host.this_host(),
+                    if plan.isolate {
+                        ", with its network disconnected"
+                    } else {
+                        ""
+                    }
+                )
+            },
             Severity::Warning,
             None,
             details,
@@ -750,7 +881,7 @@ pub async fn restore(cx: &Context<'_>) -> Result<Restored, Stop> {
             pit_uuid: plan.pit.pit_uuid,
             branch_uuid: plan.pit.branch_uuid,
             appliance_uuid: plan.appliance.appliance_uuid,
-            mode: Mode::NewVm,
+            mode: if test { Mode::Test } else { Mode::NewVm },
             host: cx.host.this_host().to_string(),
             vmid: None,
             name: Some(plan.name.clone()),
@@ -763,6 +894,9 @@ pub async fn restore(cx: &Context<'_>) -> Result<Restored, Stop> {
             finished_at_ms: None,
             error: None,
             ended_at_ms: None,
+            replaced: BTreeMap::new(),
+            test: None,
+            manifest: Some(plan.pit.manifest.clone()),
         },
     );
     let outcome = carry_out(cx, &plan, &job).await;
@@ -770,6 +904,31 @@ pub async fn restore(cx: &Context<'_>) -> Result<Restored, Stop> {
         Ok(restored) => {
             record.vmid = Some(restored.vmid);
             record.finished_at_ms = Some((cx.now_ms)());
+            if test {
+                record.test = Some(TestOutcome {
+                    booted: restored.booted,
+                    agent: restored.agent,
+                    agent_after_s: restored.agent_after_s,
+                });
+                cx.flow
+                    .phase("destroy", "Destroy the scratch VM", PhaseStatus::Running);
+                match cx.host.destroy_vm(restored.vmid).await {
+                    Ok(()) => {
+                        record.ended_at_ms = Some((cx.now_ms)());
+                        cx.flow
+                            .phase("destroy", "Destroy the scratch VM", PhaseStatus::Complete);
+                    }
+                    Err(e) => {
+                        cx.flow.warning(format!(
+                            "Could not destroy the scratch VM {}: {e}. Remove it by hand; \
+                             until then it keeps what it was restored from.",
+                            restored.vmid
+                        ));
+                        cx.flow
+                            .phase("destroy", "Destroy the scratch VM", PhaseStatus::Failed);
+                    }
+                }
+            }
         }
         Err(Stop::Failed { message, .. }) => {
             record.error = Some(message.clone());
@@ -781,6 +940,18 @@ pub async fn restore(cx: &Context<'_>) -> Result<Restored, Stop> {
         }
     }
     record_restore(cx, &record);
+    if let Ok(restored) = &outcome {
+        cx.flow.result(json!({
+            "vmid": restored.vmid,
+            "name": restored.name,
+            "host": cx.host.this_host().to_string(),
+            "booted": restored.booted,
+            "agent": restored.agent,
+            "agent_after_s": restored.agent_after_s,
+            "destroyed": test && record.ended_at_ms.is_some(),
+            "methods": record.methods,
+        }));
+    }
     outcome
 }
 
@@ -788,24 +959,40 @@ fn translate(plan: &Plan, vmid: u32) -> Result<VmConfig, Stop> {
     let volumes: BTreeMap<String, String> = plan
         .volumes
         .iter()
-        .map(|p| (p.volume.slot.clone(), format!("{}:vm-{vmid}-disk-x", p.storage.id)))
+        .map(|p| {
+            (
+                p.volume.slot.clone(),
+                format!("{}:vm-{vmid}-disk-x", p.storage.id),
+            )
+        })
         .collect();
-    restore::translate(&plan.manifest, &plan.name, &volumes, plan.isolate, Uuid::new_v4())
-        .map_err(Stop::failed)
+    restore::translate(
+        &plan.manifest,
+        &plan.name,
+        &volumes,
+        plan.isolate,
+        Uuid::new_v4(),
+    )
+    .map_err(Stop::failed)
 }
 
-async fn carry_out(cx: &Context<'_>, plan: &Plan, job: &str) -> Result<Restored, Stop> {
+pub(super) async fn carry_out(cx: &Context<'_>, plan: &Plan, job: &str) -> Result<Restored, Stop> {
     let pools: BTreeSet<String> = plan
         .volumes
         .iter()
         .map(|p| p.storage.pool().to_string())
         .collect();
     let mut placed: Vec<String> = Vec::new();
+    let mut datasets = BTreeMap::new();
     let mut vmid = None;
     let result = async {
-        cx.flow.phase_with(RECEIVE_PHASE.0, RECEIVE_PHASE.1, PhaseStatus::Running, true);
+        cx.flow
+            .phase_with(RECEIVE_PHASE.0, RECEIVE_PHASE.1, PhaseStatus::Running, true);
         for pool in &pools {
-            cx.host.staging_parent(pool, job).await.map_err(Stop::failed)?;
+            cx.host
+                .staging_parent(pool, job)
+                .await
+                .map_err(Stop::failed)?;
         }
         let mut staged = Vec::new();
         for planned in &plan.volumes {
@@ -813,10 +1000,19 @@ async fn carry_out(cx: &Context<'_>, plan: &Plan, job: &str) -> Result<Restored,
             bring(cx, plan, planned, &target).await?;
             staged.push(target);
         }
-        cx.flow.phase_with(RECEIVE_PHASE.0, RECEIVE_PHASE.1, PhaseStatus::Complete, true);
+        cx.flow.phase_with(
+            RECEIVE_PHASE.0,
+            RECEIVE_PHASE.1,
+            PhaseStatus::Complete,
+            true,
+        );
 
-        cx.flow.phase_with(CREATE_PHASE.0, CREATE_PHASE.1, PhaseStatus::Running, false);
-        let id = cx.host.next_vmid().await.map_err(Stop::failed)?;
+        cx.flow
+            .phase_with(CREATE_PHASE.0, CREATE_PHASE.1, PhaseStatus::Running, false);
+        let id = match plan.vmid {
+            Some(id) => id,
+            None => cx.host.next_vmid().await.map_err(Stop::failed)?,
+        };
         let mut volumes = BTreeMap::new();
         for (planned, from) in plan.volumes.iter().zip(&staged) {
             let taken = cx
@@ -825,10 +1021,15 @@ async fn carry_out(cx: &Context<'_>, plan: &Plan, job: &str) -> Result<Restored,
                 .await
                 .map_err(Stop::failed)?;
             let mut taken = taken;
-            taken.extend(placed.iter().filter_map(|p| p.rsplit('/').next().map(str::to_string)));
+            taken.extend(
+                placed
+                    .iter()
+                    .filter_map(|p| p.rsplit('/').next().map(str::to_string)),
+            );
             let disk = disk_name(id, &taken);
             let to = format!("{}/{disk}", planned.storage.dataset);
             cx.host.place(from, &to).await.map_err(Stop::failed)?;
+            datasets.insert(planned.volume.slot.clone(), to.clone());
             placed.push(to);
             volumes.insert(
                 planned.volume.slot.clone(),
@@ -849,9 +1050,13 @@ async fn carry_out(cx: &Context<'_>, plan: &Plan, job: &str) -> Result<Restored,
             .map_err(Stop::failed)?;
         vmid = Some(id);
         for (slot, value) in &config.disks {
-            cx.host.set_vm(id, slot, value).await.map_err(Stop::failed)?;
+            cx.host
+                .set_vm(id, slot, value)
+                .await
+                .map_err(Stop::failed)?;
         }
-        cx.flow.phase_with(CREATE_PHASE.0, CREATE_PHASE.1, PhaseStatus::Complete, true);
+        cx.flow
+            .phase_with(CREATE_PHASE.0, CREATE_PHASE.1, PhaseStatus::Complete, true);
         Ok::<u32, Stop>(id)
     }
     .await;
@@ -864,10 +1069,10 @@ async fn carry_out(cx: &Context<'_>, plan: &Plan, job: &str) -> Result<Restored,
     let id = match result {
         Ok(id) => id,
         Err(stop) => {
-            if let Some(id) = vmid {
-                if let Err(e) = cx.host.destroy_vm(id).await {
-                    cx.flow.warning(format!("Could not remove VM {id}: {e}"));
-                }
+            if let Some(id) = vmid
+                && let Err(e) = cx.host.destroy_vm(id).await
+            {
+                cx.flow.warning(format!("Could not remove VM {id}: {e}"));
             }
             for dataset in &placed {
                 let _ = cx.host.destroy_tree(dataset).await;
@@ -875,41 +1080,57 @@ async fn carry_out(cx: &Context<'_>, plan: &Plan, job: &str) -> Result<Restored,
             return Err(stop);
         }
     };
-    cx.flow.info(format!("{} is VM {id} on {}.", plan.name, cx.host.this_host()));
+    cx.flow.info(format!(
+        "{} is VM {id} on {}.",
+        plan.name,
+        cx.host.this_host()
+    ));
+    let mut booted = false;
     let mut agent = false;
+    let mut agent_after_s = None;
     if plan.start {
-        cx.flow.phase("boot", "Start the VM and check its guest agent", PhaseStatus::Running);
-        cx.host.start_vm(id).await.map_err(Stop::failed)?;
-        let deadline = Instant::now() + cx.agent_wait;
-        while Instant::now() < deadline {
+        cx.flow.phase(
+            "boot",
+            "Start the VM and check its guest agent",
+            PhaseStatus::Running,
+        );
+        match cx.host.start_vm(id).await {
+            Ok(()) => booted = true,
+            Err(e) if plan.test => cx.flow.warning(format!("The scratch VM didn't start: {e}")),
+            Err(e) => return Err(Stop::failed(e)),
+        }
+        let started = Instant::now();
+        let deadline = started + cx.agent_wait;
+        while booted && Instant::now() < deadline {
             if cx.host.agent_answers(id).await {
                 agent = true;
+                agent_after_s = Some(started.elapsed().as_secs());
                 break;
             }
             tokio::time::sleep(cx.poll).await;
         }
         if agent {
             cx.flow.info("The guest agent answers.");
-        } else {
+        } else if booted {
             cx.flow.warning(format!(
                 "The guest agent didn't answer within {} s; the VM may still be booting, or it \
                  has no agent.",
                 cx.agent_wait.as_secs()
             ));
         }
-        cx.flow.phase("boot", "Start the VM and check its guest agent", PhaseStatus::Complete);
+        cx.flow.phase(
+            "boot",
+            "Start the VM and check its guest agent",
+            PhaseStatus::Complete,
+        );
     }
-    cx.flow.result(json!({
-        "vmid": id,
-        "name": plan.name,
-        "host": cx.host.this_host().to_string(),
-        "agent": agent,
-        "methods": plan.volumes.iter().map(|p| (p.volume.slot.clone(), p.method.number())).collect::<BTreeMap<_, _>>(),
-    }));
     Ok(Restored {
         vmid: id,
         name: plan.name.clone(),
+        booted,
         agent,
+        agent_after_s,
+        datasets,
     })
 }
 
@@ -929,7 +1150,12 @@ impl RealHost<'_> {
             .run(command)
             .await
             .map(|o| o.stdout_text())
-            .map_err(|e| format!("{program} {}: {e}", args.first().copied().unwrap_or_default()))
+            .map_err(|e| {
+                format!(
+                    "{program} {}: {e}",
+                    args.first().copied().unwrap_or_default()
+                )
+            })
     }
 
     /// Exit 1 means it doesn't exist.
@@ -961,8 +1187,8 @@ impl RestoreHost for RealHost<'_> {
 
     fn storages(&self) -> BoxFuture<'_, Result<Vec<Storage>, String>> {
         Box::pin(async move {
-            let cfg = std::fs::read_to_string(STORAGE_CFG)
-                .map_err(|e| format!("{STORAGE_CFG}: {e}"))?;
+            let cfg =
+                std::fs::read_to_string(STORAGE_CFG).map_err(|e| format!("{STORAGE_CFG}: {e}"))?;
             Ok(parse_storages(&cfg, &self.node.to_string()))
         })
     }
@@ -971,7 +1197,19 @@ impl RestoreHost for RealHost<'_> {
         let pool = pool.to_string();
         Box::pin(async move {
             let text = self
-                .run(ZFS, &["list", "-Hp", "-t", "snapshot", "-o", "name,guid", "-r", &pool])
+                .run(
+                    ZFS,
+                    &[
+                        "list",
+                        "-Hp",
+                        "-t",
+                        "snapshot",
+                        "-o",
+                        "name,guid",
+                        "-r",
+                        &pool,
+                    ],
+                )
                 .await?;
             Ok(text
                 .lines()
@@ -1028,10 +1266,22 @@ impl RestoreHost for RealHost<'_> {
         let parent = format!("{top}/{job}");
         Box::pin(async move {
             if self.value("name", &top).await?.is_none() {
-                self.run(ZFS, &["create", "-o", "mountpoint=none", "-o", "canmount=off", &top])
-                    .await?;
+                self.run(
+                    ZFS,
+                    &[
+                        "create",
+                        "-o",
+                        "mountpoint=none",
+                        "-o",
+                        "canmount=off",
+                        &top,
+                    ],
+                )
+                .await?;
             }
-            self.run(ZFS, &["create", "-o", "canmount=off", &parent]).await.map(drop)
+            self.run(ZFS, &["create", "-o", "canmount=off", &parent])
+                .await
+                .map(drop)
         })
     }
 
@@ -1070,7 +1320,10 @@ impl RestoreHost for RealHost<'_> {
             let Some(origin) = self.value("origin", &dataset).await?.filter(|o| o != "-") else {
                 return Ok(None);
             };
-            Ok(self.value("guid", &origin).await?.and_then(|v| v.parse().ok()))
+            Ok(self
+                .value("guid", &origin)
+                .await?
+                .and_then(|v| v.parse().ok()))
         })
     }
 
@@ -1105,7 +1358,10 @@ impl RestoreHost for RealHost<'_> {
     fn next_vmid(&self) -> BoxFuture<'_, Result<u32, String>> {
         Box::pin(async move {
             let text = self
-                .run(PVESH, &["get", "/cluster/nextid", "--output-format", "json"])
+                .run(
+                    PVESH,
+                    &["get", "/cluster/nextid", "--output-format", "json"],
+                )
                 .await?;
             text.trim()
                 .trim_matches('"')
@@ -1114,7 +1370,11 @@ impl RestoreHost for RealHost<'_> {
         })
     }
 
-    fn create_vm(&self, vmid: u32, options: &[(String, String)]) -> BoxFuture<'_, Result<(), String>> {
+    fn create_vm(
+        &self,
+        vmid: u32,
+        options: &[(String, String)],
+    ) -> BoxFuture<'_, Result<(), String>> {
         let mut args = vec!["create".to_string(), vmid.to_string()];
         for (key, value) in options {
             args.push(format!("--{key}"));
@@ -1138,7 +1398,12 @@ impl RestoreHost for RealHost<'_> {
     fn agent_answers(&self, vmid: u32) -> BoxFuture<'_, bool> {
         Box::pin(async move {
             let command = Command::new(QM)
-                .args(["guest".to_string(), "cmd".into(), vmid.to_string(), "ping".into()])
+                .args([
+                    "guest".to_string(),
+                    "cmd".into(),
+                    vmid.to_string(),
+                    "ping".into(),
+                ])
                 .timeout(Duration::from_secs(20));
             self.runner.run(command).await.is_ok()
         })
@@ -1148,9 +1413,19 @@ impl RestoreHost for RealHost<'_> {
         Box::pin(async move {
             let id = vmid.to_string();
             let _ = self.run(QM, &["stop", &id]).await;
-            self.run(QM, &["destroy", &id, "--destroy-unreferenced-disks", "1", "--purge", "1"])
-                .await
-                .map(drop)
+            self.run(
+                QM,
+                &[
+                    "destroy",
+                    &id,
+                    "--destroy-unreferenced-disks",
+                    "1",
+                    "--purge",
+                    "1",
+                ],
+            )
+            .await
+            .map(drop)
         })
     }
 }
@@ -1165,8 +1440,11 @@ impl Transfers for RealTransfers {
         cluster_uuid: &str,
         grant: &str,
     ) -> BoxFuture<'_, Result<GrantedIndex, String>> {
-        let (appliance, cluster_uuid, grant) =
-            (appliance.clone(), cluster_uuid.to_string(), grant.to_string());
+        let (appliance, cluster_uuid, grant) = (
+            appliance.clone(),
+            cluster_uuid.to_string(),
+            grant.to_string(),
+        );
         Box::pin(async move {
             ApplianceClient::for_host(&appliance)?
                 .granted(&cluster_uuid, &grant)
@@ -1180,7 +1458,11 @@ impl Transfers for RealTransfers {
         request: &ExportRequest,
     ) -> BoxFuture<'_, Result<u64, String>> {
         let (appliance, request) = (appliance.clone(), request.clone());
-        Box::pin(async move { ApplianceClient::for_host(&appliance)?.estimate(&request).await })
+        Box::pin(async move {
+            ApplianceClient::for_host(&appliance)?
+                .estimate(&request)
+                .await
+        })
     }
 
     fn receive(
@@ -1226,12 +1508,13 @@ impl Transfers for RealTransfers {
     }
 }
 
-pub async fn run(flow: &Workflow, args: &[String]) -> ExitCode {
-    let spec = operation();
-    flow.begin(OPERATION, &spec.title, &spec.description);
+pub async fn run(flow: &Workflow, operation_id: &str, args: &[String]) -> ExitCode {
+    let test = operation_id == TEST_OPERATION;
+    let spec = if test { test_operation() } else { operation() };
+    flow.begin(operation_id, &spec.title, &spec.description);
     let outcome = async {
         let [host] = args else {
-            return Err(Stop::failed("usage: backup.restore HOST"));
+            return Err(Stop::failed(format!("usage: {operation_id} HOST")));
         };
         let node: HostSlot = crate::engine::listen::node_name()
             .parse()
@@ -1259,7 +1542,7 @@ pub async fn run(flow: &Workflow, args: &[String]) -> ExitCode {
             agent_wait: Duration::from_secs(300),
             poll: Duration::from_secs(10),
         };
-        restore(&cx).await.map(drop)
+        restore(&cx, test).await.map(drop)
     }
     .await;
     flow.finish(&outcome)
@@ -1267,4 +1550,4 @@ pub async fn run(flow: &Workflow, args: &[String]) -> ExitCode {
 
 #[cfg(test)]
 #[path = "restore_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -440,6 +440,25 @@ pub async fn revoke_appliance(
     .await
 }
 
+pub async fn set_appliance_address(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    Path(appliance): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    post_json(&state, client, &headers, &uri, || {
+        Ok(EngineCall::SetApplianceAddress {
+            appliance_uuid: appliance
+                .parse()
+                .map_err(|_| invalid("not an appliance ID"))?,
+            request: parse_body::<bmac_proto::backups::SetApplianceAddress>(&body)?,
+        })
+    })
+    .await
+}
+
 pub async fn backup_policies(
     State(state): State<AppState>,
     Extension(client): Extension<ClientAddr>,

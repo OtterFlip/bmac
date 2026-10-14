@@ -968,6 +968,7 @@ mod tests {
             disks: vec![],
             findings: vec![],
             luks_mismatches: vec![],
+            pit_snapshots: vec![],
             errors: vec![],
         };
         observe(

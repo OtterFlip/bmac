@@ -68,6 +68,15 @@ pub const HEARTBEAT: Duration = Duration::from_secs(120);
 /// A condition not seen for this long starts afresh when it returns.
 const FORGET_CONDITION_MS: i64 = 10 * 60 * 1000;
 
+#[derive(Debug, Default)]
+pub struct BackupsInputs {
+    pub backups: Option<bmac_proto::status::BackupsObservation>,
+    /// By host name.
+    pub storage: Vec<(String, bmac_proto::status::StorageObservation)>,
+    /// Name and VMID.
+    pub vms: std::collections::BTreeMap<uuid::Uuid, (String, u32)>,
+}
+
 /// Builds the snapshots for the engine's status calls.
 pub struct StatusSource {
     host: Option<HostSlot>,
@@ -217,6 +226,39 @@ impl StatusSource {
         let mut snapshot = assemble::vms(&self.view());
         self.date(snapshot.at_ms, &mut snapshot.conditions);
         snapshot
+    }
+
+    /// What the Backups page takes from the observations: the newest
+    /// `backups` observation, each host's storage, and each production VM's
+    /// name and VMID by UUID.
+    pub fn backups_inputs(&self) -> BackupsInputs {
+        let view = self.view();
+        let mut inputs = BackupsInputs::default();
+        for (host, collector) in view.observations.keys() {
+            if collector == bmac_proto::status::BACKUPS_COLLECTOR
+                && let Some(seen) =
+                    view.observed::<bmac_proto::status::BackupsObservation>(*host, collector)
+                && inputs.backups.as_ref().is_none_or(|b| b.at_ms < seen.at_ms)
+            {
+                inputs.backups = Some(seen);
+            }
+            if collector == bmac_proto::status::STORAGE_COLLECTOR
+                && let Some(seen) =
+                    view.observed::<bmac_proto::status::StorageObservation>(*host, collector)
+            {
+                inputs.storage.push((host.to_string(), seen));
+            }
+        }
+        for resource in &view.resources {
+            if resource.kind == bmac_registry::Kind::Production
+                && let Ok(id) = resource.id.parse::<uuid::Uuid>()
+            {
+                inputs
+                    .vms
+                    .insert(id, (resource.name.to_string(), resource.vmid.get()));
+            }
+        }
+        inputs
     }
 
     pub fn storage(&self) -> StorageSnapshot {

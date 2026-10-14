@@ -26,6 +26,14 @@ pub enum Mode {
     IntoExisting,
     /// The VM's disks rolled back to the PIT's snapshots on the cluster.
     Rollback,
+    /// A VM restored as new made production: its disks replace the
+    /// production VM's, which keeps its identity.
+    Promotion,
+    /// A restore test: an isolated scratch VM, booted, checked, and
+    /// destroyed.
+    Test,
+    /// A VM of a lost cluster, restored on the cluster rebuilt in its place.
+    Recovery,
 }
 
 /// A snapshot of a volume on the restoring host, by GUID.

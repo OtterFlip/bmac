@@ -158,10 +158,10 @@ describe("notification settings", () => {
     await user.click(within(card).getByRole("button", { name: /Store token/ }));
     await user.click(await within(card).findByRole("button", { name: /Check the Postmark server/ }));
     const table = await within(card).findByRole("table", { name: "Email templates" });
-    expect(within(table).getAllByText("missing")).toHaveLength(7);
+    expect(within(table).getAllByText("missing")).toHaveLength(9);
     expect(within(card).getByText(/A sandbox server accepts email and delivers none/)).toBeInTheDocument();
-    await user.click(within(card).getByRole("button", { name: /Create 7 missing/ }));
-    await waitFor(() => expect(within(table).getAllByText("present")).toHaveLength(7));
+    await user.click(within(card).getByRole("button", { name: /Create 9 missing/ }));
+    await waitFor(() => expect(within(table).getAllByText("present")).toHaveLength(9));
 
     await user.click(within(card).getByRole("button", { name: /^Send$/ }));
     expect(await within(card).findByRole("list", { name: "Test email results" })).toHaveTextContent("ops@example.com: accepted by Postmark");

@@ -16,8 +16,10 @@ import type {
   AuditView,
   GrantView,
   IssueGrant,
+  IssueRecoveryGrant,
   IssuedGrant,
   PeersView,
+  RecoveryView,
   PitsView,
   PlatformView,
   PruneResult,
@@ -68,8 +70,11 @@ export interface Api {
   prune(): Promise<PruneResult>;
   grants(): Promise<GrantView[]>;
   issueGrant(request: IssueGrant): Promise<IssuedGrant>;
+  issueRecoveryGrant(request: IssueRecoveryGrant): Promise<IssuedGrant>;
   revokeGrant(grantId: string): Promise<void>;
   peers(): Promise<PeersView>;
+  /** Recovery manifests and LUKS header backups kept per cluster, and its restore tests. */
+  recovery(): Promise<RecoveryView>;
   trust(request: TrustPeer): Promise<TrustResult>;
   untrust(applianceUuid: string, password: string): Promise<void>;
   scrub(): Promise<ScrubView | null>;
@@ -145,8 +150,10 @@ export function createApi(fetcher: typeof fetch = (input, init) => fetch(input, 
     prune: () => call("POST", "/prune"),
     grants: () => call("GET", "/grants"),
     issueGrant: (request) => call("POST", "/grants", request),
+    issueRecoveryGrant: (request) => call("POST", "/grants/recovery", request),
     revokeGrant: (grant_id) => call("POST", "/grants/revoke", { grant_id }),
     peers: () => call("GET", "/peers"),
+    recovery: () => call("GET", "/recovery"),
     trust: (request) => call("POST", "/peers/trust", request),
     untrust: (appliance_uuid, password) => call("POST", "/peers/untrust", { appliance_uuid, password }),
     scrub: () => call("GET", "/scrub"),

@@ -294,10 +294,83 @@ describe("the Diagnostics page", () => {
   });
 });
 
-describe("pages not built yet", () => {
-  it("say when they arrive", async () => {
+describe("the Backups page", () => {
+  it("shows the appliances, each VM's PIT graph with its branches, restores, and transfers", async () => {
     await open("/backups");
-    expect(await screen.findByText("Backups isn't built yet")).toBeInTheDocument();
-    expect(screen.getByText(/arrive with the backup appliance/)).toBeInTheDocument();
+    const appliances = await screen.findByRole("table", { name: "Backup appliances" });
+    expect(within(appliances).getByText("vault")).toBeInTheDocument();
+    expect(within(appliances).getByText(/prod1: 1\.3 GiB/)).toBeInTheDocument();
+    expect(screen.getByText("6 PITs · 2 branches · oldest at the top")).toBeInTheDocument();
+    const pits = within(screen.getByRole("list", { name: "prod1 PITs" })).getAllByRole("listitem");
+    expect(pits).toHaveLength(6);
+    expect(pits[0]).toHaveTextContent("bookmark");
+    expect(pits[5]).toHaveTextContent("snapshot");
+    expect(pits[5]).toHaveTextContent(/offsite 1\.3 GiB/);
+    expect(screen.getByRole("img", { name: "PIT graph, oldest at the top" })).toBeInTheDocument();
+    expect(screen.getByText(/daily at 03:00 · to vault, offsite · keeps 2 newest on the cluster/)).toBeInTheDocument();
+    expect(screen.getByText("No backup policy")).toBeInTheDocument();
+    const restores = screen.getByRole("table", { name: "Restores" });
+    expect(within(restores).getByText("booted, agent after 21 s")).toBeInTheDocument();
+    expect(within(restores).getByText("scsi0: full, efidisk0: full")).toBeInTheDocument();
+    expect(within(screen.getByRole("table", { name: "Transfers" })).getAllByRole("row")).toHaveLength(4);
+  });
+
+  it("draws the oldest PIT at the top left and a branch to its right", async () => {
+    await open("/backups");
+    const graph = await screen.findByRole("img", { name: "PIT graph, oldest at the top" });
+    const dots = [...graph.querySelectorAll("circle")].map((c) => ({ x: Number(c.getAttribute("cx")), y: Number(c.getAttribute("cy")) }));
+    expect(dots[0].y).toBeLessThan(dots[1].y);
+    expect(dots[0].x).toBe(Math.min(...dots.map((d) => d.x)));
+    expect(dots[3].x).toBeGreaterThan(dots[2].x);
+  });
+
+  it("lets an admin save a policy and set an appliance's address", async () => {
+    const user = await open("/backups");
+    await user.click(await screen.findByRole("button", { name: /Add a policy/ }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("checkbox", { name: "back up to vault" }));
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("saveBackupPolicy")).toBe(1));
+    const saved = mock.calls.find((c) => c.method === "saveBackupPolicy")!.args[0] as Record<string, unknown>;
+    expect(saved).toMatchObject({ vm: "prod2", every: { kind: "daily", at: "03:00" }, appliances: ["6c2f0a3e-0000-4000-8000-00000000000a"], revision: null });
+    await user.click(await screen.findByRole("button", { name: "Set vault's address" }));
+    const address = await screen.findByLabelText("Address");
+    await user.clear(address);
+    await user.type(address, "100.64.0.99");
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mock.calls.some((c) => c.method === "setApplianceAddress" && c.args[1] === "100.64.0.99")).toBe(true));
+  });
+
+  it("approves an enrollment only with the fingerprint read on the appliance", async () => {
+    mock.applianceData.requests = [
+      { request_id: "r1", appliance_uuid: null, name: "vault2", fingerprint: "AA:BB", from: "100.64.0.30", suggested_address: null, received_by: "mox1", created_at_ms: Date.now() },
+    ];
+    const user = await open("/backups");
+    await user.click(await screen.findByRole("button", { name: /Approve/ }));
+    const dialog = await screen.findByRole("dialog");
+    const approve = within(dialog).getByRole("button", { name: "Approve" });
+    expect(approve).toBeDisabled();
+    await user.type(within(dialog).getByLabelText(/Fingerprint on the appliance/), "AA:BC");
+    await user.click(approve);
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("doesn't match");
+    await user.clear(within(dialog).getByLabelText(/Fingerprint on the appliance/));
+    await user.type(within(dialog).getByLabelText(/Fingerprint on the appliance/), "AA:BB");
+    await user.click(approve);
+    await waitFor(() => expect(mock.applianceData.requests).toHaveLength(0));
+  });
+
+  it("offers a viewer nothing to change", async () => {
+    await open("/backups", "viewer");
+    await screen.findByRole("table", { name: "Backup appliances" });
+    expect(screen.queryByRole("button", { name: /Enroll an appliance/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Policy|Add a policy/ })).not.toBeInTheDocument();
+  });
+
+  it("says why when backups can't be read", async () => {
+    mock.backups = async () => {
+      throw new ApiFailure(503, "unavailable", "backups are not available on this host");
+    };
+    await open("/backups");
+    expect(await screen.findByText("backups are not available on this host")).toBeInTheDocument();
   });
 });

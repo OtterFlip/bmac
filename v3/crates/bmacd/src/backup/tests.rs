@@ -299,7 +299,7 @@ impl Guests for FakeGuests {
         Ok(*self.leased.lock().unwrap())
     }
 
-    fn acquire(&self, _name: &GuestName) -> BoxFuture<'_, Result<String, String>> {
+    fn acquire(&self, _name: &GuestName, _ttl_s: u32) -> BoxFuture<'_, Result<String, String>> {
         self.leases.lock().unwrap().push("acquire".into());
         ready(Ok("nonce".into()))
     }
@@ -1503,6 +1503,73 @@ mod source_service {
                 }
             )),
             ErrorCode::Conflict
+        );
+    }
+
+    #[tokio::test]
+    async fn the_check_in_reports_finished_restore_tests_that_read_from_the_appliance() {
+        let s = setup();
+        s.save(
+            policy(vec![appliance_uuid(1)]),
+            vec![appliance(1, Some(NOW_MS))],
+        );
+        let p1 = s.captured().await;
+        let record =
+            |n: u128, from: u128, mode, finished: bool| bmac_backup::records::RestoreRecord {
+                schema_version: 1,
+                record_type: String::new(),
+                revision: 0,
+                restore_uuid: Uuid::from_u128(0x500 + n),
+                vm_uuid: vm_uuid(),
+                pit_uuid: p1,
+                branch_uuid: Uuid::from_u128(0xb),
+                appliance_uuid: appliance_uuid(from),
+                mode,
+                host: "mox2".into(),
+                vmid: Some(900),
+                name: None,
+                methods: BTreeMap::new(),
+                started_at_ms: NOW_MS + n as i64,
+                finished_at_ms: finished.then_some(NOW_MS + n as i64 + 1),
+                error: None,
+                ended_at_ms: None,
+                replaced: BTreeMap::new(),
+                test: finished.then_some(bmac_backup::records::TestOutcome {
+                    booted: true,
+                    agent: false,
+                    agent_after_s: None,
+                }),
+                manifest: None,
+            };
+        use bmac_backup::restore::Mode;
+        let mut failed = record(4, 1, Mode::Test, false);
+        failed.error = Some("the scratch VM didn't start".into());
+        for r in [
+            record(1, 1, Mode::Test, true),
+            record(2, 1, Mode::Test, false),
+            record(3, 2, Mode::Test, true),
+            record(5, 1, Mode::NewVm, true),
+            failed,
+        ] {
+            s.store.locked(|l| l.save_restore(r).map(drop)).unwrap();
+        }
+        let now = || NOW_MS + 10_000;
+        let reply = source(&s, &now)
+            .checkin(FP, &checkin(vec![], vec![]))
+            .unwrap();
+        let shown: Vec<_> = reply
+            .restore_tests
+            .iter()
+            .map(|t| (t.restore_uuid, t.booted, t.error.is_some()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (Uuid::from_u128(0x504), false, true),
+                (Uuid::from_u128(0x501), true, false),
+            ],
+            "finished or failed tests from this appliance, newest first; not one still running, \
+             another appliance's, or a restore that isn't a test"
         );
     }
 }

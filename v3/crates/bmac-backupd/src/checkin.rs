@@ -14,8 +14,8 @@ use std::time::Duration;
 use bmac_exec::BoxFuture;
 use bmac_proto::appliance::{
     ApplianceProgress, Capacity, CheckinReply, CheckinRequest, ClaimRequest, FailedReport,
-    HeadReport, Heartbeat, IndexRequest, IndexedPit, OfferedPit, PeerIndex, SendRequest,
-    SourceHost, on_appliance, on_source,
+    HeadReport, Heartbeat, IndexRequest, IndexedPit, LuksHeader, LuksHeaderRequest, LuksHeaders,
+    OfferedPit, PeerIndex, RecoveryManifest, SendRequest, SourceHost, on_appliance, on_source,
 };
 use serde::Serialize;
 use tokio::sync::Notify;
@@ -27,7 +27,9 @@ use crate::journal::{Journal, Layout, Metadata};
 use crate::peers::Peers;
 use crate::pool::{Pool, Stream};
 use crate::pull::{Link, Progress, Published, PullError, Puller};
+use crate::recovery;
 use crate::repair::{self, PeerLink};
+use crate::roots::Roots;
 use crate::scrub::{IoGate, ScrubState};
 use crate::state::{self, Enrollment, Identity, Paths};
 use crate::watchdog::Round;
@@ -73,6 +75,8 @@ pub struct Agent {
     /// Set while a pull repairs from a peer, for the check-in.
     pub repairing: AtomicBool,
     pub io: Arc<IoGate>,
+    /// When the recovery manifest and LUKS headers were last pulled.
+    pub recovery_pulled: Mutex<Option<i64>>,
 }
 
 impl Agent {
@@ -306,6 +310,15 @@ impl Agent {
                     }
                 }
                 if !locked {
+                    if let Err(e) = self.roots(&reply.branch_roots, now).await {
+                        status.last_error = Some(format!("the branch roots: {e}"));
+                    }
+                    if let Err(e) = self.recovery(reply.recovery_revision.as_deref(), now).await {
+                        status.last_error = Some(e);
+                    }
+                    if let Err(e) = self.tests(&reply.restore_tests).await {
+                        status.last_error = Some(format!("the restore tests: {e}"));
+                    }
                     *self.offers.lock().unwrap_or_else(|p| p.into_inner()) = reply.offers;
                     self.offered.notify_one();
                 }
@@ -334,6 +347,111 @@ impl Agent {
     }
 
     /// Remembers hosts the offers name, for later check-ins.
+    async fn roots(&self, named: &[uuid::Uuid], now_ms: i64) -> std::io::Result<()> {
+        let _guard = self.metadata.lock().await?;
+        let mut roots = Roots::load(&self.metadata)?;
+        if roots.named(&self.cluster_uuid(), named, now_ms) {
+            roots.save(&self.metadata)?;
+        }
+        Ok(())
+    }
+
+    async fn tests(
+        &self,
+        reported: &[bmac_proto::appliance::RestoreTestReport],
+    ) -> std::io::Result<()> {
+        if reported.is_empty() {
+            return Ok(());
+        }
+        let _guard = self.metadata.lock().await?;
+        recovery::keep_tests(&self.metadata, &self.cluster_uuid(), reported).map(|_| ())
+    }
+
+    /// Pulls the recovery manifest when it changed or an hour went by,
+    /// and each host's LUKS header backups hourly.
+    async fn recovery(&self, revision: Option<&str>, now_ms: i64) -> Result<(), String> {
+        let cluster = self.cluster_uuid();
+        let last = *self
+            .recovery_pulled
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let kept = recovery::newest(&self.metadata, &cluster)
+            .ok()
+            .flatten()
+            .map(|m| m.revision);
+        if !recovery::due(last, revision, kept.as_deref(), now_ms) {
+            return Ok(());
+        }
+        let hourly = last.is_none_or(|t| now_ms - t >= recovery::PULL_EVERY_MS);
+        let manifest: RecoveryManifest = self
+            .call::<(), _>("GET", on_source::RECOVERY_MANIFEST, None)
+            .await
+            .map_err(|e| format!("the recovery manifest: {e}"))?;
+        {
+            let _guard = self.metadata.lock().await.map_err(|e| e.to_string())?;
+            recovery::keep_manifest(&self.metadata, &cluster, &manifest, now_ms)
+                .map_err(|e| format!("the recovery manifest: {e}"))?;
+        }
+        if !hourly {
+            return Ok(());
+        }
+        let mut problems = Vec::new();
+        for host in self.hosts() {
+            match self
+                .client
+                .call::<(), LuksHeaders>(&host, "GET", on_source::LUKS_HEADERS, None)
+                .await
+            {
+                Ok(headers) if headers.host == host.host => {
+                    for name in recovery::headers_wanted(&self.metadata, &cluster, &headers) {
+                        let request = LuksHeaderRequest { name: name.clone() };
+                        let header = match self
+                            .client
+                            .call::<_, LuksHeader>(
+                                &host,
+                                "POST",
+                                on_source::LUKS_HEADER,
+                                Some(&request),
+                            )
+                            .await
+                        {
+                            Ok(header) if header.host == host.host && header.name == name => header,
+                            Ok(_) => {
+                                problems
+                                    .push(format!("{}: {name}: another header came", host.host));
+                                continue;
+                            }
+                            Err(e) => {
+                                problems.push(format!("{}: {name}: {e}", host.host));
+                                continue;
+                            }
+                        };
+                        let _guard = self.metadata.lock().await.map_err(|e| e.to_string())?;
+                        if let Err(e) =
+                            recovery::keep_header(&self.metadata, &cluster, &header, now_ms)
+                        {
+                            problems.push(format!("{}: {e}", host.host));
+                        }
+                    }
+                }
+                Ok(headers) => problems.push(format!(
+                    "{} answered with {}'s headers",
+                    host.host, headers.host
+                )),
+                Err(e) => problems.push(format!("{}: {e}", host.host)),
+            }
+        }
+        *self
+            .recovery_pulled
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(now_ms);
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("the LUKS header backups: {}", problems.join("; ")))
+        }
+    }
+
     fn learn(&self, offers: &[OfferedPit]) {
         let mut enrollment = self.enrollment.lock().unwrap_or_else(|p| p.into_inner());
         let mut changed = false;

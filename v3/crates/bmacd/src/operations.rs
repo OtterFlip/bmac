@@ -35,6 +35,7 @@ pub const LOCK_CLASSES: &[&str] = &[
     "qdevice",
     "storage",
     "backups",
+    "restore",
 ];
 
 const DRY_RUN_FLAG: &str = "--dry-run";
@@ -56,6 +57,9 @@ pub fn native_operations() -> Vec<Operation> {
     operations.extend(crate::native::disks::operations());
     operations.push(crate::backup::capture::operation());
     operations.push(crate::backup::restore::operation());
+    operations.push(crate::backup::restore::test_operation());
+    operations.extend(crate::backup::replace::operations());
+    operations.push(crate::backup::recover::operation());
     operations
 }
 

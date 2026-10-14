@@ -14,8 +14,8 @@ use bmac_backup::records::ApplianceRecord;
 use bmac_core::ApplianceAddress;
 use bmac_proto::api::ApiError;
 use bmac_proto::appliance::{
-    ExportEstimate, ExportRequest, GrantedIndex, GrantedRequest, SOURCE_PORT, normalized_fingerprint,
-    on_appliance,
+    ExportEstimate, ExportRequest, GrantedIndex, GrantedRequest, RecoveryBind, RecoveryIndex,
+    RecoveryRequest, SOURCE_PORT, normalized_fingerprint, on_appliance,
 };
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -40,7 +40,18 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const STREAM_IDLE: Duration = Duration::from_secs(300);
 
 fn fingerprint(der: &[u8]) -> String {
-    Sha256::digest(der).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(der)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The host's certificate, then the CA unless the file already holds it.
+fn chain_with_ca(cert: &str, ca: &str) -> String {
+    if cert.contains(ca.trim()) {
+        return cert.to_string();
+    }
+    format!("{}\n{}\n", cert.trim_end(), ca.trim())
 }
 
 /// Trusts only the appliance certificate with this fingerprint.
@@ -117,14 +128,22 @@ impl std::fmt::Debug for ApplianceClient {
 }
 
 impl ApplianceClient {
-    /// With this host's certificate and key, as root reads them.
+    /// With this host's certificate and key, as root reads them. The
+    /// appliance knows the cluster only by its CA's fingerprint, so the CA
+    /// goes in the chain after the host's certificate.
     pub fn for_host(appliance: &ApplianceRecord) -> Result<ApplianceClient, String> {
         let cert = std::fs::read_to_string(HOST_CERT).map_err(|e| format!("{HOST_CERT}: {e}"))?;
+        let ca = std::fs::read_to_string(crate::joins::CLUSTER_CA)
+            .map_err(|e| format!("{}: {e}", crate::joins::CLUSTER_CA))?;
         let key = std::fs::read_to_string(HOST_KEY).map_err(|e| format!("{HOST_KEY}: {e}"))?;
-        ApplianceClient::new(appliance, &cert, &key)
+        ApplianceClient::new(appliance, &chain_with_ca(&cert, &ca), &key)
     }
 
-    pub fn new(appliance: &ApplianceRecord, cert: &str, key: &str) -> Result<ApplianceClient, String> {
+    pub fn new(
+        appliance: &ApplianceRecord,
+        cert: &str,
+        key: &str,
+    ) -> Result<ApplianceClient, String> {
         let address = appliance.address.clone().ok_or_else(|| {
             format!(
                 "{} has no address; set one in its settings so a restore can reach it",
@@ -158,7 +177,11 @@ impl ApplianceClient {
         })
     }
 
-    async fn request(&self, path: &str, body: Vec<u8>) -> Result<hyper::Response<Incoming>, String> {
+    async fn request(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+    ) -> Result<hyper::Response<Incoming>, String> {
         let port = self.address.port_or(SOURCE_PORT);
         let host = self.address.host_text();
         let connect = async {
@@ -199,7 +222,11 @@ impl ApplianceClient {
             .map_err(|e| format!("{}: {e}", self.name))
     }
 
-    async fn call<Q: Serialize, A: DeserializeOwned>(&self, path: &str, body: &Q) -> Result<A, String> {
+    async fn call<Q: Serialize, A: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &Q,
+    ) -> Result<A, String> {
         let response = self
             .request(path, serde_json::to_vec(body).expect("requests serialize"))
             .await?;
@@ -225,6 +252,25 @@ impl ApplianceClient {
             },
         )
         .await
+    }
+
+    /// Under a recovery grant: the lost cluster's recovery manifest and
+    /// every PIT of it.
+    pub async fn recovery_index(&self, grant: &str) -> Result<RecoveryIndex, String> {
+        self.call(
+            on_appliance::RECOVERY_INDEX,
+            &RecoveryRequest {
+                grant: grant.to_string(),
+            },
+        )
+        .await
+    }
+
+    /// Under a recovery grant: binds the lost cluster's namespace to this
+    /// cluster.
+    pub async fn recovery_bind(&self, bind: &RecoveryBind) -> Result<(), String> {
+        let _: serde_json::Value = self.call(on_appliance::RECOVERY_BIND, bind).await?;
+        Ok(())
     }
 
     /// The size of the stream `request` would send.
@@ -254,7 +300,11 @@ impl ApplianceClient {
         let status = response.status();
         let mut body = response.into_body();
         if !status.is_success() {
-            let bytes = body.collect().await.map(|c| c.to_bytes()).unwrap_or_default();
+            let bytes = body
+                .collect()
+                .await
+                .map(|c| c.to_bytes())
+                .unwrap_or_default();
             return Err(refusal(&self.name, status, &bytes));
         }
         let mut total = 0u64;
@@ -282,5 +332,20 @@ fn refusal(name: &str, status: hyper::StatusCode, bytes: &[u8]) -> String {
     match serde_json::from_slice::<ApiError>(bytes) {
         Ok(error) => format!("{name} refused: {}", error.message),
         Err(_) => format!("{name} answered {status}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chain_with_ca;
+
+    #[test]
+    fn the_cluster_ca_follows_the_host_certificate_once() {
+        let host = "-----BEGIN CERTIFICATE-----\nHOST\n-----END CERTIFICATE-----\n";
+        let ca = "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n";
+        let chain = chain_with_ca(host, ca);
+        assert!(chain.starts_with(host.trim_end()));
+        assert_eq!(chain.matches("BEGIN CERTIFICATE").count(), 2);
+        assert_eq!(chain_with_ca(&chain, ca), chain);
     }
 }

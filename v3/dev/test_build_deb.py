@@ -110,9 +110,13 @@ class BuildDebTest(unittest.TestCase):
                 "usr/sbin/bmac-backupd",
                 "usr/lib/systemd/system/bmac-backupd.service",
                 "usr/share/doc/bmac-backupd/README.md",
+                "etc/needrestart/conf.d/bmac-backupd.conf",
                 "DEBIAN/control",
             ):
                 self.assertTrue((tree / path).is_file(), path)
+            self.assertIn("{qr(^bmac-backupd\\.service$)} = 0;",
+                          (tree / "etc/needrestart/conf.d/bmac-backupd.conf").read_text())
+            self.assertEqual((tree / "DEBIAN/conffiles").read_text(), "/etc/needrestart/conf.d/bmac-backupd.conf\n")
             self.assertFalse((tree / "usr/lib/systemd/system/bmacd.service").exists())
             control = (tree / "DEBIAN/control").read_text()
             self.assertIn("Package: bmac-backupd\n", control)

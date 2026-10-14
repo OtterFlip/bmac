@@ -191,6 +191,36 @@ impl JoinStore {
         })
     }
 
+    /// A recovery: this cluster takes over a lost cluster's UUID, keeping
+    /// the used Tailscale keys it has recorded.
+    pub fn replace_cluster_uuid(&self, uuid: &str) -> Result<(), ApiError> {
+        let root = self
+            .cluster
+            .parent()
+            .expect("the cluster record has a directory")
+            .to_path_buf();
+        self.locked(&root, |lock| {
+            let current = self.cluster()?;
+            if current.as_ref().is_some_and(|c| c.cluster_uuid == uuid) {
+                return Ok(());
+            }
+            let record = ClusterRecord {
+                schema_version: RECORD_SCHEMA,
+                record_type: "cluster".into(),
+                revision: current.as_ref().map_or(0, |c| c.revision),
+                cluster_uuid: uuid.into(),
+                used_tailscale_key_sha256: current
+                    .as_ref()
+                    .map(|c| c.used_tailscale_key_sha256.clone())
+                    .unwrap_or_default(),
+            };
+            let expected = current.map(|c| c.revision);
+            let value = serde_json::to_value(&record).expect("cluster records serialize");
+            write_record(lock, &self.cluster, value, expected).map_err(storage)?;
+            Ok(())
+        })
+    }
+
     pub fn join(&self, host: HostSlot) -> Result<Option<JoinRecord>, ApiError> {
         let Some(value) = read_record(
             &self.pmxcfs,

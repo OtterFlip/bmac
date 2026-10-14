@@ -9,4 +9,12 @@ export type GrantView = { grant_id: string, cluster_uuid: string, pits: Array<st
 /**
  * `live`, `revoked`, or `ended`.
  */
-state: string, last_used_ms: number | null, };
+state: string, last_used_ms: number | null, 
+/**
+ * `restore`, or `recovery` for a cluster rebuilt on new hardware.
+ */
+kind: string, 
+/**
+ * A recovery grant's host certificate, SHA-256.
+ */
+host_fingerprint: string | null, };

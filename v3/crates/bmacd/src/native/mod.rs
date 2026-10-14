@@ -700,8 +700,17 @@ pub fn main(args: &[String]) -> ExitCode {
             crate::backup::capture::OPERATION => {
                 crate::backup::capture::run(&Workflow::stdio(), rest).await
             }
-            crate::backup::restore::OPERATION => {
-                crate::backup::restore::run(&Workflow::stdio(), rest).await
+            op @ (crate::backup::restore::OPERATION | crate::backup::restore::TEST_OPERATION) => {
+                crate::backup::restore::run(&Workflow::stdio(), op, rest).await
+            }
+            op @ (crate::backup::replace::RESTORE_INTO
+            | crate::backup::replace::ROLLBACK
+            | crate::backup::replace::PROMOTE
+            | crate::backup::replace::CLEANUP) => {
+                crate::backup::replace::run(&Workflow::stdio(), op, rest).await
+            }
+            crate::backup::recover::OPERATION => {
+                crate::backup::recover::run(&Workflow::stdio(), rest).await
             }
             other => {
                 eprintln!("{other} is not a native operation");

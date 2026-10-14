@@ -53,6 +53,8 @@ use super::store::BackupStore;
 use crate::native::{Stop, Workflow};
 
 pub const OPERATION: &str = "backup.capture";
+/// How long a capture's orchestration lease lasts.
+const LEASE_S: u32 = 7200;
 /// The phase during which the guest may be frozen; a cancel waits for it.
 const SNAPSHOT_PHASE: (&str, &str) = ("snapshot", "Freeze, snapshot, and thaw");
 const REGISTRY: &str = "/usr/lib/bmac/legacy/scripts/host_runtime/cluster_registry.py";
@@ -114,8 +116,8 @@ pub trait Guests: Send + Sync {
     fn by_uuid(&self, vm: &Uuid) -> Result<Option<Production>, String>;
     /// Whether an operation holds the VM's orchestration lease now.
     fn leased(&self, name: &GuestName) -> Result<bool, String>;
-    /// Takes the VM's orchestration lease; its nonce.
-    fn acquire(&self, name: &GuestName) -> BoxFuture<'_, Result<String, String>>;
+    /// Takes the VM's orchestration lease for `ttl_s`; its nonce.
+    fn acquire(&self, name: &GuestName, ttl_s: u32) -> BoxFuture<'_, Result<String, String>>;
     fn release(&self, name: &GuestName, nonce: &str) -> BoxFuture<'_, Result<(), String>>;
 }
 
@@ -245,7 +247,7 @@ pub async fn capture(cx: &Context<'_>, vm: &GuestName) -> Result<Captured, Stop>
         "Take the VM's orchestration lease",
         PhaseStatus::Running,
     );
-    let nonce = cx.guests.acquire(vm).await.map_err(|e| {
+    let nonce = cx.guests.acquire(vm, LEASE_S).await.map_err(|e| {
         Stop::failed(format!(
             "could not take {vm}'s orchestration lease (another operation may hold it): {e}"
         ))
@@ -869,8 +871,9 @@ impl Guests for RegistryGuests<'_> {
         }))
     }
 
-    fn acquire(&self, name: &GuestName) -> BoxFuture<'_, Result<String, String>> {
+    fn acquire(&self, name: &GuestName, ttl_s: u32) -> BoxFuture<'_, Result<String, String>> {
         let name = name.to_string();
+        let ttl = ttl_s.to_string();
         Box::pin(async move {
             let text = self.cli(&["orchestration-get", &name]).await?;
             let record: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
@@ -903,7 +906,7 @@ impl Guests for RegistryGuests<'_> {
                 "--owner",
                 &self.owner,
                 "--ttl-seconds",
-                "7200",
+                &ttl,
                 "--final-network-enabled",
                 network,
                 "--startup-sha256",

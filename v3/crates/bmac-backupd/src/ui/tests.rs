@@ -792,3 +792,54 @@ async fn a_new_password_ends_the_other_sessions() {
     assert_eq!(rig.get("/status", &other).await.status, 401);
     assert!(crate::admin::verify(rig.ui.metadata.root(), "a much longer passphrase").unwrap());
 }
+
+#[tokio::test]
+async fn the_recovery_page_shows_manifests_headers_and_reported_restore_tests() {
+    let rig = rig().await;
+    let metadata = &rig.ui.metadata;
+    let files =
+        std::collections::BTreeMap::from([("config/cluster.json".to_string(), "{}".to_string())]);
+    let manifest = bmac_proto::appliance::RecoveryManifest {
+        schema_version: 1,
+        cluster_uuid: CLUSTER.into(),
+        generated_at_ms: AT,
+        host: "mox1".parse().unwrap(),
+        revision: bmac_proto::appliance::RecoveryManifest::revision_of(&files),
+        files,
+    };
+    crate::recovery::keep_manifest(metadata, CLUSTER, &manifest, AT).unwrap();
+    crate::recovery::keep_tests(
+        metadata,
+        CLUSTER,
+        &[bmac_proto::appliance::RestoreTestReport {
+            restore_uuid: id(0x90),
+            vm_uuid: id(7),
+            pit_uuid: id(5),
+            host: "mox2".into(),
+            started_at_ms: AT,
+            finished_at_ms: Some(AT + 60_000),
+            booted: true,
+            agent: false,
+            agent_after_s: None,
+            error: None,
+        }],
+    )
+    .unwrap();
+    let token = rig.login().await;
+    let page = rig.get("/recovery", &token).await;
+    assert_eq!(page.status, 200, "{}", page.text);
+    let cluster = &page.body["clusters"][0];
+    assert_eq!(cluster["cluster_name"], "prod");
+    assert_eq!(cluster["manifests"][0]["generated_at_ms"], AT);
+    assert_eq!(
+        cluster["manifests"][0]["revision"],
+        manifest.revision[..16].to_string()
+    );
+    assert_eq!(cluster["headers"], json!([]));
+    assert_eq!(cluster["restore_tests"][0]["booted"], true);
+    assert_eq!(cluster["restore_tests"][0]["agent"], false);
+    assert!(
+        !page.text.contains("config/cluster.json"),
+        "only what was kept, not its files"
+    );
+}

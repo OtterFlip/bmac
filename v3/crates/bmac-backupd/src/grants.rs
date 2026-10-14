@@ -5,6 +5,12 @@
 //! approval for one cluster to read chosen PITs until an expiry. The token
 //! is shown once; only its SHA-256 is kept, in the metadata dataset. A
 //! live grant keeps its PITs from being pruned.
+//!
+//! A recovery grant (`BACKUP.md`, "Recovering BMAC after losing the whole
+//! cluster") is for a cluster rebuilt on new hardware: it names one host's
+//! certificate, which the handshake then lets through, and lets that host
+//! read the namespace's recovery manifest and every PIT of it, and bind the
+//! namespace to the new cluster.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -40,6 +46,19 @@ pub struct Grant {
     pub revoked: bool,
     #[serde(default)]
     pub last_used_ms: Option<i64>,
+    #[serde(default)]
+    pub kind: GrantKind,
+    /// A recovery grant's host certificate, SHA-256, lowercase hex.
+    #[serde(default)]
+    pub host_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantKind {
+    #[default]
+    Restore,
+    Recovery,
 }
 
 impl Grant {
@@ -126,11 +145,90 @@ impl Grants {
             by: by.to_string(),
             revoked: false,
             last_used_ms: None,
+            kind: GrantKind::Restore,
+            host_fingerprint: None,
         };
         self.grants
             .retain(|g| g.live(now_ms) || now_ms - g.expires_at_ms < KEEP_ENDED_MS);
         self.grants.push(grant.clone());
         Ok((grant, token))
+    }
+
+    /// A recovery grant for `cluster`'s namespace, for the host whose
+    /// certificate has `host_fingerprint`; the token, to show once.
+    pub fn issue_recovery(
+        &mut self,
+        journal: &Journal,
+        cluster: &str,
+        host_fingerprint: &str,
+        hours: Option<u32>,
+        by: &str,
+        now_ms: i64,
+    ) -> Result<(Grant, String), String> {
+        let hours = hours.unwrap_or(DEFAULT_GRANT_HOURS);
+        if hours == 0 || hours > MAX_GRANT_HOURS {
+            return Err(format!("a grant lasts 1 to {MAX_GRANT_HOURS} hours"));
+        }
+        let fingerprint = bmac_proto::appliance::normalized_fingerprint(host_fingerprint)
+            .ok_or("the host's certificate fingerprint is not a SHA-256")?;
+        if !journal.pits.iter().any(|p| p.cluster_uuid == cluster) {
+            return Err(format!("no PIT of cluster {cluster} is published here"));
+        }
+        let token = format!(
+            "{TOKEN_PREFIX}{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random(32)?)
+        );
+        let grant = Grant {
+            grant_id: random(6)?.iter().map(|b| format!("{b:02x}")).collect(),
+            token_sha256: sha256_hex(&token),
+            cluster_uuid: cluster.to_string(),
+            pits: Vec::new(),
+            created_at_ms: now_ms,
+            expires_at_ms: now_ms + i64::from(hours) * HOUR_MS,
+            by: by.to_string(),
+            revoked: false,
+            last_used_ms: None,
+            kind: GrantKind::Recovery,
+            host_fingerprint: Some(fingerprint),
+        };
+        self.grants
+            .retain(|g| g.live(now_ms) || now_ms - g.expires_at_ms < KEEP_ENDED_MS);
+        self.grants.push(grant.clone());
+        Ok((grant, token))
+    }
+
+    /// The live recovery grants: `(grant_id, cluster, host fingerprint)`.
+    pub fn recovery_hosts(&self, now_ms: i64) -> Vec<(String, String, String)> {
+        self.grants
+            .iter()
+            .filter(|g| g.kind == GrantKind::Recovery && g.live(now_ms))
+            .filter_map(|g| {
+                Some((
+                    g.grant_id.clone(),
+                    g.cluster_uuid.clone(),
+                    g.host_fingerprint.clone()?,
+                ))
+            })
+            .collect()
+    }
+
+    /// The live recovery grant `token` is, if it is `grant_id` for
+    /// `cluster`.
+    pub fn recovery(
+        &self,
+        token: &str,
+        cluster: &str,
+        grant_id: &str,
+        now_ms: i64,
+    ) -> Result<&Grant, String> {
+        let grant = self.live_any(token, cluster, now_ms)?;
+        if grant.kind != GrantKind::Recovery || grant.grant_id != grant_id {
+            return Err(format!(
+                "grant {} isn't this host's recovery grant",
+                grant.grant_id
+            ));
+        }
+        Ok(grant)
     }
 
     /// The live grant `token` is, if it lets `cluster` read `pit`.
@@ -151,8 +249,16 @@ impl Grants {
         Ok(grant)
     }
 
-    /// The live grant `token` is, if it is `cluster`'s.
+    /// The live restore grant `token` is, if it is `cluster`'s.
     pub fn live_for(&self, token: &str, cluster: &str, now_ms: i64) -> Result<&Grant, String> {
+        let grant = self.live_any(token, cluster, now_ms)?;
+        if grant.kind != GrantKind::Restore {
+            return Err(format!("grant {} is a recovery grant", grant.grant_id));
+        }
+        Ok(grant)
+    }
+
+    fn live_any(&self, token: &str, cluster: &str, now_ms: i64) -> Result<&Grant, String> {
         let hash = sha256_hex(token);
         let grant = self
             .grants
@@ -273,5 +379,46 @@ mod tests {
         assert!(grants.revoke(&grant.grant_id));
         assert!(grants.check(&token, "c1", &pit, 1).is_err());
         assert!(grants.pins(1).is_empty());
+    }
+
+    #[test]
+    fn a_recovery_grant_names_one_host_and_reads_the_whole_namespace() {
+        let mut grants = Grants::default();
+        let host = "AB:".repeat(31) + "AB";
+        assert!(
+            grants
+                .issue_recovery(&journal(), "c1", "ab", None, "admin", 0)
+                .unwrap_err()
+                .contains("SHA-256")
+        );
+        assert!(
+            grants
+                .issue_recovery(&journal(), "c2", &host, None, "admin", 0)
+                .unwrap_err()
+                .contains("no PIT of cluster c2")
+        );
+        let (grant, token) = grants
+            .issue_recovery(&journal(), "c1", &host, Some(48), "admin", 0)
+            .unwrap();
+        assert_eq!(grant.kind, GrantKind::Recovery);
+        assert_eq!(grant.host_fingerprint, Some("ab".repeat(32)));
+        assert_eq!(
+            grants.recovery_hosts(1),
+            vec![(grant.grant_id.clone(), "c1".into(), "ab".repeat(32))]
+        );
+        assert!(grants.recovery(&token, "c1", &grant.grant_id, 1).is_ok());
+        assert!(grants.recovery(&token, "c1", "other", 1).is_err());
+        assert!(grants.recovery(&token, "c2", &grant.grant_id, 1).is_err());
+        assert!(
+            grants
+                .check(&token, "c1", &Uuid::from_u128(10), 1)
+                .unwrap_err()
+                .contains("recovery grant"),
+            "an enrolled cluster's host can't use it"
+        );
+        assert!(grants.pins(1).is_empty());
+        grants.revoke(&grant.grant_id);
+        assert!(grants.recovery_hosts(1).is_empty());
+        assert!(grants.recovery(&token, "c1", &grant.grant_id, 1).is_err());
     }
 }

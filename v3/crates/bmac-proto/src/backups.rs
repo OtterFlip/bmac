@@ -90,6 +90,161 @@ pub struct ApplianceList {
     pub can_manage: bool,
 }
 
+/// The body of `POST /api/v1/appliances/<uuid>/address`: where restore
+/// jobs reach the appliance's port 8445, or none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SetApplianceAddress {
+    pub address: Option<String>,
+}
+
+/// `GET /api/v1/backups`: everything the Backups page shows, from the
+/// backup records, the duty host's `backups` observation, and every host's
+/// storage observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct BackupsView {
+    pub at_ms: i64,
+    pub appliances: Vec<BackupApplianceView>,
+    pub vms: Vec<BackupVmView>,
+    /// Newest first.
+    pub restores: Vec<RestoreView>,
+    /// Finished sends to appliances, newest first.
+    pub transfers: Vec<TransferView>,
+    /// The caller may change policies and appliances (admins only).
+    pub can_manage: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct BackupApplianceView {
+    pub appliance: ApplianceView,
+    pub status: Option<crate::status::BackupApplianceStatus>,
+    /// PITs it is pulling now.
+    pub live: Vec<LiveTransferView>,
+}
+
+/// A claimed PIT and the bytes the appliance last reported for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct LiveTransferView {
+    pub vm: String,
+    pub vm_uuid: String,
+    pub pit_uuid: String,
+    pub pit_name: String,
+    pub bytes: u64,
+    /// When bytes last moved.
+    pub progress_s: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct BackupVmView {
+    pub vm: String,
+    pub vm_uuid: String,
+    pub vmid: Option<u32>,
+    pub policy: Option<PolicyView>,
+    pub status: Option<crate::status::BackupVmStatus>,
+    /// The catalog, oldest first.
+    pub pits: Vec<PitNodeView>,
+    /// The branch the next PIT goes on.
+    pub branch_uuid: Option<String>,
+    /// Space the PIT snapshots hold on each host.
+    pub local: Vec<LocalSpaceView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PolicyView {
+    pub revision: u64,
+    pub enabled: bool,
+    pub appliances: Vec<String>,
+    pub local_newest: u32,
+    pub local_days: u32,
+    pub local_weeks: u32,
+    /// Such as "daily at 03:00".
+    pub every: String,
+    /// The schedule as the policy API takes it, to send back unchanged.
+    pub every_json: String,
+    /// `if_available`, `required`, or `never`.
+    pub freeze: String,
+    pub accept_multi_pool: bool,
+    pub updated_by: String,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PitNodeView {
+    pub pit_uuid: String,
+    pub branch_uuid: String,
+    pub parent: Option<String>,
+    pub name: String,
+    pub taken_s: i64,
+    /// `snapshot` or `bookmark`.
+    pub presence: String,
+    /// `crash`, `filesystem`, or `application`.
+    pub consistency: String,
+    pub offers: Vec<PitOfferView>,
+    pub release_blocked: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PitOfferView {
+    pub appliance_uuid: String,
+    /// `open`, `claimed`, `published`, or `failed`.
+    pub state: String,
+    pub bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct LocalSpaceView {
+    pub host: String,
+    pub snapshots: u32,
+    /// Bytes only the PIT snapshots hold (`used` of each).
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RestoreView {
+    pub restore_uuid: String,
+    pub vm_uuid: String,
+    pub vm: Option<String>,
+    pub pit_uuid: String,
+    pub appliance_uuid: String,
+    /// `new_vm`, `test`, `into_existing`, `rollback`, `promotion`, or
+    /// `recovery`.
+    pub mode: String,
+    pub host: String,
+    pub vmid: Option<u32>,
+    pub name: Option<String>,
+    /// Each volume's method (1, 2, or 3), by slot.
+    pub methods: std::collections::BTreeMap<String, u8>,
+    pub started_at_ms: i64,
+    pub finished_at_ms: Option<i64>,
+    pub ended_at_ms: Option<i64>,
+    pub error: Option<String>,
+    pub test: Option<RestoreTestView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RestoreTestView {
+    pub booted: bool,
+    pub agent: bool,
+    pub agent_after_s: Option<u64>,
+}
+
+/// One finished send of a volume to an appliance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct TransferView {
+    pub at_ms: i64,
+    /// The host that sent it.
+    pub host: String,
+    pub appliance: String,
+    pub vm_uuid: String,
+    pub pit_uuid: String,
+    pub volume_uuid: String,
+    pub bytes: u64,
+    pub duration_ms: u64,
+    pub error: Option<String>,
+}
+
 /// Colon-separated uppercase hex, as the Dashboard shows fingerprints.
 pub fn display_fingerprint(hex: &str) -> String {
     hex.as_bytes()

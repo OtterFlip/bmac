@@ -14,43 +14,82 @@ use tokio::io::DuplexStream;
 use super::*;
 use crate::native::tests::{Shared, send, workflow};
 
-const CLUSTER: &str = "c1";
-const PIT_NAME: &str = "bmac-pit-20260101T000000Z-000001";
+pub(crate) const CLUSTER: &str = "c1";
+pub(crate) const PIT_NAME: &str = "bmac-pit-20260101T000000Z-000001";
 
-fn id(n: u128) -> Uuid {
+pub(crate) fn id(n: u128) -> Uuid {
     Uuid::from_u128(n)
 }
 
 #[derive(Debug, Default, Clone)]
-struct Dataset {
-    volsize: u64,
-    origin: Option<String>,
-    resume_token: Option<String>,
+pub(crate) struct Dataset {
+    pub(crate) volsize: u64,
+    pub(crate) origin: Option<String>,
+    pub(crate) resume_token: Option<String>,
 }
 
 #[derive(Default)]
-struct World {
-    datasets: BTreeMap<String, Dataset>,
-    snapshots: BTreeMap<String, SnapshotGuid>,
-    vms: BTreeMap<u32, Vec<(String, String)>>,
-    started: Vec<u32>,
-    log: Vec<String>,
-    /// Receives that fail once, part way, leaving a resume token.
-    break_once: BTreeSet<String>,
-    received: Vec<ExportRequest>,
-    fail_create: bool,
+pub(crate) struct World {
+    pub(crate) datasets: BTreeMap<String, Dataset>,
+    pub(crate) snapshots: BTreeMap<String, SnapshotGuid>,
+    pub(crate) vms: BTreeMap<u32, Vec<(String, String)>>,
+    pub(crate) started: Vec<u32>,
+    pub(crate) log: Vec<String>,
+    /// Volumes whose receive fails once, part way, leaving a resume token.
+    pub(crate) break_once: BTreeSet<Uuid>,
+    pub(crate) received: Vec<ExportRequest>,
+    pub(crate) fail_create: bool,
+    pub(crate) fail_start: bool,
+    // The production VMs, for `replace`.
+    pub(crate) configs: BTreeMap<u32, String>,
+    pub(crate) owners: BTreeMap<u32, HostSlot>,
+    pub(crate) ha: BTreeMap<u32, bool>,
+    pub(crate) running: BTreeSet<u32>,
+    pub(crate) jobs: Vec<(u32, crate::backup::replace::Job, i64)>,
+    pub(crate) quorate: bool,
+    pub(crate) fail_rename: Option<String>,
+}
+
+impl World {
+    /// `zfs rename`: the dataset with its snapshots; clones keep their
+    /// origin, under its new name.
+    pub(crate) fn move_dataset(&mut self, from: &str, to: &str) {
+        let d = self
+            .datasets
+            .remove(from)
+            .unwrap_or_else(|| panic!("{from} doesn't exist"));
+        self.datasets.insert(to.to_string(), d);
+        let prefix = format!("{from}@");
+        let moved: Vec<(String, SnapshotGuid)> = self
+            .snapshots
+            .iter()
+            .filter(|(n, _)| n.starts_with(&prefix))
+            .map(|(n, g)| (n.clone(), *g))
+            .collect();
+        for (name, guid) in moved {
+            self.snapshots.remove(&name);
+            self.snapshots.insert(name.replacen(from, to, 1), guid);
+        }
+        for d in self.datasets.values_mut() {
+            if let Some(o) = &d.origin
+                && o.starts_with(&prefix)
+            {
+                d.origin = Some(o.replacen(from, to, 1));
+            }
+        }
+    }
 }
 
 #[derive(Clone, Default)]
-struct Fake(Arc<Mutex<World>>);
+pub(crate) struct Fake(pub(crate) Arc<Mutex<World>>);
 
 impl Fake {
-    fn w(&self) -> std::sync::MutexGuard<'_, World> {
+    pub(crate) fn w(&self) -> std::sync::MutexGuard<'_, World> {
         self.0.lock().unwrap()
     }
 }
 
-fn ok<T: Send + 'static>(value: T) -> BoxFuture<'static, T> {
+pub(crate) fn ok<T: Send + 'static>(value: T) -> BoxFuture<'static, T> {
     Box::pin(async move { value })
 }
 
@@ -89,7 +128,7 @@ impl RestoreHost for Fake {
             .datasets
             .keys()
             .filter_map(|n| n.strip_prefix(&prefix))
-            .filter(|n| !n.contains('/'))
+            .filter_map(|n| n.split('/').next())
             .map(str::to_string)
             .collect();
         ok(Ok(names))
@@ -100,7 +139,9 @@ impl RestoreHost for Fake {
     }
 
     fn staging_parent(&self, pool: &str, job: &str) -> BoxFuture<'_, Result<(), String>> {
-        self.w().log.push(format!("staging {pool}/bmac-restore/{job}"));
+        self.w()
+            .log
+            .push(format!("staging {pool}/bmac-restore/{job}"));
         ok(Ok(()))
     }
 
@@ -121,7 +162,11 @@ impl RestoreHost for Fake {
     }
 
     fn resume_token(&self, dataset: &str) -> BoxFuture<'_, Result<Option<String>, String>> {
-        let token = self.w().datasets.get(dataset).and_then(|d| d.resume_token.clone());
+        let token = self
+            .w()
+            .datasets
+            .get(dataset)
+            .and_then(|d| d.resume_token.clone());
         ok(Ok(token))
     }
 
@@ -148,18 +193,7 @@ impl RestoreHost for Fake {
     fn place(&self, from: &str, to: &str) -> BoxFuture<'_, Result<(), String>> {
         let mut w = self.w();
         w.log.push(format!("place {from} {to}"));
-        let d = w.datasets.remove(from).expect("placed from an existing dataset");
-        w.datasets.insert(to.to_string(), d);
-        let moved: Vec<(String, SnapshotGuid)> = w
-            .snapshots
-            .iter()
-            .filter(|(n, _)| n.starts_with(&format!("{from}@")))
-            .map(|(n, g)| (n.clone(), *g))
-            .collect();
-        for (name, guid) in moved {
-            w.snapshots.remove(&name);
-            w.snapshots.insert(name.replacen(from, to, 1), guid);
-        }
+        w.move_dataset(from, to);
         ok(Ok(()))
     }
 
@@ -177,7 +211,11 @@ impl RestoreHost for Fake {
         ok(Ok(120))
     }
 
-    fn create_vm(&self, vmid: u32, options: &[(String, String)]) -> BoxFuture<'_, Result<(), String>> {
+    fn create_vm(
+        &self,
+        vmid: u32,
+        options: &[(String, String)],
+    ) -> BoxFuture<'_, Result<(), String>> {
         let mut w = self.w();
         if w.fail_create {
             return ok(Err("qm create: storage is locked".into()));
@@ -196,6 +234,9 @@ impl RestoreHost for Fake {
     }
 
     fn start_vm(&self, vmid: u32) -> BoxFuture<'_, Result<(), String>> {
+        if self.w().fail_start {
+            return ok(Err(format!("qm start {vmid}: no bootable device")));
+        }
         self.w().started.push(vmid);
         ok(Ok(()))
     }
@@ -221,7 +262,9 @@ impl Transfers for Fake {
         grant: &str,
     ) -> BoxFuture<'_, Result<GrantedIndex, String>> {
         if grant != "bmac-grant-good" || cluster_uuid != CLUSTER {
-            return ok(Err("vault refused: that isn't a restore grant of this appliance".into()));
+            return ok(Err(
+                "vault refused: that isn't a restore grant of this appliance".into(),
+            ));
         }
         ok(Ok(index()))
     }
@@ -232,7 +275,11 @@ impl Transfers for Fake {
         request: &ExportRequest,
     ) -> BoxFuture<'_, Result<u64, String>> {
         assert_eq!(request.grant.as_deref(), Some("bmac-grant-good"));
-        ok(Ok(if request.from_guid.is_some() { 1 << 20 } else { 3 << 30 }))
+        ok(Ok(if request.from_guid.is_some() {
+            1 << 20
+        } else {
+            3 << 30
+        }))
     }
 
     fn receive(
@@ -249,7 +296,7 @@ impl Transfers for Fake {
             .into_iter()
             .find(|v| v.volume_uuid == request.volume_uuid.to_string())
             .unwrap();
-        if w.break_once.remove(target) {
+        if w.break_once.remove(&request.volume_uuid) {
             w.datasets.insert(
                 target.to_string(),
                 Dataset {
@@ -274,7 +321,7 @@ impl Transfers for Fake {
     }
 }
 
-const STORAGE_CFG_TEXT: &str = "\
+pub(crate) const STORAGE_CFG_TEXT: &str = "\
 dir: local
 \tpath /var/lib/vz
 \tcontent iso
@@ -295,7 +342,7 @@ zfspool: elsewhere
 \tcontent images
 ";
 
-fn volume(slot: &str, n: u128, block: u64, guid: u64) -> Volume {
+pub(crate) fn volume(slot: &str, n: u128, block: u64, guid: u64) -> Volume {
     Volume {
         volume_uuid: id(n).to_string(),
         slot: slot.into(),
@@ -312,7 +359,7 @@ fn volume(slot: &str, n: u128, block: u64, guid: u64) -> Volume {
     }
 }
 
-fn manifest() -> Manifest {
+pub(crate) fn manifest() -> Manifest {
     let config_text = "name: web\nscsi0: local-zfs:vm-100-disk-0,size=8G\nscsi1: bmac-zfs-64k:vm-100-disk-1,size=8G\nnet0: virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr1\nmemory: 2048\n";
     let (_, config) = bmac_backup::manifest::current_config(config_text);
     let mut m = Manifest {
@@ -336,7 +383,10 @@ fn manifest() -> Manifest {
         config_text: config_text.into(),
         config,
         config_sha256: bmac_backup::manifest::sha256_hex(config_text.as_bytes()),
-        volumes: vec![volume("scsi0", 0xd0, 16384, 300), volume("scsi1", 0xd1, 65536, 310)],
+        volumes: vec![
+            volume("scsi0", 0xd0, 16384, 300),
+            volume("scsi1", 0xd1, 65536, 310),
+        ],
         firmware: Firmware {
             bios: "seabios".into(),
             machine: None,
@@ -350,7 +400,7 @@ fn manifest() -> Manifest {
     m
 }
 
-fn peer_volumes(guids: [u64; 2]) -> Vec<PeerVolume> {
+pub(crate) fn peer_volumes(guids: [u64; 2]) -> Vec<PeerVolume> {
     [(0xd0, guids[0], 16384), (0xd1, guids[1], 65536)]
         .into_iter()
         .map(|(n, g, b)| PeerVolume {
@@ -362,7 +412,7 @@ fn peer_volumes(guids: [u64; 2]) -> Vec<PeerVolume> {
         .collect()
 }
 
-fn index() -> GrantedIndex {
+pub(crate) fn index() -> GrantedIndex {
     let mut m = manifest();
     let sealed = m.seal();
     GrantedIndex {
@@ -401,13 +451,13 @@ fn index() -> GrantedIndex {
     }
 }
 
-struct Rig {
-    _dir: tempfile::TempDir,
-    store: BackupStore,
-    fake: Fake,
+pub(crate) struct Rig {
+    pub(crate) _dir: tempfile::TempDir,
+    pub(crate) store: BackupStore,
+    pub(crate) fake: Fake,
 }
 
-fn rig() -> Rig {
+pub(crate) fn rig() -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let store = BackupStore::new(
         Pmxcfs::new(dir.path(), Arc::new(RealFs)),
@@ -444,7 +494,7 @@ fn rig() -> Rig {
     }
 }
 
-async fn drive(out: Shared, mut input: DuplexStream, answers: Vec<Value>) {
+pub(crate) async fn drive(out: Shared, mut input: DuplexStream, answers: Vec<Value>) {
     let mut answered = 0;
     loop {
         let events = out.events();
@@ -495,6 +545,10 @@ fn request_form(e: &WorkflowEvent) -> Option<(String, bmac_core::job::RequestFor
 
 impl Rig {
     async fn run(&self, answers: Vec<Value>) -> Job {
+        self.run_as(false, answers).await
+    }
+
+    async fn run_as(&self, test: bool, answers: Vec<Value>) -> Job {
         let work = tempfile::tempdir().unwrap();
         let (flow, out, input) = workflow(work.path());
         let now = || 1_767_300_000_000i64;
@@ -509,7 +563,7 @@ impl Rig {
             poll: Duration::from_millis(5),
         };
         let outcome = tokio::select! {
-            outcome = restore(&cx) => outcome,
+            outcome = restore(&cx, test) => outcome,
             () = drive(out.clone(), input, answers) => unreachable!(),
         };
         Job {
@@ -519,7 +573,7 @@ impl Rig {
     }
 }
 
-fn source(grant: &str) -> Value {
+pub(crate) fn source(grant: &str) -> Value {
     json!({"values": {"appliance": id(0xa).to_string(), "grant": grant}})
 }
 
@@ -527,7 +581,7 @@ fn what() -> Value {
     json!({"values": {"pit": id(3).to_string(), "name": "web-restored", "isolate": true, "start": true}})
 }
 
-fn yes() -> Value {
+pub(crate) fn yes() -> Value {
     json!({"confirmed": true})
 }
 
@@ -539,22 +593,37 @@ async fn a_full_restore_receives_checks_places_and_boots_an_isolated_vm() {
     assert_eq!(restored.vmid, 120);
     assert!(restored.agent);
     let details = job.confirm_details();
-    assert!(details.iter().any(|d| d.starts_with("scsi0: method 3")), "{details:?}");
-    assert!(details.iter().any(|d| d.contains("6.0 GiB to transfer in all")), "{details:?}");
+    assert!(
+        details.iter().any(|d| d.starts_with("scsi0: method 3")),
+        "{details:?}"
+    );
+    assert!(
+        details
+            .iter()
+            .any(|d| d.contains("6.0 GiB to transfer in all")),
+        "{details:?}"
+    );
     assert!(details.iter().any(|d| d.contains("may take a long time")));
 
     let w = r.fake.w();
     let vm = &w.vms[&120];
     assert!(vm.contains(&("net0".into(), "virtio,bridge=vmbr1,link_down=1".into())));
     assert!(vm.contains(&("scsi0".into(), "local-zfs:vm-120-disk-0,size=8G".into())));
-    assert!(vm.contains(&("scsi1".into(), "bmac-zfs-64k:vm-120-disk-0,size=8G".into())));
+    assert!(
+        vm.contains(&("scsi1".into(), "bmac-zfs-64k:vm-120-disk-1,size=8G".into())),
+        "disk numbers are unique across the VM, not per storage"
+    );
     assert!(w.datasets.contains_key("rpool/data/vm-120-disk-0"));
-    assert!(w.datasets.contains_key("rpool/data-64k/vm-120-disk-0"));
+    assert!(w.datasets.contains_key("rpool/data-64k/vm-120-disk-1"));
     assert_eq!(
-        w.snapshots.get(&format!("rpool/data/vm-120-disk-0@{PIT_NAME}")),
+        w.snapshots
+            .get(&format!("rpool/data/vm-120-disk-0@{PIT_NAME}")),
         Some(&SnapshotGuid::new(300))
     );
-    assert!(w.datasets.keys().all(|d| !d.contains("bmac-restore")), "staging is gone");
+    assert!(
+        w.datasets.keys().all(|d| !d.contains("bmac-restore")),
+        "staging is gone"
+    );
     assert!(w.received.iter().all(|r| r.from_guid.is_none()));
     drop(w);
 
@@ -577,10 +646,14 @@ async fn an_older_pit_here_makes_an_incremental_and_the_pit_itself_a_clone() {
                 ..Dataset::default()
             },
         );
-        w.snapshots
-            .insert("rpool/data/vm-100-disk-0@bmac-pit-p1".into(), SnapshotGuid::new(100));
-        w.snapshots
-            .insert("rpool/data/vm-100-disk-0@bmac-pit-p2".into(), SnapshotGuid::new(200));
+        w.snapshots.insert(
+            "rpool/data/vm-100-disk-0@bmac-pit-p1".into(),
+            SnapshotGuid::new(100),
+        );
+        w.snapshots.insert(
+            "rpool/data/vm-100-disk-0@bmac-pit-p2".into(),
+            SnapshotGuid::new(200),
+        );
         w.datasets.insert(
             "rpool/data-64k/vm-100-disk-1".into(),
             Dataset {
@@ -597,13 +670,22 @@ async fn an_older_pit_here_makes_an_incremental_and_the_pit_itself_a_clone() {
     job.outcome.as_ref().unwrap();
     let details = job.confirm_details();
     assert!(
-        details.iter().any(|d| d.starts_with("scsi0: method 2") && d.contains("1.0 MiB")),
+        details
+            .iter()
+            .any(|d| d.starts_with("scsi0: method 2") && d.contains("1.0 MiB")),
         "{details:?}"
     );
-    assert!(details.iter().any(|d| d.starts_with("scsi1: method 1")), "{details:?}");
+    assert!(
+        details.iter().any(|d| d.starts_with("scsi1: method 1")),
+        "{details:?}"
+    );
     let w = r.fake.w();
     assert_eq!(w.received.len(), 1);
-    assert_eq!(w.received[0].from_guid, Some(SnapshotGuid::new(200)), "the nearest ancestor");
+    assert_eq!(
+        w.received[0].from_guid,
+        Some(SnapshotGuid::new(200)),
+        "the nearest ancestor"
+    );
     assert!(w.log.iter().any(|l| l.starts_with(&format!(
         "clone rpool/data-64k/vm-100-disk-1@{PIT_NAME} rpool/bmac-restore/"
     ))));
@@ -618,27 +700,8 @@ async fn an_older_pit_here_makes_an_incremental_and_the_pit_itself_a_clone() {
 #[tokio::test]
 async fn an_interrupted_stream_resumes_from_its_token() {
     let r = rig();
-    let job_prefix = "rpool/bmac-restore/";
-    // The target's job directory isn't known up front: break any receive
-    // into scsi0's staging name by watching for it.
-    let fake = r.fake.clone();
-    let watcher = tokio::spawn(async move {
-        loop {
-            let staged = fake
-                .w()
-                .log
-                .iter()
-                .find_map(|l| l.strip_prefix("staging rpool/bmac-restore/").map(str::to_string));
-            if let Some(job) = staged {
-                let target = format!("{job_prefix}{job}/{}", id(0xd0));
-                fake.w().break_once.insert(target);
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    });
+    r.fake.w().break_once.insert(id(0xd0));
     let job = r.run(vec![source("bmac-grant-good"), what(), yes()]).await;
-    watcher.await.unwrap();
     job.outcome.as_ref().unwrap();
     assert!(job.said("resuming it"));
     let w = r.fake.w();
@@ -656,7 +719,12 @@ async fn a_bad_grant_is_asked_again_and_a_failed_create_leaves_nothing_behind() 
     let r = rig();
     r.fake.w().fail_create = true;
     let job = r
-        .run(vec![source("bmac-grant-bad"), source("bmac-grant-good"), what(), yes()])
+        .run(vec![
+            source("bmac-grant-bad"),
+            source("bmac-grant-good"),
+            what(),
+            yes(),
+        ])
         .await;
     assert!(job.said("isn't a restore grant"));
     let Err(Stop::Failed { message, .. }) = &job.outcome else {
@@ -704,6 +772,75 @@ fn the_bases_are_the_pits_ancestors_only() {
         volumes: peer_volumes([900, 910]),
     });
     let pit = index.pits[0].clone();
-    let bases: Vec<Uuid> = bases_for(&index, &pit, &id(0xd0)).iter().map(|b| b.pit_uuid).collect();
-    assert_eq!(bases, vec![id(2), id(1)], "another branch's PIT isn't an ancestor");
+    let bases: Vec<Uuid> = bases_for(&index, &pit, &id(0xd0))
+        .iter()
+        .map(|b| b.pit_uuid)
+        .collect();
+    assert_eq!(
+        bases,
+        vec![id(2), id(1)],
+        "another branch's PIT isn't an ancestor"
+    );
+}
+
+#[tokio::test]
+async fn a_restore_test_boots_a_scratch_vm_records_the_outcome_and_destroys_it() {
+    let r = rig();
+    let job = r
+        .run_as(
+            true,
+            vec![
+                source("bmac-grant-good"),
+                json!({"values": {"pit": id(3).to_string()}}),
+                yes(),
+            ],
+        )
+        .await;
+    let restored = job.outcome.unwrap();
+    assert_eq!(restored.name, "bmac-test-web");
+    assert!(restored.booted && restored.agent);
+    assert_eq!(restored.agent_after_s, Some(0));
+    let w = r.fake.w();
+    assert!(w.log.contains(&format!("destroy vm {}", restored.vmid)));
+    assert!(!w.vms.contains_key(&restored.vmid));
+    drop(w);
+    let record = &r.store.restores().unwrap()[0];
+    assert_eq!(record.mode, Mode::Test);
+    assert_eq!(
+        record.test,
+        Some(TestOutcome {
+            booted: true,
+            agent: true,
+            agent_after_s: Some(0),
+        })
+    );
+    assert!(record.ended_at_ms.is_some() && !record.holds_cluster_snapshot());
+    assert!(!record.continues(1_767_300_000_000));
+}
+
+#[tokio::test]
+async fn a_restore_test_whose_vm_wont_boot_is_recorded_and_still_destroyed() {
+    let r = rig();
+    r.fake.w().fail_start = true;
+    let job = r
+        .run_as(
+            true,
+            vec![
+                source("bmac-grant-good"),
+                json!({"values": {"pit": id(3).to_string()}}),
+                yes(),
+            ],
+        )
+        .await;
+    assert!(job.said("didn't start: qm start"));
+    let restored = job.outcome.unwrap();
+    assert!(!restored.booted && !restored.agent);
+    assert!(
+        r.fake
+            .w()
+            .log
+            .contains(&format!("destroy vm {}", restored.vmid))
+    );
+    let record = &r.store.restores().unwrap()[0];
+    assert_eq!(record.test.as_ref().map(|t| t.booted), Some(false));
 }

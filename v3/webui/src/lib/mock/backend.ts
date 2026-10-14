@@ -7,9 +7,13 @@
 import type {
   Alert,
   Answer,
+  ApplianceList,
+  BackupsView,
   CertificateView,
   HostFactsRecord,
   HostSlot,
+  IssueEnroll,
+  IssuedEnroll,
   IssueJoin,
   IssuedJoin,
   JobEvent,
@@ -36,8 +40,9 @@ import type {
   TemplatesView,
   TestEmailResult,
 } from "@bmac/ui";
-import { ApiFailure, type Backend, type SessionInfo, type StreamHandlers, type Unlisten } from "../backend";
+import { ApiFailure, type Backend, type PolicyChange, type SessionInfo, type StreamHandlers, type Unlisten } from "../backend";
 import { demoAlerts } from "./alerts";
+import { demoAppliances, demoBackups } from "./backups";
 import { demoLogs, demoReplication, searchDemo } from "./logs";
 import type { ScenarioHooks } from "./scenarios";
 import { demoCertificate, demoSettings, fingerprint } from "./settings";
@@ -73,6 +78,10 @@ export class MockBackend implements Backend {
   private certificateSeed = 100;
   /** What `joins()` returns; `can_manage` follows the session's role. */
   joinData: JoinList = { joins: [], can_manage: false };
+  /** What `backups()` returns; `can_manage` follows the session's role. */
+  backupsData: BackupsView = demoBackups();
+  /** What `appliances()` returns; `can_manage` follows the session's role. */
+  applianceData: ApplianceList = demoAppliances();
   /** What `alerts()` returns; the `can_` flags follow the session's role. */
   alertsData: NotifyView = demoAlerts();
   /** The Postmark token as bmacd would store it; never returned. */
@@ -269,6 +278,83 @@ export class MockBackend implements Backend {
     this.requireAdmin("managing join bundles");
     if (!this.joinData.joins.some((j) => j.host === host)) throw new ApiFailure(404, "not_found", `${host} has no outstanding join bundle`);
     this.joinData.joins = this.joinData.joins.filter((j) => j.host !== host);
+  }
+
+  async backups(): Promise<BackupsView> {
+    this.record("backups");
+    this.requireSession();
+    return { ...structuredClone(this.backupsData), can_manage: this.current!.role === "admin" };
+  }
+
+  async appliances(): Promise<ApplianceList> {
+    this.record("appliances");
+    this.requireSession();
+    return { ...structuredClone(this.applianceData), can_manage: this.current!.role === "admin" };
+  }
+
+  async issueEnroll(request: IssueEnroll): Promise<IssuedEnroll> {
+    this.record("issueEnroll", request);
+    this.requireAdmin("managing backup appliances");
+    return { file_name: "bmac-appliance-enroll.json", content: JSON.stringify({ version: 1, token: "demo" }) };
+  }
+
+  async approveAppliance(requestId: string, fingerprint: string): Promise<void> {
+    this.record("approveAppliance", requestId, fingerprint);
+    this.requireAdmin("managing backup appliances");
+    const request = this.applianceData.requests.find((r) => r.request_id === requestId);
+    if (!request) throw new ApiFailure(404, "not_found", "no such enrollment request");
+    if (request.fingerprint !== fingerprint) throw new ApiFailure(409, "conflict", "the fingerprint doesn't match the request's certificate");
+    this.applianceData.requests = this.applianceData.requests.filter((r) => r.request_id !== requestId);
+  }
+
+  async rejectAppliance(requestId: string): Promise<void> {
+    this.record("rejectAppliance", requestId);
+    this.requireAdmin("managing backup appliances");
+    this.applianceData.requests = this.applianceData.requests.filter((r) => r.request_id !== requestId);
+  }
+
+  async revokeAppliance(applianceUuid: string): Promise<void> {
+    this.record("revokeAppliance", applianceUuid);
+    this.requireAdmin("managing backup appliances");
+    for (const a of this.backupsData.appliances) if (a.appliance.appliance_uuid === applianceUuid) a.appliance.enrollment = "revoked";
+  }
+
+  async setApplianceAddress(applianceUuid: string, address: string | null): Promise<void> {
+    this.record("setApplianceAddress", applianceUuid, address);
+    this.requireAdmin("managing backup appliances");
+    for (const a of this.backupsData.appliances) if (a.appliance.appliance_uuid === applianceUuid) a.appliance.address = address;
+  }
+
+  async saveBackupPolicy(change: PolicyChange): Promise<void> {
+    this.record("saveBackupPolicy", change);
+    this.requireAdmin("changing backup policies");
+    const vm = this.backupsData.vms.find((v) => v.vm === change.vm);
+    if (!vm) throw new ApiFailure(422, "invalid", `vm: no production VM ${change.vm}`, { vm: `no production VM ${change.vm}` });
+    if ((vm.policy?.revision ?? null) !== change.revision) throw new ApiFailure(409, "conflict", "the backup policy changed since it was read; reload and try again");
+    const every = change.every as { kind: string; at?: string; minutes?: number };
+    vm.policy = {
+      revision: (vm.policy?.revision ?? 0) + 1,
+      enabled: change.enabled,
+      appliances: [...change.appliances],
+      local_newest: change.local_retention.newest,
+      local_days: change.local_retention.days,
+      local_weeks: change.local_retention.weeks,
+      every: every.kind === "interval" ? `every ${every.minutes} minutes` : `daily at ${every.at}`,
+      every_json: JSON.stringify(change.every),
+      freeze: change.freeze,
+      accept_multi_pool: change.accept_multi_pool,
+      updated_by: this.current!.user,
+      updated_at_ms: Date.now(),
+    };
+  }
+
+  async deleteBackupPolicy(vmUuid: string, revision: number): Promise<void> {
+    this.record("deleteBackupPolicy", vmUuid, revision);
+    this.requireAdmin("changing backup policies");
+    const vm = this.backupsData.vms.find((v) => v.vm_uuid === vmUuid);
+    if (!vm?.policy) throw new ApiFailure(404, "not_found", `no backup policy for ${vmUuid}`);
+    if (vm.policy.revision !== revision) throw new ApiFailure(409, "conflict", "the backup policy changed since it was read; reload and try again");
+    vm.policy = null;
   }
 
   async certificate(): Promise<CertificateView> {

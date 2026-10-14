@@ -28,6 +28,7 @@ pub mod on_source {
     pub const SEND: &str = "/v1/send";
     pub const RECOVERY_MANIFEST: &str = "/v1/recovery-manifest";
     pub const LUKS_HEADERS: &str = "/v1/luks-headers";
+    pub const LUKS_HEADER: &str = "/v1/luks-header";
     pub const HEARTBEAT: &str = "/v1/heartbeat";
 }
 
@@ -37,6 +38,8 @@ pub mod on_appliance {
     pub const EXPORT: &str = "/v1/export";
     pub const PEER_INDEX: &str = "/v1/peer-index";
     pub const GRANTED: &str = "/v1/granted";
+    pub const RECOVERY_INDEX: &str = "/v1/recovery/index";
+    pub const RECOVERY_BIND: &str = "/v1/recovery/bind";
 }
 
 /// One entry of an appliance's trusted-peer list. Only that appliance's
@@ -229,6 +232,35 @@ pub struct CheckinReply {
     pub offers: Vec<OfferedPit>,
     /// Send the PIT index next (`POST /v1/index`).
     pub want_index: bool,
+    /// Restored PITs that new branches continue from: keep them (for up to
+    /// 30 days) until this appliance has the branch.
+    #[serde(default)]
+    pub branch_roots: Vec<Uuid>,
+    /// The cluster recovery manifest's revision: pull it when it changed.
+    #[serde(default)]
+    pub recovery_revision: Option<String>,
+    /// The newest [`REPORTED_TESTS`] restore tests that read from this
+    /// appliance, newest first (`BACKUP.md`, "Restore tests").
+    #[serde(default)]
+    pub restore_tests: Vec<RestoreTestReport>,
+}
+
+pub const REPORTED_TESTS: usize = 20;
+
+/// A finished restore test: whether its scratch VM booted and its guest
+/// agent answered, or why it failed before that.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoreTestReport {
+    pub restore_uuid: Uuid,
+    pub vm_uuid: Uuid,
+    pub pit_uuid: Uuid,
+    pub host: String,
+    pub started_at_ms: i64,
+    pub finished_at_ms: Option<i64>,
+    pub booted: bool,
+    pub agent: bool,
+    pub agent_after_s: Option<u64>,
+    pub error: Option<String>,
 }
 
 /// `POST /v1/claim`.
@@ -405,12 +437,129 @@ pub struct Heartbeat {
     pub online: Vec<HostSlot>,
 }
 
-/// `GET /v1/luks-headers`: this host's LUKS header backups.
+/// `GET /v1/luks-headers`: this host's LUKS header backups, by file name.
+/// A LUKS2 header is 16 MiB, so each comes by its own call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LuksHeaders {
     pub host: HostSlot,
-    /// File name and its contents, base64.
-    pub headers: BTreeMap<String, String>,
+    pub headers: BTreeMap<String, LuksHeaderDigest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LuksHeaderDigest {
+    pub sha256: String,
+    pub size: u64,
+}
+
+/// The body of `POST /v1/luks-header`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LuksHeaderRequest {
+    pub name: String,
+}
+
+/// One header backup, gzip-compressed (its unused areas are zeros).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LuksHeader {
+    pub host: HostSlot,
+    pub name: String,
+    /// Of the uncompressed file.
+    pub sha256: String,
+    /// The gzip stream, base64.
+    pub gzip: String,
+}
+
+/// `GET /v1/recovery-manifest` (`BACKUP.md`, "Recovering BMAC after losing
+/// the whole cluster"): BMAC's configuration, registry, backup records, and
+/// host facts, without secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryManifest {
+    pub schema_version: u32,
+    pub cluster_uuid: String,
+    pub generated_at_ms: i64,
+    /// The host that made it.
+    pub host: HostSlot,
+    /// SHA-256 over `files`, so an unchanged manifest is kept once.
+    pub revision: String,
+    /// Each file's path under `/etc/pve/priv/bmac/` and its contents.
+    pub files: BTreeMap<String, String>,
+}
+
+pub const RECOVERY_SCHEMA: u32 = 1;
+
+/// The directories of `/etc/pve/priv/bmac/` a recovery manifest carries.
+/// Nothing else there is copied: secrets, sessions, join and enrollment
+/// tokens, keys, job logs, and host identities stay behind.
+pub const RECOVERY_DIRS: &[&str] = &["backup", "config", "registry", "schedules"];
+
+impl RecoveryManifest {
+    pub fn revision_of(files: &BTreeMap<String, String>) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        for (path, text) in files {
+            hash.update((path.len() as u64).to_be_bytes());
+            hash.update(path.as_bytes());
+            hash.update((text.len() as u64).to_be_bytes());
+            hash.update(text.as_bytes());
+        }
+        hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+/// `POST /v1/recovery/index`: under a recovery grant, the newest recovery
+/// manifest of the grant's cluster and every PIT published of it. The
+/// grant names the cluster, which a rebuilt cluster doesn't know yet.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryRequest {
+    pub grant: String,
+}
+
+impl std::fmt::Debug for RecoveryRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecoveryRequest")
+            .field("grant", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryIndex {
+    pub appliance_uuid: Uuid,
+    pub cluster_uuid: String,
+    /// The lost cluster's name, as the appliance enrolled with it.
+    pub cluster_name: String,
+    pub grant_id: String,
+    pub expires_at_ms: i64,
+    pub manifest: Option<RecoveryManifest>,
+    pub pits: Vec<PeerPit>,
+}
+
+/// `POST /v1/recovery/bind`: the cluster rebuilt on new hardware takes
+/// over the namespace. The appliance pins the new CA and hosts in place of
+/// the old ones.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryBind {
+    pub cluster_uuid: String,
+    pub grant: String,
+    pub cluster_name: String,
+    pub proxmox_ca_fingerprint: String,
+    pub hosts: Vec<SourceHost>,
+}
+
+impl std::fmt::Debug for RecoveryBind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecoveryBind")
+            .field("cluster_uuid", &self.cluster_uuid)
+            .field("grant", &"<redacted>")
+            .field("cluster_name", &self.cluster_name)
+            .field("proxmox_ca_fingerprint", &self.proxmox_ca_fingerprint)
+            .field("hosts", &self.hosts)
+            .finish()
+    }
 }
 
 /// The enrollment bundle the Dashboard issues for a new appliance, shown

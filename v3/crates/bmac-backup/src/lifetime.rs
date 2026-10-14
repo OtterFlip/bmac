@@ -71,6 +71,9 @@ pub enum SnapshotNeed {
     /// Bookmarks aren't proven, and an appliance that isn't delinquent has
     /// this PIT as its head.
     ApplianceHead,
+    /// Bookmarks aren't proven, and a new branch's first PIT will be sent
+    /// from this one.
+    BranchStart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -159,7 +162,14 @@ pub fn plan(inputs: &Inputs, now_s: i64, settings: &BackupSettings) -> Plan {
         bookmark(newest.pit_uuid, BookmarkNeed::Newest);
     }
     for id in inputs.branch_starts.intersection(&known) {
-        bookmark(*id, BookmarkNeed::BranchStart);
+        if inputs.bookmarks_proven {
+            bookmark(*id, BookmarkNeed::BranchStart);
+        } else {
+            out.snapshots
+                .entry(*id)
+                .or_default()
+                .insert(SnapshotNeed::BranchStart);
+        }
     }
     out
 }
@@ -279,13 +289,11 @@ mod tests {
         let plan = plan(&inputs, NOW, &s);
         assert_eq!(
             plan.snapshots[&id(1)],
-            BTreeSet::from([SnapshotNeed::ApplianceHead])
+            BTreeSet::from([SnapshotNeed::ApplianceHead, SnapshotNeed::BranchStart]),
+            "a branch start keeps its snapshot, not a bookmark"
         );
         assert!(plan.releases_snapshot(&id(2)));
-        assert_eq!(
-            plan.bookmarks[&id(1)],
-            BTreeSet::from([BookmarkNeed::BranchStart])
-        );
+        assert!(!plan.keeps_bookmark(&id(1)));
         assert_eq!(
             plan.bookmarks[&id(2)],
             BTreeSet::from([BookmarkNeed::Newest])

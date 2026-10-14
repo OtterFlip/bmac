@@ -243,6 +243,27 @@ impl Source<'_> {
             Ok((record, catalogs))
         })?;
 
+        let restores = self.store.restores()?;
+        let mut branch_roots = Vec::new();
+        for (vm, _) in &catalogs {
+            let Some(lineage) = self.store.lineage(vm)? else {
+                continue;
+            };
+            if heads
+                .get(vm)
+                .is_some_and(|h| h.branch_uuid == lineage.branch_uuid)
+            {
+                continue;
+            }
+            branch_roots.extend(
+                restores
+                    .iter()
+                    .filter(|r| r.vm_uuid == *vm && r.continues(now_ms))
+                    .max_by_key(|r| r.finished_at_ms)
+                    .map(|r| r.pit_uuid),
+            );
+        }
+
         let index = self.store.index(&id)?;
         let mut offers = Vec::new();
         for (vm, pits) in &catalogs {
@@ -257,6 +278,31 @@ impl Source<'_> {
                 offers.push(offer);
             }
         }
+        let mut tests: Vec<_> = restores
+            .iter()
+            .filter(|r| {
+                r.appliance_uuid == id
+                    && r.mode == bmac_backup::restore::Mode::Test
+                    && (r.finished_at_ms.is_some() || r.error.is_some())
+            })
+            .collect();
+        tests.sort_by_key(|r| std::cmp::Reverse(r.started_at_ms));
+        let restore_tests = tests
+            .into_iter()
+            .take(bmac_proto::appliance::REPORTED_TESTS)
+            .map(|r| bmac_proto::appliance::RestoreTestReport {
+                restore_uuid: r.restore_uuid,
+                vm_uuid: r.vm_uuid,
+                pit_uuid: r.pit_uuid,
+                host: r.host.clone(),
+                started_at_ms: r.started_at_ms,
+                finished_at_ms: r.finished_at_ms,
+                booted: r.test.as_ref().is_some_and(|t| t.booted),
+                agent: r.test.as_ref().is_some_and(|t| t.agent),
+                agent_after_s: r.test.as_ref().and_then(|t| t.agent_after_s),
+                error: r.error.clone(),
+            })
+            .collect();
         let mut shown = record.clone();
         shown.last_checkin_ms = Some(now_ms);
         Ok(CheckinReply {
@@ -266,6 +312,9 @@ impl Source<'_> {
             state: state_text(overall(&shown, &policies, &catalogs, now_s, &settings)),
             offers,
             want_index: request.index_revision != record.index_revision,
+            branch_roots,
+            recovery_revision: None,
+            restore_tests,
         })
     }
 
@@ -517,10 +566,17 @@ impl Source<'_> {
                     .iter()
                     .find(|v| v.volume_uuid == volume.volume_uuid)
                     .ok_or_else(|| invalid("the base has no such volume"))?;
-                let candidates = [
-                    format!("{}@{}", from_volume.dataset, from.name),
-                    format!("{}#{}", from_volume.dataset, from.name),
-                ];
+                // A restored disk carries its base under the disk's own
+                // name, which may not be the one the base was taken from.
+                let mut candidates = Vec::new();
+                for dataset in [&volume.dataset, &from_volume.dataset] {
+                    for sep in ['@', '#'] {
+                        let name = format!("{dataset}{sep}{}", from.name);
+                        if !candidates.contains(&name) {
+                            candidates.push(name);
+                        }
+                    }
+                }
                 names.extend(candidates.iter().cloned());
                 Some((candidates, from_volume.snapshot_guid))
             }

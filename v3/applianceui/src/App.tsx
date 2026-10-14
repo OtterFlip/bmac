@@ -5,7 +5,7 @@
 // administrator's password, then the pages. Nothing is kept across a reload.
 
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { Archive, Gauge, GitBranch, KeyRound, Lock, LogIn, LogOut, ScrollText, Settings, Share2, Shield, TrendingUp, Loader2 } from "lucide-react";
+import { Archive, Gauge, GitBranch, KeyRound, LifeBuoy, Lock, LogIn, LogOut, ScrollText, Settings, Share2, Shield, TrendingUp, Loader2 } from "lucide-react";
 import { Button, Input, Label, cn, type ApplianceHello } from "@bmac/ui";
 import { ApiContext, Problem, useApi } from "./parts";
 import { errorMessage, type Api } from "./lib/api";
@@ -15,18 +15,20 @@ import { ThroughputPage } from "./pages/Throughput";
 import { RetentionPage } from "./pages/Retention";
 import { GrantsPage } from "./pages/Grants";
 import { PeersPage } from "./pages/Peers";
+import { RecoveryPage } from "./pages/Recovery";
 import { SettingsPage } from "./pages/Settings";
 import { AuditPage } from "./pages/Audit";
 
-export type Page = "overview" | "pits" | "throughput" | "retention" | "grants" | "peers" | "settings" | "audit";
+export type Page = "overview" | "pits" | "throughput" | "retention" | "grants" | "peers" | "recovery" | "settings" | "audit";
 
 const NAV: { id: Page; label: string; icon: ReactNode }[] = [
   { id: "overview", label: "Overview", icon: <Gauge /> },
   { id: "pits", label: "PITs", icon: <GitBranch /> },
   { id: "throughput", label: "Throughput", icon: <TrendingUp /> },
   { id: "retention", label: "Retention", icon: <Archive /> },
-  { id: "grants", label: "Restore grants", icon: <KeyRound /> },
+  { id: "grants", label: "Grants", icon: <KeyRound /> },
   { id: "peers", label: "Peers", icon: <Share2 /> },
+  { id: "recovery", label: "Recovery", icon: <LifeBuoy /> },
   { id: "settings", label: "Settings", icon: <Settings /> },
   { id: "audit", label: "Audit log", icon: <ScrollText /> },
 ];
@@ -141,6 +143,7 @@ function Shell({ hello, logout }: { hello: ApplianceHello; logout: () => void })
     retention: <RetentionPage />,
     grants: <GrantsPage />,
     peers: <PeersPage />,
+    recovery: <RecoveryPage />,
     settings: <SettingsPage />,
     audit: <AuditPage />,
   };

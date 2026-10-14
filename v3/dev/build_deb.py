@@ -229,11 +229,14 @@ def stage_appliance(tree: Path, binary: Path, version: str, root: Path = V3_ROOT
     units = root / "packaging" / "appliance" / "systemd"
     for unit in sorted(p for p in units.rglob("*") if p.is_file()):
         _write(tree / "usr/lib/systemd/system" / unit.relative_to(units), unit.read_bytes(), 0o644)
+    needrestart = "etc/needrestart/conf.d/bmac-backupd.conf"
+    _write(tree / needrestart, (root / "packaging/appliance/needrestart/bmac-backupd.conf").read_bytes(), 0o644)
     doc = tree / "usr/share/doc" / APPLIANCE
     _write(doc / "README.md", (root / "packaging" / "README.md").read_bytes(), 0o644)
     size = sum(p.stat().st_size for p in tree.rglob("*") if p.is_file())
     debian = tree / "DEBIAN"
     _write(debian / "control", appliance_control(version, (size + 1023) // 1024), 0o644)
+    _write(debian / "conffiles", f"/{needrestart}\n".encode(), 0o644)
     for name, text in (("postinst", APPLIANCE_POSTINST), ("prerm", APPLIANCE_PRERM), ("postrm", APPLIANCE_POSTRM)):
         _write(debian / name, text, 0o755)
     for path in sorted(tree.rglob("*"), reverse=True):

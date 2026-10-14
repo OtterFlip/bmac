@@ -2124,6 +2124,26 @@ counts as unconfirmed, so a weakening one waits out the delay. `unlock` and
 running them with the SSH variables unset and the answers on stdin. The
 package depends on `cryptsetup-bin` as well as `zfsutils-linux`.
 
+Lab result (`m9_backup`, SATA cluster, 2026-10-14): 114 checks passed and
+none failed, in 28 minutes. The run covers the following:
+- creating the encrypted pool at the console (it is refused over SSH, and
+  the disks are LUKS2);
+- enrollment with a matching fingerprint, approval, and the first check-in;
+- a full and an incremental pull;
+- delegation: `bmac-source` runs as its own user, holds only send, hold
+  and release on each storage, and refuses an unenrolled client;
+- the UI: hello, 401 and 403 refusals, login, the pool, PITs, transfers and
+  retention, logout, no cookie, and an audited login and logout;
+- a reboot: the pool stays locked and still checks in, and the Dashboard
+  shows it locked; `unlock` refuses a wrong passphrase, then imports the
+  pool by GUID with both PITs still held;
+- refused check-ins after a revoke.
+
+The run found two bugs. Setting the metadata mountpoint can mount the
+dataset by itself, so `mount_metadata` checks again before it mounts.
+`pool_guid` reads `zpool list` rows, because some OpenZFS releases answer
+`zpool get` with a usage error for a pool that isn't imported.
+
 ### M9.4 Restore
 
 **Builds:** restore to a new VM, restore into the existing VM (restored
@@ -2148,6 +2168,41 @@ are the model for restoring as a new VM without colliding with production
 (new MAC, hostname, machine ID; network disconnected until the operator
 chooses).
 
+**As built:** each way back is a native operation on the Backups category,
+run from the Dashboard's jobs, admin only. `backup.restore` and
+`backup.restore_test` (`backup/restore.rs`) run on the host they restore
+on: the operator picks an approved appliance and pastes a restore grant,
+the appliance lists the granted PITs with their manifests, and each volume
+gets the cheapest method the snapshots in that host's pools allow, sized by
+the appliance (`zfs send -nP`) before the confirmation. Volumes are cloned
+or received resumably under `<pool>/bmac-restore/<job>/<volume_uuid>` with
+`volmode=none`, checked by GUID and size, renamed into the storage for
+their block size, and attached to a VM created without disks from the
+translated configuration (new MACs and SMBIOS UUID, links down when
+isolated). A restore test restores into a scratch VM named
+`bmac-test-<vm>`, boots it, waits for the guest agent, records the outcome
+in the restore record, and destroys the VM, even when it didn't boot.
+`backup.restore_into`, `backup.rollback`, `backup.promote`, and
+`backup.cleanup` (`backup/replace.rs`) run on the VM's owner, refuse without
+quorum, and share one fence: the VM's orchestration lease (48 hours), HA
+or a shutdown to stop it, and `pvesr delete` of its replication jobs. A
+swap renames each current disk to
+`<pool>/bmac-replaced/<vmid>/<volume_uuid>-<time>` and the restored one into
+its place, renaming back on any failure; a rollback is `zfs rollback -r` and
+is refused when a clone depends on a newer snapshot. The jobs are then
+recreated and each first sync waited for, the VM is started, and backups
+continue from the PIT on a new branch (`continue_from`). Promotion swaps the
+restored VM's disks into the production VM, which keeps its identity, and
+removes the restored VM's own configuration. A cleanup promotes any disk
+still a clone of a set-aside one before destroying it, and keeps what a
+restore in progress depends on. `backup.recover` (`backup/recover.rs`) is
+the whole-cluster recovery `BACKUP.md` describes; the manifest comes from
+`bmac-source` (`GET /v1/recovery-manifest`, `backup/recovery.rs`), the
+appliance keeps it and each host's LUKS headers (`bmac-backupd`'s
+`recovery.rs`), and recovery grants are a second kind of grant on the
+appliance, pinned to one host certificate. Restore-test results are kept
+on the cluster and reported to the appliance in the check-in reply (M9.5).
+
 ### M9.5 Dashboard backup pages
 
 **Builds:** the Backups page: policies per VM with the appliance
@@ -2158,6 +2213,33 @@ Ignore BACKUP.md if it says to do the graph with time left-to-right,
 since browsers and UIs are more naturally arranged vertically it makes more
 sense to arrange the graph timeline vertically from top-to-bottom with branches
 extending to the right.
+
+**As built:** `GET /api/v1/backups` answers a `BackupsView`
+(`bmac-proto/src/backups.rs`) that the engine assembles
+(`backup/view.rs`) from the backup records, the newest `backups`
+observation, each host's storage observation, and the registry's names.
+That covers each appliance with its state, check-in time, and live
+transfers; each VM's policy, state, PITs with where each one is held
+(appliances, cluster snapshot or bookmark), current branch, and local
+snapshot space; the restore records; and the newest finished transfers,
+which `bmac-source` now records per host (`backup/transfers/<host>.json`,
+newest 200). The storage collector sums each dataset's `bmac-pit-`
+snapshots (`zfs list -t snapshot`) for the local space. `POST
+/appliances/{uuid}/address` sets or clears an appliance's address. The
+Dashboard's Backups page (`webui/src/pages/BackupsPage.tsx`) has the
+appliances (enroll, approve after typing the fingerprint the appliance
+printed, reject, revoke, address), one card per VM with its policy dialog,
+PIT graph and PIT list, the restores, the transfer history, and the eight
+backup operations, which run as jobs with their own forms (the restore
+wizard). The graph's layout (`pitLayout`) and its SVG (`PitGraphLines`)
+moved to `@bmac/ui` so the appliance UI draws the same graph: one row of
+32 px per PIT, oldest at the top, each branch in a column to the right of
+the one it forked from. Check-in replies carry the newest 20 restore tests
+that read from the appliance, and the appliance keeps 50 per cluster and
+shows them on a new Recovery page with the manifests and LUKS header
+versions it keeps. The LUKS headers moved to a list of digests and one
+gzip-compressed header per `POST /v1/luks-header`: the M9.4 lab run found a
+whole host's headers in one reply exceeded the 16 MiB socket frame.
 
 
 ### M9.6 Lab proofs and acceptance

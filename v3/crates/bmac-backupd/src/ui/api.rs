@@ -254,7 +254,9 @@ async fn route(call: &Call<'_>, method: &Method, path: &str) -> Answer {
         ("GET", "/grants") => grants(call),
         ("POST", "/grants") => issue_grant(call).await,
         ("POST", "/grants/revoke") => revoke_grant(call).await,
+        ("POST", "/grants/recovery") => issue_recovery_grant(call).await,
         ("GET", "/peers") => show_peers(call),
+        ("GET", "/recovery") => recovery_view(call),
         ("POST", "/peers/trust") => trust(call).await,
         ("POST", "/peers/untrust") => untrust(call).await,
         ("GET", "/scrub") => json(scrub_view(call)?),
@@ -701,6 +703,12 @@ fn grant_view(g: &crate::grants::Grant, now: i64) -> GrantView {
         }
         .into(),
         last_used_ms: g.last_used_ms,
+        kind: match g.kind {
+            crate::grants::GrantKind::Restore => "restore",
+            crate::grants::GrantKind::Recovery => "recovery",
+        }
+        .into(),
+        host_fingerprint: g.host_fingerprint.as_deref().map(display_fingerprint),
     }
 }
 
@@ -748,6 +756,33 @@ async fn issue_grant(call: &Call<'_>) -> Answer {
     })
 }
 
+async fn issue_recovery_grant(call: &Call<'_>) -> Answer {
+    let request: IssueRecoveryGrant = call.body()?;
+    let metadata = &call.ui.metadata;
+    let _guard = metadata.lock().await.map_err(internal)?;
+    let journal = call.journal()?;
+    let mut grants = Grants::load(metadata).map_err(internal)?;
+    let (grant, token) = grants
+        .issue_recovery(
+            &journal,
+            &request.cluster_uuid,
+            &request.host_fingerprint,
+            Some(request.hours),
+            &call.by(),
+            call.now(),
+        )
+        .map_err(invalid)?;
+    grants.save(metadata).map_err(internal)?;
+    call.audit(
+        "recovery_grant",
+        serde_json::json!({"grant_id": grant.grant_id, "cluster_uuid": grant.cluster_uuid, "host_fingerprint": grant.host_fingerprint, "expires_at_ms": grant.expires_at_ms}),
+    );
+    json(IssuedGrant {
+        grant: grant_view(&grant, call.now()),
+        token,
+    })
+}
+
 async fn revoke_grant(call: &Call<'_>) -> Answer {
     let request: RevokeGrant = call.body()?;
     let metadata = &call.ui.metadata;
@@ -765,6 +800,59 @@ async fn revoke_grant(call: &Call<'_>) -> Answer {
         serde_json::json!({"grant_id": request.grant_id}),
     );
     Ok(Value::Null)
+}
+
+fn recovery_view(call: &Call<'_>) -> Answer {
+    use bmac_proto::appliance_ui::{
+        ClusterRecoveryView, HeaderKept, ManifestKept, RecoveryView, ReportedRestoreTest,
+    };
+    let metadata = &call.ui.metadata;
+    let clusters = (call.ui.clusters)()
+        .into_iter()
+        .map(|c| {
+            let cluster = c.status.cluster_uuid;
+            ClusterRecoveryView {
+                manifests: crate::recovery::manifests_kept(metadata, &cluster)
+                    .into_iter()
+                    .map(|(generated_at_ms, revision)| ManifestKept {
+                        generated_at_ms,
+                        revision,
+                    })
+                    .collect(),
+                headers: crate::recovery::headers_kept(metadata, &cluster)
+                    .into_iter()
+                    .flat_map(|(host, files)| {
+                        files
+                            .into_iter()
+                            .map(move |(file, newest_at_ms, versions)| HeaderKept {
+                                host: host.clone(),
+                                file,
+                                newest_at_ms,
+                                versions: versions as u32,
+                            })
+                    })
+                    .collect(),
+                restore_tests: crate::recovery::tests_kept(metadata, &cluster)
+                    .into_iter()
+                    .map(|t| ReportedRestoreTest {
+                        restore_uuid: t.restore_uuid.to_string(),
+                        vm_uuid: t.vm_uuid.to_string(),
+                        pit_uuid: t.pit_uuid.to_string(),
+                        host: t.host,
+                        started_at_ms: t.started_at_ms,
+                        finished_at_ms: t.finished_at_ms,
+                        booted: t.booted,
+                        agent: t.agent,
+                        agent_after_s: t.agent_after_s,
+                        error: t.error,
+                    })
+                    .collect(),
+                cluster_uuid: cluster,
+                cluster_name: c.status.cluster_name,
+            }
+        })
+        .collect();
+    json(RecoveryView { clusters })
 }
 
 fn show_peers(call: &Call<'_>) -> Answer {

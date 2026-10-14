@@ -314,7 +314,18 @@ pub struct StorageObservation {
     /// LUKS mappings that disagree with `/etc/crypttab` or rpool's members.
     #[serde(default)]
     pub luks_mismatches: Vec<String>,
+    /// The PIT snapshots on each dataset that has any, for local retention.
+    #[serde(default)]
+    pub pit_snapshots: Vec<PitSnapshotSpace>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PitSnapshotSpace {
+    pub dataset: String,
+    pub snapshots: u32,
+    /// The sum of their `used`: what destroying them all would free.
+    pub used_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -225,6 +225,10 @@ pub struct PitRecord {
     pub release_blocked: Option<String>,
 }
 
+/// How long a restore's PIT is named to the appliances as a pending
+/// branch root.
+pub const BRANCH_ROOT_KEEP_MS: i64 = 30 * 24 * 3600 * 1000;
+
 /// One restore job and what it left on the cluster.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -255,12 +259,49 @@ pub struct RestoreRecord {
     /// stops naming the PIT as a pending branch root then.
     #[serde(default)]
     pub ended_at_ms: Option<i64>,
+    /// The disks set aside, by slot, with their snapshots and bookmarks,
+    /// until a cleanup destroys them.
+    #[serde(default)]
+    pub replaced: BTreeMap<String, String>,
+    /// A restore test's outcome; its scratch VM is gone.
+    #[serde(default)]
+    pub test: Option<TestOutcome>,
+    /// The PIT's sealed manifest, so backups can continue from it after
+    /// the catalog lets the PIT go.
+    #[serde(default)]
+    pub manifest: Option<String>,
+}
+
+/// What a restore test found (`BACKUP.md`, "Restore tests").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestOutcome {
+    pub booted: bool,
+    pub agent: bool,
+    /// Seconds from the VM's start until its agent answered.
+    pub agent_after_s: Option<u64>,
 }
 
 impl RestoreRecord {
     /// Whether the restore used its PIT and still stands.
     pub fn stands(&self) -> bool {
         self.finished_at_ms.is_some() && self.error.is_none() && self.ended_at_ms.is_none()
+    }
+
+    /// Whether the VM's backups continue from the restored PIT on a new
+    /// branch, so the appliances should keep it until they have the branch.
+    pub fn continues(&self, now_ms: i64) -> bool {
+        self.stands()
+            && matches!(
+                self.mode,
+                crate::restore::Mode::IntoExisting
+                    | crate::restore::Mode::Rollback
+                    | crate::restore::Mode::Promotion
+                    | crate::restore::Mode::Recovery
+            )
+            && self
+                .finished_at_ms
+                .is_some_and(|t| now_ms - t < BRANCH_ROOT_KEEP_MS)
     }
 
     /// Whether a volume is still a clone of the PIT's snapshot on the

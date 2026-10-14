@@ -6,8 +6,11 @@
 //! a host certificate that leads to the CA of a cluster this appliance is
 //! enrolled with; anything else is refused before a request is read, and
 //! the refusal is recorded. A peer reads every published PIT; a cluster
-//! host reads only what a live restore grant names. Untrusting a peer, or
-//! a cluster's enrollment going, closes its open connections.
+//! host reads only what a live restore grant names. A host a live recovery
+//! grant names (a cluster rebuilt on new hardware) reads its namespace's
+//! recovery manifest and every PIT of it, and may bind the namespace to its
+//! cluster. Untrusting a peer, a cluster's enrollment going, or a recovery
+//! grant ending closes its open connections.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -30,7 +33,8 @@ use bmac_exec::BoxFuture;
 use bmac_proto::api::{ApiError, ErrorCode};
 use bmac_proto::appliance::{
     ExportEstimate, ExportRequest, GrantedBase, GrantedIndex, GrantedRequest, PeerIndex, PeerPit,
-    PeerVolume, TrustedPeer, on_appliance, trusted_peer,
+    PeerVolume, RecoveryBind, RecoveryIndex, RecoveryRequest, TrustedPeer, on_appliance,
+    trusted_peer,
 };
 use bytes::Bytes;
 use http_body::Frame;
@@ -82,6 +86,12 @@ pub enum Client {
         cluster_uuid: String,
         fingerprint: String,
     },
+    /// The host a live recovery grant names.
+    Recovery {
+        cluster_uuid: String,
+        grant_id: String,
+        fingerprint: String,
+    },
 }
 
 impl Client {
@@ -89,6 +99,11 @@ impl Client {
         match self {
             Client::Peer { appliance_uuid, .. } => format!("peer {appliance_uuid}"),
             Client::Cluster { cluster_uuid, .. } => format!("cluster {cluster_uuid}"),
+            Client::Recovery {
+                cluster_uuid,
+                grant_id,
+                ..
+            } => format!("recovery of {cluster_uuid} under grant {grant_id}"),
         }
     }
 }
@@ -148,6 +163,8 @@ fn leads_to(
 struct ExportVerifier {
     peers: Vec<TrustedPeer>,
     clusters: Vec<ClusterCa>,
+    /// `(grant_id, cluster, host fingerprint)` of the live recovery grants.
+    recoveries: Vec<(String, String, String)>,
     provider: Arc<CryptoProvider>,
     outcome: Mutex<Option<Result<Client, (String, String)>>>,
 }
@@ -163,6 +180,17 @@ impl ExportVerifier {
         if let Some(peer) = trusted_peer(&self.peers, &presented) {
             return Ok(Client::Peer {
                 appliance_uuid: peer.appliance_uuid.clone(),
+                fingerprint: presented,
+            });
+        }
+        if let Some((grant_id, cluster_uuid, _)) = self
+            .recoveries
+            .iter()
+            .find(|(_, _, f)| f.eq_ignore_ascii_case(&presented))
+        {
+            return Ok(Client::Recovery {
+                cluster_uuid: cluster_uuid.clone(),
+                grant_id: grant_id.clone(),
                 fingerprint: presented,
             });
         }
@@ -287,6 +315,28 @@ pub fn plan_export(
                 .check(token, cluster_uuid, &request.pit_uuid, now_ms)
                 .map_err(|e| refuse(ErrorCode::Forbidden, e))?;
             Some(grant.grant_id.clone())
+        }
+        Client::Recovery {
+            cluster_uuid,
+            grant_id,
+            ..
+        } => {
+            if *cluster_uuid != request.cluster_uuid {
+                return Err(refuse(
+                    ErrorCode::Forbidden,
+                    "a recovery reads only its grant's cluster",
+                ));
+            }
+            let token = request.grant.as_deref().ok_or_else(|| {
+                refuse(
+                    ErrorCode::Forbidden,
+                    "reading a PIT needs the recovery grant",
+                )
+            })?;
+            grants
+                .recovery(token, cluster_uuid, grant_id, now_ms)
+                .map_err(|e| refuse(ErrorCode::Forbidden, e))?;
+            Some(grant_id.clone())
         }
     };
     let pit = journal
@@ -415,6 +465,12 @@ impl Exporter {
             .collect()
     }
 
+    fn recoveries(&self) -> Vec<(String, String, String)> {
+        Grants::load(&self.metadata)
+            .unwrap_or_default()
+            .recovery_hosts((self.now_ms)())
+    }
+
     fn peers(&self) -> Peers {
         Peers::load(&self.metadata).unwrap_or_default()
     }
@@ -448,12 +504,16 @@ impl Exporter {
             tokio::time::sleep(RECHECK).await;
             let peers = self.peers();
             let clusters = self.clusters();
+            let recoveries = self.recoveries();
             let open = self.open.lock().unwrap_or_else(|p| p.into_inner());
             for (client, task) in open.values() {
                 let still = match client {
                     Client::Peer { fingerprint, .. } => peers.trusted(fingerprint).is_some(),
                     Client::Cluster { cluster_uuid, .. } => {
                         clusters.iter().any(|c| &c.cluster_uuid == cluster_uuid)
+                    }
+                    Client::Recovery { grant_id, .. } => {
+                        recoveries.iter().any(|(g, _, _)| g == grant_id)
                     }
                 };
                 if !still {
@@ -480,6 +540,7 @@ impl Exporter {
         let verifier = Arc::new(ExportVerifier {
             peers: self.peers().list(),
             clusters: self.clusters(),
+            recoveries: self.recoveries(),
             provider: self.provider.clone(),
             outcome: Mutex::default(),
         });
@@ -539,6 +600,10 @@ impl Exporter {
             from: from.to_string(),
             at_ms: now,
         };
+        eprintln!(
+            "bmac-backupd: exports: refused {} ({}) from {from}: not a trusted peer, cluster host, or recovery host",
+            refusal.claimed, refusal.fingerprint
+        );
         let audit = peers.refused(refusal.clone());
         let _ = peers.save(&self.metadata);
         if audit {
@@ -658,6 +723,8 @@ fn router(exporter: Arc<Exporter>) -> Router {
         .route(on_appliance::PEER_INDEX, get(peer_index))
         .route(on_appliance::EXPORT, post(export))
         .route(on_appliance::GRANTED, post(granted))
+        .route(on_appliance::RECOVERY_INDEX, post(recovery_index))
+        .route(on_appliance::RECOVERY_BIND, post(recovery_bind))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(exporter)
 }
@@ -743,10 +810,7 @@ async fn granted(
     Json(request): Json<GrantedRequest>,
 ) -> Response {
     let Client::Cluster { cluster_uuid, .. } = &client else {
-        return api_error(refuse(
-            ErrorCode::Forbidden,
-            "grants are for cluster hosts",
-        ));
+        return api_error(refuse(ErrorCode::Forbidden, "grants are for cluster hosts"));
     };
     if *cluster_uuid != request.cluster_uuid {
         return api_error(refuse(
@@ -766,6 +830,166 @@ async fn granted(
     };
     exporter.served(&client).await;
     Json(granted_index(&journal, &exporter.metadata, grant)).into_response()
+}
+
+/// The recovering host's grant, checked against its request.
+fn recovery_grant(
+    exporter: &Exporter,
+    client: &Client,
+    cluster: &str,
+    token: &str,
+) -> Result<Grant, ApiError> {
+    let Client::Recovery {
+        cluster_uuid,
+        grant_id,
+        ..
+    } = client
+    else {
+        return Err(refuse(
+            ErrorCode::Forbidden,
+            "only the host a recovery grant names may recover",
+        ));
+    };
+    if cluster_uuid != cluster {
+        return Err(refuse(
+            ErrorCode::Forbidden,
+            "a recovery reads only its grant's cluster",
+        ));
+    }
+    Grants::load(&exporter.metadata)
+        .unwrap_or_default()
+        .recovery(token, cluster_uuid, grant_id, (exporter.now_ms)())
+        .cloned()
+        .map_err(|e| refuse(ErrorCode::Forbidden, e))
+}
+
+/// Every PIT of a namespace with its manifest, and the newest recovery
+/// manifest.
+pub fn recovery_index_of(
+    journal: &Journal,
+    metadata: &Metadata,
+    grant: &Grant,
+    cluster_name: &str,
+) -> RecoveryIndex {
+    RecoveryIndex {
+        appliance_uuid: journal.appliance_uuid,
+        cluster_uuid: grant.cluster_uuid.clone(),
+        cluster_name: cluster_name.to_string(),
+        grant_id: grant.grant_id.clone(),
+        expires_at_ms: grant.expires_at_ms,
+        manifest: crate::recovery::newest(metadata, &grant.cluster_uuid)
+            .ok()
+            .flatten(),
+        pits: journal
+            .pits
+            .iter()
+            .filter(|p| p.cluster_uuid == grant.cluster_uuid)
+            .filter_map(|p| peer_pit(p, metadata))
+            .collect(),
+    }
+}
+
+async fn recovery_index(
+    State(exporter): State<Arc<Exporter>>,
+    Extension(client): Extension<Client>,
+    Json(request): Json<RecoveryRequest>,
+) -> Response {
+    let journal = match exporter.ready().await {
+        Ok(j) => j,
+        Err(e) => return api_error(e),
+    };
+    let cluster = match &client {
+        Client::Recovery { cluster_uuid, .. } => cluster_uuid.clone(),
+        _ => String::new(),
+    };
+    let grant = match recovery_grant(&exporter, &client, &cluster, &request.grant) {
+        Ok(g) => g,
+        Err(e) => return api_error(e),
+    };
+    let now = (exporter.now_ms)();
+    if let Ok(_guard) = exporter.metadata.lock().await {
+        let mut grants = Grants::load(&exporter.metadata).unwrap_or_default();
+        grants.used(&grant.grant_id, now);
+        let _ = grants.save(&exporter.metadata);
+    }
+    let _ = exporter.audit.record(
+        now,
+        "recovery_index",
+        &client.label(),
+        serde_json::json!({"cluster_uuid": grant.cluster_uuid, "grant": grant.grant_id}),
+    );
+    let cluster_name = state::load::<state::Enrollment>(&exporter.paths.enrollment(&cluster))
+        .ok()
+        .flatten()
+        .map(|e| e.cluster_name)
+        .unwrap_or_default();
+    Json(recovery_index_of(
+        &journal,
+        &exporter.metadata,
+        &grant,
+        &cluster_name,
+    ))
+    .into_response()
+}
+
+/// Binds the namespace to the recovering cluster: its CA and hosts replace
+/// the lost cluster's in the enrollment, and the check-ins follow.
+async fn recovery_bind(
+    State(exporter): State<Arc<Exporter>>,
+    Extension(client): Extension<Client>,
+    Json(request): Json<RecoveryBind>,
+) -> Response {
+    if let Err(e) = exporter.ready().await {
+        return api_error(e);
+    }
+    let grant = match recovery_grant(&exporter, &client, &request.cluster_uuid, &request.grant) {
+        Ok(g) => g,
+        Err(e) => return api_error(e),
+    };
+    let Some(ca) = bmac_proto::appliance::normalized_fingerprint(&request.proxmox_ca_fingerprint)
+    else {
+        return api_error(refuse(
+            ErrorCode::Invalid,
+            "the CA fingerprint is not a SHA-256",
+        ));
+    };
+    if request.hosts.is_empty() {
+        return api_error(refuse(ErrorCode::Invalid, "the binding names no host"));
+    }
+    let now = (exporter.now_ms)();
+    let path = exporter.paths.enrollment(&request.cluster_uuid);
+    let Ok(Some(mut enrollment)) = state::load::<state::Enrollment>(&path) else {
+        return api_error(refuse(
+            ErrorCode::NotFound,
+            "this appliance isn't enrolled with that cluster",
+        ));
+    };
+    let before = enrollment.proxmox_ca_fingerprint.clone();
+    enrollment.proxmox_ca_fingerprint = ca.clone();
+    enrollment.hosts = request.hosts.clone();
+    if !request.cluster_name.is_empty() {
+        enrollment.cluster_name = request.cluster_name.clone();
+    }
+    if let Err(e) = state::save(&path, &enrollment) {
+        return api_error(refuse(ErrorCode::Internal, e.to_string()));
+    }
+    let _ = exporter.audit.record(
+        now,
+        "recovery_bind",
+        &client.label(),
+        serde_json::json!({
+            "cluster_uuid": request.cluster_uuid,
+            "grant": grant.grant_id,
+            "ca_before": before,
+            "ca_after": ca,
+            "hosts": request.hosts.iter().map(|h| h.host.to_string()).collect::<Vec<_>>(),
+        }),
+    );
+    eprintln!(
+        "bmac-backupd: cluster {} is bound to a recovered cluster (CA {ca}) under recovery grant {}",
+        request.cluster_uuid, grant.grant_id
+    );
+    Json(serde_json::json!({})).into_response()
 }
 
 async fn peer_index(

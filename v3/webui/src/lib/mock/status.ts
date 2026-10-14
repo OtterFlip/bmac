@@ -114,6 +114,7 @@ function storageObservation(host: string, at_ms: number, allocated: number, free
       : [],
     findings: [],
     luks_mismatches: [],
+    pit_snapshots: [],
     errors: [],
   };
 }

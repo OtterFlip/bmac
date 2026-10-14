@@ -267,8 +267,10 @@ VM, so the Dashboard shows a live rate during a transfer and a history chart
 to spot a network bottleneck. When a transfer ends, the cluster logs one
 event with the total bytes, the duration, and the average rate (total bytes
 divided by total time), and the appliance logs the same from its side. The
-Backups page shows the last and typical rate per appliance; restores use it
-for their time estimate.
+cluster also keeps the newest 200 finished transfers per host
+(`backup/transfers/<host>.json`). The Backups page shows the live rate of
+each transfer in progress, and the transfer history with each one's bytes,
+duration, and average rate; restores use the rate for their time estimate.
 
 ### Appliance pool layout
 
@@ -419,7 +421,8 @@ branch B:                P6 -- P7
 
 The Dashboard's Backups page and the appliance UI draw each VM's history as a
 tree. Time runs top to bottom, the oldest PIT is always at the top left, and
-each branch is a row extending to the right of the one it forked from, joined to its parent PIT.
+each branch is a column to the right of the one it forked from, joined to
+its parent PIT.
 Each PIT shows its time and consistency level, and marks where it exists: on
 which appliances, and whether the cluster still has its snapshot or only its
 bookmark. Selecting a PIT shows its manifest summary and the restores it
@@ -730,7 +733,8 @@ or rolled back.
 5. Re-enable HA, start the VM, and start a new branch from the restored PIT.
    The old branch is marked inactive (never deleted).
 
-The replaced zvols stay until an explicit cleanup, which refuses while a
+The replaced zvols stay until an explicit cleanup (`backup.cleanup`, per
+host, choosing among the set-aside disks), which refuses while a
 staging clone still depends on them, and promotes (`zfs promote`) a restored
 volume that is still a clone of one of their snapshots before destroying
 them. Rollback in place ("Local retention and fast recovery")
@@ -761,43 +765,86 @@ to run without quorum, and guards against the old owner returning midway.
    checks);
 4. destroy only the scratch VM.
 
-The results are stored in the cluster and reported to the appliance. Backup
+The results are stored in the cluster and reported to the appliance: every
+check-in reply carries the newest 20 finished or failed tests that read from
+that appliance, and the appliance keeps the newest 50 per cluster
+(`recovery/<cluster_uuid>/restore-tests.json`) and shows them on its
+Recovery page. Backup
 publication, scrub health, and restore-test success are three separate
 signals and are never merged into one "OK".
 
 ## Recovering BMAC after losing the whole cluster
 
-Each appliance pulls a **cluster recovery manifest** every hour, and after
-each change: the BMAC configuration, the registry, the backup policies, and
-the host facts, without secrets. It is versioned and kept on the appliance
-under its own retention.
+Each appliance pulls a **cluster recovery manifest** every hour, and as
+soon as it changes: every check-in reply carries the manifest's revision, a
+SHA-256 over its files. The manifest is the text of BMAC's files under
+`/etc/pve/priv/bmac/` in `backup/`, `config/`, `registry/`, and
+`schedules/`: the configuration and host facts, the registry, the backup
+policies and appliances, and the schedules. Nothing else in that directory
+is read (secrets, sessions, enrollment tokens, keys), hidden files (pmxcfs
+write temporaries) and anything that isn't UTF-8 are left out, and a file
+over 1 MiB or a manifest over 64 MiB is refused. The appliance keeps the
+newest 48 versions and one a day for 90 days, in its metadata dataset under
+`recovery/<cluster_uuid>/`.
 
 To recover onto new hardware:
 
 1. Install new hosts with the Deployer, as a new cluster.
-2. On an appliance's UI, the administrator issues a **recovery grant** for
-   the cluster namespace.
-3. In the new cluster's Dashboard, Backups, then Recover from appliance:
-   paste the grant.
-4. `bmacd` reads the recovery manifest and the list of published PITs, and
-   offers to restore BMAC's configuration and resource identities and selected
-   VMs.
-5. Each VM is restored as above (isolated first, then promoted), and
-   replication and HA are re-established.
-6. The new cluster keeps the old `cluster_uuid`, so backups continue on the
-   same namespace and history. New host identities and certificates are
-   issued normally.
+2. In the new cluster's Dashboard, start **Recover from an appliance**
+   (`backup.recover`) on the host the VMs are to come back on. It refuses
+   if this cluster already has backup policies, and shows this host's
+   certificate fingerprint (SHA-256 of its `pve-ssl.pem`).
+3. On an appliance's UI, Grants, then Grant a recovery: the administrator
+   picks the lost cluster and types that fingerprint. The **recovery grant**
+   is a random token, shown once, bound to the namespace, that one host
+   certificate, and an expiry. The appliance's 8445 listener admits that
+   certificate in the handshake while the grant is live, as it admits a
+   trusted peer.
+4. The operator gives the job the appliance's address, its certificate
+   fingerprint (pinned for the connection), and the grant. As with any
+   fingerprint BMAC asks for, the job also tells the operator to compare
+   the appliance's fingerprint in the browser, since the job's own
+   connection being genuine doesn't prove the browser's is.
+5. `POST /v1/recovery/index` answers with the newest recovery manifest and
+   every published PIT of the namespace. The operator picks the VMs (each
+   one's newest PIT is offered) and whether to take over the configuration.
+   A preflight checks each VM's VMID is free here and plans each volume as
+   for a restore. A typed confirmation (the lost cluster's name) lists what
+   changes and the manual prerequisites.
+6. Taking over the configuration: the new cluster takes the old
+   `cluster_uuid`, so backups continue on the same namespace and history,
+   and the cluster-wide files are written back: the registry's policy,
+   resources, history, and desired ingress with its generations;
+   `config/cluster.json` (not the per-host files, which the Deployer wrote
+   for the new hosts); every schedule; and the backup settings, policies,
+   and appliances. Leases, live state, and the PIT catalog are not: the new
+   hosts' snapshots are what they are. Then `POST /v1/recovery/bind` makes
+   the appliance pin the new cluster's CA and reach its hosts in place of
+   the old ones, which it audits; its agent for that cluster starts again
+   with the new trust. Any other appliance of the lost cluster needs its own
+   recovery grant and binding.
+7. Each VM is restored on this host under its own VMID and name (there is
+   no production VM to promote over), replication to its other placement
+   hosts in the registry is recreated, it is added to HA, which starts it,
+   and its backups continue from the PIT on a new branch. New host
+   identities and certificates are issued normally.
 
 This needs no surviving host, source snapshot, or old Dashboard; only the
 appliance, its administrator's credentials, and new hardware. Anything
 external (Cloudflare, DNS, provider networking, secrets not backed up) is
-listed by the recovery job as a manual prerequisite.
+listed by the recovery job as a manual prerequisite. Without taking over
+the configuration, the VMs still come back, with new backup histories.
 
 LUKS header backups and cluster recovery manifests are stored on every
 appliance, so a host can be recovered even if its LUKS headers are damaged.
 The appliance pulls them, as it pulls everything: the manifest from any host,
-and each host's headers from that host's `bmac-source`
-(`GET /v1/luks-headers`), on the same hourly schedule.
+and each host's headers from that host's `bmac-source`, on the same hourly
+schedule. `GET /v1/luks-headers` lists each header file's SHA-256 and size;
+the appliance then fetches only the files whose digest it doesn't hold, one
+per `POST /v1/luks-header` (gzip, at most 20 MiB uncompressed), checks the
+digest, and keeps the newest 10 versions of each. Its Recovery page lists,
+per cluster, the manifests kept, each host's header files with their newest
+time and version count, and the reported restore tests.
 
 ## Scrubs and integrity
 
@@ -814,6 +861,10 @@ and each host's headers from that host's `bmac-source`
 
 - Ubuntu Server LTS, amd64, installed by the Deployer's appliance ISO or from
   the `.deb` (`DEPLOYMENT.md`).
+- Ubuntu's unattended upgrades stay on, but needrestart is told not to
+  restart `bmac-backupd` (`/etc/needrestart/conf.d/bmac-backupd.conf`):
+  that would cut the pulls and exports in progress and end every UI
+  session. Pulls and restores resume after any restart regardless.
 - The OS is on its own disk or disks. The backup pool uses LUKS2 under ZFS,
   with any layout (`STORAGE.md`). `bmac-backupd create-pool POOL LAYOUT
   DISK...` (disks named by `/dev/disk/by-id/`, erased after the operator
@@ -875,10 +926,13 @@ restore jobs and trusted peers only).
 | `POST /v1/locate` | `bmac-source` | Enrolled appliance | Which hosts hold given snapshot or bookmark GUIDs |
 | `POST /v1/send` | `bmac-source` | Enrolled appliance | Stream a full, incremental (from a snapshot or bookmark), or resumed send of a BMAC snapshot that exists on this host |
 | `GET /v1/recovery-manifest` | `bmac-source` | Enrolled appliance | Cluster recovery manifest |
-| `GET /v1/luks-headers` | `bmac-source` | Enrolled appliance | This host's LUKS header backups (`DEPLOYMENT.md`), which `bmacd` reads from `/var/lib/bmac/luks-headers/` and hands over the source socket; `bmac-source` cannot read `/var/lib/bmac` |
+| `GET /v1/luks-headers` | `bmac-source` | Enrolled appliance | The SHA-256 and size of each of this host's LUKS header backups (`DEPLOYMENT.md`), which `bmacd` reads from `/var/lib/bmac/luks-headers/` and hands over the source socket; `bmac-source` cannot read `/var/lib/bmac` |
+| `POST /v1/luks-header` | `bmac-source` | Enrolled appliance | One named header backup, gzip-compressed, with its SHA-256 |
 | `GET /v1/heartbeat` | `bmac-source` | Enrolled appliance | Host and cluster liveness for the watchdog (`MONITORING.md`) |
-| `POST /v1/export` | Appliance | Cluster restore job (with grant) or trusted peer | Stream a published PIT volume, full or incremental from a given GUID, or its size estimate |
+| `POST /v1/export` | Appliance | Cluster restore job (with a restore or recovery grant) or trusted peer | Stream a published PIT volume, full or incremental from a given GUID, or its size estimate |
 | `GET /v1/peer-index` | Appliance | Trusted peer | Published PITs (metadata only) |
+| `POST /v1/recovery/index` | Appliance | Host named by a recovery grant | The lost cluster's newest recovery manifest and every published PIT of it |
+| `POST /v1/recovery/bind` | Appliance | Host named by a recovery grant | Bind the namespace to the rebuilt cluster: its CA and hosts |
 | `POST /v1/enroll` | `bmacd`, port 8444 (`SECURITY.md`, "Joins and enrollment") | New appliance (with token) | Present the appliance certificate for approval |
 
 `bmac-source` checks the client certificate's fingerprint against the

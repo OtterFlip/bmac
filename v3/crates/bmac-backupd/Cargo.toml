@@ -25,6 +25,7 @@ bmac-exec.workspace = true
 bmac-notify.workspace = true
 bmac-proto.workspace = true
 bytes.workspace = true
+flate2.workspace = true
 http-body.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client"] }

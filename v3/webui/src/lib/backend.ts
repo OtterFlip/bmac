@@ -12,11 +12,15 @@ import type {
   Alert,
   Answer,
   ApiError,
+  ApplianceList,
+  BackupsView,
   CertificateView,
   ClusterSnapshot,
   ErrorCode,
   HostFactsRecord,
   HostsSnapshot,
+  IssueEnroll,
+  IssuedEnroll,
   IssueJoin,
   IssuedJoin,
   JobList,
@@ -58,6 +62,20 @@ export interface SessionInfo {
   expires_at_ms: number;
 }
 
+/** A backup policy as the Dashboard saves it (`POST /backups/policies`). */
+export interface PolicyChange {
+  vm: string;
+  /** The schedule: `{ kind: "interval", minutes }`, `{ kind: "daily", at }`, and so on. */
+  every: unknown;
+  appliances: string[];
+  local_retention: { newest: number; days: number; weeks: number };
+  freeze: string;
+  accept_multi_pool: boolean;
+  enabled: boolean;
+  /** The revision as read; null for a new policy. */
+  revision: number | null;
+}
+
 export type StreamState = "connecting" | "open" | "reconnecting" | "closed";
 
 export interface StreamHandlers {
@@ -91,6 +109,21 @@ export interface Backend {
   issueJoin(request: IssueJoin): Promise<IssuedJoin>;
   revokeJoin(host: string): Promise<void>;
   certificate(): Promise<CertificateView>;
+  /** Appliances, policies, the PIT catalog, transfers, local space, and restores. */
+  backups(): Promise<BackupsView>;
+  /** Enrolled appliances and the enrollment requests waiting for approval. */
+  appliances(): Promise<ApplianceList>;
+  /** Issues an enrollment bundle; its content holds a single-use token and is shown once. */
+  issueEnroll(request: IssueEnroll): Promise<IssuedEnroll>;
+  /** Approves the request for exactly the certificate with `fingerprint`. */
+  approveAppliance(requestId: string, fingerprint: string): Promise<void>;
+  rejectAppliance(requestId: string): Promise<void>;
+  revokeAppliance(applianceUuid: string): Promise<void>;
+  /** Where restore jobs reach the appliance; null clears it. */
+  setApplianceAddress(applianceUuid: string, address: string | null): Promise<void>;
+  /** Fails with `conflict` when the policy changed since `revision`. */
+  saveBackupPolicy(change: PolicyChange): Promise<void>;
+  deleteBackupPolicy(vmUuid: string, revision: number): Promise<void>;
   rotateCertificate(): Promise<CertificateView>;
   /** Fails with `conflict` unless `fingerprint` is the pending certificate's. */
   switchCertificate(fingerprint: string): Promise<CertificateView>;
@@ -275,6 +308,27 @@ export function createHttpBackend(fetcher: typeof fetch = (...args) => fetch(...
       await request("POST", `/joins/${encodeURIComponent(host)}/revoke`, {});
     },
     certificate: () => request<CertificateView>("GET", "/certificate"),
+    backups: () => request<BackupsView>("GET", "/backups"),
+    appliances: () => request<ApplianceList>("GET", "/appliances"),
+    issueEnroll: (req) => request<IssuedEnroll>("POST", "/appliances", req),
+    approveAppliance: async (id, fingerprint) => {
+      await request("POST", `/appliances/requests/${encodeURIComponent(id)}/approve`, { fingerprint });
+    },
+    rejectAppliance: async (id) => {
+      await request("POST", `/appliances/requests/${encodeURIComponent(id)}/reject`, {});
+    },
+    revokeAppliance: async (id) => {
+      await request("POST", `/appliances/${encodeURIComponent(id)}/revoke`, {});
+    },
+    setApplianceAddress: async (id, address) => {
+      await request("POST", `/appliances/${encodeURIComponent(id)}/address`, { address });
+    },
+    saveBackupPolicy: async (change) => {
+      await request("POST", "/backups/policies", change);
+    },
+    deleteBackupPolicy: async (vm, revision) => {
+      await request("POST", `/backups/policies/${encodeURIComponent(vm)}/delete`, { revision });
+    },
     rotateCertificate: () => request<CertificateView>("POST", "/certificate/rotate", {}),
     switchCertificate: (fingerprint) => request<CertificateView>("POST", "/certificate/switch", { fingerprint }),
     discardCertificate: () => request<CertificateView>("POST", "/certificate/discard", {}),

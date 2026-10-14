@@ -21,6 +21,7 @@ use crate::grants::Grants;
 use crate::journal::{Layout, Metadata};
 use crate::platform::Platform;
 use crate::pool::{Pool, RealPool, pool_guid};
+use crate::roots::Roots;
 use crate::scrub::{self, IoGate};
 use crate::setup::metadata_mounted;
 use crate::state::{self, Identity, Paths, PoolBinding};
@@ -168,12 +169,29 @@ pub async fn run(
     let rescan = async {
         loop {
             for enrollment in state::enrollments(&paths).unwrap_or_default() {
-                if agents
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .contains_key(&enrollment.cluster_uuid)
                 {
-                    continue;
+                    // A recovery binds the namespace to a new cluster's CA:
+                    // the old agent goes, and one for the new CA starts.
+                    let mut running = agents.lock().unwrap_or_else(|p| p.into_inner());
+                    let stale = running.get(&enrollment.cluster_uuid).map(|(agent, _)| {
+                        agent
+                            .enrollment
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .proxmox_ca_fingerprint
+                            != enrollment.proxmox_ca_fingerprint
+                    });
+                    match stale {
+                        Some(false) => continue,
+                        Some(true) => {
+                            if let Some((_, tasks)) = running.remove(&enrollment.cluster_uuid) {
+                                for task in tasks {
+                                    task.abort();
+                                }
+                            }
+                        }
+                        None => {}
+                    }
                 }
                 let client = match ClusterClient::new(
                     &enrollment.proxmox_ca_fingerprint,
@@ -215,6 +233,7 @@ pub async fn run(
                     tls_identity: (cert.clone(), key.clone()),
                     repairing: Default::default(),
                     io: io.clone(),
+                    recovery_pulled: Mutex::default(),
                 });
                 let tasks = vec![
                     tokio::spawn(agent.clone().run_checkins()),
@@ -234,7 +253,10 @@ pub async fn run(
             if !unlocked().await {
                 continue;
             }
-            let pins = Grants::load(&metadata).unwrap_or_default().pins(now_ms());
+            let mut pins = Grants::load(&metadata).unwrap_or_default().pins(now_ms());
+            for (pit, reasons) in Roots::load(&metadata).unwrap_or_default().pins(now_ms()) {
+                pins.entry(pit).or_default().extend(reasons);
+            }
             match retention::prune(pool.as_ref(), &metadata, &audit, &pins, now_ms()).await {
                 Ok(r) if r.pruned.is_empty() && r.skipped.is_empty() => {}
                 Ok(r) => eprintln!(

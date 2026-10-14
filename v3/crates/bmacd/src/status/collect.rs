@@ -16,8 +16,8 @@ use bmac_adapters::{Collection, programs, run_text};
 use bmac_core::{HostSlot, PoolName, Vmid};
 use bmac_exec::{Command, CommandRunner};
 use bmac_proto::status::{
-    ClusterObservation, CorosyncPeer, GuestObservation, GuestsObservation, Pool, PoolFinding,
-    ProxmoxStorage, ReplicationObservation, StorageObservation,
+    ClusterObservation, CorosyncPeer, GuestObservation, GuestsObservation, PitSnapshotSpace, Pool,
+    PoolFinding, ProxmoxStorage, ReplicationObservation, StorageObservation,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -310,6 +310,15 @@ pub async fn storage(
         })
         .collect();
     storages.sort_by(|a, b| a.storage.cmp(&b.storage));
+    let snapshots = run_text(
+        runner,
+        Command::new(programs::ZFS).args(["list", "-H", "-p", "-t", "snapshot", "-o", "name,used"]),
+    )
+    .await;
+    let pit_snapshots = errors
+        .take(snapshots)
+        .map(|t| parse_pit_snapshots(&t))
+        .unwrap_or_default();
     StorageObservation {
         at_ms,
         pools,
@@ -318,8 +327,38 @@ pub async fn storage(
         disks,
         findings,
         luks_mismatches,
+        pit_snapshots,
         errors: errors.errors,
     }
+}
+
+/// Sums the `bmac-pit-` snapshots of each dataset from `zfs list -H -p -t
+/// snapshot -o name,used`.
+fn parse_pit_snapshots(text: &str) -> Vec<PitSnapshotSpace> {
+    let mut by_dataset: std::collections::BTreeMap<&str, (u32, u64)> = Default::default();
+    for line in text.lines() {
+        let mut fields = line.split('\t');
+        let (Some(name), Some(used)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let Some((dataset, snapshot)) = name.split_once('@') else {
+            continue;
+        };
+        if !snapshot.starts_with(bmac_backup::names::PREFIX) {
+            continue;
+        }
+        let entry = by_dataset.entry(dataset).or_default();
+        entry.0 += 1;
+        entry.1 += used.trim().parse::<u64>().unwrap_or(0);
+    }
+    by_dataset
+        .into_iter()
+        .map(|(dataset, (snapshots, used_bytes))| PitSnapshotSpace {
+            dataset: dataset.to_string(),
+            snapshots,
+            used_bytes,
+        })
+        .collect()
 }
 
 /// Every imported pool's member states, error counts, data errors, and
@@ -435,6 +474,30 @@ pub fn same_apart_from_time(a: &Value, b: &Value) -> bool {
 mod tests {
     use super::*;
     use bmac_exec::{FakeRunner, Reply};
+
+    #[test]
+    fn pit_snapshots_are_summed_per_dataset() {
+        let text = "rpool/data/vm-100-disk-0@bmac-pit-20261014T030000Z-a1b2c3\t4096\n\
+                    rpool/data/vm-100-disk-0@bmac-pit-20261015T030000Z-d4e5f6\t8192\n\
+                    rpool/data/vm-100-disk-0@__replicate_100-0_1700000000__\t999\n\
+                    rpool/data/vm-101-disk-0@bmac-pit-20261014T030000Z-a1b2c3\t1\n\
+                    rpool/ROOT@manual\t5\n";
+        assert_eq!(
+            parse_pit_snapshots(text),
+            vec![
+                PitSnapshotSpace {
+                    dataset: "rpool/data/vm-100-disk-0".into(),
+                    snapshots: 2,
+                    used_bytes: 12288,
+                },
+                PitSnapshotSpace {
+                    dataset: "rpool/data/vm-101-disk-0".into(),
+                    snapshots: 1,
+                    used_bytes: 1,
+                },
+            ]
+        );
+    }
 
     const PVECM: &str = "Cluster information\n-------------------\nName:             bmaclab\n\
         Config Version:   4\nQuorate:          Yes\n\nVotequorum information\n----------------------\n\

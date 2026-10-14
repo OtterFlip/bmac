@@ -88,12 +88,15 @@ pub async fn mount_metadata(
     paths: &Paths,
     layout: &Layout,
 ) -> Result<(), String> {
-    let mounted = zfs(
-        runner,
-        &["get", "-H", "-o", "value", "mounted", &layout.metadata()],
-    )
-    .await?;
-    if mounted.trim() == "yes" {
+    let mounted = || async {
+        zfs(
+            runner,
+            &["get", "-H", "-o", "value", "mounted", &layout.metadata()],
+        )
+        .await
+        .map(|m| m.trim() == "yes")
+    };
+    if mounted().await? {
         return Ok(());
     }
     let mountpoint = paths.metadata();
@@ -106,6 +109,10 @@ pub async fn mount_metadata(
         ],
     )
     .await?;
+    // Setting the mountpoint can itself mount the dataset.
+    if mounted().await? {
+        return Ok(());
+    }
     zfs(runner, &["mount", &layout.metadata()]).await.map(drop)
 }
 

@@ -166,6 +166,10 @@ pub enum EngineCall {
     RevokeAppliance {
         appliance_uuid: uuid::Uuid,
     },
+    SetApplianceAddress {
+        appliance_uuid: uuid::Uuid,
+        request: crate::backups::SetApplianceAddress,
+    },
     BackupPolicies {},
     /// The policy as the Dashboard edits it, checked by the engine.
     SaveBackupPolicy {
@@ -233,6 +237,7 @@ impl EngineCall {
             EngineCall::ApproveAppliance { .. } => "approve_appliance",
             EngineCall::RejectAppliance { .. } => "reject_appliance",
             EngineCall::RevokeAppliance { .. } => "revoke_appliance",
+            EngineCall::SetApplianceAddress { .. } => "set_appliance_address",
             EngineCall::BackupPolicies {} => "backup_policies",
             EngineCall::SaveBackupPolicy { .. } => "save_backup_policy",
             EngineCall::DeleteBackupPolicy { .. } => "delete_backup_policy",

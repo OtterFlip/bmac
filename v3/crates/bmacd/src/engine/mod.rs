@@ -333,6 +333,51 @@ impl Engine {
         }
     }
 
+    async fn backups_view(&self, session: &SessionInfo, replies: &Replies) {
+        let Some(policies) = self.policies.clone() else {
+            replies
+                .err(ApiError::new(
+                    ErrorCode::Unavailable,
+                    "backups are not available on this host",
+                ))
+                .await;
+            return;
+        };
+        let appliances = self.appliances.clone();
+        let status = self.status.clone();
+        let admin = session.role == Role::Admin;
+        let view = tokio::task::spawn_blocking(move || {
+            let mut inputs = crate::backup::view::Inputs {
+                now_ms: (policies.clock)(),
+                can_manage: admin,
+                ..Default::default()
+            };
+            if let Some(appliances) = appliances {
+                match appliances.list(admin) {
+                    Ok(list) => inputs.appliances = Some(list),
+                    Err(e) => inputs.errors.push(format!("the appliances: {}", e.message)),
+                }
+            }
+            if let Some(status) = status {
+                let observed = status.backups_inputs();
+                inputs.backups = observed.backups;
+                inputs.storage = observed.storage;
+                inputs.names = observed.vms;
+            }
+            crate::backup::view::read(&policies.store, &policies.schedules, &mut inputs);
+            crate::backup::view::assemble(inputs)
+        })
+        .await;
+        match view {
+            Ok(view) => replies.ok(body(view)).await,
+            Err(e) => {
+                replies
+                    .err(ApiError::new(ErrorCode::Internal, e.to_string()))
+                    .await
+            }
+        };
+    }
+
     async fn appliance_call(
         &self,
         session: &SessionInfo,
@@ -390,6 +435,25 @@ impl Engine {
                             Ok(()) => (
                                 Ok(serde_json::json!({})),
                                 Some(format!("rejected enrollment request {request_id}")),
+                            ),
+                            Err(e) => (Err(e), None),
+                        }
+                    }
+                    EngineCall::SetApplianceAddress {
+                        appliance_uuid,
+                        request,
+                    } => {
+                        match appliances.set_address(&appliance_uuid, request.address.as_deref()) {
+                            Ok(record) => (
+                                Ok(serde_json::json!({})),
+                                Some(format!(
+                                    "set the address of appliance {} ({appliance_uuid}) to {}",
+                                    record.name,
+                                    record
+                                        .address
+                                        .map(|a| a.to_string())
+                                        .unwrap_or_else(|| "none".into())
+                                )),
                             ),
                             Err(e) => (Err(e), None),
                         }
@@ -1264,14 +1328,7 @@ impl Handler for Engine {
             } => self.status_read(&replies, StatusSource::storage).await,
             EngineCall::List {
                 collection: Collection::Backups,
-            } => {
-                replies
-                    .err(ApiError::new(
-                        ErrorCode::Unavailable,
-                        "Backups arrive with the backup appliance; not yet",
-                    ))
-                    .await;
-            }
+            } => self.backups_view(&session, &replies).await,
             call @ (EngineCall::List {
                 collection: Collection::Alerts,
             }
@@ -1295,7 +1352,8 @@ impl Handler for Engine {
             | EngineCall::IssueEnroll { .. }
             | EngineCall::ApproveAppliance { .. }
             | EngineCall::RejectAppliance { .. }
-            | EngineCall::RevokeAppliance { .. }) => {
+            | EngineCall::RevokeAppliance { .. }
+            | EngineCall::SetApplianceAddress { .. }) => {
                 self.appliance_call(&session, client, call, &replies).await;
             }
             call @ (EngineCall::BackupPolicies {}

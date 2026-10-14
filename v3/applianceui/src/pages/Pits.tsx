@@ -7,51 +7,21 @@
 
 import { useMemo, useState } from "react";
 import { GitBranch, KeyRound, Lock, Unlock } from "lucide-react";
-import { Badge, Button, Card, CardHeader, Checkbox, Dialog, EmptyState, Input, Label, bytes, cn, type IssuedGrant, type PitView } from "@bmac/ui";
+import { Badge, Button, Card, CardHeader, Checkbox, Dialog, EmptyState, Input, Label, PitGraphLines, bytes, cn, type IssuedGrant, type PitView } from "@bmac/ui";
 import { Done, PageBody, PageHeader, Problem, short, useAction, useApi, useLoad, whenSeconds } from "../parts";
 import { byVm, layout } from "../lib/graph";
 
-const ROW = 32;
-const COLUMN = 22;
-const PAD = 14;
-
-const BRANCH_COLORS = ["stroke-accent fill-accent", "stroke-info fill-info", "stroke-ok fill-ok", "stroke-warn fill-warn", "stroke-run fill-run"];
-
-function branchColor(column: number) {
-  return BRANCH_COLORS[column % BRANCH_COLORS.length];
-}
-
 export function PitGraph({ pits, selected, toggle }: { pits: PitView[]; selected: Set<string>; toggle: (pit: PitView) => void }) {
   const graph = useMemo(() => layout(pits), [pits]);
-  const width = PAD * 2 + Math.max(0, graph.columns - 1) * COLUMN;
-  const height = graph.nodes.length * ROW;
-  const x = (column: number) => PAD + column * COLUMN;
-  const y = (row: number) => row * ROW + ROW / 2;
   return (
     <div className="flex">
-      <svg width={width} height={height} className="shrink-0" role="img" aria-label="PIT graph, oldest at the top">
-        {graph.edges.map((e) => (
-          <path
-            key={`${e.from.pit.pit_uuid}-${e.to.pit.pit_uuid}`}
-            d={e.from.column === e.to.column ? `M${x(e.from.column)},${y(e.from.row)} L${x(e.to.column)},${y(e.to.row)}` : `M${x(e.from.column)},${y(e.from.row)} C${x(e.from.column)},${y(e.to.row)} ${x(e.to.column)},${y(e.from.row)} ${x(e.to.column)},${y(e.to.row)}`}
-            className={cn("fill-none", branchColor(e.to.column).split(" ")[0])}
-            strokeWidth={2}
-          />
-        ))}
-        {graph.nodes.map((n) => (
-          <circle
-            key={n.pit.pit_uuid}
-            cx={x(n.column)}
-            cy={y(n.row)}
-            r={selected.has(n.pit.pit_uuid) ? 7 : 5}
-            className={cn(n.pit.suspect ? "fill-danger stroke-danger" : branchColor(n.column), "cursor-pointer")}
-            strokeWidth={selected.has(n.pit.pit_uuid) ? 3 : 1}
-            onClick={() => toggle(n.pit)}
-          >
-            <title>{n.pit.name}</title>
-          </circle>
-        ))}
-      </svg>
+      <PitGraphLines
+        graph={graph}
+        selected={(pit) => selected.has(pit.pit_uuid)}
+        pick={toggle}
+        nodeClass={(n) => (n.pit.suspect ? "fill-danger stroke-danger" : undefined)}
+        title={(pit) => pit.name}
+      />
       <ul className="min-w-0 flex-1">
         {graph.nodes.map((n) => (
           <li key={n.pit.pit_uuid} className={cn("flex h-[32px] items-center gap-2 border-b border-line/50 px-2 text-[12.5px]", selected.has(n.pit.pit_uuid) && "bg-accent/8")}>

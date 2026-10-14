@@ -125,7 +125,11 @@ fn a_grant_lists_its_pits_with_manifests_and_their_earlier_pits_as_bases() {
     assert_eq!(index.pits[0].pit_uuid, id(2));
     assert_eq!(index.pits[0].manifest, "{\"m\":2}");
     let bases: Vec<Uuid> = index.bases.iter().map(|b| b.pit_uuid).collect();
-    assert_eq!(bases, vec![id(1)], "only earlier PITs, and without manifests");
+    assert_eq!(
+        bases,
+        vec![id(1)],
+        "only earlier PITs, and without manifests"
+    );
     assert_eq!(index.bases[0].volumes[0].guid, SnapshotGuid::new(101));
     assert!(grants.live_for(&token, "c2", 1).is_err());
     assert!(grants.live_for(&token, CLUSTER, 3_600_001).is_err());
@@ -208,6 +212,7 @@ fn the_handshake_admits_trusted_peers_and_enrolled_clusters_hosts_only() {
             cluster_uuid: CLUSTER.into(),
             ca_fingerprint: fingerprint(&ca),
         }],
+        recoveries: Vec::new(),
         provider: provider(),
         outcome: Mutex::default(),
     };
@@ -494,4 +499,182 @@ async fn eventually<T>(mut check: impl FnMut() -> Option<T>) -> T {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("it never happened");
+}
+
+fn recovering(grant_id: &str) -> Client {
+    Client::Recovery {
+        cluster_uuid: CLUSTER.into(),
+        grant_id: grant_id.into(),
+        fingerprint: "ef".repeat(32),
+    }
+}
+
+#[test]
+fn the_handshake_admits_the_host_a_live_recovery_grant_names() {
+    let (host_pem, _) = state::certificate("mox1", &id(0x51)).unwrap();
+    let presented = fingerprint(&der(&host_pem));
+    let verifier = ExportVerifier {
+        peers: Vec::new(),
+        clusters: Vec::new(),
+        recoveries: vec![("g1".into(), CLUSTER.into(), presented.to_ascii_uppercase())],
+        provider: provider(),
+        outcome: Mutex::default(),
+    };
+    assert!(matches!(
+        verifier.decide(&der(&host_pem), &[], UnixTime::now()),
+        Ok(Client::Recovery { cluster_uuid, grant_id, .. }) if cluster_uuid == CLUSTER && grant_id == "g1"
+    ));
+    let (other, _) = state::certificate("mox1", &id(0x52)).unwrap();
+    assert!(verifier.decide(&der(&other), &[], UnixTime::now()).is_err());
+}
+
+#[test]
+fn a_recovery_reads_any_pit_of_its_namespace_with_its_own_grant_only() {
+    let j = journal();
+    let mut grants = Grants::default();
+    let (grant, token) = grants
+        .issue_recovery(&j, CLUSTER, &"ef".repeat(32), None, "admin", 0)
+        .unwrap();
+    let (_, restore_token) = grants
+        .issue(&j, CLUSTER, &[id(2)], None, "admin", 0)
+        .unwrap();
+    let with = |pit, token: &str| ExportRequest {
+        grant: Some(token.to_string()),
+        ..request(pit)
+    };
+    let client = recovering(&grant.grant_id);
+    for pit in [1, 2] {
+        let plan = plan_export(&j, &grants, &client, &with(pit, &token), 1).unwrap();
+        assert_eq!(plan.grant_id, Some(grant.grant_id.clone()));
+    }
+    assert!(plan_export(&j, &grants, &client, &request(1), 1).is_err());
+    assert!(plan_export(&j, &grants, &client, &with(2, &restore_token), 1).is_err());
+    assert!(
+        plan_export(&j, &grants, &recovering("another"), &with(1, &token), 1).is_err(),
+        "a grant is its own host's"
+    );
+    assert!(
+        plan_export(&j, &grants, &host(CLUSTER), &with(1, &token), 1).is_err(),
+        "an enrolled host can't use a recovery grant"
+    );
+}
+
+#[tokio::test]
+async fn a_recovering_host_reads_the_namespace_and_binds_it_to_its_cluster() {
+    let a = appliance().await;
+    let paths = a.exporter.paths.clone();
+    state::save(
+        &paths.enrollment(CLUSTER),
+        &state::Enrollment {
+            schema_version: state::SCHEMA,
+            cluster_uuid: CLUSTER.into(),
+            cluster_name: "lost".into(),
+            proxmox_ca_fingerprint: "aa".repeat(32),
+            hosts: vec![bmac_proto::appliance::SourceHost {
+                host: "mox1".parse().unwrap(),
+                addresses: vec!["old-mox1".into()],
+            }],
+            request_id: None,
+            enrolled_at_ms: 0,
+            quota_bytes: None,
+        },
+    )
+    .unwrap();
+    let files = BTreeMap::from([("config/cluster.json".to_string(), "{}".to_string())]);
+    crate::recovery::keep_manifest(
+        &a.exporter.metadata,
+        CLUSTER,
+        &bmac_proto::appliance::RecoveryManifest {
+            schema_version: 1,
+            cluster_uuid: CLUSTER.into(),
+            generated_at_ms: 1,
+            host: "mox1".parse().unwrap(),
+            revision: bmac_proto::appliance::RecoveryManifest::revision_of(&files),
+            files,
+        },
+        1,
+    )
+    .unwrap();
+    let (host_cert, host_key) = state::certificate("mox1", &id(0x51)).unwrap();
+    let (grant, token) = {
+        let mut grants = Grants::default();
+        let issued = grants
+            .issue_recovery(
+                &journal(),
+                CLUSTER,
+                &crate::state::pem_fingerprint(&host_cert).unwrap(),
+                None,
+                "admin",
+                0,
+            )
+            .unwrap();
+        grants.save(&a.exporter.metadata).unwrap();
+        issued
+    };
+    let new_host = ClusterClient::peer(&a.fingerprint, (&host_cert, &host_key), 8445).unwrap();
+    let ask = RecoveryRequest {
+        grant: token.clone(),
+    };
+    let index: RecoveryIndex = new_host
+        .call_peer(&a.address, "POST", on_appliance::RECOVERY_INDEX, Some(&ask))
+        .await
+        .unwrap();
+    assert_eq!(index.grant_id, grant.grant_id);
+    assert_eq!(
+        (index.cluster_uuid.as_str(), index.cluster_name.as_str()),
+        (CLUSTER, "lost")
+    );
+    assert_eq!(index.pits.len(), 2);
+    assert!(
+        index
+            .manifest
+            .unwrap()
+            .files
+            .contains_key("config/cluster.json")
+    );
+    // A recovery isn't a peer.
+    assert!(
+        new_host
+            .call_peer::<(), PeerIndex>(&a.address, "GET", on_appliance::PEER_INDEX, None)
+            .await
+            .is_err()
+    );
+
+    let bind = RecoveryBind {
+        cluster_uuid: CLUSTER.into(),
+        grant: token.clone(),
+        cluster_name: "rebuilt".into(),
+        proxmox_ca_fingerprint: "BB:".repeat(31) + "BB",
+        hosts: vec![bmac_proto::appliance::SourceHost {
+            host: "mox1".parse().unwrap(),
+            addresses: vec!["new-mox1".into()],
+        }],
+    };
+    let _: serde_json::Value = new_host
+        .call_peer(&a.address, "POST", on_appliance::RECOVERY_BIND, Some(&bind))
+        .await
+        .unwrap();
+    let bound: state::Enrollment = state::load(&paths.enrollment(CLUSTER)).unwrap().unwrap();
+    assert_eq!(bound.proxmox_ca_fingerprint, "bb".repeat(32));
+    assert_eq!(bound.hosts[0].addresses, vec!["new-mox1".to_string()]);
+    assert_eq!(bound.cluster_name, "rebuilt");
+    let audit = a.exporter.audit.recent(5).unwrap();
+    assert_eq!(audit[0].event, "recovery_bind");
+    assert!(!serde_json::to_string(&audit).unwrap().contains(&token));
+
+    let mut grants = Grants::load(&a.exporter.metadata).unwrap();
+    grants.revoke(&grant.grant_id);
+    grants.save(&a.exporter.metadata).unwrap();
+    assert!(
+        new_host
+            .call_peer::<_, RecoveryIndex>(
+                &a.address,
+                "POST",
+                on_appliance::RECOVERY_INDEX,
+                Some(&ask)
+            )
+            .await
+            .is_err(),
+        "the grant's end closes the door"
+    );
 }

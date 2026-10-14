@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 
 use bmac_backup::lifetime::{self, ClusterPit, Head, Inputs, Offer, Plan};
 use bmac_backup::manifest::Manifest;
-use bmac_backup::records::{ApplianceRecord, PitRecord, Policy, Presence};
+use bmac_backup::records::{ApplianceRecord, Lineage, PitRecord, Policy, Presence, RestoreRecord};
 use bmac_backup::retention::LocalPit;
 use bmac_backup::settings::BackupSettings;
 use bmac_backup::states::{self, ApplianceState};
@@ -115,6 +115,7 @@ impl Upkeep<'_> {
         pits: &[PitRecord],
         policy: Option<&Policy>,
         appliances: &[ApplianceRecord],
+        continuity: &Continuity,
         settings: &BackupSettings,
     ) -> Plan {
         let now_s = self.now_s();
@@ -160,8 +161,8 @@ impl Upkeep<'_> {
                 .map(|p| p.local_retention.keep(&local, now_s))
                 .unwrap_or_default(),
             staging_origins: BTreeSet::new(),
-            restores: BTreeSet::new(),
-            branch_starts: BTreeSet::new(),
+            restores: continuity.restores.clone(),
+            branch_starts: continuity.branch_start.into_iter().collect(),
             bookmarks_proven: self.bookmarks_proven,
         };
         lifetime::plan(&inputs, now_s, settings)
@@ -183,7 +184,13 @@ impl Upkeep<'_> {
         let settings = self.store.settings().map_err(|e| e.message)?;
         let appliances = self.store.appliances().map_err(|e| e.message)?;
         let policy = self.store.policy(&vm).map_err(|e| e.message)?;
-        let plan = self.plan(&pits, policy.as_ref(), &appliances, &settings);
+        let continuity = Continuity::of(
+            vm,
+            self.store.lineage(&vm).map_err(|e| e.message)?.as_ref(),
+            &pits,
+            &self.store.restores().map_err(|e| e.message)?,
+        );
+        let plan = self.plan(&pits, policy.as_ref(), &appliances, &continuity, &settings);
         let mut report = Report {
             vm,
             ..Report::default()
@@ -407,4 +414,40 @@ pub fn spawn(node: bmac_core::HostSlot) -> tokio::task::JoinHandle<()> {
             }
         }
     })
+}
+
+/// What restores leave for one VM's snapshots.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Continuity {
+    /// PITs a restore still clones from (method 1).
+    pub restores: BTreeSet<Uuid>,
+    /// The restored PIT the VM's current branch will start from, while that
+    /// branch has no PIT of its own.
+    pub branch_start: Option<Uuid>,
+}
+
+impl Continuity {
+    pub fn of(
+        vm: Uuid,
+        lineage: Option<&Lineage>,
+        pits: &[PitRecord],
+        restores: &[RestoreRecord],
+    ) -> Self {
+        let branch_start = lineage.and_then(|l| {
+            let head = l.head?;
+            let on_other_branch = pits
+                .iter()
+                .find(|p| p.pit_uuid == head)
+                .is_some_and(|p| p.branch_uuid != l.branch_uuid);
+            on_other_branch.then_some(head)
+        });
+        Continuity {
+            restores: restores
+                .iter()
+                .filter(|r| r.vm_uuid == vm && r.holds_cluster_snapshot())
+                .map(|r| r.pit_uuid)
+                .collect(),
+            branch_start,
+        }
+    }
 }

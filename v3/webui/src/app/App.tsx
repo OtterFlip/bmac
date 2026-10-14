@@ -11,6 +11,7 @@ import { Toaster } from "../components/layout/Toaster";
 import { RunSwitcher } from "../components/RunSwitcher";
 import { ActivityPage } from "../pages/ActivityPage";
 import { AlertsPage } from "../pages/AlertsPage";
+import { BackupsPage } from "../pages/BackupsPage";
 import { DiagnosticsPage } from "../pages/DiagnosticsPage";
 import { HostsPage } from "../pages/HostsPage";
 import { LogsPage } from "../pages/LogsPage";
@@ -36,6 +37,7 @@ const PAGES: Partial<Record<Page, () => JSX.Element>> = {
   staging: StagingPage,
   storage: StoragePage,
   qdevice: QDevicePage,
+  backups: BackupsPage,
   alerts: AlertsPage,
   activity: ActivityPage,
   logs: LogsPage,

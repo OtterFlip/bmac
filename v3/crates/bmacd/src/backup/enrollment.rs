@@ -70,42 +70,49 @@ fn enrollment_name(e: Enrollment) -> &'static str {
     }
 }
 
-impl Appliances {
-    /// The hosts an appliance can reach `bmac-source` on: its tailnet name,
-    /// then its private address.
-    fn source_hosts(&self) -> Result<Vec<SourceHost>, ApiError> {
-        let cluster = self.settings.cluster()?;
-        let identities = self.identities.all()?;
-        let mut out = Vec::new();
-        for facts in self.settings.hosts()? {
-            let mut addresses = Vec::new();
-            if let Some(name) = identities
-                .iter()
-                .find(|i| i.host == facts.host)
-                .and_then(|i| i.tailnet_name.clone())
-            {
-                addresses.push(name);
-            } else if let Some(name) = facts
-                .values
-                .get("TAILSCALE_HOSTNAME")
-                .filter(|n| !n.is_empty())
-            {
-                addresses.push(name.clone());
-            }
-            if let Some(cluster) = &cluster
-                && let Ok(ip) =
-                    bmac_settings::host_private_ip(facts.host, &facts.values, &cluster.values)
-            {
-                addresses.push(ip);
-            }
-            if !addresses.is_empty() {
-                out.push(SourceHost {
-                    host: facts.host,
-                    addresses,
-                });
-            }
+/// The hosts an appliance can reach `bmac-source` on: its tailnet name,
+/// then its private address.
+pub(crate) fn source_hosts(
+    settings: &Settings,
+    identities: &Identities,
+) -> Result<Vec<SourceHost>, ApiError> {
+    let cluster = settings.cluster()?;
+    let identities = identities.all()?;
+    let mut out = Vec::new();
+    for facts in settings.hosts()? {
+        let mut addresses = Vec::new();
+        if let Some(name) = identities
+            .iter()
+            .find(|i| i.host == facts.host)
+            .and_then(|i| i.tailnet_name.clone())
+        {
+            addresses.push(name);
+        } else if let Some(name) = facts
+            .values
+            .get("TAILSCALE_HOSTNAME")
+            .filter(|n| !n.is_empty())
+        {
+            addresses.push(name.clone());
         }
-        Ok(out)
+        if let Some(cluster) = &cluster
+            && let Ok(ip) =
+                bmac_settings::host_private_ip(facts.host, &facts.values, &cluster.values)
+        {
+            addresses.push(ip);
+        }
+        if !addresses.is_empty() {
+            out.push(SourceHost {
+                host: facts.host,
+                addresses,
+            });
+        }
+    }
+    Ok(out)
+}
+
+impl Appliances {
+    pub(crate) fn source_hosts(&self) -> Result<Vec<SourceHost>, ApiError> {
+        source_hosts(&self.settings, &self.identities)
     }
 
     pub fn issue(&self, request: &IssueEnroll, by: &str) -> Result<IssuedEnroll, ApiError> {
@@ -311,6 +318,30 @@ impl Appliances {
                 .appliance(appliance)?
                 .ok_or_else(|| not_found("no such appliance"))?;
             record.enrollment = Enrollment::Revoked;
+            l.save_appliance(record)
+        })
+    }
+
+    /// Where restore jobs reach the appliance's port 8445; none clears it.
+    pub fn set_address(
+        &self,
+        appliance: &Uuid,
+        address: Option<&str>,
+    ) -> Result<ApplianceRecord, ApiError> {
+        let address = match address.map(str::trim).filter(|a| !a.is_empty()) {
+            None => None,
+            Some(text) => Some(text.parse::<bmac_core::ApplianceAddress>().map_err(|e| {
+                let mut error = ApiError::new(ErrorCode::Invalid, format!("address: {e}"));
+                error.field_errors.insert("address".into(), e.to_string());
+                error
+            })?),
+        };
+        self.store.locked(|l| {
+            let mut record = l
+                .store()
+                .appliance(appliance)?
+                .ok_or_else(|| not_found("no such appliance"))?;
+            record.address = address;
             l.save_appliance(record)
         })
     }

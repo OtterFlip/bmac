@@ -120,6 +120,9 @@ class Backup:
         self.appliance_uuid = ""
         self.fingerprint = ""
         self.disk = ""
+        # Where restore jobs reach the appliance, suggested at enrollment.
+        self.address: str | None = None
+        self.local_retention: dict | None = None
         # Made up for this run and never printed.
         self.passphrase = secrets.token_urlsafe(24)
 
@@ -216,7 +219,9 @@ class Backup:
             == self.app(f"zpool get -Hp -o value guid {POOL}"))
         self.s.check("the metadata dataset is mounted in the state directory", lambda: self.app(
             f"zfs get -H -o value mounted,mountpoint {POOL}/bmac/metadata").split() == ["yes", "/var/lib/bmac-backupd/metadata"])
-        out = self.app("bmac-backupd enroll /root/enroll.json; status=$?; rm -f /root/enroll.json; exit $status", timeout=180)
+        address = f" --address {self.address}" if self.address else ""
+        out = self.app(f"bmac-backupd enroll /root/enroll.json{address}; status=$?; rm -f /root/enroll.json; exit $status",
+                       timeout=180)
         self.s.check("enroll names the same fingerprint", fingerprint in out)
 
         listed = self.dashboard.call("GET", "/appliances")
@@ -243,9 +248,10 @@ class Backup:
             for a in self.dashboard.call("GET", "/appliances")["appliances"]), 180)
 
     def policy(self) -> None:
-        saved = self.dashboard.call("POST", "/backups/policies", {
-            "vm": self.vm["name"], "appliances": [self.appliance_uuid], "enabled": True,
-        })
+        body = {"vm": self.vm["name"], "appliances": [self.appliance_uuid], "enabled": True}
+        if self.local_retention:
+            body["local_retention"] = self.local_retention
+        saved = self.dashboard.call("POST", "/backups/policies", body)
         self.s.check(f"{self.vm['name']} has a backup policy for {APPLIANCE_NAME}", saved.get("appliances") == [self.appliance_uuid])
 
     def capture(self, label: str) -> None:

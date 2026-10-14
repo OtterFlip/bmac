@@ -12,19 +12,17 @@ use base64::Engine as _;
 use bmac_core::HostSlot;
 use bmac_exec::{BoxFuture, RealRunner};
 use bmac_proto::api::{ApiError, ErrorCode};
-use bmac_proto::appliance::{Heartbeat, LuksHeaders};
+use bmac_proto::appliance::{Heartbeat, LuksHeader, LuksHeaderDigest, LuksHeaders};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use super::capture::RegistryGuests;
 use super::cluster::RealCluster;
 use super::source::{Source, TransferDone, enrolled_fingerprints};
-use super::source_socket::{SourceCall, SourceHandler};
+use super::source_socket::{MAX_HEADER, SourceCall, SourceHandler};
 use super::store::BackupStore;
 use crate::cluster::ClusterView;
 use crate::log;
-
-/// The largest LUKS header backup served.
-const MAX_HEADER: u64 = 64 * 1024 * 1024;
 
 pub struct EngineSource {
     pub host: HostSlot,
@@ -32,6 +30,8 @@ pub struct EngineSource {
     pub store: BackupStore,
     pub settings: crate::settings::Settings,
     pub luks_headers: PathBuf,
+    /// `/etc/pve/priv/bmac`, for the recovery manifest.
+    pub recovery_root: PathBuf,
     /// The engine's own listen addresses, whose IPs 8445 binds too.
     pub listen: Option<tokio::sync::watch::Receiver<Vec<std::net::SocketAddr>>>,
 }
@@ -44,6 +44,7 @@ impl EngineSource {
             store: BackupStore::system(),
             settings: crate::settings::Settings::system(),
             luks_headers: PathBuf::from(crate::native::storage::HEADER_DIR),
+            recovery_root: PathBuf::from(super::recovery::ROOT),
             listen: None,
         }
     }
@@ -85,7 +86,7 @@ impl EngineSource {
             cluster: &cluster,
             guests: &guests,
             addresses: &addresses,
-            cluster_uuid,
+            cluster_uuid: cluster_uuid.clone(),
             now_ms: &now,
         };
         match call {
@@ -103,7 +104,13 @@ impl EngineSource {
             SourceCall::Checkin {
                 fingerprint,
                 request,
-            } => Ok(json(&source.checkin(&fingerprint, &request)?)),
+            } => {
+                let mut reply = source.checkin(&fingerprint, &request)?;
+                reply.recovery_revision = super::recovery::files(&self.recovery_root)
+                    .ok()
+                    .map(|f| bmac_proto::appliance::RecoveryManifest::revision_of(&f));
+                Ok(json(&reply))
+            }
             SourceCall::Claim {
                 fingerprint,
                 request,
@@ -127,6 +134,25 @@ impl EngineSource {
             } => {
                 let appliance = source.enrolled(&fingerprint)?;
                 log_transfer(&appliance.name, &report);
+                let transfer = bmac_proto::backups::TransferView {
+                    at_ms: now(),
+                    host: self.host.to_string(),
+                    appliance: appliance.name.clone(),
+                    vm_uuid: report.vm_uuid.to_string(),
+                    pit_uuid: report.pit_uuid.to_string(),
+                    volume_uuid: report.volume_uuid.to_string(),
+                    bytes: report.bytes,
+                    duration_ms: report.duration_ms,
+                    error: report.error.clone(),
+                };
+                let store = self.store.clone();
+                let recorded = tokio::task::spawn_blocking(move || {
+                    store.locked(|l| l.record_transfer(transfer))
+                })
+                .await;
+                if let Ok(Err(e)) = recorded {
+                    log::warning(&format!("backup: the transfer history: {}", e.message));
+                }
                 Ok(json!({}))
             }
             SourceCall::Heartbeat { fingerprint } => {
@@ -146,39 +172,102 @@ impl EngineSource {
                 source.enrolled(&fingerprint)?;
                 Ok(json(&self.luks_headers()?))
             }
+            SourceCall::LuksHeader {
+                fingerprint,
+                request,
+            } => {
+                source.enrolled(&fingerprint)?;
+                Ok(json(&self.luks_header(&request.name)?))
+            }
+            SourceCall::RecoveryManifest { fingerprint } => {
+                source.enrolled(&fingerprint)?;
+                if cluster_uuid.is_empty() {
+                    return Err(ApiError::new(
+                        ErrorCode::Unavailable,
+                        "the cluster has no identity record yet",
+                    ));
+                }
+                let manifest =
+                    super::recovery::manifest(&self.recovery_root, &cluster_uuid, self.host, now())
+                        .map_err(|e| ApiError::new(ErrorCode::Internal, e))?;
+                Ok(json(&manifest))
+            }
         }
     }
 
     fn luks_headers(&self) -> Result<LuksHeaders, ApiError> {
-        let mut headers = BTreeMap::new();
-        let entries = match std::fs::read_dir(&self.luks_headers) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(LuksHeaders {
-                    host: self.host,
-                    headers,
-                });
-            }
-            Err(e) => return Err(ApiError::new(ErrorCode::Internal, e.to_string())),
-        };
-        for entry in entries.flatten() {
-            let Ok(meta) = entry.metadata() else { continue };
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !meta.is_file() || meta.len() > MAX_HEADER || name.starts_with('.') {
-                continue;
-            }
-            if let Ok(bytes) = std::fs::read(entry.path()) {
-                headers.insert(
-                    name,
-                    base64::engine::general_purpose::STANDARD.encode(bytes),
-                );
-            }
-        }
-        Ok(LuksHeaders {
-            host: self.host,
-            headers,
-        })
+        list_headers(&self.luks_headers, self.host)
     }
+
+    fn luks_header(&self, name: &str) -> Result<LuksHeader, ApiError> {
+        read_header(&self.luks_headers, self.host, name)
+    }
+}
+
+/// The header backups in `dir`, each with its digest.
+pub fn list_headers(dir: &std::path::Path, host: HostSlot) -> Result<LuksHeaders, ApiError> {
+    let mut headers = BTreeMap::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LuksHeaders { host, headers });
+        }
+        Err(e) => return Err(ApiError::new(ErrorCode::Internal, e.to_string())),
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Ok(bytes) = header_bytes(dir, &name) {
+            headers.insert(
+                name,
+                LuksHeaderDigest {
+                    sha256: sha256_hex(&bytes),
+                    size: bytes.len() as u64,
+                },
+            );
+        }
+    }
+    Ok(LuksHeaders { host, headers })
+}
+
+fn header_bytes(dir: &std::path::Path, name: &str) -> Result<Vec<u8>, ApiError> {
+    let missing = || ApiError::new(ErrorCode::NotFound, format!("no LUKS header backup {name}"));
+    if name.is_empty() || name.starts_with('.') || name.contains('/') {
+        return Err(missing());
+    }
+    let path = dir.join(name);
+    let meta = std::fs::symlink_metadata(&path).map_err(|_| missing())?;
+    if !meta.is_file() || meta.len() > MAX_HEADER {
+        return Err(missing());
+    }
+    std::fs::read(&path).map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+}
+
+/// One header backup, compressed.
+pub fn read_header(
+    dir: &std::path::Path,
+    host: HostSlot,
+    name: &str,
+) -> Result<LuksHeader, ApiError> {
+    use std::io::Write as _;
+    let bytes = header_bytes(dir, name)?;
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let compressed = gzip
+        .write_all(&bytes)
+        .and_then(|()| gzip.finish())
+        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+    Ok(LuksHeader {
+        host,
+        name: name.to_string(),
+        sha256: sha256_hex(&bytes),
+        gzip: base64::engine::general_purpose::STANDARD.encode(compressed),
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// One event per transfer: bytes, duration, and the average rate.
@@ -354,6 +443,41 @@ mod tests {
         assert_eq!(zfs_pools(cfg, "mox1"), ["rpool/data", "tank/here"]);
         assert_eq!(zfs_pools(cfg, "mox3"), ["rpool/data", "tank/vm"]);
         assert!(zfs_pools("", "mox1").is_empty());
+    }
+
+    #[test]
+    fn a_luks2_header_backup_fits_one_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let host: HostSlot = "mox1".parse().unwrap();
+        let mut image = vec![0u8; 16 * 1024 * 1024];
+        image[..4096].fill(0x5a);
+        std::fs::write(dir.path().join("bmac-rpool-s1.img"), &image).unwrap();
+        std::fs::write(dir.path().join(".partial"), b"x").unwrap();
+        let listing = list_headers(dir.path(), host).unwrap();
+        assert_eq!(listing.headers.len(), 1);
+        let digest = &listing.headers["bmac-rpool-s1.img"];
+        assert_eq!(digest.size, image.len() as u64);
+        let header = read_header(dir.path(), host, "bmac-rpool-s1.img").unwrap();
+        assert_eq!(header.sha256, digest.sha256);
+        let reply = super::super::source_socket::SourceReply::Ok {
+            body: json(&header),
+        };
+        assert!(
+            crate::wire::encode(&reply).unwrap().len() < super::super::source_socket::MAX_FRAME
+        );
+        for name in ["../etc/passwd", ".partial", "", "missing.img"] {
+            assert_eq!(
+                read_header(dir.path(), host, name).unwrap_err().code,
+                ErrorCode::NotFound,
+                "{name}"
+            );
+        }
+        assert!(
+            list_headers(&dir.path().join("none"), host)
+                .unwrap()
+                .headers
+                .is_empty()
+        );
     }
 
     #[tokio::test]

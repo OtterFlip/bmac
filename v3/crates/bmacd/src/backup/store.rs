@@ -49,6 +49,22 @@ record!(PitRecord, "backup_pit");
 record!(SettingsRecord, "backup_settings");
 record!(IndexRecord, "backup_appliance_index");
 record!(RestoreRecord, "backup_restore");
+record!(TransfersRecord, "backup_transfers");
+
+/// How many finished transfers each host keeps.
+pub const KEEP_TRANSFERS: usize = 200;
+
+/// One host's newest finished transfers to appliances, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransfersRecord {
+    pub schema_version: u64,
+    pub record_type: String,
+    #[serde(default)]
+    pub revision: u64,
+    pub host: String,
+    pub transfers: Vec<bmac_proto::backups::TransferView>,
+}
 
 /// An appliance's published PITs as it last reported them (`POST
 /// /v1/index`): metadata only, for the restore wizard.
@@ -137,6 +153,10 @@ impl BackupStore {
 
     fn restore_path(&self, restore: &Uuid) -> PathBuf {
         self.root.join("restores").join(format!("{restore}.json"))
+    }
+
+    fn transfers_path(&self, host: &str) -> PathBuf {
+        self.root.join("transfers").join(format!("{host}.json"))
     }
 
     fn vm_dir(&self, vm: &Uuid) -> PathBuf {
@@ -290,6 +310,30 @@ impl BackupStore {
         self.read(&self.pit_path(vm, pit))
     }
 
+    /// Every host's finished transfers, newest first.
+    pub fn transfers(&self) -> Result<Vec<bmac_proto::backups::TransferView>, ApiError> {
+        let dir = self.root.join("transfers");
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(internal(format!("cannot list {}: {e}", dir.display()))),
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            match self.read::<TransfersRecord>(&path) {
+                Ok(Some(record)) => out.extend(record.transfers),
+                Ok(None) => {}
+                Err(e) => log::warning(&format!("backups: {}", e.message)),
+            }
+        }
+        out.sort_by_key(|t| std::cmp::Reverse(t.at_ms));
+        Ok(out)
+    }
+
     /// The VMs with a catalog directory.
     pub fn cataloged_vms(&self) -> Result<Vec<Uuid>, ApiError> {
         let dir = self.root.join("pits");
@@ -388,6 +432,28 @@ impl Locked<'_> {
 
     pub fn save_pit(&self, pit: PitRecord) -> Result<PitRecord, ApiError> {
         self.write(self.store.pit_path(&pit.vm_uuid, &pit.pit_uuid), pit)
+    }
+
+    /// Adds a host's finished transfer, keeping the newest
+    /// [`KEEP_TRANSFERS`].
+    pub fn record_transfer(
+        &self,
+        transfer: bmac_proto::backups::TransferView,
+    ) -> Result<(), ApiError> {
+        let path = self.store.transfers_path(&transfer.host);
+        let mut record = self
+            .store
+            .read::<TransfersRecord>(&path)?
+            .unwrap_or(TransfersRecord {
+                schema_version: RECORD_SCHEMA,
+                record_type: String::new(),
+                revision: 0,
+                host: transfer.host.clone(),
+                transfers: Vec::new(),
+            });
+        record.transfers.insert(0, transfer);
+        record.transfers.truncate(KEEP_TRANSFERS);
+        self.write(path, record).map(|_| ())
     }
 
     pub fn delete_pit(&self, vm: &Uuid, pit: &Uuid) -> Result<(), ApiError> {

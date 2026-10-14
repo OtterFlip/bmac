@@ -206,6 +206,10 @@ pub fn router_with(state: AppState) -> Router {
             post(api::revoke_appliance),
         )
         .route(
+            "/appliances/{appliance}/address",
+            post(api::set_appliance_address),
+        )
+        .route(
             "/backups/policies",
             get(api::backup_policies).post(api::save_backup_policy),
         )

@@ -387,6 +387,9 @@ def restored(s, vm, stage: str, unlock: Callable | None = None):
                 done = subprocess.run([*installed.ssh_args(), "cat > /tmp/bmacd.deb && dpkg -i /tmp/bmacd.deb >/dev/null "
                                        "&& rm /tmp/bmacd.deb && systemctl restart bmacd.service bmacd-web.service"],
                                       stdin=deb, capture_output=True, text=True, timeout=300)
+            if done.returncode != 0:
+                s.note("bmacd's journal:\n" + installed.on_host(
+                    "journalctl -u bmacd.service -n 30 --no-pager -o cat || true"))
             s.require(f"the current bmacd package is installed on {vm.name} ({done.stderr.strip()[-200:]})",
                       done.returncode == 0)
         s.require("bmacd and bmacd-web are running", lambda: wait_until(lambda: installed.on_host(
