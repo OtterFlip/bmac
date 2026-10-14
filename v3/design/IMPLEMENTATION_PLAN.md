@@ -2211,10 +2211,11 @@ production with its VMID, MACs and HA resource, and P3 is pulled
 incrementally from P1 on a new branch), a rollback to P3, a restore of P2
 into the VM with replication converging again, a cleanup, P4 incremental
 from P2, an online growth of 1 GiB followed by P5 incremental at the new
-size (lab item 7), and the Backups and Recovery pages (M9.5). The fourth
-run passed 151 checks of 153 in 57 minutes; both failures were the
-scenario expecting the catalog to keep P1 after the cluster had dropped
-its snapshot and bookmark, as `BACKUP.md` says it should.
+size (lab item 7), and the Backups and Recovery pages (M9.5). The final
+run (2026-10-14) passed all 153 checks in 58 minutes. The scenario notes
+each PIT as the Backups page shows it, because the catalog drops a PIT
+once the cluster keeps neither its snapshot nor its bookmark, as
+`BACKUP.md` says it should.
 
 The runs found five bugs. The appliance trusts a host on 8445 only when the
 presented chain includes the cluster CA, so `bmac-source` sends the leaf and
