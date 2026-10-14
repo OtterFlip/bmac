@@ -411,8 +411,8 @@ branch B:                P6 -- P7
 ## PIT graph
 
 The Dashboard's Backups page and the appliance UI draw each VM's history as a
-tree. Time runs left to right, the oldest PIT is always at the top left, and
-each branch is a row below the one it forked from, joined to its parent PIT.
+tree. Time runs top to bottom, the oldest PIT is always at the top left, and
+each branch is a row extending to the right of the one it forked from, joined to its parent PIT.
 Each PIT shows its time and consistency level, and marks where it exists: on
 which appliances, and whether the cluster still has its snapshot or only its
 bookmark. Selecting a PIT shows its manifest summary and the restores it

@@ -1882,6 +1882,19 @@ on raidz1, raidz2, and raidz3 pools of several widths, and records
 **Done when:** predictions are within 1% of the measurements (`STORAGE.md`), or the
 function is corrected until they are.
 
+**As built:** `lab/lab scenario m8_capacity` uses a scratch pool of sparse
+files on mox1 for each layout: raidz1 of 3–6 disks, raidz2 of 4, 6, 8, and
+10, and raidz3 of 5, 7, and 9, all ashift 12 with compression off. Each
+pool gets a 512 MiB zvol per offered block size, filled with random data,
+and its `used` is compared with `bmac capacity --json`. The inflation
+matched. The metadata allowance didn't: the planned `2 × 128 / b` made
+every 16K prediction 1.05–1.42% high, because ZFS compresses the indirect
+blocks. Measured metadata is 0.2–0.8 × `128 / b`, so the function now
+charges `m(b) = 128 / b`. All 44 predictions are then 0.1–0.7% above the
+measurement and never below it. `bmac-storage`'s `tests/capacity_lab.rs`
+holds the function to that against the recorded measurements
+(`tests/fixtures/lab/capacity.json`).
+
 **M8 done when:** in the lab, a raidz2 host and a mirror host are set up,
 disks are added, replaced, and removed (mirror only) through the Dashboard,
 and VMs with 16K and 64K disks are created with the suggested sizes.
@@ -2021,9 +2034,14 @@ chooses).
 ### M9.5 Dashboard backup pages
 
 **Builds:** the Backups page: policies per VM with the appliance
-assignment, the PIT graph (`BACKUP.md`, "PIT graph"; time left to right,
-oldest PIT at the top left), appliance states and check-in times, live and
+assignment, the PIT graph (`BACKUP.md`, "PIT graph"; time top to bottom,
+oldest PIT at the top left, branches to the right), appliance states and check-in times, live and
 historical transfer rates, local retention space, and the restore wizard.
+Ignore BACKUP.md if it says to do the graph with time left-to-right,
+since browsers and UIs are more naturally arranged vertically it makes more
+sense to arrange the graph timeline vertically from top-to-bottom with branches
+extending to the right.
+
 
 ### M9.6 Lab proofs and acceptance
 
