@@ -1041,13 +1041,15 @@ pub async fn restore_into(cx: &Context<'_>, vm: &GuestName) -> Result<Value, Sto
         }
     }
     let mut record = record;
+    let methods = record.methods.clone();
     let datasets = outcome.map(|(aside, ())| {
         record.replaced = aside.clone();
         current_datasets(&current, aside.keys())
     });
     finish(cx, record, &datasets);
     datasets?;
-    let result = json!({"vm": vm.to_string(), "vmid": production.vmid, "pit": plan.pit.pit_uuid});
+    let result = json!({"vm": vm.to_string(), "vmid": production.vmid, "pit": plan.pit.pit_uuid,
+                        "methods": methods});
     flow.result(result.clone());
     Ok(result)
 }

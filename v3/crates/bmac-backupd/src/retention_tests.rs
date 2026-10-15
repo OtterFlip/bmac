@@ -137,6 +137,16 @@ fn weakening_waits_out_the_delay_unless_confirmed_and_never_passes_the_floor() {
 }
 
 #[test]
+fn prunes_run_hourly_or_as_often_in_a_test_day() {
+    let mut s = Settings::default();
+    assert_eq!(s.prune_every(), std::time::Duration::from_secs(3600));
+    s.test_day_s = Some(300);
+    assert_eq!(s.prune_every(), std::time::Duration::from_millis(12_000));
+    s.test_day_s = Some(60);
+    assert_eq!(s.prune_every(), std::time::Duration::from_secs(10));
+}
+
+#[test]
 fn a_plan_keeps_bucket_winners_branch_roots_holds_and_transfer_bases() {
     let mut journal = Journal::new(id(1), "g");
     journal.pits = (1..=8).map(pit).collect();

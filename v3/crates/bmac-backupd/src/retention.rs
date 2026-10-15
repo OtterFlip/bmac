@@ -26,6 +26,7 @@ pub const DEFAULT_DELAY_HOURS: u32 = 72;
 /// How long a quarantined receive's zvols stay for a look.
 pub const QUARANTINE_KEEP_MS: i64 = 7 * 24 * 3600 * 1000;
 const HOUR_MS: i64 = 3600 * 1000;
+const MIN_PRUNE_EVERY_S: i64 = 10;
 
 /// A weaker policy waiting out the delay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +117,12 @@ impl Settings {
 
     pub fn save(&self, metadata: &Metadata) -> io::Result<()> {
         fsx::write_json(&metadata.root.join("retention.json"), self, 0o600)
+    }
+
+    /// How long between prunes: hourly, or as often in a test day.
+    pub fn prune_every(&self) -> std::time::Duration {
+        let day_s = self.test_day_s.unwrap_or(24 * 3600);
+        std::time::Duration::from_secs((day_s / 24).max(MIN_PRUNE_EVERY_S) as u64)
     }
 
     /// Applies a pending policy whose delay is over.

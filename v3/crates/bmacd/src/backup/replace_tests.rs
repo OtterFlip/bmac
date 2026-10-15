@@ -449,7 +449,10 @@ async fn a_restore_into_the_vm_sets_the_disks_aside_and_swaps_in_the_pit() {
         vec![source("bmac-grant-good"), pit(3), yes()],
     )
     .await;
-    ran.outcome.as_ref().unwrap();
+    let result = ran.outcome.as_ref().unwrap();
+    let records = r.store.restores().unwrap();
+    assert_eq!(result["methods"], json!(records[0].methods), "{result}");
+    assert!(!records[0].methods.is_empty());
 
     let w = r.fake.w();
     let aside0 = format!("rpool/bmac-replaced/100/{}-{}", id(0xd0), NOW_MS / 1000);

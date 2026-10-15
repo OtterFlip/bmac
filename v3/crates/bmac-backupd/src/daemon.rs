@@ -250,7 +250,10 @@ pub async fn run(
     };
     let prunes = async {
         loop {
-            tokio::time::sleep(PRUNE_EVERY).await;
+            let every = retention::Settings::load(&metadata)
+                .map(|s| s.prune_every())
+                .unwrap_or(PRUNE_EVERY);
+            tokio::time::sleep(every).await;
             if !unlocked().await {
                 continue;
             }

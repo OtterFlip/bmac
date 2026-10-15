@@ -593,8 +593,11 @@ impl Agent {
                 } else {
                     published.bytes as f64 / seconds / (1024.0 * 1024.0)
                 };
+                let pit = &published.pit;
                 eprintln!(
-                    "bmac-backupd: published {label}: {} bytes in {seconds:.1} s ({rate:.1} MiB/s){}",
+                    "bmac-backupd: published PIT {} of VM {}: {} bytes in {seconds:.1} s ({rate:.1} MiB/s){}",
+                    pit.name,
+                    pit.vm_uuid,
                     published.bytes,
                     from_peer
                         .as_ref()
@@ -607,9 +610,9 @@ impl Agent {
                     "bmac-backupd",
                     serde_json::json!({
                         "cluster_uuid": cluster,
-                        "vm_uuid": offer.vm_uuid,
-                        "pit_uuid": offer.pit_uuid,
-                        "branch_uuid": offer.branch_uuid,
+                        "vm_uuid": pit.vm_uuid,
+                        "pit_uuid": pit.pit_uuid,
+                        "branch_uuid": pit.branch_uuid,
                         "base": published.pit.received_from,
                         "from_peer": from_peer,
                         "bytes": published.bytes,
@@ -664,7 +667,6 @@ impl Agent {
     ) -> Option<(Published, String)> {
         let journal = self.journal()?;
         let head = repair::behind(&journal, cluster, offer)?.clone();
-        let repaired = repair::from_head(offer, &head)?;
         let peers = Peers::load(&self.metadata).ok()?;
         if peers.peers.is_empty() {
             return None;
@@ -697,12 +699,14 @@ impl Agent {
             let Ok(index) = index else {
                 continue;
             };
-            if !repair::can_serve(&index, cluster, &head, offer) {
+            let Some(repaired) = repair::target(&index, cluster, &head, offer)
+                .and_then(|target| repair::repaired_offer(target, offer, &head))
+            else {
                 continue;
-            }
+            };
             eprintln!(
                 "bmac-backupd: repairing PIT {} of VM {} from peer {} ({})",
-                offer.name, offer.vm_uuid, peer.appliance_uuid, peer.address
+                repaired.name, repaired.vm_uuid, peer.appliance_uuid, peer.address
             );
             let link = PeerLink::new(client, peer.address.clone(), cluster, &head);
             let puller = Puller {

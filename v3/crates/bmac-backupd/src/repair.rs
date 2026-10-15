@@ -4,16 +4,18 @@
 //! Repair from a trusted peer (`BACKUP.md`, "Repairing an appliance that
 //! fell behind", step 2). When the cluster can offer only a full send of a
 //! branch this appliance has a head on, a peer this appliance trusts, and
-//! that trusts it back, may hold both the head and the offered PIT with
-//! the same GUIDs; then the peer sends the incremental between them, and
-//! the pull is checked and published as any other.
+//! that trusts it back, may hold the head with the same GUIDs and a later
+//! PIT of the branch, the offered one or an earlier one; then the peer
+//! sends the incremental between them, and the pull is checked and
+//! published as any other. From an earlier one, the cluster's next offer is
+//! an incremental from it while its bookmark lasts.
 
 use std::collections::BTreeMap;
 
 use bmac_core::{ApplianceAddress, SnapshotGuid};
 use bmac_exec::BoxFuture;
 use bmac_proto::appliance::{
-    BaseKind, ClaimRequest, ExportRequest, OfferBase, OfferedPit, PeerIndex, SendRequest,
+    BaseKind, ClaimRequest, ExportRequest, OfferBase, OfferedPit, PeerIndex, PeerPit, SendRequest,
     SourceHost, on_appliance,
 };
 use uuid::Uuid;
@@ -45,38 +47,77 @@ pub fn behind<'a>(
         .max_by_key(|p| (p.taken_s, p.published_at_ms))
 }
 
-/// Whether the peer holds the offered PIT, and `head` with every volume's
-/// GUID the same, so it can send the incremental between them.
-pub fn can_serve(index: &PeerIndex, cluster: &str, head: &StoredPit, offer: &OfferedPit) -> bool {
-    let find = |pit: &Uuid| {
-        index
-            .pits
+/// The PIT the peer can send an incremental to from `head`: the offered
+/// one if it holds it, otherwise its newest PIT of the branch between the
+/// head and the offer. Either way the peer's copy of the head has every
+/// volume's GUID, which proves the ancestry on a branch's single line.
+pub fn target<'a>(
+    index: &'a PeerIndex,
+    cluster: &str,
+    head: &StoredPit,
+    offer: &OfferedPit,
+) -> Option<&'a PeerPit> {
+    let theirs = index
+        .pits
+        .iter()
+        .find(|p| p.cluster_uuid == cluster && p.pit_uuid == head.pit_uuid)?;
+    let same_head = head.volumes.iter().all(|v| {
+        theirs
+            .volumes
             .iter()
-            .find(|p| p.cluster_uuid == cluster && &p.pit_uuid == pit)
-    };
-    let (Some(theirs), Some(target)) = (find(&head.pit_uuid), find(&offer.pit_uuid)) else {
-        return false;
-    };
-    target.name == offer.name
-        && target.branch_uuid == offer.branch_uuid
-        && head.volumes.iter().all(|v| {
-            theirs
-                .volumes
-                .iter()
-                .any(|t| t.volume_uuid == v.volume_uuid && t.guid == v.guid)
-        })
+            .any(|t| t.volume_uuid == v.volume_uuid && t.guid == v.guid)
+    });
+    if !same_head {
+        return None;
+    }
+    let later = index.pits.iter().filter(|p| {
+        p.cluster_uuid == cluster
+            && p.vm_uuid == offer.vm_uuid
+            && p.branch_uuid == offer.branch_uuid
+            && p.taken_s > head.taken_s
+            && p.taken_s <= offer.taken_s
+    });
+    let mut newest: Option<&PeerPit> = None;
+    for p in later {
+        if p.pit_uuid == offer.pit_uuid {
+            return (p.name == offer.name).then_some(p);
+        }
+        if newest.is_none_or(|n| (p.taken_s, p.pit_uuid) > (n.taken_s, n.pit_uuid)) {
+            newest = Some(p);
+        }
+    }
+    newest
 }
 
-/// The offer as a pull from the peer: incremental from `head`.
-pub fn from_head(offer: &OfferedPit, head: &StoredPit) -> Option<OfferedPit> {
+/// `target` as a pull from the peer, incremental from `head`. The offered
+/// PIT keeps the cluster's manifest; an earlier one carries the peer's.
+pub fn repaired_offer(
+    target: &PeerPit,
+    offer: &OfferedPit,
+    head: &StoredPit,
+) -> Option<OfferedPit> {
     let host = offer.hosts.first().cloned()?;
+    let base = Some(OfferBase {
+        pit_uuid: head.pit_uuid,
+        kind: BaseKind::Snapshot,
+    });
+    if target.pit_uuid == offer.pit_uuid {
+        return Some(OfferedPit {
+            base,
+            hosts: vec![host],
+            ..offer.clone()
+        });
+    }
     Some(OfferedPit {
-        base: Some(OfferBase {
-            pit_uuid: head.pit_uuid,
-            kind: BaseKind::Snapshot,
-        }),
+        vm_uuid: target.vm_uuid,
+        pit_uuid: target.pit_uuid,
+        branch_uuid: target.branch_uuid,
+        name: target.name.clone(),
+        taken_s: target.taken_s,
+        parent: target.parent,
+        base,
         hosts: vec![host],
-        ..offer.clone()
+        manifest: target.manifest.clone(),
     })
 }
 
@@ -150,7 +191,7 @@ impl Link for PeerLink {
 mod tests {
     use super::*;
     use crate::journal::StoredVolume;
-    use bmac_proto::appliance::{PeerPit, PeerVolume};
+    use bmac_proto::appliance::PeerVolume;
 
     fn id(n: u128) -> Uuid {
         Uuid::from_u128(n)
@@ -236,15 +277,37 @@ mod tests {
             revision: 1,
             pits: vec![peer_pit(&stored(2, 102)), peer_pit(&stored(5, 105))],
         };
-        assert!(can_serve(&index, "c1", head, &offer(5, None)));
+        let target_of =
+            |index: &PeerIndex| target(index, "c1", head, &offer(5, None)).map(|p| p.pit_uuid);
+        assert_eq!(target_of(&index), Some(id(5)));
         // The peer's copy of the head is another snapshot: no.
         index.pits[0].volumes[0].guid = SnapshotGuid::new(999);
-        assert!(!can_serve(&index, "c1", head, &offer(5, None)));
+        assert_eq!(target_of(&index), None);
         index.pits[0].volumes[0].guid = SnapshotGuid::new(102);
-        index.pits.pop();
-        assert!(!can_serve(&index, "c1", head, &offer(5, None)));
 
-        let repaired = from_head(&offer(5, None), head).unwrap();
+        // Without the offered PIT, the newest one between the head and it.
+        index.pits.pop();
+        assert_eq!(target_of(&index), None, "nothing after the head");
+        let mut other_branch = peer_pit(&stored(4, 104));
+        other_branch.branch_uuid = id(0xc);
+        index.pits.extend([
+            peer_pit(&stored(3, 103)),
+            peer_pit(&stored(4, 104)),
+            other_branch,
+            peer_pit(&stored(6, 106)),
+        ]);
+        index.pits[2].parent = Some(id(3));
+        index.pits[2].manifest = "the peer's manifest".into();
+        assert_eq!(target_of(&index), Some(id(4)));
+
+        let earlier = repaired_offer(&index.pits[2], &offer(5, None), head).unwrap();
+        assert_eq!(
+            (earlier.pit_uuid, earlier.parent, earlier.manifest.as_str()),
+            (id(4), Some(id(3)), "the peer's manifest")
+        );
+        assert_eq!(earlier.base.unwrap().pit_uuid, id(2));
+        let repaired = repaired_offer(&peer_pit(&stored(5, 105)), &offer(5, None), head).unwrap();
+        assert_eq!(repaired.pit_uuid, id(5));
         assert_eq!(repaired.base.unwrap().pit_uuid, id(2));
         let (cert, key) = crate::state::certificate("vault1", &id(1)).unwrap();
         let link = PeerLink::new(

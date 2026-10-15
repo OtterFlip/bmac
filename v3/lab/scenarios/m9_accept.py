@@ -8,7 +8,7 @@ starts from the cluster with production VMs (m8_storage.staged): VM 1,
 and B ("vaultb"); VM 2, "bulk", on mox2 and mox3, to B only.
 
 Compressed time: the cluster's backup settings are short (a check-in every
-10 s, LATE after 45 s, delinquent after 450 s), both policies run every 2
+10 s, LATE after 45 s, delinquent after 600 s), both policies run every 2
 minutes, and a test day lasts 300 s on the cluster and on both appliances.
 A LATE appliance's warning still holds for the alerts' 5 minutes.
 
@@ -75,7 +75,7 @@ SETTINGS = {
     "ready_window_s": 60,
     "claim_window_s": 90,
     "stalled_after_s": 180,
-    "delinquency_s": 450,
+    "delinquency_s": 600,
     "streams_per_appliance": 1,
     "min_healthy_appliances": 1,
     "test_day_s": TEST_DAY_S,
@@ -258,6 +258,24 @@ class Accept:
         self.s.note(f"result: {json.dumps(result)}")
         return result, details
 
+    def operate(self, operation: str, parameters: dict, what: str, **reply) -> bool:
+        """ops.operate, again while a capture holds the VM's orchestration
+        lease: the job then fails before it changes anything."""
+        deadline = time.monotonic() + BUSY_TIMEOUT
+        while True:
+            summary, events = join.follow(self.s, self.dashboard, self.dashboard.start(operation, parameters),
+                                          ops.answering(**reply))
+            leased = "orchestration lease" in (summary.get("message") or "")
+            if summary.get("state") == "COMPLETED" or not leased or time.monotonic() > deadline:
+                break
+            self.s.note(f"{operation}: a capture holds the lease; trying again")
+            time.sleep(20)
+        if summary.get("state") != "COMPLETED":
+            for e in [e for e in events if e["type"] == "output"][-8:]:
+                self.s.note(f"output: {e.get('text')}")
+        return self.s.check(f"{operation} {what} ({summary.get('state')}: {summary.get('message') or ''})",
+                            summary.get("state") == "COMPLETED")
+
     def policy(self, purpose: str, appliances: list, local: dict, enabled: bool = True) -> None:
         current = self.vm_view(purpose).get("policy")
         body = {"vm": self.vms[purpose]["name"], "every": EVERY, "appliances": [a.appliance_uuid for a in appliances],
@@ -407,7 +425,7 @@ class Accept:
         """Step 3."""
         name = self.vms["small"]["name"]
         before = self.newest(self.a, "small")
-        ops.operate(self.s, self.dashboard, "staging.add", {"source": name}, f"clones {name} onto mox3",
+        self.operate("staging.add", {"source": name}, f"clones {name} onto mox3",
                     answers={"staging_guest_vm_root_password": secrets.token_urlsafe(18)},
                     choices={"Staging standby": "mox3", "Snapshot for the new staging VM": "new"})
         staged = ops.staging_on(self.hosts["mox2"], "mox3")
@@ -416,7 +434,7 @@ class Accept:
         self.s.check("step 3: small is backed up while its staging VM runs",
                      bool(during) and during.get("received_from") == before.get("pit_uuid"))
         if staged.get("name"):
-            ops.operate(self.s, self.dashboard, "staging.remove", {"resource": staged["name"]},
+            self.operate("staging.remove", {"resource": staged["name"]},
                         f"removes {staged['name']}")
         after = self.newer(self.a, "small", during)
         self.s.check("step 3: and after it is removed, incrementally",
@@ -431,7 +449,7 @@ class Accept:
     def moves(self) -> None:
         """Step 4."""
         name = self.vms["small"]["name"]
-        ops.operate(self.s, self.dashboard, "prod.change_owner", {"resource": name}, f"moves {name} to mox3",
+        self.operate("prod.change_owner", {"resource": name}, f"moves {name} to mox3",
                     choices={"New owner": "mox3"})
         self.wait(f"{name} runs on mox3", lambda: self.owner("small") == "mox3", 300)
         # A tries the placement hosts in order, and mox1 has a replica of
@@ -469,10 +487,10 @@ class Accept:
         """Steps 5 and 6."""
         a, b = self.a, self.b
         head = self.newest(a, "small")
+        stopped_s = time.time()
         since = self.stop(a)
         self.wait(f"step 5: {a.name}'s LATE alert", lambda: self.alerted(
             "backup.appliance.late", f"appliance/{a.appliance_uuid}"), SETTINGS["late_after_s"] + WARNING_HOLD_S + 120)
-        self.s.check(f"step 5: {b.name} carries on", bool(self.newer(b, "small", self.newest(b, "small"))))
         places = self.on_cluster("small", head)
         self.s.check(f"step 6: the cluster keeps {a.name}'s head ({places})", "bookmark" in places.values()
                      or "snapshot" in places.values())
@@ -480,6 +498,8 @@ class Accept:
         self.s.require(f"step 6: {a.name} returns within the delinquency period ({away:.0f} s)",
                        away < SETTINGS["delinquency_s"])
         self.start(a)
+        carried, _ = self.taken_after(b, "small", stopped_s)
+        self.s.check(f"step 5: {b.name} carried on while {a.name} was away", bool(carried))
         caught = self.newer(a, "small", head)
         entry = self.published_entry(a, caught)
         self.s.check(f"step 6: {a.name} catches up incrementally from its head, from the cluster ({entry})",
@@ -738,8 +758,9 @@ class Accept:
                                                              "pits": [newest["pit_uuid"]]}]])
         self.s.require(f"a restore grant for bulk's newest PIT ({status})", status == 200)
         self.grants.append(issued["token"])
-        self.dashboard.call("POST", f"/backups/policies/{bulk['name']}/delete", {})
-        ops.operate(self.s, self.dashboard, "prod.remove", {"resource": bulk["name"]}, f"removes {bulk['name']}")
+        self.dashboard.call("POST", f"/backups/policies/{bulk['vm_uuid']}/delete",
+                            {"revision": self.vm_view("bulk")["policy"]["revision"]})
+        self.operate("prod.remove", {"resource": bulk["name"]}, f"removes {bulk['name']}")
         result, _ = self.job("step 16: bulk is recreated from its newest PIT on mox2", "backup.restore", {"host": "mox2"},
                              {**self.source(), "pit": newest["pit_uuid"], "isolate": True, "start": True})
         vmid = int(result.get("vmid") or 0)
@@ -770,13 +791,13 @@ class Accept:
                                        f"https://{appliance.address}:8443{path} || true")
                 self.s.check(f"security: the cluster can't {method} {appliance.name}'s {path} ({code})",
                              code in ("401", "403"))
-        refusals = len(self.audit(b, "refused_peer"))
+        before = self.refused_at(b, a)
         code = a.app(f"curl -sk -o /dev/null -w '%{{http_code}}' --max-time 20 --cert /var/lib/bmac-backupd/tls/appliance.pem "
                      f"--key /var/lib/bmac-backupd/tls/appliance.key https://{b.address}:8445/v1/peer-index || true")
         self.s.check(f"security: {a.name}, which {b.name} no longer trusts, gets nothing from its 8445 ({code})",
                      not code.startswith("2"))
-        self.s.check(f"security: {b.name}'s audit log has the refusal", lambda: m6.wait_until(
-            lambda: len(self.audit(b, "refused_peer")) > refusals, 30))
+        self.s.check(f"security: {b.name}'s Trusted peers page lists the refusal", lambda: m6.wait_until(
+            lambda: self.refused_at(b, a) > before, 30))
 
         hidden = [x for x in [a.passphrase, b.passphrase, *self.grants] + [
             h.carried.get("luks_passphrase") or "" for h in self.hosts.values()] if x]
