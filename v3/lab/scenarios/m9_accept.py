@@ -150,6 +150,20 @@ class Accept:
             return {}
         return found[0]
 
+    def taken_after(self, b, purpose: str, at_s: float, timeout: float = STEP_TIMEOUT) -> tuple[dict, dict]:
+        """Waits for b to publish a PIT of the VM taken after at_s; the first
+        one, and the PIT b published before it."""
+        found: list[tuple[dict, dict]] = []
+
+        def published() -> bool:
+            pits = self.pits(b, purpose)
+            found[:] = [(p, pits[i - 1] if i else {}) for i, p in enumerate(pits) if p["taken_s"] > at_s][:1]
+            return bool(found)
+        if not m6.wait_until(published, timeout):
+            b.diagnose()
+            return {}, {}
+        return found[0]
+
     def audit(self, b, event: str) -> list[dict]:
         text = b.app("cat /var/lib/bmac-backupd/metadata/audit.jsonl 2>/dev/null || true")
         entries = [json.loads(l) for l in text.splitlines() if l.strip()]
@@ -242,10 +256,12 @@ class Accept:
         """Where the PIT is on each of the VM's placement hosts: "snapshot",
         "bookmark", or ""."""
         vmid, name = self.vms[purpose]["vmid"], pit["name"]
+        # Only the owner has the VM's config; replicas keep the same datasets.
+        disks = self.disks(self.owner(purpose), vmid)
         out = {}
         for host in self.vms[purpose]["placement"]:
             kinds = set()
-            for d in self.disks(host, vmid):
+            for d in disks:
                 listed = self.on(host, f"zfs list -H -o name -t snapshot,bookmark -d 1 {d} 2>/dev/null || true")
                 kinds |= {"snapshot" for l in listed.splitlines() if l == f"{d}@{name}"}
                 kinds |= {"bookmark" for l in listed.splitlines() if l == f"{d}#{name}"}
@@ -390,8 +406,8 @@ class Accept:
         ops.operate(self.s, self.dashboard, "prod.change_owner", {"resource": name}, f"moves {name} to mox3",
                     choices={"New owner": "mox3"})
         self.wait(f"{name} runs on mox3", lambda: self.owner("small") == "mox3", 300)
-        before = self.newest(self.a, "small")
-        moved = self.newer(self.a, "small", before)
+        # A PIT mox1 took before the move may still be on its way to A.
+        moved, before = self.taken_after(self.a, "small", time.time())
         self.s.check(f"step 4: after the move, the next PIT is an incremental sent by mox3 ({self.sent_by(moved)})",
                      bool(moved) and moved.get("received_from") == before.get("pit_uuid")
                      and self.sent_by(moved) == {"mox3"})
@@ -409,8 +425,7 @@ class Accept:
                 self.s.require("mox3 comes back", lambda: m7.wait_back(mox3) != "")
         self.s.require("mox3 is back in the cluster", lambda: m6.wait_until(
             lambda: all(ops.nodes_online(h) for h in self.hosts.values()), m6.BOOT_TIMEOUT))
-        before = self.newest(self.a, "small")
-        failed_over = self.newer(self.a, "small", before)
+        failed_over, before = self.taken_after(self.a, "small", time.time())
         self.s.check(f"step 4: after the failover, the next PIT is an incremental sent by mox1 "
                      f"({self.sent_by(failed_over)})",
                      bool(failed_over) and failed_over.get("received_from") == before.get("pit_uuid")
