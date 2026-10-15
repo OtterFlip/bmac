@@ -192,5 +192,17 @@ export function demoBackups(now = Date.now()): BackupsView {
     can_manage: false,
     time_zone: "America/Denver",
     errors: [],
+    settings: {
+      checkin_interval_s: 60,
+      late_after_s: 180,
+      ready_window_s: 300,
+      claim_window_s: 300,
+      stalled_after_s: 600,
+      delinquency_s: 72 * 3600,
+      streams_per_appliance: 1,
+      min_healthy_appliances: 1,
+      test_day_s: null,
+    },
+    settings_revision: 0,
   };
 }

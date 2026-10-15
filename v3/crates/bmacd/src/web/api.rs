@@ -490,6 +490,21 @@ pub async fn save_backup_policy(
     .await
 }
 
+pub async fn save_backup_settings(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    post_json(&state, client, &headers, &uri, || {
+        Ok(EngineCall::SaveBackupSettings {
+            request: parse_body::<bmac_proto::backups::SaveBackupSettings>(&body)?,
+        })
+    })
+    .await
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeletePolicy {

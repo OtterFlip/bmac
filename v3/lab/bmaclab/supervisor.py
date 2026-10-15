@@ -25,6 +25,7 @@ from .topology import Vm
 
 IDLE_EXIT_SECONDS = 15
 MAX_FRAME = 65536 + 64
+DROP_REPORT_SECONDS = 10
 SWITCHED = tuple(network for network in LINKS if network != "uplink")
 
 
@@ -99,10 +100,19 @@ class Switch:
     """The lab's management and VLAN networks. Every frame goes to each
     other VM on its network and never back to its sender, the way a switch
     floods it. QEMU's multicast socket also hands a VM its own frames, which
-    teaches a host's bridge that its guests' MACs are out on the uplink."""
+    teaches a host's bridge that its guests' MACs are out on the uplink.
 
-    def __init__(self, lab: Lab) -> None:
+    Each member is sent to from a socket of its own. The kernel charges a
+    datagram waiting in a receiver's queue to the socket that sent it, so a
+    VM that stops reading (its NIC down while it boots or waits) would
+    otherwise fill one shared send buffer and silence the network for all."""
+
+    def __init__(self, lab: Lab, clock=time.monotonic) -> None:
+        self.clock = clock
+        self.drops: dict[tuple[str, str], int] = {}
+        self.reported = clock()
         self.ports: dict[socket.socket, list[str]] = {}
+        self.egress: dict[str, socket.socket] = {}
         for network in SWITCHED:
             members = [str(lab.paths.nic(vm.name, network)) for vm in lab.topology.vms if vm.nic(network)]
             if not members:
@@ -114,12 +124,27 @@ class Switch:
             port.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
             port.setblocking(False)
             self.ports[port] = members
+            for member in members:
+                out = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+                out.setblocking(False)
+                self.egress[member] = out
 
     def serve(self, stopping: threading.Event) -> None:
         while not stopping.is_set():
             ready, _, _ = select.select(list(self.ports), [], [], 0.5)
             for port in ready:
                 self.forward(port)
+            self.report()
+
+    def report(self) -> None:
+        """Prints the frames dropped since the last report, at most every
+        DROP_REPORT_SECONDS, so that a silent VLAN shows why."""
+        if not self.drops or self.clock() - self.reported < DROP_REPORT_SECONDS:
+            return
+        for (member, reason), count in sorted(self.drops.items()):
+            print(f"switch: dropped {count} frames to {member}: {reason}", flush=True)
+        self.drops.clear()
+        self.reported = self.clock()
 
     def forward(self, port: socket.socket) -> None:
         for _ in range(256):
@@ -130,12 +155,15 @@ class Switch:
             for member in self.ports[port]:
                 if member != sender:
                     try:
-                        port.sendto(frame, member)
-                    except OSError:  # stopped, or too far behind: dropped, as a switch would
+                        self.egress[member].sendto(frame, member)
+                    except (FileNotFoundError, ConnectionRefusedError):  # a stopped VM
                         pass
+                    except OSError as error:  # too far behind: dropped, as a switch would
+                        key = (member, error.strerror or type(error).__name__)
+                        self.drops[key] = self.drops.get(key, 0) + 1
 
     def close(self) -> None:
-        for port in self.ports:
+        for port in [*self.ports, *self.egress.values()]:
             port.close()
 
 

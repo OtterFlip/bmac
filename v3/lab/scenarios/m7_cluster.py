@@ -53,8 +53,7 @@ def build(s, after=None) -> None:
             if s.failed != failed:
                 return
             hosts = {"mox3": mox3, "mox1": mox1, "mox2": mox2}
-            for name in HOSTS:
-                hosts[name].save_stage(STAGE, live=s.lab.can_save_live(hosts[name].vm))
+            m6.save_cluster_stage(s, [hosts[name] for name in HOSTS], STAGE)
             if after is not None:
                 after(hosts)
 
@@ -93,6 +92,9 @@ def take_turns(s, dashboard, mox3, mox1, mox2, bundles: dict) -> None:
     join.approve(s, dashboard, mox3, mox2)
 
     join.check_members(s, dashboard, [mox3, mox1, mox2], [b["setup_ssh_public_key"] for _, b in bundles.values()])
+    for host in (mox1, mox2):
+        s.check(f"{host.vm.name} joined in the cluster's time zone, {m7.LAB_ZONE}", lambda: host.on_host(
+            "timedatectl show -p Timezone --value") == m7.LAB_ZONE)
     s.check("mox3's pool is still on LUKS", lambda: int(mox3.on_host(
         "zpool status -P rpool | grep -c /dev/mapper/ || true")) >= 2)
 

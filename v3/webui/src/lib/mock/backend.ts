@@ -28,6 +28,7 @@ import type {
   NotifyView,
   OperationView,
   ReplicationView,
+  SaveBackupSettings,
   SaveNotifySettings,
   SaveSettings,
   SaveSilence,
@@ -355,6 +356,18 @@ export class MockBackend implements Backend {
     if (!vm?.policy) throw new ApiFailure(404, "not_found", `no backup policy for ${vmUuid}`);
     if (vm.policy.revision !== revision) throw new ApiFailure(409, "conflict", "the backup policy changed since it was read; reload and try again");
     vm.policy = null;
+  }
+
+  async saveBackupSettings(request: SaveBackupSettings): Promise<SaveBackupSettings> {
+    this.record("saveBackupSettings", request);
+    this.requireAdmin("changing backup policies and settings");
+    if (request.revision !== this.backupsData.settings_revision) throw new ApiFailure(409, "conflict", "the backup settings changed since they were read; reload and try again");
+    const s = request.settings;
+    if (s.late_after_s <= s.checkin_interval_s) throw new ApiFailure(422, "invalid", "an appliance must be allowed more than one check-in interval before it is late");
+    if (s.delinquency_s <= s.late_after_s) throw new ApiFailure(422, "invalid", "the delinquency period must be longer than the late threshold");
+    this.backupsData.settings = { ...s };
+    this.backupsData.settings_revision += 1;
+    return { settings: { ...s }, revision: this.backupsData.settings_revision };
   }
 
   async certificate(): Promise<CertificateView> {

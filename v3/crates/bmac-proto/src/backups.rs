@@ -117,6 +117,44 @@ pub struct BackupsView {
     /// The cluster's time zone (IANA): schedules run in it, and the
     /// Backups page shows times in it.
     pub time_zone: Option<String>,
+    pub settings: BackupSettingsView,
+    /// 0 while the defaults were never saved.
+    pub settings_revision: u64,
+}
+
+/// The cluster-wide backup settings (`BACKUP.md`, "Backup policies").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct BackupSettingsView {
+    /// Told to appliances in every check-in reply.
+    pub checkin_interval_s: i64,
+    /// An appliance is LATE after this long without a check-in.
+    pub late_after_s: i64,
+    /// An appliance checked in this recently counts as available for a
+    /// capture.
+    pub ready_window_s: i64,
+    /// How long a new PIT's snapshot waits for an appliance to start
+    /// pulling.
+    pub claim_window_s: i64,
+    /// A transfer with no bytes for this long has stalled.
+    pub stalled_after_s: i64,
+    /// After this long without a check-in or a publish an appliance is
+    /// delinquent, and the cluster stops keeping its checkpoints.
+    pub delinquency_s: i64,
+    pub streams_per_appliance: u32,
+    pub min_healthy_appliances: u32,
+    /// For tests only: local retention's days last this many seconds.
+    pub test_day_s: Option<i64>,
+}
+
+/// The body of `POST /api/v1/backups/settings`, and its reply with the
+/// saved revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SaveBackupSettings {
+    pub settings: BackupSettingsView,
+    /// The revision as read; 0 while the defaults were never saved.
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

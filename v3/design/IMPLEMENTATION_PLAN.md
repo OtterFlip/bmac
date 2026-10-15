@@ -2264,7 +2264,11 @@ that read from the appliance, and the appliance keeps 50 per cluster and
 shows them on a new Recovery page with the manifests and LUKS header
 versions it keeps. The LUKS headers moved to a list of digests and one
 gzip-compressed header per `POST /v1/luks-header`: the M9.4 lab run found a
-whole host's headers in one reply exceeded the 16 MiB socket frame.
+whole host's headers in one reply exceeded the 16 MiB socket frame. For
+M9.6 the view also carries the cluster-wide backup settings and their
+revision, which an admin changes in a settings dialog (`POST
+/backups/settings`, audited); `backup.skipped` (no appliance available) is
+critical, as `MONITORING.md` lists it, so it becomes an alert at once.
 
 
 ### M9.6 Lab proofs and acceptance
@@ -2274,8 +2278,8 @@ lab"), each with its fallback wired in until it passes, then the acceptance
 scenario. First, four changes decided at the start of M9.6: retention by
 the cluster's calendar (`BACKUP.md`, "Appliance retention" and
 "Calendar"), the cluster's time zone chosen in the Deployer and carried to
-the appliances, hosts dialing the appliances so backup data never crosses
-Tailscale ("Connections"), and skipping a slot while the VM's previous PIT
+the appliances, hosts dialing the appliances at any address the administrator gives
+("Connections"; the lab never gives a Tailscale one), and skipping a slot while the VM's previous PIT
 is still being pulled (capture step 0). The lab gets appliance B, puts
 both appliances on the hosts' network, and runs in `America/Denver`.
 

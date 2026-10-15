@@ -34,6 +34,9 @@ pub const PINS_END: &str = "# END bmac managed host private addresses";
 const SLOW: Duration = Duration::from_secs(5 * 60);
 /// `pvecm status` polls before the new cluster must be quorate.
 const QUORUM_POLLS: u32 = 40;
+/// Tries at the existing host's certificate, so that a moment's loss on
+/// the private VLAN doesn't fail the join.
+const REACH_POLLS: u32 = 10;
 
 fn fail(what: &str, e: impl std::fmt::Display) -> Stop {
     Stop::Failed {
@@ -317,6 +320,29 @@ impl Cluster<'_> {
             .ok_or_else(|| Stop::failed("This host has no tailnet address yet."))
     }
 
+    async fn served_fingerprint(&self, via: &JoinVia, domain: &str) -> Result<String, Stop> {
+        let mut tries = 0;
+        loop {
+            let served = self
+                .run(Command::new(BASH).args([
+                    "-c",
+                    SERVED_FINGERPRINT,
+                    "bmac",
+                    &via.address.to_string(),
+                    &format!("{}.{domain}", via.host),
+                ]))
+                .await;
+            tries += 1;
+            match served {
+                Err(Stop::Failed { .. }) if tries < REACH_POLLS => {
+                    self.flow.check()?;
+                    tokio::time::sleep(self.poll).await;
+                }
+                served => return served,
+            }
+        }
+    }
+
     async fn wait_quorate(&self) -> Result<(), Stop> {
         let mut last = String::new();
         for _ in 0..QUORUM_POLLS {
@@ -460,15 +486,7 @@ impl Cluster<'_> {
                 )));
             }
             None => {
-                let served = self
-                    .run(Command::new(BASH).args([
-                        "-c",
-                        SERVED_FINGERPRINT,
-                        "bmac",
-                        &via.address.to_string(),
-                        &format!("{}.{domain}", via.host),
-                    ]))
-                    .await?;
+                let served = self.served_fingerprint(via, domain).await?;
                 let served = openssl_fingerprint(&served).ok_or_else(|| {
                     Stop::failed(format!(
                         "{} at {} served no certificate on port 8006.",

@@ -95,7 +95,7 @@ def build(s, after=None) -> None:
             return
         for name in HOSTS:
             hosts[name].carried["prod_root_password"] = password
-            hosts[name].save_stage(STAGE, live=s.lab.can_save_live(hosts[name].vm))
+        m6.save_cluster_stage(s, [hosts[name] for name in HOSTS], STAGE)
         if after is not None:
             after(hosts)
 

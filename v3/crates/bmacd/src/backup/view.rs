@@ -49,6 +49,8 @@ pub struct Inputs {
     pub errors: Vec<String>,
     /// The cluster's time zone, which schedules run in.
     pub time_zone: Option<String>,
+    pub settings: bmac_backup::settings::BackupSettings,
+    pub settings_revision: u64,
 }
 
 /// An enum's name on the wire, such as `if_available`.
@@ -260,6 +262,15 @@ pub fn read(
         Ok(transfers) => inputs.transfers = transfers,
         Err(e) => note("the transfers", e),
     }
+    match store.settings_record() {
+        Ok(record) => {
+            if let Some(r) = record {
+                inputs.settings = r.settings;
+                inputs.settings_revision = r.revision;
+            }
+        }
+        Err(e) => note("the backup settings", e),
+    }
     inputs.vms = vms;
 }
 
@@ -357,6 +368,8 @@ pub fn assemble(mut inputs: Inputs) -> BackupsView {
         can_manage: inputs.can_manage,
         errors: inputs.errors,
         time_zone: inputs.time_zone,
+        settings: super::policies::settings_view(&inputs.settings),
+        settings_revision: inputs.settings_revision,
     }
 }
 

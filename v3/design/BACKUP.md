@@ -107,6 +107,11 @@ Cluster-wide backup settings:
 | Minimum healthy appliances per VM | 1 |
 | Automatic appliance removal | Never |
 
+An admin edits them on the Backups page (`POST /api/v1/backups/settings`,
+with the revision read; the audit log records each change). A test day
+(`test_day_s`, see "Calendar") is a further setting for compressed-time
+tests only.
+
 Every alert below has its own on/off switch in the alert settings
 (`MONITORING.md`).
 

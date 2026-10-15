@@ -276,7 +276,7 @@ impl Engine {
             replies
                 .err(ApiError::new(
                     ErrorCode::Forbidden,
-                    "changing backup policies needs the admin role",
+                    "changing backup policies and settings needs the admin role",
                 ))
                 .await;
             return;
@@ -298,6 +298,18 @@ impl Engine {
                             Ok(()) => (
                                 Ok(serde_json::json!({})),
                                 Some(format!("deleted the backup policy of VM {vm_uuid}")),
+                            ),
+                            Err(e) => (Err(e), None),
+                        }
+                    }
+                    EngineCall::SaveBackupSettings { request } => {
+                        match policies.save_settings(request) {
+                            Ok(saved) => (
+                                Ok(body(&saved)),
+                                Some(format!(
+                                    "saved the backup settings: {}",
+                                    crate::backup::policies::describe_settings(&saved.settings)
+                                )),
                             ),
                             Err(e) => (Err(e), None),
                         }
@@ -1359,7 +1371,8 @@ impl Handler for Engine {
             }
             call @ (EngineCall::BackupPolicies {}
             | EngineCall::SaveBackupPolicy { .. }
-            | EngineCall::DeleteBackupPolicy { .. }) => {
+            | EngineCall::DeleteBackupPolicy { .. }
+            | EngineCall::SaveBackupSettings { .. }) => {
                 self.policy_call(&session, client, call, &replies).await;
             }
             EngineCall::SearchLogs { query } => self.search_logs(query, &replies).await,

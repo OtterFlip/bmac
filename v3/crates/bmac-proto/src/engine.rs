@@ -179,6 +179,9 @@ pub enum EngineCall {
         vm_uuid: uuid::Uuid,
         revision: u64,
     },
+    SaveBackupSettings {
+        request: crate::backups::SaveBackupSettings,
+    },
 }
 
 impl EngineCall {
@@ -241,6 +244,7 @@ impl EngineCall {
             EngineCall::BackupPolicies {} => "backup_policies",
             EngineCall::SaveBackupPolicy { .. } => "save_backup_policy",
             EngineCall::DeleteBackupPolicy { .. } => "delete_backup_policy",
+            EngineCall::SaveBackupSettings { .. } => "save_backup_settings",
         }
     }
 }

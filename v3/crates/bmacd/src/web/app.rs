@@ -217,6 +217,7 @@ pub fn router_with(state: AppState) -> Router {
             "/backups/policies/{vm}/delete",
             post(api::delete_backup_policy),
         )
+        .route("/backups/settings", post(api::save_backup_settings))
         .route("/certificate/rotate", post(api::rotate_certificate))
         .route("/certificate/switch", post(api::switch_certificate))
         .route("/certificate/discard", post(api::discard_certificate))

@@ -132,6 +132,19 @@ class Lab:
             raise LabError(f"{vm.name} is not running")
         return Qmp(self.paths.qmp(vm.name))
 
+    def pause(self, vms: list[Vm]) -> None:
+        """Stops the VMs' CPUs, so that a live save of each one finds the
+        others at the same moment."""
+        for vm in vms:
+            with self.qmp(vm) as monitor:
+                monitor.command("stop")
+
+    def resume(self, vms: list[Vm]) -> None:
+        for vm in vms:
+            if self.running(vm):
+                with self.qmp(vm) as monitor:
+                    monitor.command("cont")
+
     def carrier_delay(self, vm: Vm) -> int:
         override = self.paths.carrier_delay(vm.name)
         return int(override.read_text()) if override.exists() else vm.carrier_delay_seconds
@@ -304,6 +317,20 @@ class Lab:
         pid = self.supervisor_pid()
         if pid:
             os.kill(pid, signal.SIGTERM)
+
+    def restart_supervisor(self) -> None:
+        """Starts the supervisor again, if it runs, so its switch knows the
+        topology's current VMs."""
+        if not self.supervisor_pid():
+            return
+        self.stop_supervisor()
+        for _ in range(100):
+            if not self.supervisor_pid():
+                break
+            time.sleep(0.05)
+        else:
+            raise LabError("the carrier supervisor did not stop")
+        self.ensure_supervisor()
 
     # Snapshots
 
@@ -600,6 +627,7 @@ class Lab:
         state = json.loads(self.paths.state.read_text())
         state["topology_sha256"] = self.topology_digest
         self.paths.state.write_text(json.dumps(state) + "\n")
+        self.restart_supervisor()
         self.log("Updated the lab; a running Ubuntu VM takes its new seed when it boots again")
 
     def install(self) -> None:

@@ -114,10 +114,11 @@ print(json.dumps(out))
 
 
 class Backup:
-    def __init__(self, s, hosts) -> None:
+    def __init__(self, s, hosts, vm: str = "appliance", name: str = APPLIANCE_NAME) -> None:
         self.s, self.lab, self.hosts = s, s.lab, hosts
-        self.appliance = self.lab.topology.vm("appliance")
-        self.tailnet_name = f"{self.lab.topology.tailnet_prefix}appliance"
+        self.appliance = self.lab.topology.vm(vm)
+        self.name = name
+        self.tailnet_name = self.lab.topology.tailnet_name(self.appliance)
         self.dashboard = join.Dashboard(hosts["mox3"])
         self.vm: dict = {}
         self.appliance_uuid = ""
@@ -249,7 +250,7 @@ class Backup:
         self.s.check("the bundle pins the cluster CA and names every host", len(bundle["hosts"]) == 3
                      and re.fullmatch(r"[0-9a-f]{64}", bundle["proxmox_ca_fingerprint"]) is not None)
         self.app("install -m 0600 /dev/stdin /root/enroll.json", input=issued["content"].encode())
-        out = self.app(f"bmac-backupd init {APPLIANCE_NAME} {POOL}")
+        out = self.app(f"bmac-backupd init {self.name} {POOL}")
         printed = re.search(r"certificate fingerprint: ([0-9A-F:]{95})", out)
         self.s.require("init prints the appliance's certificate fingerprint", printed is not None)
         fingerprint = self.fingerprint = printed.group(1)
@@ -265,7 +266,7 @@ class Backup:
         self.s.check("enroll names the same fingerprint", fingerprint in out)
 
         listed = self.dashboard.call("GET", "/appliances")
-        requests = [r for r in listed["requests"] if r.get("name") == APPLIANCE_NAME]
+        requests = [r for r in listed["requests"] if r.get("name") == self.name]
         self.s.require("the Dashboard lists the enrollment request", len(requests) == 1)
         request = requests[0]
         self.s.check("the Dashboard shows the fingerprint the appliance printed", request["fingerprint"] == fingerprint)
@@ -279,7 +280,7 @@ class Backup:
         approved = self.dashboard.call("POST", f"/appliances/requests/{request['request_id']}/approve",
                                        {"fingerprint": fingerprint})
         self.appliance_uuid = approved["appliance_uuid"]
-        self.s.check(f"the appliance is approved with the address it suggested ({approved.get('address')})", any(
+        self.s.check(f"the appliance is approved with the address it suggested ({address})", any(
             a["appliance_uuid"] == self.appliance_uuid and a["enrollment"] == "approved"
             and a.get("address") == address for a in self.dashboard.call("GET", "/appliances")["appliances"]))
         self.app("systemctl start bmac-backupd.service")
@@ -292,7 +293,7 @@ class Backup:
         if self.local_retention:
             body["local_retention"] = self.local_retention
         saved = self.dashboard.call("POST", "/backups/policies", body)
-        self.s.check(f"{self.vm['name']} has a backup policy for {APPLIANCE_NAME}", saved.get("appliances") == [self.appliance_uuid])
+        self.s.check(f"{self.vm['name']} has a backup policy for {self.name}", saved.get("appliances") == [self.appliance_uuid])
 
     def capture(self, label: str) -> None:
         summary, _ = join.follow(self.s, self.dashboard, self.dashboard.start("backup.capture", {"vm": self.vm["name"]}),
@@ -376,7 +377,7 @@ class Backup:
         self.s.check("the UI on 8443 presents the certificate the appliance enrolled with",
                      seen["fingerprint"] == self.fingerprint and seen["hello"]["fingerprint"] == self.fingerprint)
         self.s.check(f"the UI names the appliance and is unlocked with a password ({seen['hello']})",
-                     seen["hello"] == {"name": APPLIANCE_NAME, "locked": False, "no_password": False,
+                     seen["hello"] == {"name": self.name, "locked": False, "no_password": False,
                                        "fingerprint": self.fingerprint})
         self.s.check("the UI page carries a fresh style nonce and its CSP", seen["page"] == 200 and seen["nonce"])
         self.s.check("the UI's API answers are no-store", seen["no_store"])

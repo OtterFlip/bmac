@@ -1133,6 +1133,63 @@ mod policy_records {
         assert!(schedules.get(&saved.schedule_id).unwrap().is_none());
         assert!(s.store.policy(&vm_uuid()).unwrap().is_none());
     }
+
+    #[test]
+    fn the_backup_settings_are_saved_over_the_revision_read() {
+        use bmac_proto::api::ErrorCode;
+        use bmac_proto::backups::SaveBackupSettings;
+        let s = setup();
+        let pmxcfs = Pmxcfs::new(s._dir.path(), Arc::new(RealFs));
+        let admin = policies::PolicyAdmin {
+            store: s.store.clone(),
+            schedules: Schedules::new(pmxcfs.clone(), s._dir.path().join("priv/bmac/schedules")),
+            pmxcfs,
+            registry: s._dir.path().join("registry"),
+            clock: Arc::new(|| 5),
+        };
+        let mut settings = policies::settings_view(&Default::default());
+        settings.checkin_interval_s = 10;
+        settings.late_after_s = 45;
+        settings.test_day_s = Some(300);
+        let saved = admin
+            .save_settings(SaveBackupSettings {
+                settings: settings.clone(),
+                revision: 0,
+            })
+            .unwrap();
+        assert_eq!(saved.revision, 1);
+        let stored = s.store.settings().unwrap();
+        assert_eq!(
+            (
+                stored.checkin_interval_s,
+                stored.late_after_s,
+                stored.test_day_s
+            ),
+            (10, 45, Some(300))
+        );
+
+        let stale = admin.save_settings(SaveBackupSettings {
+            settings: settings.clone(),
+            revision: 0,
+        });
+        assert_eq!(stale.unwrap_err().code, ErrorCode::Conflict);
+        let mut late = settings.clone();
+        late.late_after_s = 5;
+        let invalid = admin.save_settings(SaveBackupSettings {
+            settings: late,
+            revision: 1,
+        });
+        assert_eq!(invalid.unwrap_err().code, ErrorCode::Invalid);
+        settings.test_day_s = None;
+        let again = admin
+            .save_settings(SaveBackupSettings {
+                settings,
+                revision: 1,
+            })
+            .unwrap();
+        assert_eq!((again.revision, again.settings.test_day_s), (2, None));
+        assert!(policies::describe_settings(&again.settings).starts_with("check-in every 10 s"));
+    }
 }
 
 #[tokio::test]

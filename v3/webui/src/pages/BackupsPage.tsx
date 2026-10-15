@@ -7,7 +7,7 @@
 // snapshots hold on the hosts, transfers, restores, and the backup jobs.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Archive, GitBranch, KeyRound, MapPin, Pencil, Play, Plus, RefreshCw, Server, Trash2, UserCheck } from "lucide-react";
+import { Archive, GitBranch, KeyRound, MapPin, Pencil, Play, Plus, RefreshCw, Server, Settings2, Trash2, UserCheck } from "lucide-react";
 import {
   Badge,
   Button,
@@ -31,6 +31,7 @@ import {
   useNow,
   type ApplianceList,
   type BackupApplianceView,
+  type BackupSettingsView,
   type BackupVmView,
   type BackupsView,
   type EnrollRequestView,
@@ -552,6 +553,112 @@ function PolicyDialog({ vm, appliances, close, done }: { vm: BackupVmView; appli
   );
 }
 
+const SETTING_FIELDS: { key: Exclude<keyof BackupSettingsView, "test_day_s">; label: string; suffix?: string }[] = [
+  { key: "checkin_interval_s", label: "Appliances check in every", suffix: "s" },
+  { key: "late_after_s", label: "Late after", suffix: "s" },
+  { key: "ready_window_s", label: "Available if checked in within", suffix: "s" },
+  { key: "claim_window_s", label: "A new PIT waits to be claimed for", suffix: "s" },
+  { key: "stalled_after_s", label: "A transfer stalls after", suffix: "s" },
+  { key: "delinquency_s", label: "Delinquent after", suffix: "s" },
+  { key: "streams_per_appliance", label: "Streams per appliance" },
+  { key: "min_healthy_appliances", label: "Healthy appliances wanted per VM" },
+];
+
+function seconds(s: number) {
+  if (s % 3600 === 0 && s >= 3600) return `${s / 3600} h`;
+  if (s % 60 === 0 && s >= 60) return `${s / 60} min`;
+  return `${s} s`;
+}
+
+function SettingsDialog({ view, close, done }: { view: BackupsView; close: () => void; done: () => void }) {
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(SETTING_FIELDS.map((f) => [f.key, String(view.settings[f.key])])),
+  );
+  const [testDay, setTestDay] = useState(view.settings.test_day_s === null ? "" : String(view.settings.test_day_s));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const settings = { ...view.settings, test_day_s: testDay.trim() === "" ? null : Number(testDay) };
+      for (const f of SETTING_FIELDS) settings[f.key] = Number(values[f.key]);
+      await api().saveBackupSettings({ settings, revision: view.settings_revision });
+      toast.success("Saved the backup settings");
+      done();
+      close();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => !open && close()}
+      icon={<Settings2 />}
+      title="Backup settings"
+      description="For every VM and appliance of the cluster. Appliances take a new check-in interval at their next check-in."
+      footer={
+        <>
+          <Button variant="ghost" onClick={close}>
+            Cancel
+          </Button>
+          <Button variant="primary" disabled={busy} onClick={() => void save()}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div className="grid gap-3 sm:grid-cols-2">
+        {SETTING_FIELDS.map((f) => (
+          <div key={f.key}>
+            <Label htmlFor={`setting-${f.key}`}>{f.label}</Label>
+            <Input
+              id={`setting-${f.key}`}
+              type="number"
+              min={1}
+              value={values[f.key]}
+              onChange={(e) => setValues((prev) => ({ ...prev, [f.key]: e.target.value }))}
+              suffix={f.suffix}
+            />
+          </div>
+        ))}
+        <div className="sm:col-span-2">
+          <Label htmlFor="setting-test-day">Test day (for tests only; blank for calendar days)</Label>
+          <Input id="setting-test-day" type="number" min={1} value={testDay} onChange={(e) => setTestDay(e.target.value)} suffix="s" />
+        </div>
+      </div>
+      <Problem>{error}</Problem>
+    </Dialog>
+  );
+}
+
+function SettingsCard({ view, reload }: { view: BackupsView; reload: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const s = view.settings;
+  return (
+    <Card className="mb-4">
+      <CardHeader
+        icon={<Settings2 />}
+        title="Backup settings"
+        subtitle={`Check-ins every ${seconds(s.checkin_interval_s)}, late after ${seconds(s.late_after_s)}, delinquent after ${seconds(s.delinquency_s)}${
+          s.test_day_s !== null ? ` · a test day lasts ${seconds(s.test_day_s)}` : ""
+        }`}
+        actions={
+          view.can_manage ? (
+            <Button size="sm" variant="ghost" aria-label="Edit the backup settings" onClick={() => setEditing(true)}>
+              <Pencil /> Settings
+            </Button>
+          ) : undefined
+        }
+      />
+      {editing && <SettingsDialog view={view} close={() => setEditing(false)} done={reload} />}
+    </Card>
+  );
+}
+
 function OfferBadges({ pit, names }: { pit: PitNodeView; names: Map<string, string> }) {
   return (
     <>
@@ -782,6 +889,7 @@ export function BackupsPage() {
         {view && (
           <>
             <Appliances view={view} list={list} reload={load} />
+            <SettingsCard view={view} reload={load} />
             <SectionTitle>VMs</SectionTitle>
             {view.vms.length === 0 && <p className="mb-4 text-[12.5px] text-fg-subtle">No production VMs.</p>}
             {view.vms.map((vm) => (

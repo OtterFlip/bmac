@@ -341,6 +341,22 @@ describe("the Backups page", () => {
     await waitFor(() => expect(mock.calls.some((c) => c.method === "setApplianceAddress" && c.args[1] === "10.40.0.21")).toBe(true));
   });
 
+  it("lets an admin shorten the backup settings for a test", async () => {
+    const user = await open("/backups");
+    expect(await screen.findByText(/Check-ins every 1 min, late after 3 min, delinquent after 72 h/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Edit the backup settings" }));
+    const dialog = await screen.findByRole("dialog");
+    const checkin = within(dialog).getByLabelText("Appliances check in every");
+    await user.clear(checkin);
+    await user.type(checkin, "10");
+    await user.type(within(dialog).getByLabelText(/Test day/), "300");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("saveBackupSettings")).toBe(1));
+    const saved = mock.calls.find((c) => c.method === "saveBackupSettings")!.args[0] as Record<string, unknown>;
+    expect(saved).toMatchObject({ revision: 0, settings: { checkin_interval_s: 10, late_after_s: 180, test_day_s: 300 } });
+    expect(await screen.findByText(/Check-ins every 10 s.*a test day lasts 5 min/)).toBeInTheDocument();
+  });
+
   it("approves an enrollment only with the fingerprint read on the appliance", async () => {
     mock.applianceData.requests = [
       { request_id: "r1", appliance_uuid: null, name: "vault2", fingerprint: "AA:BB", from: "100.64.0.30", suggested_address: null, received_by: "mox1", created_at_ms: Date.now() },

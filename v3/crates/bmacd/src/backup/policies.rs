@@ -10,8 +10,10 @@ use std::collections::BTreeMap;
 
 use bmac_backup::records::{Enrollment, Freeze, Policy, RECORD_SCHEMA};
 use bmac_backup::retention::LocalRetention;
+use bmac_backup::settings::BackupSettings;
 use bmac_core::GuestName;
 use bmac_proto::api::{ApiError, ErrorCode, Role};
+use bmac_proto::backups::{BackupSettingsView, SaveBackupSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -230,4 +232,76 @@ impl PolicyAdmin {
     pub fn delete(&self, vm: &Uuid, revision: u64) -> Result<(), ApiError> {
         delete(&self.store, &self.schedules, vm, revision)
     }
+
+    /// Saves the cluster-wide settings over `request.revision`; the saved
+    /// settings and their new revision.
+    pub fn save_settings(
+        &self,
+        request: SaveBackupSettings,
+    ) -> Result<SaveBackupSettings, ApiError> {
+        let settings = settings_from(&request.settings);
+        let revision = self.store.locked(|l| {
+            let current = l.store().settings_record()?.map_or(0, |r| r.revision);
+            if current != request.revision {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "the backup settings changed since they were read; reload and try again",
+                ));
+            }
+            l.save_settings(settings.clone(), request.revision)
+        })?;
+        Ok(SaveBackupSettings {
+            settings: settings_view(&settings),
+            revision,
+        })
+    }
+}
+
+pub fn settings_view(s: &BackupSettings) -> BackupSettingsView {
+    BackupSettingsView {
+        checkin_interval_s: s.checkin_interval_s,
+        late_after_s: s.late_after_s,
+        ready_window_s: s.ready_window_s,
+        claim_window_s: s.claim_window_s,
+        stalled_after_s: s.stalled_after_s,
+        delinquency_s: s.delinquency_s,
+        streams_per_appliance: s.streams_per_appliance,
+        min_healthy_appliances: s.min_healthy_appliances,
+        test_day_s: s.test_day_s,
+    }
+}
+
+fn settings_from(v: &BackupSettingsView) -> BackupSettings {
+    BackupSettings {
+        checkin_interval_s: v.checkin_interval_s,
+        late_after_s: v.late_after_s,
+        ready_window_s: v.ready_window_s,
+        claim_window_s: v.claim_window_s,
+        stalled_after_s: v.stalled_after_s,
+        delinquency_s: v.delinquency_s,
+        streams_per_appliance: v.streams_per_appliance,
+        min_healthy_appliances: v.min_healthy_appliances,
+        test_day_s: v.test_day_s,
+    }
+}
+
+/// The settings in a line, for the audit log.
+pub fn describe_settings(v: &BackupSettingsView) -> String {
+    let mut line = format!(
+        "check-in every {} s, late after {} s, ready window {} s, claim window {} s, \
+         stalled after {} s, delinquent after {} s, {} stream(s) per appliance, \
+         at least {} healthy appliance(s)",
+        v.checkin_interval_s,
+        v.late_after_s,
+        v.ready_window_s,
+        v.claim_window_s,
+        v.stalled_after_s,
+        v.delinquency_s,
+        v.streams_per_appliance,
+        v.min_healthy_appliances
+    );
+    if let Some(day) = v.test_day_s {
+        line.push_str(&format!(", a test day of {day} s"));
+    }
+    line
 }

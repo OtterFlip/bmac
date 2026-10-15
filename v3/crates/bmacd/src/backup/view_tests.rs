@@ -213,7 +213,22 @@ fn the_view_joins_catalog_offers_space_restores_and_transfers() {
         names: BTreeMap::from([(id(7), ("prod1".to_string(), 100))]),
         can_manage: false,
         errors: vec![],
+        settings: bmac_backup::settings::BackupSettings {
+            checkin_interval_s: 10,
+            test_day_s: Some(300),
+            ..Default::default()
+        },
+        settings_revision: 4,
     });
+    assert_eq!(
+        (
+            view.settings.checkin_interval_s,
+            view.settings.late_after_s,
+            view.settings.test_day_s,
+            view.settings_revision
+        ),
+        (10, 180, Some(300), 4)
+    );
     let [vm] = view.vms.as_slice() else {
         panic!("{:?}", view.vms)
     };

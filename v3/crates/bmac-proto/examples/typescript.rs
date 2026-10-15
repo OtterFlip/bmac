@@ -72,6 +72,7 @@ fn export(cfg: &Config) -> Result<(), ts_rs::ExportError> {
         backups::ApproveAppliance,
         backups::ApplianceList,
         backups::SetApplianceAddress,
+        backups::SaveBackupSettings,
         backups::BackupsView,
         status::ClusterSnapshot,
         status::HostsSnapshot,

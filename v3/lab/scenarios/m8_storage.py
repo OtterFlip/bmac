@@ -391,8 +391,7 @@ def then(hosts) -> None:
         s.note("mox3 isn't restarted; BMAC_LAB_DRILLS=1 proves its crypttab and initramfs at boot")
 
     if s.failed == failed:
-        for name in HOSTS:
-            hosts[name].save_stage(STAGE, live=s.lab.can_save_live(hosts[name].vm))
+        m6.save_cluster_stage(s, [hosts[name] for name in HOSTS], STAGE)
 
 
 def staged(s, then_) -> None:

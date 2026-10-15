@@ -162,6 +162,38 @@ class SwitchTest(LabTestCase):
         with self.assertRaises(TimeoutError):
             nics[sender].recv(65536)
 
+    def test_a_vm_that_stops_reading_does_not_silence_the_others(self) -> None:
+        sender, stuck, reader = [vm.name for vm in self.topology.vms if vm.nic("vlan")][:3]
+        nics = {}
+        for name in (sender, stuck, reader):
+            nic = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            nic.bind(str(self.paths.nic(name, "vlan")))
+            self.addCleanup(nic.close)
+            nics[name] = nic
+        switch = Switch(self.lab)
+        self.addCleanup(switch.close)
+        stopping = threading.Event()
+        self.addCleanup(stopping.set)
+        threading.Thread(target=switch.serve, args=(stopping,), daemon=True).start()
+        last = b"\xff" * 12 + b"\x88\xb5" + b"last"
+        seen = threading.Event()
+
+        def read() -> None:
+            nics[reader].settimeout(10)
+            while nics[reader].recv(65536) != last:
+                pass
+            seen.set()
+
+        threading.Thread(target=read, daemon=True).start()
+        frame = b"\xff" * 12 + b"\x88\xb5" + b"x" * 1000
+        for n in range(600):
+            nics[sender].sendto(frame, str(self.paths.switch("vlan")))
+            if n % 20 == 0:
+                time.sleep(0.002)
+        time.sleep(0.2)
+        nics[sender].sendto(last, str(self.paths.switch("vlan")))
+        self.assertTrue(seen.wait(10), f"{reader} heard nothing once {stuck} stopped reading")
+
 
 class SnapshotTest(LabTestCase):
     def test_snapshot_and_reset_restore_every_disk_and_firmware_store(self) -> None:
@@ -319,6 +351,27 @@ class UpdateTest(LabTestCase):
         self.lab.reset("installed")
         self.assertEqual(json.loads(self.paths.state.read_text())["topology_sha256"], self.lab.topology_digest)
 
+    def test_a_running_supervisor_is_started_again_with_the_topology(self) -> None:
+        running = [41]
+        events = []
+        self.lab.supervisor_pid = lambda: running[0] if running else None  # type: ignore[method-assign]
+
+        def stop() -> None:
+            events.append("stop")
+            running.clear()
+
+        def start() -> None:
+            events.append("start")
+            running.append(42)
+        self.lab.stop_supervisor = stop  # type: ignore[method-assign]
+        self.lab.ensure_supervisor = start  # type: ignore[method-assign]
+        self.lab.restart_supervisor()
+        self.assertEqual((events, running), (["stop", "start"], [42]))
+        running.clear()
+        events.clear()
+        self.lab.restart_supervisor()
+        self.assertEqual(events, [], "a supervisor that isn't running isn't started")
+
     def test_a_new_host_needs_a_rebuild(self) -> None:
         shutil.rmtree(self.paths.vm("mox3"))
         self.lab.firmware = (self.paths.root / "code", self.paths.root / "vars")
@@ -380,6 +433,35 @@ class FakeMonitor:
 
     def command(self, name: str, /, **arguments: object) -> None:
         self.commands.append((name, arguments))
+
+
+class PauseTest(LabTestCase):
+    def test_every_vm_is_paused_before_any_resumes_and_a_stopped_one_is_skipped(self) -> None:
+        sent: list[tuple[str, str]] = []
+
+        class Monitor(FakeMonitor):
+            def __init__(self, name: str) -> None:
+                super().__init__()
+                self.name = name
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                pass
+
+            def command(self, name: str, /, **arguments: object) -> None:
+                sent.append((self.name, name))
+
+        vms = [self.topology.vm(n) for n in ("mox3", "mox1", "mox2")]
+        running = {"mox3", "mox1", "mox2"}
+        self.lab.running = lambda vm: vm.name in running  # type: ignore[method-assign]
+        self.lab.qmp = lambda vm: Monitor(vm.name)  # type: ignore[method-assign,assignment]
+        self.lab.pause(vms)
+        running.discard("mox1")
+        self.lab.resume(vms)
+        self.assertEqual(sent, [("mox3", "stop"), ("mox1", "stop"), ("mox2", "stop"),
+                                ("mox3", "cont"), ("mox2", "cont")])
 
 
 class SupervisorTest(LabTestCase):

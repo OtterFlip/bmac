@@ -37,6 +37,7 @@ import type {
   OperationView,
   ReplicationView,
   Role,
+  SaveBackupSettings,
   SaveNotifySettings,
   SaveSettings,
   SaveSilence,
@@ -124,6 +125,8 @@ export interface Backend {
   /** Fails with `conflict` when the policy changed since `revision`. */
   saveBackupPolicy(change: PolicyChange): Promise<void>;
   deleteBackupPolicy(vmUuid: string, revision: number): Promise<void>;
+  /** Fails with `conflict` when the settings changed since `request.revision`. */
+  saveBackupSettings(request: SaveBackupSettings): Promise<SaveBackupSettings>;
   rotateCertificate(): Promise<CertificateView>;
   /** Fails with `conflict` unless `fingerprint` is the pending certificate's. */
   switchCertificate(fingerprint: string): Promise<CertificateView>;
@@ -329,6 +332,7 @@ export function createHttpBackend(fetcher: typeof fetch = (...args) => fetch(...
     deleteBackupPolicy: async (vm, revision) => {
       await request("POST", `/backups/policies/${encodeURIComponent(vm)}/delete`, { revision });
     },
+    saveBackupSettings: (body) => request<SaveBackupSettings>("POST", "/backups/settings", body),
     rotateCertificate: () => request<CertificateView>("POST", "/certificate/rotate", {}),
     switchCertificate: (fingerprint) => request<CertificateView>("POST", "/certificate/switch", { fingerprint }),
     discardCertificate: () => request<CertificateView>("POST", "/certificate/discard", {}),

@@ -693,8 +693,10 @@ fn backups(view: &View, found: &mut Vec<Condition>) {
             Some(a) if a.outcome == "skipped" => found.push(condition(
                 "backup.skipped",
                 &resource,
-                ConditionSeverity::Info,
-                format!("{name}'s last scheduled backup was skipped; no retention slot needed it"),
+                ConditionSeverity::Critical,
+                format!(
+                    "{name}'s last scheduled backup was skipped: none of its appliances was available"
+                ),
                 vec![],
             )),
             _ => {}
@@ -1217,6 +1219,11 @@ mod tests {
                 "pits": 2, "snapshots": 1, "release_blocked": ["p1: dataset is busy"],
                 "healthy_appliances": 1, "min_healthy": 2,
                 "overdue": ["vault"], "unclaimed": ["offsite"],
+            }, {
+                "vm": "prod2", "vm_uuid": "v", "enabled": true,
+                "last_attempt": {"outcome": "skipped", "at_ms": 1, "message": null},
+                "pits": 1, "snapshots": 1, "release_blocked": [],
+                "healthy_appliances": 1, "min_healthy": 1, "overdue": [], "unclaimed": [],
             }], "errors": ["policy unreadable"]})
         };
         observe(&mut v, 1, BACKUPS_COLLECTOR, seen("offsite"));
@@ -1233,6 +1240,7 @@ mod tests {
                 "backup.overdue vm/prod1/vault Critical: prod1's newest backup on vault is older than its schedule allows",
                 "backup.too_few vm/prod1 Critical: prod1 has 1 healthy backup appliance(s); at least 2 are wanted",
                 "backup.release_blocked vm/prod1 Warning: prod1: a backup snapshot can't be released (p1: dataset is busy)",
+                "backup.skipped vm/prod2 Critical: prod2's last scheduled backup was skipped: none of its appliances was available",
                 "collector.backups mox1 Warning: mox1: policy unreadable",
                 "collector.backups mox2 Warning: mox2: policy unreadable",
             ]

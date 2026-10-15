@@ -61,6 +61,8 @@ LAYOUT = {"data_kind": "mirror", "data": sata_pair, "encryption": "luks2"}
 # mox3 as a successful run leaves it: an encrypted one-host cluster with a
 # SATA data mirror, set up. Later scenarios start from it (see staged).
 STAGE = "m7-first-host"
+# The Deployer's default, the workstation's zone; the lab's is Denver's.
+LAB_ZONE = "America/Denver"
 
 SERIAL_CONSOLE = r"""
 set -e
@@ -346,6 +348,8 @@ def then(host) -> None:
         "cat /etc/network/interfaces.d/bmac-private.cfg"))
 
     s.check("mox3 is a quorate one-host cluster", lambda: "Quorate:          Yes" in host.on_host("pvecm status"))
+    s.check(f"mox3 runs in the cluster's time zone, {LAB_ZONE}", lambda: host.on_host(
+        "timedatectl show -p Timezone --value") == LAB_ZONE)
     s.check("corosync's first link is the private address", lambda: f"ring0_addr: {vm.vlan_ip}" in host.on_host(
         "cat /etc/pve/corosync.conf"))
     s.check("keepalived owns the guest-egress VIP", lambda: host.on_host(
@@ -365,6 +369,7 @@ def then(host) -> None:
 
     s.check("the host has left setup mode", lambda: wait_for(left_setup))
 
+    host.carried["luks_passphrase"] = passphrase
     if s.failed == failed:
         host.unlock = lambda: unlock_at_boot(lab, vm, passphrase)
         host.save_stage(STAGE, live=lab.can_save_live(vm), extra={"luks_passphrase": passphrase})

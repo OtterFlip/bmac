@@ -313,6 +313,34 @@ async fn another_cluster_or_another_name_stops_the_phase() {
 }
 
 #[tokio::test]
+async fn a_join_tries_the_existing_hosts_certificate_again_after_a_lost_connection() {
+    let rig = rig();
+    rig.resolves();
+    let probe = [
+        "-c",
+        SERVED_FINGERPRINT,
+        "bmac",
+        "10.213.0.13",
+        "mox3.pve.internal",
+    ];
+    rig.runner.expect(BASH, probe, Reply::fail(1, ""));
+    let other = format!("sha256 Fingerprint={}", ["AB"; 32].join(":"));
+    rig.runner.expect(BASH, probe, Reply::ok(other));
+    let via = JoinVia {
+        host: slot("mox3"),
+        address: ip("10.213.0.13"),
+        fingerprint: ["CD"; 32].join(":"),
+        cluster_name: "bmaclab".into(),
+    };
+    let error = rig.cluster().join(&via).await.unwrap_err();
+    rig.runner.assert_done();
+    assert!(
+        format!("{error:?}").contains("isn't mox3's, so the join was stopped"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn the_hosts_name_must_resolve_to_the_private_address() {
     let rig = rig();
     rig.runner.expect(

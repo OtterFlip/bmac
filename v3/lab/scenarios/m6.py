@@ -42,6 +42,9 @@ DISCOVERY_KEY = "TAILSCALE_LAB_AUTH_KEY_DISCOVERY"
 CHECKPOINT = "before-m6"
 # A stage is saved shut down only after this many live tries fail.
 LIVE_SAVE_ATTEMPTS = 2
+# The LRM waits for the CRM master to freeze its services; a master that
+# took over waits out the old one's 120-second lock.
+HA_STOP_TIMEOUT = 360
 # Stage fields a host restored from the stage keeps into the stages saved from it.
 CARRIED = ("luks_passphrase", "prod_root_password")
 INSTALL_TIMEOUT = 2400
@@ -168,11 +171,14 @@ class Installed:
         self.unlock: Callable[[], None] | None = None
         # Fields of the stage it came from that the host still needs.
         self.carried: dict = {}
+        # Resumed from a live stage, its clock still at the save until stepped.
+        self.resumed_live = False
 
-    def save_stage(self, name: str, live: bool = False, extra: dict | None = None) -> None:
+    def save_stage(self, name: str, live: bool = False, extra: dict | None = None, settle: bool = True) -> None:
         """Saves the host as stage name for later runs to start from (see
         staged), with extra in its record. A live stage keeps running; any
-        other is shut down for the save and started again."""
+        other is shut down for the save and started again. Without settle,
+        a host saved while paused isn't asked to answer afterwards."""
         self.s.note(f"saving {self.vm.name} as stage {name}" + (" live" if live else ""))
         meta = {"password": self.password, "package_sha256": package_digest(), **self.carried, **(extra or {})}
         for attempt in range(LIVE_SAVE_ATTEMPTS if live else 0):
@@ -190,6 +196,10 @@ class Installed:
             with booting(self.s, self.unlock):
                 self.lab.save_stage(self.vm, name, self.work, meta)
         self.saved.append(name)
+        if settle:
+            self.answers_after_save()
+
+    def answers_after_save(self) -> None:
         # The guard drops SSH on the public address, so only the tailnet reaches it.
         self.s.require(f"{self.host_name} answers SSH on the tailnet after its stage was saved",
                        lambda: wait_until(lambda: self.on_host("true") == "", BOOT_TIMEOUT))
@@ -331,6 +341,26 @@ def reuse(s, vm, stage: str, then, unlock: Callable | None = None) -> None:
         then(installed)
 
 
+def save_cluster_stage(s, hosts: list, stage: str) -> None:
+    """Saves every host as stage. Saved live one after another, a host that
+    ran on would send the others records it no longer has once restored,
+    and they would refuse its next ones; so every host is paused before any
+    is saved, and they resume together."""
+    lab = s.lab
+    if not all(lab.can_save_live(h.vm) for h in hosts):
+        for host in hosts:
+            host.save_stage(stage)
+        return
+    lab.pause([h.vm for h in hosts])
+    try:
+        for host in hosts:
+            host.save_stage(stage, live=True, settle=False)
+    finally:
+        lab.resume([h.vm for h in hosts])
+    for host in hosts:
+        host.answers_after_save()
+
+
 def has_stage(lab, vm_names: list[str], stage: str) -> bool:
     """Whether every VM has the stage, and BMAC_LAB_FRESH doesn't ask for it
     to be built again."""
@@ -341,12 +371,32 @@ def reuse_cluster(s, vm_names: list[str], stage: str, then, unlock: Callable | N
     """Starts every VM in vm_names from stage, saved together, and carries on
     with `then({name: installed})` before putting them all back."""
     with contextlib.ExitStack() as stack:
-        hosts = {name: stack.enter_context(restored(s, s.lab.topology.vm(name), stage, unlock)) for name in vm_names}
+        hosts = {name: stack.enter_context(restored(s, s.lab.topology.vm(name), stage, unlock, step_clock=False))
+                 for name in vm_names}
+        step_clocks([h for h in hosts.values() if h.resumed_live])
         then(hosts)
 
 
+def step_clocks(hosts: list) -> None:
+    """Sets the clocks of hosts resumed from a live stage, still at the time
+    it was saved. watchdog-mux times its clients by the wall clock, so
+    stepping it fences a host whose HA manager has a service; stopped first,
+    the LRM freezes its services, which needs the cluster's CRM master. So
+    every host is resumed before any of them is stepped, and the CRMs stop
+    only once every LRM has."""
+    ha = [h for h in hosts if h.on_host("systemctl is-active --quiet pve-ha-lrm.service && echo yes || true") == "yes"]
+    for host in ha:
+        host.on_host("systemctl stop pve-ha-lrm.service", timeout=HA_STOP_TIMEOUT)
+    for host in ha:
+        host.on_host("systemctl stop pve-ha-crm.service", timeout=HA_STOP_TIMEOUT)
+    for host in hosts:
+        host.on_host(f"date -s @{time.time():.3f} >/dev/null")
+    for host in ha:
+        host.on_host("systemctl start pve-ha-crm.service pve-ha-lrm.service")
+
+
 @contextlib.contextmanager
-def restored(s, vm, stage: str, unlock: Callable | None = None):
+def restored(s, vm, stage: str, unlock: Callable | None = None, step_clock: bool = True):
     """vm started from stage with the current bmacd package, put back as it
     was when the block ends."""
     lab = s.lab
@@ -371,16 +421,9 @@ def restored(s, vm, stage: str, unlock: Callable | None = None):
             lab.start([vm])
         s.require(f"{host_name} answers SSH on the tailnet", lambda: wait_until(
             lambda: installed.on_host("true") == "", BOOT_TIMEOUT))
-        if meta.get("live"):
-            # watchdog-mux times its clients by the wall clock, so stepping it
-            # fences a host whose HA manager has a service. Stopped on its
-            # own, the HA manager freezes its services and closes the watchdog.
-            ha = installed.on_host("systemctl is-active --quiet pve-ha-lrm.service && echo yes || true") == "yes"
-            if ha:
-                installed.on_host("systemctl stop pve-ha-lrm.service pve-ha-crm.service")
-            installed.on_host(f"date -s @{time.time():.3f} >/dev/null")
-            if ha:
-                installed.on_host("systemctl start pve-ha-crm.service pve-ha-lrm.service")
+        installed.resumed_live = bool(meta.get("live"))
+        if installed.resumed_live and step_clock:
+            step_clocks([installed])
         if meta.get("package_sha256") != package_digest():
             s.note(f"installing the current bmacd package on {vm.name}")
             with package().open("rb") as deb:
