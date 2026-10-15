@@ -203,6 +203,14 @@ the delinquency period and local retention bound (for example 20 VMs × 6 PITs
 restores can use it. Appliances keep their own copy of every manifest they
 publish.
 
+The manifest's parent PIT never changes. The catalog record's and an
+appliance's journal entry's parent are the nearest ancestor still in that
+store: when a PIT leaves (its snapshot and bookmarks gone from the cluster,
+or pruned by an appliance), its children take its parent, and an appliance
+that never received the cluster's parent records the offer's base instead.
+The walks that find an incremental base, for an offer or a restore, then
+reach every remaining ancestor.
+
 **Manifest** (versioned JSON schema, canonical serialization, SHA-256 over the
 payload without the hash field):
 

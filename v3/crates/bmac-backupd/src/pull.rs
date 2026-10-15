@@ -686,7 +686,7 @@ impl Puller<'_> {
             .write_manifest(self.cluster_uuid, &offer.pit_uuid, &offer.manifest)
             .map_err(|e| PullError::Retry(format!("the manifest: {e}")))?;
         let bytes = plan.volumes.iter().map(|v| v.bytes).sum();
-        let pit = StoredPit {
+        let mut pit = StoredPit {
             cluster_uuid: self.cluster_uuid.to_string(),
             vm_uuid: offer.vm_uuid,
             branch_uuid: offer.branch_uuid,
@@ -702,6 +702,15 @@ impl Puller<'_> {
         };
         let _guard = self.locked().await?;
         let mut journal = self.journal()?;
+        // The parent is the nearest ancestor published here, when the
+        // cluster's isn't: the base the cluster chose is that ancestor.
+        if pit
+            .parent
+            .is_none_or(|p| journal.pit(self.cluster_uuid, &p).is_none())
+            && plan.base.is_some()
+        {
+            pit.parent = plan.base;
+        }
         journal
             .receiving
             .retain(|r| !(r.cluster_uuid == self.cluster_uuid && r.pit_uuid == offer.pit_uuid));

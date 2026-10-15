@@ -301,6 +301,26 @@ async fn the_next_pit_is_an_incremental_onto_the_heads_zvols() {
 }
 
 #[tokio::test]
+async fn a_pit_whose_parent_never_came_here_descends_from_its_base() {
+    let r = rig();
+    r.puller()
+        .pull(&r.offer(1, 0xa, None, None, &[(disk(0), 100)]))
+        .await
+        .unwrap();
+    // PIT 2 went to other appliances only.
+    let third = r.offer(3, 0xa, Some(2), Some(1), &[(disk(0), 102)]);
+    let published = r.puller().pull(&third).await.unwrap();
+    assert_eq!(published.pit.parent, Some(Uuid::from_u128(1)));
+    assert_eq!(
+        r.journal()
+            .pit(CLUSTER, &Uuid::from_u128(3))
+            .unwrap()
+            .parent,
+        Some(Uuid::from_u128(1))
+    );
+}
+
+#[tokio::test]
 async fn a_new_branch_is_received_as_a_clone_of_the_fork_point() {
     let r = rig();
     r.puller()

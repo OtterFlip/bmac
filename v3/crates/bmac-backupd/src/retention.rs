@@ -546,6 +546,15 @@ pub async fn prune(
         journal
             .pits
             .retain(|p| !(p.cluster_uuid == doomed.cluster_uuid && p.pit_uuid == doomed.pit_uuid));
+        // Its children descend from its parent, so restores and the graph
+        // still find every remaining ancestor.
+        for child in journal
+            .pits
+            .iter_mut()
+            .filter(|p| p.cluster_uuid == doomed.cluster_uuid && p.parent == Some(doomed.pit_uuid))
+        {
+            child.parent = stored.parent;
+        }
         let _ =
             std::fs::remove_file(metadata.manifest_path(&doomed.cluster_uuid, &doomed.pit_uuid));
         settings.release(&doomed.cluster_uuid, &doomed.pit_uuid);

@@ -1,3 +1,8 @@
+<!--
+Copyright (c) 2026 BEENTHERE VENTURES, INC.
+SPDX-License-Identifier: GPL-3.0-only
+-->
+
 # BMAC: Simplified Internet Ingress and Egress
 
 **Design proposal - October 14, 2026**  

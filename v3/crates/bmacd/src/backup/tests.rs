@@ -1470,6 +1470,59 @@ mod source_service {
     }
 
     #[tokio::test]
+    async fn an_appliance_back_from_a_short_absence_is_offered_from_its_head_past_dropped_pits() {
+        let s = setup();
+        s.save(
+            policy(vec![appliance_uuid(1), appliance_uuid(2)]),
+            vec![appliance(1, Some(NOW_MS)), appliance(2, Some(NOW_MS))],
+        );
+        let p1 = s.captured().await;
+        for a in [1, 2] {
+            s.set_offer(p1, appliance_uuid(a), Offer::Published);
+            s.report_head(appliance_uuid(a), p1, NOW_MS);
+        }
+        // Appliance 1 is away while appliance 2 publishes p2 and p3.
+        s.clock
+            .store(NOW_MS + 5_000, std::sync::atomic::Ordering::SeqCst);
+        let p2 = s.captured().await;
+        s.set_offer(p2, appliance_uuid(2), Offer::Published);
+        s.report_head(appliance_uuid(2), p2, NOW_MS + 5_000);
+        s.clock
+            .store(NOW_MS + 400_000, std::sync::atomic::Ordering::SeqCst);
+        s.report_head(appliance_uuid(2), p2, NOW_MS + 400_000);
+        // Appliance 1 is back for p3.
+        s.report_head(appliance_uuid(1), p1, NOW_MS + 400_000);
+        let p3 = s.captured().await;
+        s.set_offer(p3, appliance_uuid(2), Offer::Published);
+        s.report_head(appliance_uuid(2), p3, NOW_MS + 400_000);
+        let p2_name = s_name(&s, p2);
+        let report = s.upkeep_at(NOW_MS + 410_000).await;
+        assert_eq!(report.dropped, [p2_name], "{report:?}");
+        assert!(s.pit_record(p2).is_none());
+        assert_eq!(
+            s.pit_record(p3).unwrap().parent,
+            Some(p1),
+            "p3 descends from p1 once p2 leaves the catalog"
+        );
+
+        let now = || NOW_MS + 420_000;
+        let reply = source(&s, &now)
+            .checkin(FP, &checkin(vec![head(&s, p1)], vec![]))
+            .unwrap();
+        let [offer] = &reply.offers[..] else {
+            panic!("{reply:?}")
+        };
+        assert_eq!(
+            (
+                offer.pit_uuid,
+                offer.base.as_ref().map(|b| (b.pit_uuid, b.kind))
+            ),
+            (p3, Some((p1, BaseKind::Bookmark))),
+            "an incremental from the head's bookmark"
+        );
+    }
+
+    #[tokio::test]
     async fn a_new_branch_is_offered_from_the_fork_point_the_appliance_holds() {
         let s = setup();
         s.save(

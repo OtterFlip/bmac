@@ -205,6 +205,11 @@ async fn a_prune_releases_and_destroys_only_what_the_plan_names() {
     assert_eq!(journal.pits.len(), 3);
     assert!(r.metadata.manifest(CLUSTER, &id(2)).unwrap().is_none());
     assert!(r.metadata.manifest(CLUSTER, &id(5)).unwrap().is_some());
+    assert_eq!(
+        journal.pit(CLUSTER, &id(5)).unwrap().parent,
+        Some(id(1)),
+        "PIT 5 descends from the nearest PIT left"
+    );
     let entry = &r.audit.recent(1).unwrap()[0];
     assert_eq!(entry.event, "prune");
     assert_eq!(entry.details["kept"], 3);

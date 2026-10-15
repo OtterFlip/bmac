@@ -456,7 +456,18 @@ impl Locked<'_> {
         self.write(path, record).map(|_| ())
     }
 
+    /// Removes the PIT's record; its children then descend from its parent,
+    /// so a walk up the catalog still reaches every remaining ancestor.
     pub fn delete_pit(&self, vm: &Uuid, pit: &Uuid) -> Result<(), ApiError> {
+        let Some(gone) = self.store.pit(vm, pit)? else {
+            return Ok(());
+        };
+        for mut child in self.store.pits(vm)? {
+            if child.parent == Some(*pit) {
+                child.parent = gone.parent;
+                self.save_pit(child)?;
+            }
+        }
         self.remove(self.store.pit_path(vm, pit))
     }
 }

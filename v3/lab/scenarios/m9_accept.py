@@ -19,23 +19,24 @@ A LATE appliance's warning still holds for the alerts' 5 minutes.
    appliance's head, and every transfer has its throughput (lab item 10).
 3. A staging VM of small is created and removed while backups run.
 4. A planned owner move to mox3, then mox3 powered off: HA restarts small
-   on mox1; each next PIT is an incremental sent by the new owner.
+   on mox1; each next PIT is an incremental sent by the new owner (mox1's
+   bmac-source is stopped for the first, since A tries mox1 first).
 5. A stops: its LATE alert; B carries on.
 6. A returns within the delinquency period and catches up incrementally
    from its head's bookmark.
 7. A and B trust each other on their Trusted peers pages; A, back after
    the delinquency period with its head gone from the cluster, repairs
-   from B. B untrusts A; A's next repair is refused, in B's audit log,
-   and A reseeds from the cluster.
+   from B. B untrusts A; A's next repair is refused, on B's Trusted peers
+   page and in its audit log, and A reseeds from the cluster.
 8. Neither appliance checks in: the slot is skipped, with no snapshot,
    and the critical alert.
 9. A rollback to an older PIT starts a new branch, received on both
    appliances as a clone.
-10. and 15. Restores from both branches: a restore test on mox2 (method 3),
-    a new VM on mox1 from an incremental over a local older PIT (method
-    2), into the production VM from its local snapshot (method 1), with the
-    estimates shown first; the next PIT continues from the restored one on
-    both appliances.
+10. and 15. Restores from both branches, with small's captures paused: a
+    new VM on mox1 from an incremental over a local older PIT (method 2),
+    a restore test on mox2 (method 3), into the production VM from its
+    local snapshot (method 1), with the estimates shown first; the next
+    PIT continues from the restored one on both appliances.
 11. A's retention pruned intermediate PITs.
 12. A reboots, stays LOCKED, and is unlocked at its console.
 14. A scrub of B finds nothing to repair.
@@ -81,15 +82,42 @@ SETTINGS = {
 }
 EVERY = {"kind": "interval", "minutes": 2}
 # Only the newest PIT stays on the cluster, so an absent appliance's head
-# is soon a bookmark, then gone; the restores add two days back.
+# is soon a bookmark, then gone; the rollback and restores add three days
+# back, enough to keep the rollback target until the restores.
 NEWEST = {"newest": 1, "days": 0, "weeks": 0}
-DAYS = {"newest": 1, "days": 2, "weeks": 0}
+DAYS = {"newest": 1, "days": 3, "weeks": 0}
 B_NAME = "vaultb"
 THROTTLE = "40mbit"
 # A warning becomes an alert after it has held for this long.
 WARNING_HOLD_S = 300
 STEP_TIMEOUT = 900
+BUSY_TIMEOUT = 600
 RECEIVING = re.compile(r"^bmac-backupd: receiving (\S+) \((.+)\) from (\S+)$")
+
+
+def fingerprint(text: str) -> str:
+    return text.replace(":", "").lower()
+
+
+class Waiting:
+    """The Dashboard, whose jobs start once a scheduled backup has let go
+    of their VM: with a slot every two minutes, one often holds it."""
+
+    def __init__(self, dashboard) -> None:
+        self.inner = dashboard
+
+    def __getattr__(self, name: str):
+        return getattr(self.inner, name)
+
+    def start(self, operation: str, parameters: dict) -> str:
+        deadline = time.monotonic() + BUSY_TIMEOUT
+        while True:
+            try:
+                return self.inner.start(operation, parameters)
+            except ApiError as e:
+                if e.status != 409 or "is in use by" not in str(e) or time.monotonic() > deadline:
+                    raise
+                time.sleep(5)
 
 
 class Accept:
@@ -98,7 +126,7 @@ class Accept:
         self.a = backup.Backup(s, hosts)
         self.b = backup.Backup(s, hosts, vm="applianceb", name=B_NAME)
         # mox2 is never powered off here.
-        self.dashboard = join.Dashboard(hosts["mox2"])
+        self.dashboard = Waiting(join.Dashboard(hosts["mox2"]))
         for b in (self.a, self.b):
             b.dashboard = self.dashboard
             b.password = secrets.token_urlsafe(18)
@@ -406,8 +434,14 @@ class Accept:
         ops.operate(self.s, self.dashboard, "prod.change_owner", {"resource": name}, f"moves {name} to mox3",
                     choices={"New owner": "mox3"})
         self.wait(f"{name} runs on mox3", lambda: self.owner("small") == "mox3", 300)
-        # A PIT mox1 took before the move may still be on its way to A.
-        moved, before = self.taken_after(self.a, "small", time.time())
+        # A tries the placement hosts in order, and mox1 has a replica of
+        # every PIT; without its bmac-source, mox3 sends from its own copy of
+        # A's head. A PIT mox1 took before the move may still be on its way.
+        self.on("mox1", "systemctl stop bmac-source.service")
+        try:
+            moved, before = self.taken_after(self.a, "small", time.time())
+        finally:
+            self.on("mox1", "systemctl start bmac-source.service")
         self.s.check(f"step 4: after the move, the next PIT is an incremental sent by mox3 ({self.sent_by(moved)})",
                      bool(moved) and moved.get("received_from") == before.get("pit_uuid")
                      and self.sent_by(moved) == {"mox3"})
@@ -513,13 +547,24 @@ class Accept:
         [(status, result)] = self.ui(b, [["POST", "/peers/untrust", {
             "appliance_uuid": a.appliance_uuid, "password": b.password}]])
         self.s.check(f"step 7: {b.name}'s administrator untrusts {a.name} ({status})", status == 200)
-        refusals = len(self.audit(b, "refused_peer"))
+        before = self.refused_at(b, a)
 
         def refused(head: dict, first: dict, entry: dict) -> None:
             self.s.check(f"step 7: {a.name}'s next repair from {b.name} is refused, and it reseeds from the cluster",
                          bool(first) and entry.get("from_peer") is None and first.get("received_from") is None)
-            self.s.check(f"step 7: {b.name}'s audit log has the refusal", len(self.audit(b, "refused_peer")) > refusals)
+            self.s.check(f"step 7: {b.name}'s Trusted peers page lists the refusal", self.refused_at(b, a) > before)
+            # A peer's refusals reach the audit log at most hourly; A's
+            # first, before B trusted it, is there.
+            self.s.check(f"step 7: {b.name}'s audit log has {a.name}'s refusal", any(
+                fingerprint(e["details"].get("fingerprint", "")) == fingerprint(a.fingerprint)
+                for e in self.audit(b, "refused_peer")))
         self.away_long(refused)
+
+    def refused_at(self, b, peer) -> int:
+        """When b last refused peer's certificate, from its Trusted peers page."""
+        [(_, listed)] = self.ui(b, [["GET", "/peers", None]])
+        return max((r["at_ms"] for r in (listed or {}).get("refusals", [])
+                    if fingerprint(r["fingerprint"]) == fingerprint(peer.fingerprint)), default=0)
 
     def no_appliance(self) -> None:
         """Step 8."""
@@ -529,7 +574,9 @@ class Accept:
         try:
             self.wait("step 8: a slot with no appliance available raises the alert", lambda: self.alerted(
                 "backup.skipped", f"vm/{name}"), SETTINGS["ready_window_s"] + 2 * 60 * EVERY["minutes"] + 120)
-            taken = [p for p in self.vm_view("small").get("pits", []) if p["taken_s"] > stopped_s + 5]
+            # A slot within the ready window still finds the appliances ready.
+            taken = [p for p in self.vm_view("small").get("pits", [])
+                     if p["taken_s"] > stopped_s + SETTINGS["ready_window_s"] + 5]
             self.s.check(f"step 8: and no snapshot ({[p['name'] for p in taken]})", taken == [])
         finally:
             self.start(self.a, self.b)
@@ -584,21 +631,17 @@ class Accept:
     def restores(self, target: dict) -> None:
         """Steps 10 and 15."""
         b, small = self.b, self.vms["small"]
+        # No capture releases the local snapshots the restores start from.
+        self.policy("small", [self.a, b], DAYS, enabled=False)
         self.issue_grant()
         pits = self.pits(b, "small")
         old_branch = [p for p in pits if p["branch_uuid"] == target["branch_uuid"]]
         later = [p for p in old_branch if p["published_at_ms"] > target["published_at_ms"]]
         self.s.require(f"{b.name} holds a PIT of the old branch after the rollback target ({len(later)})", bool(later))
 
-        result, details = self.job("step 15: a restore test of an old-branch PIT on mox2", "backup.restore_test",
-                                   {"host": "mox2"}, {**self.source(), "pit": later[-1]["pit_uuid"]})
-        self.s.check(f"step 10: on mox2, each volume is a full stream (method 3) ({result.get('methods')})",
-                     bool(result.get("methods")) and set(result["methods"].values()) == {3})
-        self.s.check("step 10: the estimate is shown first", any("method 3" in d and "to transfer" in d for d in details))
-        self.s.check("step 15: the scratch VM booted and is destroyed",
-                     result.get("booted") is True and result.get("destroyed") is True)
-
         owner = self.owner("small")
+        self.s.require(f"the rollback target is still a snapshot on {owner}",
+                       lambda: self.on_cluster("small", target).get(owner) == "snapshot")
         result, details = self.job(f"step 10: a new VM on {owner} from an old-branch PIT", "backup.restore",
                                    {"host": owner}, {**self.source(), "pit": later[0]["pit_uuid"],
                                                      "isolate": True, "start": False})
@@ -608,6 +651,14 @@ class Accept:
         restored = int(result.get("vmid") or 0)
         if restored:
             self.on(owner, f"qm destroy {restored} --purge 1 --destroy-unreferenced-disks 1")
+
+        result, details = self.job("step 15: a restore test of an old-branch PIT on mox2", "backup.restore_test",
+                                   {"host": "mox2"}, {**self.source(), "pit": later[-1]["pit_uuid"]})
+        self.s.check(f"step 10: on mox2, each volume is a full stream (method 3) ({result.get('methods')})",
+                     bool(result.get("methods")) and set(result["methods"].values()) == {3})
+        self.s.check("step 10: the estimate is shown first", any("method 3" in d and "to transfer" in d for d in details))
+        self.s.check("step 15: the scratch VM booted and is destroyed",
+                     result.get("booted") is True and result.get("destroyed") is True)
 
         local = [p for p in self.pits(b, "small") if p["branch_uuid"] != target["branch_uuid"]
                  and self.on_cluster("small", p).get(owner) == "snapshot"]
@@ -622,6 +673,7 @@ class Accept:
         self.s.check("step 10: the plan is shown first", any("method 1" in d for d in details))
         self.s.check("small runs after the restore", lambda: m6.wait_until(
             lambda: self.on(owner, f"qm status {small['vmid']}") == "status: running", 300))
+        self.policy("small", [self.a, b], DAYS)
         for x in (self.a, b):
             first = self.newer(x, "small", before[x.name])
             self.s.check(f"step 10: the first PIT after the restore is an incremental from the restored PIT on {x.name}",
