@@ -286,6 +286,9 @@ pub struct Plan {
     pub test: bool,
     /// The VMID to take; otherwise the next free one.
     pub vmid: Option<u32>,
+    /// The VM itself comes back, as in a recovery, rather than a copy
+    /// beside it.
+    pub same_vm: bool,
     pub volumes: Vec<Planned>,
 }
 
@@ -572,6 +575,7 @@ async fn choose(
         start: flag("start"),
         test,
         vmid: None,
+        same_vm: false,
         volumes: Vec::new(),
     };
     plan.volumes = preflight(cx, &plan, &index).await?;
@@ -955,6 +959,14 @@ pub async fn restore(cx: &Context<'_>, test: bool) -> Result<Restored, Stop> {
     outcome
 }
 
+fn identity(plan: &Plan) -> restore::Identity {
+    if plan.same_vm {
+        restore::Identity::Same
+    } else {
+        restore::Identity::New(Uuid::new_v4())
+    }
+}
+
 fn translate(plan: &Plan, vmid: u32) -> Result<VmConfig, Stop> {
     let volumes: BTreeMap<String, String> = plan
         .volumes
@@ -971,7 +983,7 @@ fn translate(plan: &Plan, vmid: u32) -> Result<VmConfig, Stop> {
         &plan.name,
         &volumes,
         plan.isolate,
-        Uuid::new_v4(),
+        identity(plan),
     )
     .map_err(Stop::failed)
 }
@@ -1041,7 +1053,7 @@ pub(super) async fn carry_out(cx: &Context<'_>, plan: &Plan, job: &str) -> Resul
             &plan.name,
             &volumes,
             plan.isolate,
-            Uuid::new_v4(),
+            identity(plan),
         )
         .map_err(Stop::failed)?;
         cx.host

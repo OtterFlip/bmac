@@ -29,9 +29,10 @@ class CheckedInTopologyTest(unittest.TestCase):
     def setUp(self) -> None:
         self.topology = load(CONFIG)
 
-    def test_has_three_hosts_two_appliances_and_a_qdevice(self) -> None:
+    def test_has_three_hosts_two_appliances_a_qdevice_and_a_spare(self) -> None:
         roles = [vm.role for vm in self.topology.vms]
-        self.assertEqual(roles, ["host", "host", "host", "appliance", "qdevice", "appliance"])
+        self.assertEqual(roles, ["host", "host", "host", "appliance", "qdevice", "appliance", "spare"])
+        self.assertEqual([h.name for h in self.topology.hosts], ["mox1", "mox2", "mox3"])
 
     def test_the_appliances_share_the_hosts_vlan_outside_the_clusters_ranges(self) -> None:
         for name, address in (("appliance", "10.213.0.220"), ("applianceb", "10.213.0.221")):

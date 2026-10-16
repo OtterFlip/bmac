@@ -6,7 +6,7 @@
 //! agents; [`RealCluster`] runs `zfs`, `pvesr`, `pvesh`, and `qm` on this
 //! host, or on another through `/etc/bmac/ssh_config` as v2's `mox_ssh` does.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use bmac_core::{HostSlot, SnapshotGuid};
@@ -80,6 +80,22 @@ pub trait BackupCluster: Send + Sync {
     fn schedule_replication(&self, job: &str) -> BoxFuture<'_, Result<(), String>>;
     /// Proxmox VE's and OpenZFS's versions on this host.
     fn versions(&self) -> BoxFuture<'_, Result<(String, String), String>>;
+    /// The cluster's hosts, online or not.
+    fn members(&self) -> Result<BTreeSet<HostSlot>, String>;
+}
+
+/// The VM's placement hosts that are in the cluster. One the registry
+/// still names after a recovery onto fewer hosts can't hold a replica.
+pub fn placed_members(
+    cluster: &dyn BackupCluster,
+    placement: &[HostSlot],
+) -> Result<Vec<HostSlot>, String> {
+    let members = cluster.members()?;
+    Ok(placement
+        .iter()
+        .copied()
+        .filter(|h| members.contains(h))
+        .collect())
 }
 
 /// `qm guest cmd`'s names for the guest agent's freeze and thaw.
@@ -400,6 +416,13 @@ impl BackupCluster for RealCluster<'_> {
                 zfs.lines().next().unwrap_or_default().trim().to_string(),
             ))
         })
+    }
+
+    fn members(&self) -> Result<BTreeSet<HostSlot>, String> {
+        use crate::cluster::ClusterView;
+        crate::cluster::PveCluster::system()
+            .membership()
+            .map(|m| m.members.into_keys().collect())
     }
 }
 

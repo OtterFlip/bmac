@@ -372,6 +372,25 @@ class UpdateTest(LabTestCase):
         self.lab.restart_supervisor()
         self.assertEqual(events, [], "a supervisor that isn't running isn't started")
 
+    def test_an_added_spare_gets_blank_disks_and_no_seed(self) -> None:
+        added = self.topology.vm("mox4")
+        shutil.rmtree(self.paths.vm(added.name))
+        self.lab.firmware = (self.paths.root / "OVMF_CODE.fd", self.paths.root / "OVMF_VARS.fd")
+        (self.paths.root / "OVMF_VARS.fd").write_text("blank vars")
+        self.lab.require_tools = lambda: None  # type: ignore[method-assign]
+        (self.paths.ssh_key.with_suffix(".pub")).write_text("ssh-ed25519 AAAA lab\n")
+        seeded = []
+        with mock.patch("bmaclab.provision.fetch", return_value=self.paths.root / "ubuntu.img"), \
+                mock.patch("bmaclab.provision.password_hash", return_value="$6$x"), \
+                mock.patch("bmaclab.provision.build_seed", side_effect=lambda t, vm, *a: seeded.append(vm.name)):
+            self.lab.update()
+        calls = self.calls.read_text().splitlines()
+        for disk in added.disks:
+            path = self.paths.disk(disk)
+            self.assertTrue(any(c.startswith("create -q -f qcow2 ") and c.endswith(f"{path} {disk.size_gib}G")
+                                and " -b " not in c for c in calls), f"{path} is blank: {calls}")
+        self.assertNotIn("mox4", seeded)
+
     def test_a_new_host_needs_a_rebuild(self) -> None:
         shutil.rmtree(self.paths.vm("mox3"))
         self.lab.firmware = (self.paths.root / "code", self.paths.root / "vars")

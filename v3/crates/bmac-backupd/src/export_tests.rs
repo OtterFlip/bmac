@@ -840,4 +840,28 @@ async fn a_host_opens_a_backup_connection_and_the_appliances_calls_go_over_it() 
             .await
             .is_err()
     );
+
+    // A recovered cluster's host is still named by its recovery grant
+    // after the binding; its backup connection is its cluster's.
+    let mut grants = Grants::default();
+    grants
+        .issue_recovery(
+            &journal(),
+            CLUSTER,
+            &fingerprint(host_cert.der()),
+            None,
+            "admin",
+            0,
+        )
+        .unwrap();
+    grants.save(&a.exporter.metadata).unwrap();
+    let server = open_backup_connection(
+        &a,
+        vec![host_cert.der().clone(), ca_cert.der().clone()],
+        key(),
+    )
+    .await
+    .unwrap();
+    eventually(|| (client.connected() == [mox2.host]).then_some(())).await;
+    server.abort();
 }

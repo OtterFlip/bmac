@@ -46,11 +46,21 @@ Then the security tests: the cluster's credentials get nothing from an
 appliance, an untrusted peer gets nothing from B, a mistyped fingerprint
 saves no peer, and no LUKS passphrase or grant is in any log.
 
-Both appliances are put back as they were."""
+17. and lab item 9: mox1 to mox3 are powered off, and the spare mox4 is
+    installed by the Deployer as mox1 of a new cluster. B's administrator
+    grants a recovery to its certificate; backup.recover takes over the
+    lost cluster's configuration and brings small and bulk back under
+    their VMIDs (bulk with its EFI and TPM disks), small under HA and
+    unreplicated, as mox3 is gone; B's backups of small continue on a new
+    branch, from the recovered PIT.
+
+BMAC_LAB_RECOVERY_ONLY=1 runs only the seeds and step 17. Both appliances
+are put back as they were."""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -93,6 +103,11 @@ WARNING_HOLD_S = 300
 STEP_TIMEOUT = 900
 BUSY_TIMEOUT = 600
 RECEIVING = re.compile(r"^bmac-backupd: receiving (\S+) \((.+)\) from (\S+)$")
+RECREATED = ("bios", "machine", "cores", "memory", "efidisk0", "tpmstate0", "scsihw", "ostype")
+# Only the seeds, then step 17: for working on the recovery alone.
+RECOVERY_ONLY = os.environ.get("BMAC_LAB_RECOVERY_ONLY") == "1"
+# The spare the lost cluster is recovered onto, installed as this slot.
+NEW_HOST, NEW_SLOT = "mox4", "mox1"
 
 
 def fingerprint(text: str) -> str:
@@ -221,17 +236,21 @@ class Accept:
             raise RuntimeError(f"{b.name}'s UI refused the login ({out.get('login')})")
         return out["answers"]
 
-    def job(self, what: str, operation: str, parameters: dict, answers: dict | None = None) -> tuple[dict, list[str]]:
-        """Runs a job to its end, answering each field from `answers` (a
-        value, or a function of the field) or its default; its result and
-        the details its confirmations showed."""
+    def job(self, what: str, operation: str, parameters: dict, answers: dict | None = None,
+            dashboard=None, declined: tuple[str, ...] = ()) -> tuple[dict, list[str]]:
+        """Runs a job to its end on the cluster's Dashboard or `dashboard`,
+        answering each field from `answers` (a value, or a function of the
+        field) or its default, and each confirmation but those titled in
+        `declined` yes; its result and the details its confirmations showed.
+        Its events are left in self.events."""
+        dashboard = dashboard or self.dashboard
         answers = answers or {}
         details: list[str] = []
 
         def reply(form: dict) -> dict:
             if form["kind"] == "confirm":
                 details.extend(form.get("details") or [])
-                return {"kind": "confirm", "confirmed": True}
+                return {"kind": "confirm", "confirmed": form.get("title") not in declined}
             if form["kind"] == "manual_action":
                 raise AssertionError(f"unexpected manual step {form.get('title')!r}")
             values = {}
@@ -246,7 +265,8 @@ class Accept:
                 values[field["id"]] = answer
             return {"kind": "values", "values": values}
 
-        summary, events = join.follow(self.s, self.dashboard, self.dashboard.start(operation, parameters), reply)
+        summary, events = join.follow(self.s, dashboard, dashboard.start(operation, parameters), reply)
+        self.events = events
         if summary.get("state") != "COMPLETED":
             for e in [e for e in events if e["type"] == "output"][-8:]:
                 self.s.note(f"output: {e.get('text')}")
@@ -341,6 +361,7 @@ class Accept:
             "small": {"name": small["name"], "vmid": int(small["vmid"]), "placement": ["mox1", "mox3"]},
             "bulk": {"name": bulk["name"], "vmid": int(bulk["vmid"]), "placement": ["mox2", "mox3"]},
         }
+        self.vms["bulk"]["config"] = self.vm_config(self.hosts["mox2"], self.vms["bulk"]["vmid"])
         self.a.vm = small
         self.b.vm = small
         join.ready(self.s, self.dashboard)
@@ -746,13 +767,20 @@ class Accept:
         self.s.check(f"step 14: no scrub alert for {b.name}", not self.alerted(
             "backup.appliance.scrub_errors", f"appliance/{b.appliance_uuid}"))
 
+    def vm_config(self, host, vmid: int) -> dict[str, str]:
+        return {l.split(":", 1)[0]: l.split(":", 1)[1].strip()
+                for l in host.on_host(f"qm config {vmid}").splitlines() if ":" in l}
+
+    def same_hardware(self, before: dict, after: dict) -> dict:
+        """The differences in firmware, machine, CPUs, memory, EFI and TPM
+        disks; disks are new volumes, so only their presence must match."""
+        return {k: (before.get(k), after.get(k)) for k in RECREATED if (k in before) != (k in after)
+                or (not k.endswith("0") and before.get(k) != after.get(k))}
+
     def recreation(self) -> None:
         """Step 16: bulk is removed and recreated from its newest PIT on B."""
         b, bulk = self.b, self.vms["bulk"]
-        keys = ("bios", "machine", "cores", "memory", "efidisk0", "tpmstate0", "scsihw", "ostype")
-        config = lambda host, vmid: {l.split(":", 1)[0]: l.split(":", 1)[1].strip()
-                                     for l in self.on(host, f"qm config {vmid}").splitlines() if ":" in l}
-        before = config("mox2", bulk["vmid"])
+        before = bulk["config"]
         newest = self.newest(b, "bulk")
         [(status, issued)] = self.ui(b, [["POST", "/grants", {"cluster_uuid": self.cluster_uuid, "hours": 8,
                                                              "pits": [newest["pit_uuid"]]}]])
@@ -765,10 +793,7 @@ class Accept:
                              {**self.source(), "pit": newest["pit_uuid"], "isolate": True, "start": True})
         vmid = int(result.get("vmid") or 0)
         self.s.require(f"the recreated VM is VM {vmid}", vmid > 0)
-        after = config("mox2", vmid)
-        # Disks are new volumes, so only their presence must match.
-        differences = {k: (before.get(k), after.get(k)) for k in keys if (k in before) != (k in after)
-                       or (not k.endswith("0") and before.get(k) != after.get(k))}
+        differences = self.same_hardware(before, self.vm_config(self.hosts["mox2"], vmid))
         self.s.check(f"step 16: the recreated VM has bulk's firmware, machine, CPUs, memory, EFI and TPM disks "
                      f"(differences: {differences})", differences == {})
         self.s.check("step 16: the recreated VM runs", lambda: m6.wait_until(
@@ -803,24 +828,152 @@ class Accept:
             h.carried.get("luks_passphrase") or "" for h in self.hosts.values()] if x]
         patterns = ("\n".join(hidden) + "\n").encode()
         for appliance in (a, b):
-            found = self.leaks(appliance.appliance, patterns, "cat /var/lib/bmac-backupd/metadata/audit.jsonl* "
-                                                              "/var/log/syslog 2>/dev/null")
+            found = self.leaks(self.lab.ssh_args(appliance.appliance), patterns,
+                               "cat /var/lib/bmac-backupd/metadata/audit.jsonl* /var/log/syslog 2>/dev/null")
             self.s.check(f"security: no LUKS passphrase or grant in {appliance.name}'s logs ({found} lines)", found == "0")
         for name in ("mox1", "mox2", "mox3"):
-            found = self.leaks(self.hosts[name].vm, patterns, "cat /var/log/bmac/*.log 2>/dev/null; "
-                                                              "find /etc/pve/priv/bmac -name '*.json*' -exec cat {} + 2>/dev/null")
+            # A host's guard drops SSH on its public address; the tailnet reaches it.
+            found = self.leaks(self.hosts[name].ssh_args(), patterns,
+                               "cat /var/log/bmac/*.log 2>/dev/null; "
+                               "find /etc/pve/priv/bmac -name '*.json*' -exec cat {} + 2>/dev/null")
             self.s.check(f"security: no LUKS passphrase or grant in {name}'s logs ({found} lines)", found == "0")
         pages = json.dumps([self.view(), self.dashboard.call("GET", "/appliances"), self.alerts()])
         self.s.check("security: no LUKS passphrase or grant on the Dashboard's pages",
                      not any(x in pages for x in hidden))
 
-    def leaks(self, vm, patterns: bytes, also: str) -> str:
-        """How many lines of vm's journal and `also`'s output hold one of
-        the patterns, which come on stdin and are never printed."""
-        done = subprocess.run(self.lab.ssh_args(vm, [
-            f"exec 3<&0; {{ journalctl --no-pager -o cat; {also}; }} </dev/null | grep -cFf /dev/fd/3 || true"]),
+    def leaks(self, ssh: list[str], patterns: bytes, also: str) -> str:
+        """How many lines of the machine's journal and `also`'s output hold
+        one of the patterns, which come on stdin and are never printed."""
+        done = subprocess.run([
+            *ssh, f"exec 3<&0; {{ journalctl --no-pager -o cat; {also}; }} </dev/null | grep -cFf /dev/fd/3 || true"],
             input=patterns, capture_output=True, timeout=300)
+        if done.returncode != 0:
+            self.s.note(f"the leak check couldn't run: {done.stderr.decode(errors='replace').strip()[-300:]}")
         return done.stdout.decode(errors="replace").strip()
+
+    def manifests_kept(self, b) -> list[dict]:
+        [(status, view)] = self.ui(b, [["GET", "/recovery", None]])
+        clusters = (view or {}).get("clusters", []) if status == 200 else []
+        return next((c["manifests"] for c in clusters if c["cluster_uuid"] == self.cluster_uuid), [])
+
+    def recovery(self) -> None:
+        """Step 17 and lab item 9: the whole cluster is lost; new hardware,
+        mox4 installed as mox1 of a new cluster, recovers it from B."""
+        b = self.b
+        self.wait(f"step 17: {b.name} keeps a recovery manifest of the cluster",
+                  lambda: bool(self.manifests_kept(b)), 600)
+        self.recovered = {p: max(self.pits(b, p), key=lambda x: x["taken_s"], default={}) for p in ("small", "bulk")}
+        self.s.require(f"{b.name} holds PITs of small and bulk", all(self.recovered.values()))
+        self.lab.stop([self.hosts[n].vm for n in ("mox1", "mox2", "mox3")], force=True)
+        self.s.note("step 17: mox1, mox2 and mox3 are powered off: the cluster is lost")
+        m6.install(self.s, m6.NVME_MIRROR, self.recover_onto, vm_name=NEW_HOST, slot=NEW_SLOT,
+                   tailnet_prefix=f"{self.lab.topology.tailnet_prefix}new-")
+
+    def recover_onto(self, host) -> None:
+        b, small, bulk = self.b, self.vms["small"], self.vms["bulk"]
+        dashboard = join.Dashboard(host)
+        self.s.require(f"the new {NEW_SLOT} is in setup mode", lambda: m6.wait_until(
+            lambda: dashboard.call("GET", "/setup").get("active") is True, 300))
+        # Host setup makes it a one-host cluster, with the block-size
+        # storages bulk's 64K disk needs.
+        self.job(f"step 17: host setup on the new {NEW_SLOT}", "hosts.setup", {}, dashboard=dashboard,
+                 declined=("Run the boot drills?",))
+        self.s.require(f"the new {NEW_SLOT} has left setup mode", lambda: m6.wait_until(
+            lambda: dashboard.call("GET", "/setup").get("active") is False, 600))
+        self.s.require(f"the new {NEW_SLOT} is a quorate one-host cluster",
+                       lambda: "Quorate:          Yes" in host.on_host("pvecm status"))
+        mine = fingerprint(host.on_host("openssl x509 -in /etc/pve/local/pve-ssl.pem -noout -fingerprint -sha256")
+                           .split("=", 1)[1])
+        [(status, issued)] = self.ui(b, [["POST", "/grants/recovery", {"cluster_uuid": self.cluster_uuid,
+                                                                       "host_fingerprint": mine, "hours": 8}]])
+        token = str((issued or {}).get("token", ""))
+        self.s.require(f"step 17: {b.name}'s administrator issues a recovery grant for the new {NEW_SLOT}'s "
+                       f"certificate ({status})", status == 200 and token.startswith("bmac-grant-"))
+        self.grants.append(token)
+
+        recovered_at = time.time()
+        result, details = self.job(f"step 17: the new {NEW_SLOT} recovers the cluster from {b.name}", "backup.recover",
+                                   {"host": NEW_SLOT},
+                                   {"address": b.address, "fingerprint": b.fingerprint, "grant": token,
+                                    "vms": [small["vm_uuid"], bulk["vm_uuid"]], "configure": True},
+                                   dashboard=dashboard)
+        said = [str(e.get("message") or e.get("text") or "") for e in self.events]
+        self.s.check(f"step 17: the job shows the new {NEW_SLOT}'s certificate fingerprint",
+                     any(mine in fingerprint(m) for m in said))
+        self.s.check("step 17: the job asks for the appliance's fingerprint to be compared in the browser",
+                     any("If your browser showed another one" in m for m in said))
+        self.s.check("step 17: the plan names what to redo by hand", any("Postmark" in d for d in details))
+        back = {r.get("name"): r for r in result.get("restored") or []}
+        self.s.check(f"step 17: the lost cluster's configuration is taken over ({result.get('configured')})",
+                     result.get("configured") is True)
+        for vm in (small, bulk):
+            self.s.check(f"step 17: {vm['name']} comes back as VM {vm['vmid']} "
+                         f"({back.get(vm['name'], {}).get('vmid')})",
+                         back.get(vm["name"], {}).get("vmid") == vm["vmid"])
+        self.s.check("step 17: small isn't replicated to mox3, which this cluster lacks",
+                     back.get(small["name"], {}).get("replicas") == []
+                     and any("placement host mox3 isn't in this cluster" in m for m in said))
+        self.s.check("step 17: this cluster has the lost cluster's ID", lambda: host.on_host(
+            "python3 -c \"import json; print(json.load(open('/etc/pve/priv/bmac/cluster.json'))['cluster_uuid'])\"")
+            == self.cluster_uuid)
+        self.s.check(f"step 17: small runs on the new {NEW_SLOT}, started by HA", lambda: m6.wait_until(
+            lambda: host.on_host(f"qm status {small['vmid']}") == "status: running", 300))
+        self.s.check("step 17: small is an HA resource",
+                     lambda: f"vm:{small['vmid']}" in host.on_host("ha-manager config"))
+        differences = self.same_hardware(bulk["config"], self.vm_config(host, bulk["vmid"]))
+        self.s.check(f"item 9: bulk is recreated with its firmware, machine, CPUs, memory, EFI and TPM disks "
+                     f"(differences: {differences})", differences == {})
+        policy = next((v.get("policy") for v in dashboard.call("GET", "/backups")["vms"]
+                       if v["vm"] == small["name"]), None)
+        self.s.check("step 17: small's backup policy came back with the configuration",
+                     bool(policy) and b.appliance_uuid in policy.get("appliances", []))
+        self.s.check(f"step 17: {b.name} has the recovery's binding in its audit log",
+                     bool(self.audit(b, "recovery_bind")))
+
+        # Not taken_after: its diagnosis reaches for the lost hosts.
+        found: list[dict] = []
+
+        def published() -> bool:
+            found[:] = [p for p in self.pits(b, "small") if p["taken_s"] > recovered_at][:1]
+            return bool(found)
+        if not self.wait(f"step 17: {b.name} publishes a PIT of small taken after the recovery", published):
+            self.diagnose_new(host, dashboard)
+        first = found[0] if found else {}
+        old = self.recovered["small"]
+        self.s.check(f"step 17: backups of small continue on {b.name} on a new branch "
+                     f"({first.get('branch_uuid')} after {old['branch_uuid']})",
+                     bool(first) and first.get("branch_uuid") != old["branch_uuid"])
+        self.s.check(f"step 17: the first is an incremental from the recovered PIT ({first.get('received_from')})",
+                     first.get("received_from") == old["pit_uuid"])
+
+        patterns = (token + "\n").encode()
+        found = self.leaks(host.ssh_args(), patterns, "cat /var/log/bmac/*.log 2>/dev/null; "
+                                                      "find /etc/pve/priv/bmac -name '*.json*' -exec cat {} + 2>/dev/null")
+        self.s.check(f"security: no recovery grant in the new {NEW_SLOT}'s logs ({found} lines)", found == "0")
+
+
+    def diagnose_new(self, host, dashboard) -> None:
+        """What the recovered cluster did about small's backups."""
+        notes = {
+            "jobs": lambda: [{k: j.get(k) for k in ("operation", "state", "message", "created_at_ms")}
+                             for j in (lambda v: v.get("jobs", v) if isinstance(v, dict) else v)(
+                                 dashboard.call("GET", "/jobs"))[:12]],
+            "backups": lambda: (lambda v: {"errors": v.get("errors"), "appliances": v.get("appliances"),
+                                           "small": next((x for x in v["vms"] if x["vm"] == self.vms["small"]["name"]),
+                                                         None)})(dashboard.call("GET", "/backups")),
+            "alerts": lambda: [(a.get("condition"), a.get("resource"), a.get("state"))
+                               for a in (lambda v: v.get("alerts", []) if isinstance(v, dict) else v)(
+                                   dashboard.call("GET", "/alerts"))],
+            "bmacd": lambda: host.on_host("journalctl -u bmacd.service --since -25min --no-pager -o cat | "
+                                          "grep -iE 'schedul|captur|backup|source|appliance' | tail -40 || true"),
+        }
+        for name, get in notes.items():
+            try:
+                value = get()
+                self.s.note(f"the recovered cluster's {name}:\n"
+                            + (value if isinstance(value, str) else json.dumps(value, indent=1)[:6000]))
+            except Exception as e:  # diagnostics only
+                self.s.note(f"the recovered cluster's {name}: {type(e).__name__}: {e}")
 
 
 def then(hosts) -> None:
@@ -829,20 +982,22 @@ def then(hosts) -> None:
     try:
         t.prepare()
         t.seeds()
-        t.incrementals()
-        t.staging()
-        t.moves()
-        t.away_briefly()
-        t.peers()
-        t.repair()
-        t.no_appliance()
-        target = t.rollback()
-        t.restores(target)
-        t.pruned()
-        t.reboot()
-        t.scrub()
-        t.recreation()
-        t.security()
+        if not RECOVERY_ONLY:
+            t.incrementals()
+            t.staging()
+            t.moves()
+            t.away_briefly()
+            t.peers()
+            t.repair()
+            t.no_appliance()
+            target = t.rollback()
+            t.restores(target)
+            t.pruned()
+            t.reboot()
+            t.scrub()
+            t.recreation()
+            t.security()
+        t.recovery()
     finally:
         for b in (t.a, t.b):
             try:

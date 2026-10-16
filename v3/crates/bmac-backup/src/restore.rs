@@ -176,18 +176,29 @@ fn numbered(key: &str, prefix: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Translates the PIT's configuration field by field for a new VM:
-/// `volumes` gives each restored slot its new volume ID. A new VM gets new
-/// MAC addresses, a new SMBIOS UUID and generation ID, and doesn't start
-/// on boot; `isolate` also holds every network link down. Host devices and
-/// hook scripts are left out, since they belong to the host the PIT came
-/// from.
+/// Whose identity a restored VM has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Identity {
+    /// A VM beside the original: new MAC addresses and this SMBIOS UUID.
+    New(Uuid),
+    /// The VM itself, back after its original was lost (a recovery): its
+    /// MAC addresses and SMBIOS UUID, which the registry and its network
+    /// know it by.
+    Same,
+}
+
+/// Translates the PIT's configuration field by field for a restored VM:
+/// `volumes` gives each restored slot its new volume ID. It gets a new
+/// generation ID, doesn't start on boot, and has the MAC addresses and
+/// SMBIOS UUID `identity` gives it; `isolate` also holds every network
+/// link down. Host devices and hook scripts are left out, since they
+/// belong to the host the PIT came from.
 pub fn translate(
     manifest: &Manifest,
     name: &str,
     volumes: &BTreeMap<String, String>,
     isolate: bool,
-    smbios_uuid: Uuid,
+    identity: Identity,
 ) -> Result<VmConfig, String> {
     let mut out = VmConfig {
         options: vec![("name".into(), name.into())],
@@ -242,9 +253,15 @@ pub fn translate(
                 format!("{model},{rest}")
             };
             let link: &[(&str, &str)] = if isolate { &[("link_down", "1")] } else { &[] };
-            with_options(&joined, &["macaddr"], link)
+            match identity {
+                Identity::New(_) => with_options(&joined, &["macaddr"], link),
+                Identity::Same => with_options(value, &[], link),
+            }
         } else if key == "smbios1" {
-            with_options(value, &[], &[("uuid", &smbios_uuid.to_string())])
+            match identity {
+                Identity::New(uuid) => with_options(value, &[], &[("uuid", &uuid.to_string())]),
+                Identity::Same => value.clone(),
+            }
         } else if key == "vmgenid" {
             "1".to_string()
         } else if key == "onboot" {
@@ -489,7 +506,7 @@ mod tests {
         ]
         .into();
         let smbios = Uuid::from_u128(5);
-        let vm = translate(&m, "web-restored", &volumes, true, smbios).unwrap();
+        let vm = translate(&m, "web-restored", &volumes, true, Identity::New(smbios)).unwrap();
         let options: BTreeMap<&str, &str> = vm
             .options
             .iter()
@@ -525,7 +542,8 @@ mod tests {
         );
         assert!(vm.left_out.iter().any(|l| l.contains("hostpci0")));
 
-        let connected = translate(&m, "web-restored", &volumes, false, smbios).unwrap();
+        let connected =
+            translate(&m, "web-restored", &volumes, false, Identity::New(smbios)).unwrap();
         assert!(
             connected
                 .options
@@ -542,7 +560,23 @@ mod tests {
             .map(|(k, v)| (k.clone(), v.clone()))
             .unwrap()]
         .into();
-        assert!(translate(&m, "x", &missing, true, smbios).is_err());
+        assert!(translate(&m, "x", &missing, true, Identity::New(smbios)).is_err());
+
+        let same = translate(&m, "web", &volumes, false, Identity::Same).unwrap();
+        let options: BTreeMap<&str, &str> = same
+            .options
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            options["net0"], "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr1,firewall=1",
+            "the VM itself keeps its MAC addresses"
+        );
+        assert_eq!(
+            options["smbios1"],
+            "uuid=11111111-1111-1111-1111-111111111111,manufacturer=x"
+        );
+        assert_eq!(options["vmgenid"], "1", "but it was restored from a backup");
     }
 
     #[test]

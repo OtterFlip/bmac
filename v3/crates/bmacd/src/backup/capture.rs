@@ -747,10 +747,9 @@ async fn replicate(
     guids: &BTreeMap<String, SnapshotGuid>,
 ) -> Result<(), Stop> {
     let me = cx.cluster.this_host();
-    let targets: Vec<HostSlot> = production
-        .placement
-        .iter()
-        .copied()
+    let targets: Vec<HostSlot> = super::cluster::placed_members(cx.cluster, &production.placement)
+        .map_err(Stop::failed)?
+        .into_iter()
         .filter(|h| *h != me)
         .collect();
     if targets.is_empty() {

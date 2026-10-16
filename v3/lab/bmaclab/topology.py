@@ -14,7 +14,7 @@ from pathlib import Path
 
 BUSES = ("nvme", "sata", "scsi", "virtio")
 NETWORKS = ("uplink", "mgmt", "vlan")
-ROLES = ("host", "appliance", "qdevice")
+ROLES = ("host", "spare", "appliance", "qdevice")
 IMAGES = ("proxmox", "ubuntu")
 # q35's AHCI controller has six ports; the lab keeps 0 and 1 for CD drives.
 SATA_PORTS = 4

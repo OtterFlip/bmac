@@ -30,6 +30,10 @@ fn lost_manifest() -> RecoveryManifest {
     let files: BTreeMap<String, String> = [
         ("registry/policy.json", "{\"a\":1}"),
         ("registry/resources/web.json", "{\"name\":\"web\"}"),
+        (
+            "registry/orchestration/web.json",
+            "{\"install_phase\":\"network-finalized\",\"lease\":{\"nonce\":\"n\"}}",
+        ),
         ("config/cluster.json", "{\"PROXMOX_CLUSTER_NAME\":\"lost\"}"),
         ("config/hosts/mox1.json", "{\"old\":true}"),
         ("backup/policies/x.json", "{\"vm\":\"web\"}"),
@@ -88,6 +92,8 @@ struct Lost {
     ha: Mutex<Vec<u32>>,
     taken: BTreeSet<u32>,
     no_manifest: bool,
+    /// This cluster's hosts when not mox1 to mox3.
+    members: Option<BTreeSet<HostSlot>>,
 }
 
 impl RecoverHost for Lost {
@@ -108,6 +114,15 @@ impl RecoverHost for Lost {
             host: me(),
             addresses: vec!["10.0.0.11".into()],
         }])
+    }
+
+    fn members(&self) -> Result<BTreeSet<HostSlot>, String> {
+        Ok(self.members.clone().unwrap_or_else(|| {
+            ["mox1", "mox2", "mox3"]
+                .iter()
+                .map(|h| h.parse().unwrap())
+                .collect()
+        }))
     }
 
     fn recovery_index<'a>(
@@ -280,6 +295,7 @@ fn only_cluster_wide_state_is_written_back() {
     for path in [
         "registry/policy.json",
         "registry/resources/prod1.json",
+        "registry/orchestration/prod1.json",
         "registry/history/prod1.json",
         "registry/ingress/desired.json",
         "registry/ingress/generations/7.json",
@@ -345,10 +361,19 @@ async fn a_recovery_takes_over_the_lost_cluster_and_brings_its_vms_back() {
         [
             "backup/policies/x.json",
             "config/cluster.json",
+            "registry/orchestration/web.json",
             "registry/policy.json",
             "registry/resources/web.json",
             "schedules/s.json",
         ]
+    );
+    let orchestration: Value =
+        serde_json::from_str(&lost.written.lock().unwrap()["registry/orchestration/web.json"])
+            .unwrap();
+    assert_eq!(
+        orchestration,
+        json!({"install_phase": "network-finalized", "lease": null}),
+        "the installation's state comes back, the lost cluster's lease doesn't"
     );
     let bound = lost.bound.lock().unwrap().clone().unwrap();
     assert_eq!(bound.cluster_uuid, CLUSTER);
@@ -358,6 +383,13 @@ async fn a_recovery_takes_over_the_lost_cluster_and_brings_its_vms_back() {
     let w = r.fake.w();
     let vm = w.vms.get(&100).expect("VM 100 is back under its own VMID");
     assert!(vm.iter().any(|(k, v)| k == "name" && v == "web"));
+    assert!(
+        vm.contains(&(
+            "net0".into(),
+            "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr1".into()
+        )),
+        "the VM keeps its MAC address: {vm:?}"
+    );
     assert!(w.started.is_empty(), "HA starts it");
     let jobs: Vec<(String, String)> = w
         .jobs
@@ -380,6 +412,28 @@ async fn a_recovery_takes_over_the_lost_cluster_and_brings_its_vms_back() {
     assert!(records[0].finished_at_ms.is_some() && records[0].error.is_none());
     let lineage = r.store.lineage(&id(7)).unwrap().unwrap();
     assert_ne!(lineage.branch_uuid, id(0xb), "a new branch");
+}
+
+#[tokio::test]
+async fn a_cluster_rebuilt_smaller_replicates_to_the_placement_hosts_it_has() {
+    let r = rig();
+    let lost = Lost {
+        members: Some([me(), "mox2".parse().unwrap()].into()),
+        ..fresh()
+    };
+    let ran = run(&r, &lost, vec![appliance(GRANT), everything(), yes()]).await;
+    let result = ran.outcome.as_ref().unwrap();
+    assert_eq!(result["restored"][0]["replicas"], json!(["mox2"]));
+    assert!(ran.said("placement host mox3 isn't in this cluster"));
+    let w = r.fake.w();
+    let targets: Vec<String> = w
+        .jobs
+        .iter()
+        .map(|(_, j, _)| j.target.to_string())
+        .collect();
+    assert_eq!(targets, ["mox2"]);
+    drop(w);
+    assert_eq!(*lost.ha.lock().unwrap(), vec![100]);
 }
 
 #[tokio::test]

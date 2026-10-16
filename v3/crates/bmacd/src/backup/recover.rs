@@ -51,10 +51,27 @@ use crate::native::{Stop, Workflow};
 pub const OPERATION: &str = "backup.recover";
 const CONFIGURE_PHASE: (&str, &str) = ("configure", "Take over the lost cluster's configuration");
 const REPLICATION_SCHEDULE: &str = "*/15";
+const ORCHESTRATION_DIR: &str = "registry/orchestration";
+
+/// The text a recovery writes for `path`: the manifest's, but with no
+/// lease in an orchestration record, as no operation of the lost cluster
+/// holds one here.
+fn written_text(path: &str, text: &str) -> Result<String, String> {
+    if !path.starts_with(ORCHESTRATION_DIR) {
+        return Ok(text.to_string());
+    }
+    let mut record: Value =
+        serde_json::from_str(text).map_err(|e| format!("{path}: not a JSON record: {e}"))?;
+    if let Some(fields) = record.as_object_mut() {
+        fields.insert("lease".into(), Value::Null);
+    }
+    serde_json::to_string(&record).map_err(|e| e.to_string())
+}
 
 /// What the manifest carries that a recovery writes back: cluster-wide
 /// state only. Per-host settings, leases, live state, and the PIT catalog
-/// stay behind; the new hosts and their snapshots are what they are.
+/// stay behind; the new hosts and their snapshots are what they are. A
+/// production VM's orchestration record comes back without its lease.
 pub fn written_back(path: &str) -> bool {
     if !super::recovery::restorable(path) {
         return false;
@@ -71,6 +88,7 @@ pub fn written_back(path: &str) -> bool {
             | "config/cluster.json"
             | "backup/settings.json"
     ) || in_dir("registry/resources")
+        || in_dir(ORCHESTRATION_DIR)
         || in_dir("registry/history")
         || in_dir("registry/ingress/generations")
         || in_dir("backup/policies")
@@ -137,6 +155,8 @@ pub trait RecoverHost: Send + Sync {
     fn cluster_uuid(&self) -> Result<Option<String>, String>;
     /// Where an appliance reaches each host's `bmac-source`.
     fn source_hosts(&self) -> Result<Vec<SourceHost>, String>;
+    /// This cluster's hosts, online or not.
+    fn members(&self) -> Result<BTreeSet<HostSlot>, String>;
     fn recovery_index<'a>(
         &'a self,
         appliance: &'a ApplianceRecord,
@@ -491,6 +511,7 @@ pub async fn recover(cx: &Context<'_>) -> Result<Value, Stop> {
             start: false,
             test: false,
             vmid: Some(c.manifest.vmid),
+            same_vm: true,
             volumes: Vec::new(),
         };
         let granted = granted_for(&index, &c.pit);
@@ -627,8 +648,9 @@ async fn take_over(
         ));
     }
     for (path, text, _) in files {
+        let text = written_text(path, text).map_err(failed)?;
         cx.host
-            .write(path, text)
+            .write(path, &text)
             .map_err(|e| failed(format!("{path}: {e}")))?;
     }
     flow.info(format!(
@@ -703,7 +725,20 @@ async fn bring_back(
             .flatten()
             .map(|p| p.placement)
             .unwrap_or_default();
-        let targets: Vec<HostSlot> = placement.into_iter().filter(|h| *h != me).collect();
+        // A cluster rebuilt with fewer hosts than the lost one had replicates
+        // to those it has.
+        let members = cx.host.members().map_err(failed)?;
+        let (targets, missing): (Vec<HostSlot>, Vec<HostSlot>) = placement
+            .into_iter()
+            .filter(|h| *h != me)
+            .partition(|h| members.contains(h));
+        for host in &missing {
+            flow.warning(format!(
+                "{}'s placement host {host} isn't in this cluster, so it isn't replicated \
+                 there; add the replication once {host} joins",
+                plan.name
+            ));
+        }
         for (n, target) in targets.iter().enumerate() {
             let job = Job {
                 id: format!("{vmid}-{n}"),
@@ -714,7 +749,7 @@ async fn bring_back(
             };
             cx.replace.create_job(&job).await.map_err(failed)?;
         }
-        if targets.is_empty() {
+        if targets.is_empty() && missing.is_empty() {
             flow.warning(format!(
                 "{} has no other placement host in the registry; it isn't replicated",
                 plan.name
@@ -823,6 +858,13 @@ impl RecoverHost for RealHost<'_> {
             &crate::identity::Identities::system(),
         )
         .map_err(|e| e.message)
+    }
+
+    fn members(&self) -> Result<BTreeSet<HostSlot>, String> {
+        use crate::cluster::ClusterView;
+        crate::cluster::PveCluster::system()
+            .membership()
+            .map(|m| m.members.into_keys().collect())
     }
 
     fn recovery_index<'a>(

@@ -163,6 +163,8 @@ class Installed:
     def __init__(self, s, vm, work: Path, password: str, host_name: str, reused: str | None = None) -> None:
         self.s, self.lab, self.vm, self.work = s, s.lab, vm, work
         self.password, self.host_name = password, host_name
+        # Its name in the SSH config the Deployer wrote: its slot.
+        self.alias = vm.name
         # The stage the host was restored from instead of installed, if any.
         self.reused = reused
         # The stages saved from this host.
@@ -206,7 +208,7 @@ class Installed:
 
     def ssh_args(self, extra: list[str] | None = None) -> list[str]:
         return ["ssh", "-F", str(self.work / "ssh" / "config"), "-o", "BatchMode=yes",
-                *(extra or []), self.vm.name]
+                *(extra or []), self.alias]
 
     def on_host(self, command: str, timeout: float = 120) -> str:
         done = subprocess.run([*self.ssh_args(), command], capture_output=True, text=True,
@@ -442,17 +444,25 @@ def restored(s, vm, stage: str, unlock: Callable | None = None, step_clock: bool
 
 
 def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
-            bundle: Path | None = None) -> None:
+            bundle: Path | None = None, slot: str | None = None, tailnet_prefix: str | None = None) -> None:
     """The task end to end; `layout` answers the pool layout form beyond the
     boot disks, and `then(installed)` carries on before the host is put
     back. With a join `bundle`, the host joins that cluster instead of
-    starting one. Installing drops vm's stages."""
+    starting one. A new cluster's host is `slot` (vm's name by default) on
+    the tailnet as `tailnet_prefix` and the slot; a prefix under the lab's
+    keeps a spare's name apart from the stage hosts'. Installing drops vm's
+    stages; a spare is put back powered off."""
     lab = s.lab
     vm = lab.topology.vm(vm_name)
+    slot = slot or vm.name
+    prefix = tailnet_prefix or lab.topology.tailnet_prefix
+    if not prefix.startswith(lab.topology.tailnet_prefix):
+        raise ValueError(f"{prefix} isn't under the lab's tailnet prefix {lab.topology.tailnet_prefix}")
+    spare = vm.role == "spare"
     keys = preflight(s)
     base = lab.paths.images.parent
     work = work_dir(lab, vm)
-    host_name = f"{lab.topology.tailnet_prefix}{vm.name}"
+    host_name = f"{prefix}{slot}"
     shutil.rmtree(work, ignore_errors=True)
     (work / "ssh").mkdir(parents=True, mode=0o700)
     cache = base / "deployer-cache"
@@ -482,8 +492,11 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
     with contextlib.ExitStack() as cleanup:
         def put_back() -> None:
             stopping.set()
+            if spare:
+                lab.stop([vm], force=True)
             lab.restore_checkpoint(vm, CHECKPOINT)
-            lab.start([vm])
+            if not spare:
+                lab.start([vm])
         cleanup.callback(put_back)
         isos: dict[str, str] = {}
         # A host saved as a stage keeps its tailnet device.
@@ -492,7 +505,7 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
 
         task = Task([str(driver), "--kind", "host", "--work", str(work), "--cache", str(cache),
                      "--packages", str(PACKAGES), "--inventory", str(inventory)], work / "driver.log",
-                    dict(os.environ, BMAC_LAB_TAILSCALE_PREFIX=lab.topology.tailnet_prefix))
+                    dict(os.environ, BMAC_LAB_TAILSCALE_PREFIX=prefix))
         cleanup.callback(task.close)
         paths: dict[str, str] = {}
         result: dict = {}
@@ -521,8 +534,8 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
                 else:
                     answer.update(origin="join", file=str(bundle))
             elif title == "Host settings" and bundle is None:
-                answer.update(slot=vm.name, MAX_PROD_VM_COUNT_ON_THIS_HOST=1, MAX_STAGING_VM_COUNT_ON_THIS_HOST=2)
-            elif title == f"{vm.name}'s hardware":
+                answer.update(slot=slot, MAX_PROD_VM_COUNT_ON_THIS_HOST=1, MAX_STAGING_VM_COUNT_ON_THIS_HOST=2)
+            elif title == f"{slot}'s hardware":
                 answer.update(source="discover")
             elif title == "Discovery settings":
                 answer.update(tailscale_key=keys[DISCOVERY_KEY], method="remote_console")
@@ -534,7 +547,7 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
                 answer.update({k: (v(form, vm) if callable(v) else v) for k, v in layout.items()})
             elif title == "Root password and Tailscale key":
                 answer.update(root_password=password, root_password_again=password, tailscale_key=keys[HOST_KEY])
-            elif title == f"How will you boot {vm.name}?":
+            elif title == f"How will you boot {slot}?":
                 answer.update(method="remote_console")
             elif title != "Clear old rpool labels?":
                 raise TaskFailed(f"unexpected form {title!r}")
@@ -587,7 +600,7 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
                 elif form["kind"] == "manual_action":
                     if form["title"].startswith("Boot the machine"):
                         lab.start([vm], media=Path(paths["discovery"]))
-                    elif form["title"] == f"Install {vm.name}":
+                    elif form["title"] == f"Install {slot}":
                         thread = threading.Thread(target=install, args=(paths["host"],), daemon=True)
                         thread.start()
                         installing.append(thread)
@@ -608,9 +621,10 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
         s.check(f"the result links the Dashboard at its tailnet name ({result.get('open_url')})",
                 str(result.get("open_url", "")).startswith(f"https://{host_name}.") and result.get("fingerprint"))
         s.check("the host card is written", Path(result.get("card_file", "/nonexistent")).exists())
-        s.check(f"ssh {vm.name} was set up", any(o == f"ssh {vm.name} now reaches the host." for o in outputs))
+        s.check(f"ssh {slot} was set up", any(o == f"ssh {slot} now reaches the host." for o in outputs))
 
         installed = Installed(s, vm, work, password, host_name)
+        installed.alias = slot
         installed.saved = saved
         on_host = installed.on_host
 
@@ -637,4 +651,5 @@ def install(s, layout: dict = NVME_MIRROR, then=None, vm_name: str = "mox3",
             thread.join(timeout=5)
         if then is not None:
             then(installed)
-    s.check(f"{vm.name} is back as it was", lambda: lab.wait_ssh(vm, BOOT_TIMEOUT) or True)
+    if not spare:
+        s.check(f"{vm.name} is back as it was", lambda: lab.wait_ssh(vm, BOOT_TIMEOUT) or True)

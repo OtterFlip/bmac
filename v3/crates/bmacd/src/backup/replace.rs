@@ -925,6 +925,7 @@ pub async fn restore_into(cx: &Context<'_>, vm: &GuestName) -> Result<Value, Sto
         start: true,
         test: false,
         vmid: None,
+        same_vm: false,
         volumes: Vec::new(),
     };
     plan.volumes = job::size_up(&cx.restore, &plan, &index, placed).await?;

@@ -60,6 +60,20 @@ disks = [
 ]
 networks = ["uplink", "mgmt", "vlan"]
 
+# A Proxmox host outside the cluster: new hardware a scenario installs with
+# the Deployer, such as the host a lost cluster is recovered onto.
+[roles.spare]
+image = "proxmox"
+cpus = 4
+memory_gib = 8
+disks = [
+  { bus = "nvme", size_gib = 32 },
+  { bus = "nvme", size_gib = 32 },
+  { bus = "sata", size_gib = 16 },
+  { bus = "sata", size_gib = 16 },
+]
+networks = ["uplink", "mgmt", "vlan"]
+
 [roles.appliance]
 image = "ubuntu"
 cpus = 2
@@ -114,3 +128,11 @@ name = "applianceb"
 role = "appliance"
 mgmt_ip = "100.64.0.102"
 vlan_ip = "10.213.0.221"
+
+# The new hardware a lost cluster is recovered onto (m9_accept step 17).
+# Installed as a slot, it takes that slot's VLAN address instead of this one.
+[[vm]]
+name = "mox4"
+role = "spare"
+mgmt_ip = "100.64.0.14"
+vlan_ip = "10.213.0.14"

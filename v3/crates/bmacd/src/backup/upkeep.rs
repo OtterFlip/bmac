@@ -26,7 +26,7 @@ use bmac_backup::states::{self, ApplianceState};
 use uuid::Uuid;
 
 use super::capture::{Guests, Production, facts_of};
-use super::cluster::BackupCluster;
+use super::cluster::{BackupCluster, placed_members};
 use super::store::BackupStore;
 
 /// Whether this release relies on bookmarks (lab items 2 and 3, M9.0) or
@@ -290,7 +290,7 @@ impl Upkeep<'_> {
 
         if !keep_bookmark {
             let mut removed_all = true;
-            for node in &production.placement {
+            for node in &placed_members(self.cluster, &production.placement)? {
                 let present = match self.cluster.guids(*node, &bookmarks).await {
                     Ok(present) => present,
                     Err(e) => {
@@ -333,7 +333,7 @@ impl Upkeep<'_> {
         pit: &PitRecord,
         volumes: &[(String, bmac_core::SnapshotGuid)],
     ) -> Result<(), String> {
-        for node in &production.placement {
+        for node in &placed_members(self.cluster, &production.placement)? {
             let names: Vec<String> = volumes
                 .iter()
                 .flat_map(|(d, _)| [format!("{d}@{}", pit.name), format!("{d}#{}", pit.name)])

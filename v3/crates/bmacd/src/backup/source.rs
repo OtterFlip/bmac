@@ -361,6 +361,8 @@ impl Source<'_> {
             .map_err(internal)?
             .map(|p| p.placement)
             .unwrap_or_default();
+        let placement =
+            super::cluster::placed_members(self.cluster, &placement).map_err(internal)?;
         Ok(Some(OfferedPit {
             vm_uuid: vm,
             pit_uuid: pit.pit_uuid,

@@ -572,9 +572,18 @@ impl Exporter {
             _ => return,
         };
         let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let mut client = client;
         let serve = if tls.get_ref().1.alpn_protocol() == Some(SOURCE_ALPN) {
             let Some((cluster, host)) = self.backup_connection(&client, &tls, from) else {
                 return;
+            };
+            client = Client::Cluster {
+                cluster_uuid: cluster.clone(),
+                fingerprint: match &client {
+                    Client::Peer { fingerprint, .. }
+                    | Client::Cluster { fingerprint, .. }
+                    | Client::Recovery { fingerprint, .. } => fingerprint.clone(),
+                },
             };
             let exporter = self.clone();
             tokio::spawn(async move {
@@ -615,7 +624,32 @@ impl Exporter {
         tls: &tokio_rustls::server::TlsStream<TcpStream>,
         from: SocketAddr,
     ) -> Option<(String, bmac_core::HostSlot)> {
-        let Client::Cluster { cluster_uuid, .. } = client else {
+        let chain = tls.get_ref().1.peer_certificates().unwrap_or_default();
+        let cluster = match client {
+            Client::Cluster { cluster_uuid, .. } => Some(cluster_uuid.clone()),
+            // The recovered cluster's host while its recovery grant still
+            // names it: once the namespace is bound, its certificate is
+            // also that cluster's.
+            Client::Recovery { cluster_uuid, .. } => {
+                chain.split_first().and_then(|(cert, rest)| {
+                    self.clusters()
+                        .into_iter()
+                        .find(|c| {
+                            c.cluster_uuid == *cluster_uuid
+                                && leads_to(
+                                    &self.provider,
+                                    cert,
+                                    rest,
+                                    &c.ca_fingerprint,
+                                    UnixTime::now(),
+                                )
+                        })
+                        .map(|c| c.cluster_uuid)
+                })
+            }
+            Client::Peer { .. } => None,
+        };
+        let Some(cluster_uuid) = cluster else {
             eprintln!(
                 "bmac-backupd: exports: {} from {from} asked for a backup connection; only \
                  cluster hosts open one",
@@ -623,19 +657,14 @@ impl Exporter {
             );
             return None;
         };
-        let host = tls
-            .get_ref()
-            .1
-            .peer_certificates()
-            .and_then(|chain| chain.first())
-            .and_then(|cert| tunnels::host_of(cert));
+        let host = chain.first().and_then(|cert| tunnels::host_of(cert));
         if host.is_none() {
             eprintln!(
                 "bmac-backupd: exports: a certificate of cluster {cluster_uuid} from {from} names \
                  no host"
             );
         }
-        Some((cluster_uuid.clone(), host?))
+        Some((cluster_uuid, host?))
     }
 
     async fn refused(&self, fingerprint: String, claimed: String, from: SocketAddr) {

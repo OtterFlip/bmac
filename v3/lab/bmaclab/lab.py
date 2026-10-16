@@ -591,8 +591,9 @@ class Lab:
     def update(self) -> None:
         """Applies lab.toml changes that need no reinstall: creates each VM
         added since the lab was built, with every lab snapshot taken of it as
-        created, and writes each Ubuntu VM's cloud-init seed again, which its
-        next boot applies. Another change to a Proxmox host needs a rebuild."""
+        created (a spare's disks blank, for the Deployer to install), and
+        writes each Ubuntu VM's cloud-init seed again, which its next boot
+        applies. Another change to a Proxmox host needs a rebuild."""
         self.require_created()
         self.require_tools()
         assert self.firmware is not None
@@ -600,7 +601,7 @@ class Lab:
         hashed = provision.password_hash(self.topology)
         added = [vm for vm in self.topology.vms if not self.paths.disk(vm.disks[0]).exists()]
         for vm in added:
-            if vm.image != "ubuntu":
+            if vm.image != "ubuntu" and vm.role != "spare":
                 raise LabError(f"{vm.name} is a new Proxmox host; `lab/lab rebuild` installs it")
         image = None
         if any(vm.image == "ubuntu" for vm in self.topology.vms):
@@ -612,7 +613,7 @@ class Lab:
             shutil.copyfile(self.firmware[1], self.paths.vars(vm.name))
             for position, disk in enumerate(vm.disks):
                 target = str(self.paths.disk(disk))
-                if position == 0:
+                if position == 0 and vm.image == "ubuntu":
                     provision.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", str(image), target, f"{disk.size_gib}G"])
                 else:
                     provision.run(["qemu-img", "create", "-q", "-f", "qcow2", target, f"{disk.size_gib}G"])

@@ -2289,6 +2289,49 @@ day of a few minutes on the cluster and the appliances. The same
 scenario has a soak option with default settings and real days, to run
 for 8 days once development is done; it isn't run in M9.
 
+**As built (lab):** `lab/lab scenario m9_accept` runs on the SATA lab with
+appliances A and B on the hosts' VLAN (a second NIC), backup settings in
+seconds, minute schedules and a 5-minute test day, and `BMAC_LAB_DRILLS=1`
+for nothing but the drills at the end. Item 10 is noted from the
+transfer metrics: a 2.7 GB seed crossed the VLAN in 27.6 s (about
+95 MiB/s), where the earlier Tailscale path relayed at about 2.7 MiB/s.
+Step 17 uses a spare lab host: a `spare` role (`mox4`, blank disks, not
+one of `topology.hosts`, so the older scenarios don't see it) that
+`m6.install` installs as slot `mox1` of a new cluster under the tailnet
+name `<prefix>new-mox1` (`bmacsata-new-mox1`), after mox1 to mox3 are stopped. The scenario
+runs host setup, issues a recovery grant on B for the new host's
+certificate, runs `backup.recover`, and checks the VMs, HA, the
+recovered cluster UUID, B's `recovery_bind`, and a new PIT on B taken
+after the recovery on a new branch from the recovered PIT.
+`BMAC_LAB_RECOVERY_ONLY=1` runs only setup and step 17.
+
+The runs found these product bugs:
+
+- **Parent chain.** The cluster dropped the records of PITs only B had
+  pulled while A was away, which broke the chain back to A's head, so A
+  was offered a full stream. A dropped record's children now point to its
+  parent (the manifest's parent never changes), and appliance retention
+  does the same when it prunes.
+- **Peer repair** needed the peer to hold the exact PIT offered, which
+  right after a return was usually still being pulled. A now repairs to
+  the newest PIT a trusted peer holds on its branch after its head, and
+  the cluster sends the rest incrementally.
+- **Prunes** ran hourly in real time even with short test days; they now
+  run every twenty-fourth of a day.
+- **Restore into an existing VM** didn't report each disk's method.
+- **Recovery onto fewer hosts.** Replication setup in `backup.recover`,
+  capture's replication wait, upkeep's bookmarks and releases, and the
+  hosts a PIT is offered from now skip placement hosts the cluster
+  doesn't have (`placed_members`).
+- **The recovered host's backup connection** was refused by B as a
+  recovery client; a recovery client whose chain leads to the bound
+  cluster's CA is now admitted as that cluster's.
+- **Orchestration records** weren't written back, so every capture
+  failed for want of the lease; they are now written back without the
+  lost cluster's lease.
+- **A recovered VM** got new MAC addresses and SMBIOS UUID, as a restored
+  copy does, which the registry flagged; it now keeps them.
+
 **M9 done when:** the compressed acceptance scenario passes in the lab,
 including a whole-cluster loss recovered from appliance B.
 

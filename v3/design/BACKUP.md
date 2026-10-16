@@ -915,11 +915,17 @@ To recover onto new hardware:
    the appliance pin the new cluster's CA and reach its hosts in place of
    the old ones, which it audits; its agent for that cluster starts again
    with the new trust. Any other appliance of the lost cluster needs its own
-   recovery grant and binding.
+   recovery grant and binding. The bound host stays named by its grant
+   until the grant ends; its backup connection, which its certificate
+   proves is the bound cluster's, is admitted as that cluster's.
 7. Each VM is restored on this host under its own VMID and name (there is
-   no production VM to promote over), replication to its other placement
+   no production VM to promote over), keeping its MAC addresses and SMBIOS
+   UUID, which the registry and its network know it by (only its
+   generation ID is new), replication to its other placement
    hosts in the registry is recreated, it is added to HA, which starts it,
-   and its backups continue from the PIT on a new branch. New host
+   and its backups continue from the PIT on a new branch. A placement host
+   the new cluster doesn't have yet (it was rebuilt with fewer hosts) gets
+   no replication job, and the job warns about each one. New host
    identities and certificates are issued normally.
 
 This needs no surviving host, source snapshot, or old Dashboard; only the

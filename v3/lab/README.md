@@ -42,10 +42,16 @@ every command.
 | VM | OS | Disks | Networks |
 |---|---|---|---|
 | mox1, mox2, mox3 | Proxmox VE 9.2 (unattended install, ZFS mirror on the NVMe pair) | 2 NVMe, 2 SATA, 2 SCSI | uplink, management, VLAN |
-| appliance | Ubuntu 24.04 cloud image | virtio system disk, SCSI backup disk | uplink, management |
+| appliance | Ubuntu 24.04 cloud image | virtio system disk, SCSI backup disk | uplink, management, VLAN |
 | qdevice | Ubuntu 24.04 cloud image | virtio system disk | uplink, management |
+| applianceb | Ubuntu 24.04 cloud image | virtio system disk, SCSI backup disk | uplink, management, VLAN |
+| mox4 (spare) | blank when added by `lab/lab update`; the Deployer installs it | 2 NVMe, 2 SATA | uplink, management, VLAN |
 
-`lab.toml` defines all of it. Every disk gets a serial number and, on SATA
+`lab.toml` defines all of it. A `spare` is new hardware outside the
+cluster: no cluster configuration names it, and a scenario installs it with
+the Deployer (`m6.install`), as `m9_accept` does to recover a lost cluster
+onto it. It may be installed as another slot, under a tailnet prefix below
+the lab's (`bmacsata-new-mox1`), so its name never takes a stage host's. Every disk gets a serial number and, on SATA
 and SCSI, a WWN (an EUI-64 on NVMe), derived from the lab, VM, and disk names
 so they stay the same across rebuilds and differ between disks. Linux ignores
 the EUI-64 of QEMU's NVMe controller (`NVME_QUIRK_BOGUS_NID`) and reports a

@@ -67,6 +67,8 @@ pub(crate) struct World {
     pub calls: Vec<String>,
     /// Receive resume tokens and the snapshot each continues.
     pub tokens: BTreeMap<String, String>,
+    /// Hosts the registry may name that aren't in the cluster.
+    pub absent: BTreeSet<HostSlot>,
 }
 
 impl World {
@@ -247,6 +249,11 @@ impl BackupCluster for FakeCluster {
 
     fn versions(&self) -> BoxFuture<'_, Result<(String, String), String>> {
         ready(Ok(("pve-manager/9.0.0".into(), "zfs-2.3.4-pve1".into())))
+    }
+
+    fn members(&self) -> Result<BTreeSet<HostSlot>, String> {
+        let w = self.world.lock().unwrap();
+        Ok(HostSlot::all().filter(|h| !w.absent.contains(h)).collect())
     }
 }
 
@@ -754,6 +761,29 @@ async fn replication_is_asked_again_while_busy_and_times_out_when_it_never_arriv
         "{message}"
     );
     assert!(s.names_on(1).is_empty());
+}
+
+#[tokio::test]
+async fn a_placement_host_the_cluster_lacks_holds_no_replica() {
+    let s = setup();
+    s.save(
+        policy(vec![appliance_uuid(1)]),
+        vec![appliance(1, Some(NOW_MS))],
+    );
+    {
+        let mut w = s.cluster.world.lock().unwrap();
+        w.absent.insert(host(3));
+        w.jobs.clear();
+    }
+    let pit = s.captured().await;
+    assert_eq!(s.names_on(1).len(), 2);
+    assert!(s.names_on(3).is_empty());
+
+    s.set_offer(pit, appliance_uuid(1), Offer::Published);
+    let report = s.upkeep_at(NOW_MS + 10_000).await;
+    assert_eq!(report.released.len(), 1, "{report:?}");
+    assert!(s.names_on(1).keys().all(|k| k.contains('#')));
+    assert!(s.names_on(3).is_empty());
 }
 
 #[tokio::test]
