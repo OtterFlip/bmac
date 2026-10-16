@@ -31,7 +31,13 @@ pub mod status;
 pub mod store;
 pub mod supervisor;
 pub mod systemd;
+pub mod updates;
 pub mod web;
 pub mod wire;
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// This build's BMAC version: `BMAC_VERSION` when the build sets it, as
+/// `dev/build_deb.py --version` does to tell successive lab builds apart.
+pub const VERSION: &str = match option_env!("BMAC_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};

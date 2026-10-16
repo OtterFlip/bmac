@@ -122,7 +122,7 @@ fn the_session_has_fresh_keys_and_a_discovery_name() {
     assert_ne!(a.session.client.public, b.session.client.public);
     assert_ne!(a.session.tailscale_name, b.session.tailscale_name);
     let prefix = if cfg!(feature = "lab") {
-        "bmaclab-discover-"
+        "bmacnvme-discover-"
     } else {
         "bmac-discover-"
     };

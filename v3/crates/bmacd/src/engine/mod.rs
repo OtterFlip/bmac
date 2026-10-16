@@ -8,6 +8,7 @@ pub mod events;
 pub mod listen;
 pub mod server;
 pub mod setup;
+mod updates;
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -1374,6 +1375,13 @@ impl Handler for Engine {
             | EngineCall::DeleteBackupPolicy { .. }
             | EngineCall::SaveBackupSettings { .. }) => {
                 self.policy_call(&session, client, call, &replies).await;
+            }
+            call @ (EngineCall::Updates {}
+            | EngineCall::StartUpload { .. }
+            | EngineCall::UploadChunk { .. }
+            | EngineCall::FinishUpload { .. }
+            | EngineCall::DeleteBundle { .. }) => {
+                self.update_call(&session, client, call, &replies).await;
             }
             EngineCall::SearchLogs { query } => self.search_logs(query, &replies).await,
             EngineCall::LogReplication {} => self.log_replication(&replies).await,

@@ -63,6 +63,8 @@ export const CLUSTER_OPERATIONS = (
     ["hosts.join", "Approve a host's join", "hosts", "admin", true, [{ ...param("host", "Host", "host"), suggest: "free_host_slots" }]],
     ["qdevice.add", "Add QDevice", "qdevice", "operator", false, []],
     ["qdevice.remove", "Remove QDevice", "qdevice", "admin", true, []],
+    ["cluster.update", "Update the cluster", "cluster", "admin", false, []],
+    ["cluster.rollback", "Roll back a cluster update", "cluster", "admin", false, []],
   ] as const
 )
   .map(([id, title, category, min_role, destructive, params]) => ({

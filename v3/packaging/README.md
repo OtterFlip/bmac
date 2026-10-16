@@ -31,9 +31,15 @@ package is built by Tauri from `deployer/`.
 
 `dev/build_deb.py` builds the web UI and the release `bmacd` and `bmac`,
 then `bmacd_<version>_amd64.deb` into `target/deployer-bundle/packages/`,
-where the Deployer's host ISO picks it up. `--no-build` packages what is
-already built; `--out DIR` writes elsewhere. It honours `SOURCE_DATE_EPOCH`
-and refuses binaries that need a newer glibc than Proxmox VE's Debian has.
+where the Deployer's host ISO picks it up, with `bmac-host-<version>.bundle`
+beside it: `bmacd` alone, signed with the development key, which the ISO
+carries too and the installed host keeps for its first rollback.
+`--no-build` packages what is already built; `--out DIR` writes elsewhere;
+`--version V` builds as another version, and `--bundle` also packs
+`bmacd` and `bmac-backupd` into a development bundle to upload to a cluster.
+Its binaries trust the development key (the `dev-signing` feature). It
+honours `SOURCE_DATE_EPOCH` and refuses binaries that need a newer glibc
+than Proxmox VE's Debian has.
 
 The host's first boot installs the package with `dpkg -i` before the
 network is up, so it `Depends` only on what Proxmox VE already has
@@ -41,4 +47,18 @@ network is up, so it `Depends` only on what Proxmox VE already has
 `bmacd.depends`, are `Recommends`; host setup installs them with apt once
 the host is online. The postinst creates the `bmac-web` and `bmac-source` users, puts the
 guest-role hook in `/var/lib/vz/snippets`, and enables `bmacd.service` and
-the deferred-cleanup timer. Release signing comes with M10.
+the deferred-cleanup timer; on an upgrade it restarts `bmacd`, and with it
+`bmacd-web` and `bmac-source`.
+
+## Releases
+
+`dev/release.py build --key KEY --check-reproducible` builds the three
+release packages twice from scratch, without `dev-signing`, and signs
+`bmac-<version>.bundle` with KEY only if both builds are byte-identical:
+a ustar archive of `manifest.json`, its raw Ed25519 signature
+`manifest.sig`, and the packages. The Deployer it builds carries the
+release-signed `bmac-host-<version>.bundle`. `dev/release.py verify
+--public PUB FILE` checks a bundle. The keys are in
+`~/.config/bmac/signing/`; the release key belongs offline, and only its
+path is ever given to `openssl`. A cluster takes a bundle at Settings,
+then Updates (`design/DEPLOYMENT.md`, "Upgrades").

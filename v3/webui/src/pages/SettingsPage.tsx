@@ -35,6 +35,7 @@ import { toast } from "../state/toast";
 import { SectionTitle, Table } from "./common";
 import { LogReplication } from "./LogReplication";
 import { NotificationSettings } from "./NotificationSettings";
+import { UpdatesSettings } from "./UpdatesSettings";
 
 const KIND_HELP: Record<string, string> = {
   positive_integer: "A whole number above 0",
@@ -501,7 +502,7 @@ export function SettingsPage() {
 
   return (
     <>
-      <PageHeader title="Settings" subtitle="Cluster settings, host facts, host keys, certificates, email notifications, and log replication" actions={<RefreshControl updatedAt={updatedAt} loading={loading} error={error} onRefresh={() => void load()} label="Reload" />} />
+      <PageHeader title="Settings" subtitle="Cluster settings, host facts, host keys, certificates, updates, email notifications, and log replication" actions={<RefreshControl updatedAt={updatedAt} loading={loading} error={error} onRefresh={() => void load()} label="Reload" />} />
       <PageBody>
         {!view ? (
           loading ? (
@@ -548,6 +549,8 @@ export function SettingsPage() {
             <HostFacts view={view} reload={load} update={setView} />
             <Identities identities={view.identities} />
             <Certificate />
+            <SectionTitle>Updates</SectionTitle>
+            <UpdatesSettings />
             <SectionTitle>Notifications</SectionTitle>
             <NotificationSettings />
             <SectionTitle>Log replication</SectionTitle>

@@ -72,14 +72,14 @@ class SecretsTest(unittest.TestCase):
 
 class DevicesTest(unittest.TestCase):
     DEVICES = [
-        device("bmaclab-mox1", ["tag:bmac-proxmox-host"]),
-        device("bmaclab-mox1-1", ["tag:bmac-proxmox-host"]),
-        device("bmaclab-qdevice", ["tag:bmac-proxmox-qdevice"]),
-        device("bmaclab-discover-x", ["tag:bmac-discovery"]),
+        device("bmacnvme-mox1", ["tag:bmac-proxmox-host"]),
+        device("bmacnvme-mox1-1", ["tag:bmac-proxmox-host"]),
+        device("bmacnvme-qdevice", ["tag:bmac-proxmox-qdevice"]),
+        device("bmacnvme-discover-x", ["tag:bmac-discovery"]),
         device("bmac-discover-y", ["tag:bmac-discovery"]),
         device("mox1", ["tag:bmac-proxmox-host"]),
-        device("bmaclab-mox2", ["tag:bmac-proxmox-host", "tag:server"]),
-        device("bmaclab-laptop", []),
+        device("bmacnvme-mox2", ["tag:bmac-proxmox-host", "tag:server"]),
+        device("bmacnvme-laptop", []),
         device("workstation", ["tag:bmac-proxmox-host"]),
     ]
 
@@ -88,19 +88,19 @@ class DevicesTest(unittest.TestCase):
 
     def test_only_prefixed_devices_tagged_solely_with_bmac_tags_are_lab_devices(self) -> None:
         api = Tailscale(KEY, FakeApi(self.DEVICES))
-        self.assertEqual(self.labels(lab_devices(api, "bmaclab-")), ["bmaclab-mox1", "bmaclab-mox1-1", "bmaclab-qdevice", "bmaclab-discover-x"])
+        self.assertEqual(self.labels(lab_devices(api, "bmacnvme-")), ["bmacnvme-mox1", "bmacnvme-mox1-1", "bmacnvme-qdevice", "bmacnvme-discover-x"])
 
     def test_a_vm_selects_its_name_and_the_suffixed_names_tailscale_gives_rejoins(self) -> None:
         api = Tailscale(KEY, FakeApi(self.DEVICES))
-        self.assertEqual(self.labels(lab_devices(api, "bmaclab-", {"bmaclab-mox1"})), ["bmaclab-mox1", "bmaclab-mox1-1"])
+        self.assertEqual(self.labels(lab_devices(api, "bmacnvme-", {"bmacnvme-mox1"})), ["bmacnvme-mox1", "bmacnvme-mox1-1"])
 
     def test_remove_deletes_by_node_id_with_the_api_key(self) -> None:
         fake = FakeApi(self.DEVICES)
         api = Tailscale(KEY, fake)
         lines: list[str] = []
-        remove(api, lab_devices(api, "bmaclab-", {"bmaclab-qdevice"}), lines.append)
-        self.assertEqual(fake.calls[-1], ("DELETE", "https://api.tailscale.com/api/v2/device/n-bmaclab-qdevice", f"Bearer {KEY}"))
-        self.assertEqual(lines, ["Removed bmaclab-qdevice from the tailnet"])
+        remove(api, lab_devices(api, "bmacnvme-", {"bmacnvme-qdevice"}), lines.append)
+        self.assertEqual(fake.calls[-1], ("DELETE", "https://api.tailscale.com/api/v2/device/n-bmacnvme-qdevice", f"Bearer {KEY}"))
+        self.assertEqual(lines, ["Removed bmacnvme-qdevice from the tailnet"])
 
     def test_remove_refuses_a_device_with_any_other_tag(self) -> None:
         fake = FakeApi([])

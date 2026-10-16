@@ -88,7 +88,7 @@ class FilesTest(unittest.TestCase):
         self.assertNotIn("10.0.2.15", text)
 
     def test_the_qdevice_setting_is_its_tailnet_name(self) -> None:
-        self.assertIn("PROXMOX_QDEVICE_HOST='bmaclab-qdevice'\n", bootstrap.conf_files(self.topology)["cluster.conf"])
+        self.assertIn("PROXMOX_QDEVICE_HOST='bmacnvme-qdevice'\n", bootstrap.conf_files(self.topology)["cluster.conf"])
 
     def test_tailscale_standin_answers_from_the_management_network(self) -> None:
         mox1 = self.topology.vm("mox1")
@@ -102,16 +102,16 @@ class FilesTest(unittest.TestCase):
             self.assertEqual(tailscale("ip", "-4").stdout, "100.64.0.11\n")
             status = json.loads(tailscale("status", "--json").stdout)
             self.assertEqual(status["BackendState"], "Running")
-            self.assertEqual(status["Self"]["HostName"], "bmaclab-mox1")
+            self.assertEqual(status["Self"]["HostName"], "bmacnvme-mox1")
             peers = {p["HostName"]: p for p in status["Peer"].values()}
-            self.assertNotIn("bmaclab-mox1", peers)
-            self.assertEqual(peers["bmaclab-qdevice"]["TailscaleIPs"], ["100.64.0.101"])
-            self.assertTrue(peers["bmaclab-qdevice"]["DNSName"].startswith("bmaclab-qdevice."))
+            self.assertNotIn("bmacnvme-mox1", peers)
+            self.assertEqual(peers["bmacnvme-qdevice"]["TailscaleIPs"], ["100.64.0.101"])
+            self.assertTrue(peers["bmacnvme-qdevice"]["DNSName"].startswith("bmacnvme-qdevice."))
             self.assertNotEqual(tailscale("up").returncode, 0)
 
     def test_tailnet_names_replace_their_block_in_the_hosts_file(self) -> None:
         block = bootstrap.tailnet_hosts_block(self.topology)
-        self.assertIn("100.64.0.101 bmaclab-qdevice.bmaclab.tailnet.invalid bmaclab-qdevice\n", block)
+        self.assertIn("100.64.0.101 bmacnvme-qdevice.bmacnvme.tailnet.invalid bmacnvme-qdevice\n", block)
         self.assertNotIn(" qdevice\n", block)
         with tempfile.TemporaryDirectory() as scratch:
             hosts = Path(scratch, "hosts")

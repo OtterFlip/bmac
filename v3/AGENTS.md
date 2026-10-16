@@ -123,7 +123,7 @@ repository root, where `dev` and `scripts` are v2's.
 
 A v2 test cluster is deployed on the same tailnet as `qdevice`, `mox1`,
 `mox2`, and `mox3`. Nothing in v3 development may register a tailnet node
-under those names. Lab VMs use `Topology.tailnet_name()` (`bmaclab-mox1`,
+under those names. Lab VMs use `Topology.tailnet_name()` (`bmacnvme-mox1`,
 and so on; see `lab/README.md`), and any other test that joins Tailscale
 uses a name with a `bmac-` prefix or similar, ephemeral keys where
 possible, and never a bare host name.

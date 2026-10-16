@@ -218,6 +218,11 @@ pub fn router_with(state: AppState) -> Router {
             post(api::delete_backup_policy),
         )
         .route("/backups/settings", post(api::save_backup_settings))
+        .route("/updates", get(api::updates))
+        .route("/updates/uploads", post(api::start_upload))
+        .route("/updates/uploads/{id}", post(api::upload_chunk))
+        .route("/updates/uploads/{id}/finish", post(api::finish_upload))
+        .route("/updates/bundles/{sha}/delete", post(api::delete_bundle))
         .route("/certificate/rotate", post(api::rotate_certificate))
         .route("/certificate/switch", post(api::switch_certificate))
         .route("/certificate/discard", post(api::discard_certificate))

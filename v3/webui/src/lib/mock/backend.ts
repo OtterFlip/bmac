@@ -40,6 +40,9 @@ import type {
   StreamMessage,
   TemplatesView,
   TestEmailResult,
+  BundleSummary,
+  UpdatesView,
+  UploadStarted,
 } from "@bmac/ui";
 import { ApiFailure, type Backend, type PolicyChange, type SessionInfo, type StreamHandlers, type Unlisten } from "../backend";
 import { demoAlerts } from "./alerts";
@@ -79,6 +82,15 @@ export class MockBackend implements Backend {
   private certificateSeed = 100;
   /** What `joins()` returns; `can_manage` follows the session's role. */
   joinData: JoinList = { joins: [], can_manage: false };
+  /** What `updates()` returns. */
+  updatesData: UpdatesView = {
+    this_host: "mox1" as HostSlot,
+    hosts: (["mox1", "mox2", "mox3"] as HostSlot[]).map((host) => ({ host, version: "3.0.0", installed: {} })),
+    bundles: [],
+    trusted_keys: ["release"],
+  };
+  /** Uploads in progress: their size and the bytes received so far. */
+  uploads: Record<string, { size: number; received: number }> = {};
   /** What `backups()` returns; `can_manage` follows the session's role. */
   backupsData: BackupsView = demoBackups();
   /** What `appliances()` returns; `can_manage` follows the session's role. */
@@ -254,6 +266,56 @@ export class MockBackend implements Backend {
     const saved = { host: host as HostSlot, ...this.checkSave(hosts.find((h) => h.host === host) ?? null, this.settingsData.host_keys, request) };
     this.settingsData.hosts = [...hosts.filter((h) => h.host !== host), saved].sort((a, b) => a.host.localeCompare(b.host, undefined, { numeric: true }));
     return structuredClone(saved);
+  }
+
+  async updates(): Promise<UpdatesView> {
+    this.record("updates");
+    this.requireSession();
+    return structuredClone(this.updatesData);
+  }
+
+  async startUpload(size: number): Promise<UploadStarted> {
+    this.record("startUpload", size);
+    this.requireAdmin("managing updates");
+    const id = Object.keys(this.uploads).length.toString(16).padStart(32, "0");
+    this.uploads[id] = { size, received: 0 };
+    return { upload_id: id, chunk: 512 * 1024 };
+  }
+
+  async uploadChunk(id: string, offset: number, data: string): Promise<void> {
+    this.record("uploadChunk", id, offset, data.length);
+    this.requireAdmin("managing updates");
+    const upload = this.uploads[id];
+    if (!upload) throw new ApiFailure(409, "conflict", "no such upload");
+    if (offset !== upload.received) throw new ApiFailure(409, "conflict", `the upload has ${upload.received} bytes, not ${offset}`);
+    upload.received += atob(data).length;
+  }
+
+  async finishUpload(id: string): Promise<BundleSummary> {
+    this.record("finishUpload", id);
+    this.requireAdmin("managing updates");
+    const upload = this.uploads[id];
+    if (!upload || upload.received !== upload.size) throw new ApiFailure(400, "invalid", "the upload is incomplete");
+    delete this.uploads[id];
+    const summary: BundleSummary = {
+      sha256: id.padStart(64, "a"),
+      version: "3.0.1",
+      built_at_s: 1_767_000_000,
+      signed_by: "release",
+      size: upload.size,
+      record_schema: 1,
+      reads_record_schema_from: 1,
+      packages: [{ name: "bmacd", version: "3.0.1" }],
+      staged_at_ms: Date.now(),
+    };
+    this.updatesData.bundles = [summary, ...this.updatesData.bundles.filter((b) => b.sha256 !== summary.sha256)];
+    return structuredClone(summary);
+  }
+
+  async deleteBundle(sha256: string): Promise<void> {
+    this.record("deleteBundle", sha256);
+    this.requireAdmin("managing updates");
+    this.updatesData.bundles = this.updatesData.bundles.filter((b) => b.sha256 !== sha256);
   }
 
   async joins(): Promise<JoinList> {

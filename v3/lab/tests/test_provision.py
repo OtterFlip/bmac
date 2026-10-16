@@ -132,7 +132,7 @@ class AnswerFileTest(unittest.TestCase):
         self.assertEqual(network["ethernets"]["mgmt"]["addresses"], ["100.64.0.100/24"])
         self.assertEqual(network["ethernets"]["vlan"]["addresses"], ["10.213.0.220/24"])
         instance = json.loads(files["meta-data"])["instance-id"]
-        self.assertRegex(instance, r"^bmaclab-appliance-[0-9a-f]{12}$")
+        self.assertRegex(instance, r"^bmacnvme-appliance-[0-9a-f]{12}$")
         moved = provision.cloud_init(self.topology, dataclasses.replace(appliance, vlan_ip="10.213.0.222"), HASH, KEY)
         self.assertNotEqual(json.loads(moved["meta-data"])["instance-id"], instance,
                             "a changed network is a new instance, so cloud-init applies it")

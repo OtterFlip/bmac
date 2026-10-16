@@ -505,6 +505,89 @@ pub async fn save_backup_settings(
     .await
 }
 
+pub async fn updates(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    get(&state, client, &headers, &uri, Ok(EngineCall::Updates {})).await
+}
+
+pub async fn start_upload(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    post_json(&state, client, &headers, &uri, || {
+        Ok(EngineCall::StartUpload {
+            request: parse_body::<bmac_proto::updates::StartUpload>(&body)?,
+        })
+    })
+    .await
+}
+
+fn upload_id(id: &str) -> Result<String, ApiError> {
+    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(invalid("not an upload id"));
+    }
+    Ok(id.to_string())
+}
+
+pub async fn upload_chunk(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    post_json(&state, client, &headers, &uri, || {
+        Ok(EngineCall::UploadChunk {
+            upload_id: upload_id(&id)?,
+            request: parse_body::<bmac_proto::updates::UploadChunk>(&body)?,
+        })
+    })
+    .await
+}
+
+pub async fn finish_upload(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    post_json(&state, client, &headers, &uri, || {
+        parse_optional::<NoParameters>(&body)?;
+        Ok(EngineCall::FinishUpload {
+            upload_id: upload_id(&id)?,
+        })
+    })
+    .await
+}
+
+pub async fn delete_bundle(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientAddr>,
+    Path(sha): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    post_json(&state, client, &headers, &uri, || {
+        parse_optional::<NoParameters>(&body)?;
+        if !crate::updates::sha256_ok(&sha) {
+            return Err(invalid("not a SHA-256"));
+        }
+        Ok(EngineCall::DeleteBundle { sha256: sha })
+    })
+    .await
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeletePolicy {

@@ -22,3 +22,4 @@ pub mod peer;
 pub mod settings;
 pub mod status;
 pub mod stream;
+pub mod updates;

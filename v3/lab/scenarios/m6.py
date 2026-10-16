@@ -4,7 +4,7 @@
 """M6 done-when in the lab: the Deployer's "Install a Proxmox host" task,
 played as an operator would, takes mox3 from a discovery session to a
 Proxmox VE install from the host ISO, waits for it on the tailnet as
-bmaclab-mox3, checks its Dashboard certificate against the one it made,
+bmacnvme-mox3 (or its lab's prefix), checks its Dashboard certificate against the one it made,
 and sets up this workstation's SSH, pinned. The installed host runs the
 development bmacd package.
 

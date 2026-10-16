@@ -676,10 +676,7 @@ pub async fn run(
         client: client.clone(),
         zfs: options.zfs,
     });
-    log::info(&format!(
-        "bmac-source {} running",
-        env!("CARGO_PKG_VERSION")
-    ));
+    log::info(&format!("bmac-source {} running", crate::VERSION));
     crate::systemd::notify_ready().map_err(|e| format!("cannot notify systemd: {e}"))?;
     tokio::pin!(shutdown);
     let mut dialers = Dialers::default();

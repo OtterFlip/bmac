@@ -11,6 +11,7 @@ members = [
     "crates/bmac-settings",
     "crates/bmac-storage",
     "crates/bmac-backup",
+    "crates/bmac-release",
     "crates/bmac-adapters",
     "crates/bmac-proto",
     "crates/bmac-inventory",
@@ -47,6 +48,7 @@ bmac-registry = { path = "crates/bmac-registry" }
 bmac-settings = { path = "crates/bmac-settings" }
 bmac-storage = { path = "crates/bmac-storage" }
 bmac-backup = { path = "crates/bmac-backup" }
+bmac-release = { path = "crates/bmac-release" }
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json"] }
 bmac-adapters = { path = "crates/bmac-adapters" }
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }

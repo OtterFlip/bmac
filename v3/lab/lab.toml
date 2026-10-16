@@ -6,7 +6,7 @@
 # disks, images, and sockets (default ~/.local/share/bmac-lab/<name>).
 
 [lab]
-name = "bmaclab"
+name = "bmacnvme"
 # Workstation ports forwarded to each VM start here, ten per VM, on 127.0.0.1.
 base_port = 22000
 # The management and VLAN segments are QEMU multicast sockets on loopback,
@@ -19,7 +19,7 @@ root_password = "bmac-lab"
 domain = "lab.internal"
 # A lab VM that joins a real tailnet is named <tailnet_prefix><vm name>, never
 # the bare VM name: the v2 test cluster already uses these names on the tailnet.
-tailnet_prefix = "bmaclab-"
+tailnet_prefix = "bmacnvme-"
 reserved_tailnet_names = ["qdevice", "mox1", "mox2", "mox3"]
 
 [networks.mgmt]

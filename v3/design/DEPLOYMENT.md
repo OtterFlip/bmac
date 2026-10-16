@@ -366,7 +366,12 @@ The first-boot script, running before the network is up:
 6. finds the install media whose `/bmac/packages.tar` has the digest it
    carries, and installs the `bmacd` packages from it. Without the media it
    says so on the console and stops here, with SSH and Tailscale already
-   set up, so the packages can be installed by hand;
+   set up, so the packages can be installed by hand. The media also
+   carries `bmacd` alone as a signed bundle; first boot leaves it in
+   `/var/lib/bmac/updates/seed/`, and `bmacd` keeps it as the installed
+   bundle once the host is in a cluster (if it holds the running build and
+   checks out against the trusted keys), so the host's first update has a
+   bundle to roll back to;
 7. starts `bmacd` in setup mode.
 
 ### Handoff
@@ -761,6 +766,20 @@ nothing untested has to be published.
 
 The previous packages stay cached on each host for rollback. A failed health
 check stops the rollout and offers to roll the upgraded hosts back.
+
+As built (M10): each host records the bundle it runs and the one before it
+in `/var/lib/bmac/updates/installed.json`, starting from the bundle its host
+ISO carried. `cluster.update` updates the other hosts by slot and its own
+host last; a host is healthy when it reports the bundle's version,
+`bmacd-web` and `bmac-source` are active, and it reaches every other member
+over 8444. It refuses downgrades, and a bundle whose record schema range
+doesn't cover the cluster's (`/etc/pve/priv/bmac/release.json`). An
+optional setting puts each host in HA maintenance while it updates. When a
+host fails, the job offers to roll back the hosts now running the new
+bundle, and fails either way; `cluster.rollback` does the same later.
+`dev/release.py build --check-reproducible` builds every package twice from
+scratch, with every file dated to the last commit, and signs only if both
+builds are byte-identical.
 
 **Appliances** upgrade from their own UI or with `apt`, independently of the
 cluster. The cluster-to-appliance protocol is versioned and both sides

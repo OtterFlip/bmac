@@ -631,6 +631,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bmac-release"
+version = "3.0.0-dev.0"
+dependencies = [
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "bmac-settings"
 version = "3.0.0-dev.0"
 dependencies = [
@@ -667,6 +679,7 @@ dependencies = [
  "bmac-pmxcfs",
  "bmac-proto",
  "bmac-registry",
+ "bmac-release",
  "bmac-settings",
  "bmac-storage",
  "bytes",

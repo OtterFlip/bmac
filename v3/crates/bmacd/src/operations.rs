@@ -36,6 +36,7 @@ pub const LOCK_CLASSES: &[&str] = &[
     "storage",
     "backups",
     "restore",
+    "update",
 ];
 
 const DRY_RUN_FLAG: &str = "--dry-run";
@@ -60,6 +61,8 @@ pub fn native_operations() -> Vec<Operation> {
     operations.push(crate::backup::restore::test_operation());
     operations.extend(crate::backup::replace::operations());
     operations.push(crate::backup::recover::operation());
+    operations.push(crate::updates::job::update_operation());
+    operations.push(crate::updates::job::rollback_operation());
     operations
 }
 

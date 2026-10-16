@@ -15,6 +15,10 @@ use crate::{PmxcfsError, Result};
 
 /// The record schema this version of BMAC writes and understands.
 pub const SCHEMA_VERSION: u64 = 1;
+/// The oldest record schema this version still reads; a release manifest
+/// carries both, and the update job refuses a release that can't read the
+/// cluster's records.
+pub const OLDEST_READ_SCHEMA: u64 = 1;
 
 fn field_u64(value: &Value, key: &str) -> Option<u64> {
     value.get(key).and_then(Value::as_u64)

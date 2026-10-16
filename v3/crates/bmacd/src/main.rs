@@ -372,6 +372,21 @@ async fn run_engine(options: Options) -> Result<(), String> {
                     );
                     let runner = runner.with_relay(mesh.clone());
                     mesh.set_runner(runner.clone());
+                    let store = bmacd::updates::UpdateStore::system();
+                    match store.adopt_seed(bmacd::VERSION, auth::system_clock()()) {
+                        Ok(Some(seed)) => log::info(&format!(
+                            "kept bundle {} ({}), which this host was installed from, for a rollback",
+                            seed.sha256, seed.version
+                        )),
+                        Ok(None) => {}
+                        Err(e) => log::warning(&format!(
+                            "the bundle this host was installed from wasn't kept: {e}"
+                        )),
+                    }
+                    mesh.set_installer(bmacd::updates::install::Installer::new(
+                        store,
+                        Arc::new(RealRunner),
+                    ));
                     tasks.push(mesh.serve(listen_rx));
                     tasks.push(mesh.spawn_links());
                     tasks.push(mesh.spawn_catch_up());

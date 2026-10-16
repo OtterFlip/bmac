@@ -49,6 +49,9 @@ import type {
   StreamMessage,
   TemplatesView,
   TestEmailResult,
+  BundleSummary,
+  UpdatesView,
+  UploadStarted,
   VmsSnapshot,
 } from "@bmac/ui";
 import { API_PREFIX, KEEPALIVE_SECONDS } from "@bmac/ui";
@@ -127,6 +130,14 @@ export interface Backend {
   deleteBackupPolicy(vmUuid: string, revision: number): Promise<void>;
   /** Fails with `conflict` when the settings changed since `request.revision`. */
   saveBackupSettings(request: SaveBackupSettings): Promise<SaveBackupSettings>;
+  /** Each host's version and rollback copy, and the release bundles uploaded to this host. */
+  updates(): Promise<UpdatesView>;
+  startUpload(size: number): Promise<UploadStarted>;
+  /** `data` is the chunk's bytes in base64; chunks go in order. */
+  uploadChunk(uploadId: string, offset: number, data: string): Promise<void>;
+  /** Checks the bundle's signature and hashes, and keeps it. */
+  finishUpload(uploadId: string): Promise<BundleSummary>;
+  deleteBundle(sha256: string): Promise<void>;
   rotateCertificate(): Promise<CertificateView>;
   /** Fails with `conflict` unless `fingerprint` is the pending certificate's. */
   switchCertificate(fingerprint: string): Promise<CertificateView>;
@@ -333,6 +344,15 @@ export function createHttpBackend(fetcher: typeof fetch = (...args) => fetch(...
       await request("POST", `/backups/policies/${encodeURIComponent(vm)}/delete`, { revision });
     },
     saveBackupSettings: (body) => request<SaveBackupSettings>("POST", "/backups/settings", body),
+    updates: () => request<UpdatesView>("GET", "/updates"),
+    startUpload: (size) => request<UploadStarted>("POST", "/updates/uploads", { size }),
+    uploadChunk: async (id, offset, data) => {
+      await request("POST", `/updates/uploads/${encodeURIComponent(id)}`, { offset, data });
+    },
+    finishUpload: (id) => request<BundleSummary>("POST", `/updates/uploads/${encodeURIComponent(id)}/finish`, {}),
+    deleteBundle: async (sha) => {
+      await request("POST", `/updates/bundles/${encodeURIComponent(sha)}/delete`, {});
+    },
     rotateCertificate: () => request<CertificateView>("POST", "/certificate/rotate", {}),
     switchCertificate: (fingerprint) => request<CertificateView>("POST", "/certificate/switch", { fingerprint }),
     discardCertificate: () => request<CertificateView>("POST", "/certificate/discard", {}),

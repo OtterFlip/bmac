@@ -45,7 +45,7 @@ pub const DASHBOARD_PORT: u16 = 8443;
 /// its own devices apart when it removes them (`lab/README.md`). Each lab
 /// has its own, passed in this variable, so two labs never share a name.
 pub const LAB_TAILSCALE_PREFIX_VAR: &str = "BMAC_LAB_TAILSCALE_PREFIX";
-const LAB_TAILSCALE_PREFIX: &str = "bmaclab-";
+const LAB_TAILSCALE_PREFIX: &str = "bmacnvme-";
 
 /// The lab's tailnet prefix.
 ///
@@ -447,16 +447,17 @@ pub fn prepare(
     })
 }
 
-/// The packages in `dir` (`*.deb`), sorted by name.
+/// The packages in `dir` (`*.deb`) and the signed bundle they came from
+/// (`*.bundle`), sorted by name.
 pub fn read_packages(dir: &Path) -> Result<Vec<Package>, String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".deb"))
+        .filter(|n| n.ends_with(".deb") || n.ends_with(".bundle"))
         .collect();
     names.sort();
-    if names.is_empty() {
+    if !names.iter().any(|n| n.ends_with(".deb")) {
         return Err(format!("{} holds no BMAC packages", dir.display()));
     }
     names

@@ -2355,6 +2355,25 @@ enables it), signs the bundles used to test upgrades.
 **From v2:** the Tauri bundle configuration and `.deb` build in
 `dashboard/`, and the release steps in `dev/README.md`.
 
+**As built:** `dev/release.py build --key KEY --check-reproducible` builds
+`bmacd`, `bmac-backupd` and the Deployer twice from an empty target
+directory, with every file and archive member dated to the last commit
+(`SOURCE_DATE_EPOCH`), the Deployer's Tauri package repacked the same way
+and given the same Debian version as the others; it signs only when both
+builds are byte-identical. A bundle is a ustar archive: `manifest.json`
+(version, build time, record schema range, and each package's name,
+version, architecture, size and SHA-256), `manifest.sig` (raw Ed25519 by
+`openssl pkeyutl`, given the key by path only), then exactly the listed
+packages; `crates/bmac-release` reads and checks it. The Ed25519 keys are
+in `~/.config/bmac/signing/` (the release key to be archived offline); their
+public halves are compiled into `bmac-release`, the development key only
+under `dev-signing`. The Deployer carries `bmacd` alone as a second signed
+bundle (`bmac-host-VERSION.bundle`), which first boot leaves in
+`/var/lib/bmac/updates/seed/` and `bmacd` keeps as the host's installed
+bundle, so even a host's first update can be rolled back. `dev/build_deb.py`
+makes the same for the lab with the development key, and with `--bundle`
+a full development bundle.
+
 ### M10.2 Cluster update job
 
 **Builds:** the update job (`DEPLOYMENT.md`, "Upgrades"): take a release
@@ -2372,6 +2391,38 @@ duration of an update, and a newer schema version refuses older engines.
 **From v2:** `update_cluster_runtime.sh`: staged files, hash checks, `bash
 -n`, one host at a time, rollback on failure, and the order tests
 (`test_update_cluster_runtime.py`).
+
+**As built:** Settings, then Updates uploads a bundle in 512 KiB chunks
+(an admin action, audited) and lists each host's version, installed and
+previous bundle, and the staged bundles. `cluster.update` and
+`cluster.rollback` are checkpointed native jobs holding the `update` and
+`cluster-membership` locks. Each host keeps bundles in
+`/var/lib/bmac/updates/` and checks a bundle itself before installing; a
+host without the bundle downloads it from the job's host over 8444
+(`/v1/updates/bundles/SHA`), and the job asks each host to install
+(`/v1/updates/install`, only for a running update job leased by the asking
+host) and polls its state. A host installs with `apt-get` in a transient
+systemd unit, so the install outlives the `bmacd` restart it causes; the
+job's own host updates last, and its job resumes under the new `bmacd`
+from its checkpoints (`service-restart-expected`). The cluster's record
+schema is in `/etc/pve/priv/bmac/release.json`; a bundle that can't read
+it, or whose engine is older than it, is refused before anything is
+installed, as is a downgrade.
+
+**As built (lab):** `lab/lab scenario m10_update` passes on the SATA, SCSI
+and NVMe labs (`bmacsata`, `bmacscsi`, `bmacnvme`), each from an
+`m8-storage` stage built from scratch by hosts installed from the
+bundle-carrying host ISO. Every host starts with that bundle installed;
+development bundles VERSION+b1 and +b2 are built and uploaded in chunks;
+the cluster updates to b1 with the production VMs running; during the
+update to b2 the second host in the job's order has its `bmac-source`
+masked and stopped, installs b2, and fails its health check, which stops
+the update with the first host on b2 and the third untouched on b1; the
+offered rollback returns the first two hosts to b1, keeping b2 for a
+second try. Neither production VM's QEMU process changes throughout. Masking
+alone was not enough: systemd drops the restart `bmacd`'s restart passes to
+a masked unit through `PartOf=`, so the old process ran on. The job's host
+is the one the runner picks, not necessarily the Dashboard's.
 
 **M10 done when:** the lab updates a three-host cluster from one build to
 the next with a production VM running, and an injected failure on the

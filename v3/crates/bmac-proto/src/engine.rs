@@ -182,6 +182,20 @@ pub enum EngineCall {
     SaveBackupSettings {
         request: crate::backups::SaveBackupSettings,
     },
+    Updates {},
+    StartUpload {
+        request: crate::updates::StartUpload,
+    },
+    UploadChunk {
+        upload_id: String,
+        request: crate::updates::UploadChunk,
+    },
+    FinishUpload {
+        upload_id: String,
+    },
+    DeleteBundle {
+        sha256: String,
+    },
 }
 
 impl EngineCall {
@@ -245,6 +259,11 @@ impl EngineCall {
             EngineCall::SaveBackupPolicy { .. } => "save_backup_policy",
             EngineCall::DeleteBackupPolicy { .. } => "delete_backup_policy",
             EngineCall::SaveBackupSettings { .. } => "save_backup_settings",
+            EngineCall::Updates {} => "updates",
+            EngineCall::StartUpload { .. } => "start_upload",
+            EngineCall::UploadChunk { .. } => "upload_chunk",
+            EngineCall::FinishUpload { .. } => "finish_upload",
+            EngineCall::DeleteBundle { .. } => "delete_bundle",
         }
     }
 }

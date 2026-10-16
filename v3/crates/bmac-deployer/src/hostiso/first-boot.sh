@@ -197,6 +197,12 @@ packages in ${MEDIA_PACKAGES}, then systemctl start bmacd. SSH and Tailscale are
   exit 1
 fi
 tar -x --no-same-owner --no-same-permissions -C "$work" -f "$work/packages.tar"
+# The signed bundle the packages came from: bmacd keeps it as the installed
+# bundle, so the host's first update has one to roll back to.
+if compgen -G "$work/bundles/*.bundle" >/dev/null; then
+  install -d -m 0700 /var/lib/bmac /var/lib/bmac/updates /var/lib/bmac/updates/seed
+  install -m 0600 "$work"/bundles/*.bundle /var/lib/bmac/updates/seed/
+fi
 dpkg -i "$work"/packages/*.deb
 
 # bmacd starts once the network is up; with the bootstrap file present and

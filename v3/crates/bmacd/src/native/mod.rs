@@ -47,11 +47,24 @@ pub fn boot_id() -> Result<String, String> {
         .map_err(|e| format!("cannot read {BOOT_ID}: {e}"))
 }
 
+/// Written in the job's work directory before the job does something that
+/// restarts `bmacd`, as installing a new `bmacd` does: the process ID of
+/// the `bmacd` that runs it. A starting `bmacd` with another ID resumes it.
+pub const SERVICE_RESTART_MARKER: &str = "service-restart-expected";
+
 /// Whether the job whose work directory is `work` asked for a restart and
-/// the host has booted since, given this boot's ID.
+/// the host has booted since, given this boot's ID, or asked for a restart
+/// of `bmacd` and `bmacd` (now `daemon_pid`) has restarted since.
 pub fn restarted_since_asked(work: &Path, boot_id: &str) -> bool {
     std::fs::read_to_string(work.join(RESTART_MARKER))
         .is_ok_and(|before| !before.trim().is_empty() && before.trim() != boot_id)
+}
+
+pub fn service_restarted_since_asked(work: &Path, daemon_pid: u32) -> bool {
+    std::fs::read_to_string(work.join(SERVICE_RESTART_MARKER))
+        .ok()
+        .and_then(|before| before.trim().parse::<u32>().ok())
+        .is_some_and(|before| before != daemon_pid)
 }
 
 /// Why an operation stopped before finishing.
@@ -620,6 +633,28 @@ impl Workflow {
             .map_err(|e| Stop::failed(format!("cannot clear {}: {e}", marker.display())))?;
         Ok(Some(true))
     }
+
+    /// Call just before something restarts `bmacd`, which stops this
+    /// process: the new `bmacd` resumes the job.
+    pub fn expect_service_restart(&self) -> Result<(), Stop> {
+        let daemon = rustix::process::getppid().map_or(0, |pid| pid.as_raw_nonzero().get());
+        write_atomic(
+            &self.work.join(SERVICE_RESTART_MARKER),
+            daemon.to_string().as_bytes(),
+        )
+        .map_err(|e| Stop::failed(format!("cannot record the expected restart: {e}")))
+    }
+
+    /// Forgets [`Workflow::expect_service_restart`].
+    pub fn clear_service_restart(&self) -> Result<(), Stop> {
+        match std::fs::remove_file(self.work.join(SERVICE_RESTART_MARKER)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Stop::failed(format!(
+                "cannot clear the expected restart: {e}"
+            ))),
+        }
+    }
 }
 
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -711,6 +746,10 @@ pub fn main(args: &[String]) -> ExitCode {
             }
             crate::backup::recover::OPERATION => {
                 crate::backup::recover::run(&Workflow::stdio(), rest).await
+            }
+            op @ (crate::updates::job::UPDATE_OPERATION
+            | crate::updates::job::ROLLBACK_OPERATION) => {
+                crate::updates::job::run(&Workflow::stdio(), op).await
             }
             other => {
                 eprintln!("{other} is not a native operation");

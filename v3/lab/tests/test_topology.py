@@ -74,7 +74,7 @@ class CheckedInTopologyTest(unittest.TestCase):
 
     def test_tailnet_names_avoid_the_v2_test_clusters_names(self) -> None:
         names = [self.topology.tailnet_name(vm) for vm in self.topology.vms]
-        self.assertEqual(names[0], "bmaclab-mox1")
+        self.assertEqual(names[0], "bmacnvme-mox1")
         for reserved in ("qdevice", "mox1", "mox2", "mox3"):
             self.assertIn(reserved, self.topology.reserved_tailnet_names)
             self.assertNotIn(reserved, names)

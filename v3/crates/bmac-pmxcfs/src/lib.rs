@@ -21,7 +21,7 @@ use std::path::PathBuf;
 pub use fsops::{FsOps, RealFs};
 pub use json::{canonical_json, reject_secret_material};
 pub use lock::{LockOptions, REGISTRY_LOCK_PREFIX, RegistryLock};
-pub use record::{RecordWrite, SCHEMA_VERSION, read_record, write_record};
+pub use record::{OLDEST_READ_SCHEMA, RecordWrite, SCHEMA_VERSION, read_record, write_record};
 pub use store::{Budget, Pmxcfs, WriteOutcome};
 pub use time::utc_now;
 

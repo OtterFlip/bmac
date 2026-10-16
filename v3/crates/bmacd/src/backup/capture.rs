@@ -1021,7 +1021,7 @@ pub async fn run(flow: &Workflow, args: &[String]) -> ExitCode {
             guests: &guests,
             store: &BackupStore::system(),
             cluster_uuid,
-            bmac_version: env!("CARGO_PKG_VERSION").into(),
+            bmac_version: crate::VERSION.into(),
             now_ms: &now,
             poll: Duration::from_secs(10),
             replication_timeout: Duration::from_secs(15 * 60),

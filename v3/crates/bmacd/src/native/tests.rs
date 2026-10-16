@@ -251,3 +251,14 @@ async fn a_restart_the_job_asked_for_is_seen_once() {
         "forgotten once seen"
     );
 }
+
+#[test]
+fn a_job_that_restarts_bmacd_resumes_only_under_a_new_bmacd() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!service_restarted_since_asked(dir.path(), 42));
+    std::fs::write(dir.path().join(SERVICE_RESTART_MARKER), "41\n").unwrap();
+    assert!(service_restarted_since_asked(dir.path(), 42));
+    assert!(!service_restarted_since_asked(dir.path(), 41));
+    std::fs::write(dir.path().join(SERVICE_RESTART_MARKER), "garbage").unwrap();
+    assert!(!service_restarted_since_asked(dir.path(), 42));
+}

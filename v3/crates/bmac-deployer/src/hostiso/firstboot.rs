@@ -48,22 +48,27 @@ fn sha256_hex(data: &[u8]) -> String {
         .collect()
 }
 
-/// The packages for the install media: `packages/<name>.deb`, and the tar's
-/// SHA-256 for the first-boot script.
+/// The packages for the install media: `packages/<name>.deb`, the signed
+/// bundle they came from as `bundles/<name>.bundle`, which first boot
+/// leaves for bmacd to keep for a rollback, and the tar's SHA-256 for the
+/// first-boot script.
 pub fn packages_tar(packages: &[Package], mtime_s: u64) -> Result<(Vec<u8>, String), String> {
-    if packages.is_empty() {
+    if !packages.iter().any(|p| p.file_name.ends_with(".deb")) {
         return Err("No BMAC packages to put on the ISO.".into());
     }
     let mut tar = TarWriter::new(mtime_s);
     for package in packages {
-        if !package_name_ok(&package.file_name) {
-            return Err(format!(
-                "{:?} is not a package file name",
-                package.file_name
-            ));
-        }
+        let folder = match package_name_ok(&package.file_name) {
+            Some(folder) => folder,
+            None => {
+                return Err(format!(
+                    "{:?} is not a package file name",
+                    package.file_name
+                ));
+            }
+        };
         tar.file(
-            &format!("packages/{}", package.file_name),
+            &format!("{folder}/{}", package.file_name),
             0o644,
             &package.bytes,
         );
@@ -82,13 +87,22 @@ fn plain(value: &str, what: &str, allowed: impl Fn(char) -> bool) -> Result<(), 
     Ok(())
 }
 
-fn package_name_ok(name: &str) -> bool {
-    name.ends_with(".deb")
-        && !name.starts_with(['.', '-'])
+/// The media folder a package or bundle file goes in, if its name is one.
+fn package_name_ok(name: &str) -> Option<&'static str> {
+    let plain = !name.starts_with(['.', '-'])
         && name.len() <= 90
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._+-~".contains(c))
+            .all(|c| c.is_ascii_alphanumeric() || "._+-~".contains(c));
+    if !plain {
+        None
+    } else if name.ends_with(".deb") {
+        Some("packages")
+    } else if name.ends_with(".bundle") {
+        Some("bundles")
+    } else {
+        None
+    }
 }
 
 impl FirstBoot<'_> {
@@ -287,6 +301,28 @@ pub(crate) mod tests {
         }];
         assert!(packages_tar(&bad, 0).is_err());
         assert!(packages_tar(&[], 0).is_err());
+    }
+
+    #[test]
+    fn the_bundle_the_packages_came_from_goes_beside_them() {
+        let deb = Package {
+            file_name: "bmacd_3.0.0_amd64.deb".into(),
+            bytes: vec![7u8; 100],
+        };
+        let bundle = Package {
+            file_name: "bmac-host-3.0.0.bundle".into(),
+            bytes: vec![9u8; 100],
+        };
+        let (tar, _) = packages_tar(&[deb.clone(), bundle.clone()], 0).unwrap();
+        assert_eq!(&tar[..30], b"packages/bmacd_3.0.0_amd64.deb");
+        assert_eq!(&tar[1024..1054], b"bundles/bmac-host-3.0.0.bundle");
+        // A bundle alone installs nothing, and other files don't go.
+        assert!(packages_tar(std::slice::from_ref(&bundle), 0).is_err());
+        let other = Package {
+            file_name: "notes.txt".into(),
+            bytes: vec![1],
+        };
+        assert!(packages_tar(&[deb, other], 0).is_err());
     }
 
     #[test]

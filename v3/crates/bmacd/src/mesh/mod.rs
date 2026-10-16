@@ -17,8 +17,10 @@
 //! certificate may only present a join or enrollment token.
 
 pub mod catchup;
+pub mod client;
 pub mod tls;
 pub mod tokens;
+mod updates;
 
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
@@ -128,6 +130,11 @@ pub struct Mesh {
     runner: OnceLock<Arc<Runner>>,
     members: Mutex<Option<(Instant, BTreeSet<HostSlot>)>>,
     catch_up: catchup::CatchUp,
+    installer: OnceLock<crate::updates::install::Installer>,
+    /// Held while an install request is checked and recorded.
+    installing: tokio::sync::Mutex<()>,
+    /// The members whose streams this host receives now.
+    reachable: Mutex<BTreeSet<HostSlot>>,
 }
 
 impl std::fmt::Debug for Mesh {
@@ -213,6 +220,9 @@ impl Mesh {
             runner: OnceLock::new(),
             members: Mutex::new(None),
             catch_up: catchup::CatchUp::new(config_rate),
+            installer: OnceLock::new(),
+            installing: tokio::sync::Mutex::new(()),
+            reachable: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -227,6 +237,33 @@ impl Mesh {
     /// Lets peers deliver answers to the jobs running here.
     pub fn set_runner(&self, runner: Arc<Runner>) {
         let _ = self.runner.set(runner);
+    }
+
+    /// Lets this host take updates.
+    pub fn set_installer(&self, installer: crate::updates::install::Installer) {
+        let _ = self.installer.set(installer);
+    }
+
+    /// A client for the other members' port 8444, as this host.
+    pub fn peer_client(&self) -> client::PeerClient {
+        client::PeerClient::new(
+            self.config.tls.client.clone(),
+            self.cluster.clone(),
+            self.config.resolve.clone(),
+        )
+    }
+
+    /// Every cluster member's slot.
+    pub async fn member_hosts(&self) -> Result<BTreeSet<HostSlot>, ApiError> {
+        self.members().await
+    }
+
+    pub fn installer(&self) -> Option<&crate::updates::install::Installer> {
+        self.installer.get()
+    }
+
+    pub fn reachable_peers(&self) -> Vec<HostSlot> {
+        self.reachable.lock().unwrap().iter().copied().collect()
     }
 
     async fn membership(&self) -> Result<Membership, ApiError> {
@@ -273,6 +310,15 @@ impl Mesh {
             .route(ENROLL_PATH, post(serve_enroll))
             .route(HOLDINGS_PATH, get(catchup::serve_holdings))
             .route(RECORDS_PATH, get(catchup::serve_records))
+            .route(
+                &format!("{}{{sha}}", bmac_proto::updates::BUNDLE_PATH),
+                get(updates::serve_bundle),
+            )
+            .route(
+                bmac_proto::updates::INSTALL_PATH,
+                post(updates::serve_install),
+            )
+            .route(bmac_proto::updates::STATE_PATH, get(updates::serve_state))
             .fallback(serve_other)
             .with_state(self.clone())
     }
@@ -521,6 +567,13 @@ impl Mesh {
     }
 
     fn reachability(&self, host: HostSlot, reachable: bool, last_seen_ms: i64) {
+        let mut peers = self.reachable.lock().unwrap();
+        if reachable {
+            peers.insert(host);
+        } else {
+            peers.remove(&host);
+        }
+        drop(peers);
         self.hub.publish(StreamBody::Host {
             host,
             reachable,

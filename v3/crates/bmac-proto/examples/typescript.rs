@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use bmac_core::job;
 use bmac_proto::{
     alerts, api, appliance_ui, backups, certificate, deployer, inventory, joins, logs, operations,
-    settings, status, stream,
+    settings, status, stream, updates,
 };
 use ts_rs::{Config, TS};
 
@@ -74,6 +74,15 @@ fn export(cfg: &Config) -> Result<(), ts_rs::ExportError> {
         backups::SetApplianceAddress,
         backups::SaveBackupSettings,
         backups::BackupsView,
+        updates::PackageSummary,
+        updates::BundleSummary,
+        updates::InstalledBundle,
+        updates::Installed,
+        updates::HostUpdates,
+        updates::UpdatesView,
+        updates::StartUpload,
+        updates::UploadStarted,
+        updates::UploadChunk,
         status::ClusterSnapshot,
         status::HostsSnapshot,
         status::VmsSnapshot,

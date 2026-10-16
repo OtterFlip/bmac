@@ -13,7 +13,7 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-# Lab builds: hosts join the tailnet as bmaclab-<host>, and a reused
+# Lab builds: hosts join the tailnet as <lab prefix><host>, and a reused
 # Tailscale key is accepted with a warning (lab/README.md).
 lab = []
 

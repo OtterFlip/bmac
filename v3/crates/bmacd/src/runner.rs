@@ -341,7 +341,8 @@ impl Runner {
             let work = self.supervisor.work_path(record.id);
             if record.state != JobState::Interrupted
                 || !held
-                || !crate::native::restarted_since_asked(&work, boot_id)
+                || !(crate::native::restarted_since_asked(&work, boot_id)
+                    || crate::native::service_restarted_since_asked(&work, std::process::id()))
             {
                 continue;
             }

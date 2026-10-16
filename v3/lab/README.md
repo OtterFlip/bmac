@@ -59,7 +59,7 @@ WWN built from the vendor, serial, and model, so the lab's NVMe disks
 exercise identification by serial.
 
 **Tailscale names.** A lab VM that joins a real tailnet is named
-`tailnet_prefix` plus its VM name (`bmaclab-mox1`), never the bare name.
+`tailnet_prefix` plus its VM name (`bmacnvme-mox1`), never the bare name.
 `reserved_tailnet_names` lists names already in use on the tailnet by the v2
 test cluster (`qdevice`, `mox1`, `mox2`, `mox3`), and the topology is
 refused if a lab name would collide with one. Code that joins a lab VM to
@@ -134,8 +134,19 @@ keeps its tailnet device. A restored stage gets the current bmacd package.
 `BMAC_LAB_FRESH=1` builds the stage again, installing the VM anew drops its
 stages, and `lab/lab rebuild` drops them with the disks.
 
+Every stage host was installed from a host ISO that carries
+`bmac-host-VERSION.bundle` (`dev/build_deb.py` signs it with the
+development key) and keeps it as its installed bundle, so work outside host
+setup and joining can start from a stage and push a newer build the way an
+administrator would: build it as a bundle (`dev/build_deb.py --version
+VERSION+bN --bundle`), upload it, and run `cluster.update`, as
+`m10_update` does from `m8-storage`. Stages built before the host ISO
+carried the bundle have none, and a rollback can't return their hosts to
+their first build.
+
 How a stage is saved depends on the lab. QEMU can't save a running NVMe
-controller ("non-migratable device"), so in the NVMe lab (`lab.toml`) the
+controller ("non-migratable device"), so in the NVMe lab (`lab.toml`,
+named `bmacnvme`, tailnet prefix `bmacnvme-`) the
 VM is shut down for the save and boots when restored. `lab-scsi.toml` and
 `lab-sata.toml` are the same topology, each with its own name, ports,
 MACs, and tailnet prefix (`bmacscsi-`, `bmacsata-`), and
@@ -176,6 +187,7 @@ stage after the chain's last rather than a second one beside it.
 | `m7-first-host` | mox3 | `m7_storage`, when every check passes | `m7_join`, `m7_cluster` | boot mirror and SATA data mirror, all LUKS2 (the run's made-up passphrase is kept with the stage and typed at the console when an NVMe-lab restore boots), setup finished, an encrypted one-host cluster whose bmacd issues join bundles |
 | `m7-cluster` | mox3, mox1, mox2 | `m7_cluster`, when every check passes, from `m7-first-host` | scenarios that need a working cluster (`m7_cluster.staged`), such as `m2_cli` and `m4_prod` | mox3 as in `m7-first-host`, then mox1 and mox2 joined through it with plain NVMe boot mirrors: a quorate three-host cluster, every setup phase complete, no join bundle left |
 | `m4-prod` | mox3, mox1, mox2 | `m4_prod`, when prod.add and its checks pass, from `m7-cluster` | `m4_prod`'s diagnostic and M4's other operations in `m4_ops` (`m4_prod.staged`) | the cluster with production VM prod1 (Ubuntu 26.04, installed unattended) running on mox1, placed on all three hosts, replicated to mox2 and mox3, under HA; the guest ISO and second admin key in the settings; the run's made-up root password is kept with the stage |
+| `m8-storage` | mox3, mox1, mox2 | `m8_storage`, when every check passes, from `m7-cluster` | scenarios that need production VMs on varied pools (`m8_storage.staged`): `m9_backup`, `m9_restore`, `m9_accept`, `m10_update` | mox2 with a raidz2 vdev, mox1 and mox3 with mirror vdevs (mox3's LUKS2), the SATA mirrors removed; production VMs small (16K blocks, on mox1 and mox3) and bulk (64K, on mox2 and mox3) running |
 
 The hosts of a stage saved together are restored together
 (`m6.reuse_cluster`), and only when each has it. `m7_join` installs mox2
@@ -201,8 +213,8 @@ The lab never joins the real tailnet before M6, so every lab VM gets a
 `tailscale` stand-in in `/usr/bin` (unless the real package is installed)
 that answers `status --json` and `ip -4` from the management network, and
 each VM's tailnet name
-(`bmaclab-qdevice`) in a marked block of `/etc/hosts`, where MagicDNS would
-resolve it. The cluster's QDevice setting names `bmaclab-qdevice`, so the
+(`bmacnvme-qdevice`) in a marked block of `/etc/hosts`, where MagicDNS would
+resolve it. The cluster's QDevice setting names `bmacnvme-qdevice`, so the
 QDevice operations run against the lab's QDevice VM.
 
 `--snapshot NAME` snapshots the lab afterwards (`bootstrapped` is the usual
@@ -298,7 +310,7 @@ bootstrap makes the users again (after `lab/lab reset installed`, say).
 ## Tailscale for the lab
 
 Until M6 the lab uses the `tailscale` stand-in above. From M6, lab VMs that
-need the real tailnet join it as `bmaclab-<vm>`, never under the bare VM
+need the real tailnet join it as `bmacnvme-<vm>`, never under the bare VM
 name. The lab uses the production tags, group, and rules, on a Tailscale
 account of its own, so nothing the lab does can reach a production tailnet:
 log the workstation in to the lab account before working on the lab, and
@@ -428,7 +440,7 @@ itself, through the API:
 - `lab/lab destroy` and `lab/lab rebuild` remove every lab device. Without an
   API key they leave the tailnet alone and say so.
 - Before a VM joins the tailnet again, the lab removes that VM's old device.
-  Otherwise Tailscale names the new device `bmaclab-<vm>-1`, and MagicDNS
+  Otherwise Tailscale names the new device `bmacnvme-<vm>-1`, and MagicDNS
   keeps the bare name on the old one.
 - `lab/lab tailnet list [VM...]` shows the lab's devices, and
   `lab/lab tailnet remove [VM...]` removes them.
