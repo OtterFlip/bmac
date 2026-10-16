@@ -2303,7 +2303,10 @@ runs host setup, issues a recovery grant on B for the new host's
 certificate, runs `backup.recover`, and checks the VMs, HA, the
 recovered cluster UUID, B's `recovery_bind`, and a new PIT on B taken
 after the recovery on a new branch from the recovered PIT.
-`BMAC_LAB_RECOVERY_ONLY=1` runs only setup and step 17.
+`BMAC_LAB_RECOVERY_ONLY=1` runs only setup and step 17 (143 checks in
+20 minutes). The final run (2026-10-15) passed all 262 checks, steps 1
+to 17 and the security checks, in 99 minutes, with no LUKS passphrase or
+grant in any host's, appliance's or Dashboard page's output.
 
 The runs found these product bugs:
 
