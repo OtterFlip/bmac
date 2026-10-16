@@ -29,7 +29,11 @@ cluster and adds backup, restore, monitoring, and alerting.
 v3 is not compatible with v2. Everything for v3 lives in this directory; the
 rest of the repository is v2, kept as reference.
 
-**Status:** design. Implementation follows an agreed implementation plan.
+**Status:** in development, following `design/IMPLEMENTATION_PLAN.md`.
+Milestones M0 to M10 are built and proven in the lab, through backups,
+restores, whole-cluster recovery, and signed rolling updates with
+rollback; M11 (native ports of the legacy scripts) and M12 (hardware runs,
+security review, and documentation for release) remain.
 
 **Development platform:** amd64 Linux with KVM and nested virtualization.
 The lab runs Proxmox hosts as nested KVM guests, the Deployer builds ISOs

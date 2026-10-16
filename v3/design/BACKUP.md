@@ -356,9 +356,10 @@ shows the bookmark's PIT as an ancestor of the new PIT on the same branch.
 ZFS itself refuses a rollback past a bookmark unless the rollback removes it,
 so an in-place rollback also removes the bookmarks of the abandoned branch.
 
-**Until the lab proves bookmarks** (items 2 and 3 of "To prove in the lab"),
-the cluster keeps the appliance heads' snapshots instead of bookmarks, on the
-same rules, and shows the extra space this costs on the Backups page.
+**Bookmarks are proven** (items 2 and 3 of "Lab proofs", M9.0), so the
+cluster relies on them. The fallback, still in the code behind
+`BOOKMARKS_PROVEN`, was to keep the appliance heads' snapshots instead of bookmarks, on the
+same rules, and show the extra space this costs on the Backups page.
 
 **Source retention.** A BMAC snapshot on the cluster is deleted only when none
 of these still needs it:
@@ -366,9 +367,7 @@ of these still needs it:
 - local retention;
 - an open claim window or a transfer in progress;
 - a staging clone origin (v2's snapshot dependency records);
-- a local restore in progress;
-- (until bookmarks are proven) an appliance head within the delinquency
-  period.
+- a local restore in progress.
 
 BMAC snapshots and bookmarks are only ever created and deleted by `bmacd`;
 snapshots on the owner only, bookmarks on every placement host.
@@ -760,8 +759,7 @@ backup policy of its own.
    clone, or a restore still needs it. Only the bookmark is needed to send
    the next incremental, so the snapshot doesn't have to wait for the next
    PIT. The bookmark is kept until every assigned appliance has published the
-   branch's first PIT or become delinquent. Until bookmarks are proven (lab
-   item 2), the snapshot is kept instead, on the same terms.
+   branch's first PIT or become delinquent.
 3. **The first PIT of the branch** is sent as an incremental from that base
    (`zfs send -i vol#restored vol@new`). Each appliance that holds the
    restored PIT (matching GUIDs, whichever appliance the restore came from)
@@ -1084,9 +1082,15 @@ settings:
 | Appliance OS lost, pool intact | Reinstall, unlock, `adopt` |
 | Appliance pool lost | Register a new appliance; it seeds from the newest PITs |
 
-## To prove in the lab before relying on it
+## Lab proofs
 
-Each item has a safe fallback that is used until it's proven.
+Each item had a safe fallback, to be used until it was proven in the lab.
+All ten were proven in M9 (`IMPLEMENTATION_PLAN.md` has each run): items 1
+to 4 and 6 by `m9_spike` (M9.0), item 5 by `m9_backup` (M9.3), items 7 and
+8 by `m9_restore` (M9.4), and items 9 and 10 by `m9_accept` (M9.6). Item 9
+was checked for the firmware mode, machine, CPUs, memory, and EFI and TPM
+disks; Secure Boot wasn't checked separately. Item 2's fallback stays in
+the code behind `BOOKMARKS_PROVEN`; item 5's was never built.
 
 1. Proxmox replication carries BMAC snapshots to every placement host and
    removes them when the owner deletes them. Fallback: none needed; v2 staging

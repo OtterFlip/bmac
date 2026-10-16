@@ -1062,15 +1062,14 @@ units, Tailscale, the clock, certificate expiry, stuck cleanups, the
 QDevice's address and qnetd, mixed BMAC versions, pmxcfs use, the egress VIP
 owner, ingress, guest agents, registry agreement, pool members, LUKS, SMART
 failure and wear (reallocated sectors growing past the lowest count seen
-since bmacd started), and the pool-full projection. The thresholds are
-`conditions::Thresholds` defaults for now. Still owed:
+since bmacd started), the pool-full projection, log copy lag (M5.4), and
+backups and appliances (M9). The thresholds are `conditions::Thresholds`
+defaults for now. Still owed:
 
 - the thresholds as cluster settings;
 - boot redundancy, meaning a spare in use (with the storage operations);
 - a job failed or interrupted;
-- login failures over a threshold, and an enrollment token reused (M6);
-- log copy lag (M5.4);
-- backups and appliances (M9).
+- login failures over a threshold, and an enrollment token reused (M6).
 
 ### M5.3 Alerts, silences, notifications
 
@@ -1358,8 +1357,8 @@ Clearing needs a destructive confirmation that names the disks by serial.
 The Deployer then runs `bmac-inventory clear-zfs-labels` over the pinned
 SSH session, with the expected serial, WWN, and pool GUID of each disk. It
 re-identifies each disk and refuses on any mismatch, then runs `zpool
-labelclear -f` (the remaster adds `zfsutils-linux` if the lab spike shows
-the live image lacks it) on each labelled device (whole disk or partition) and only
+labelclear -f` (where the live image has no ZFS, `bmac-inventory` zeroes
+the four label slots itself, as `labelclear -f` does) on each labelled device (whole disk or partition) and only
 on those, and re-reads the labels to prove they are gone. The inventory is
 then taken again. If the operator declines, the warning stays on the host's
 card and in the installation steps, along with v2's initramfs recovery
@@ -2273,8 +2272,8 @@ critical, as `MONITORING.md` lists it, so it becomes an alert at once.
 
 ### M9.6 Lab proofs and acceptance
 
-**Builds:** the remaining lab proofs in `BACKUP.md` ("To prove in the
-lab"), each with its fallback wired in until it passes, then the acceptance
+**Builds:** the remaining lab proofs in `BACKUP.md` ("Lab proofs"), each
+with its fallback wired in until it passes, then the acceptance
 scenario. First, four changes decided at the start of M9.6: retention by
 the cluster's calendar (`BACKUP.md`, "Appliance retention" and
 "Calendar"), the cluster's time zone chosen in the Deployer and carried to

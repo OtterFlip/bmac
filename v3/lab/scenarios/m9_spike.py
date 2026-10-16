@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 """M9.0's lab spike: the ZFS behaviour BACKUP.md relies on, proven before
-any code does (its "To prove in the lab" items 1 to 4). It starts from the
+any code does (its "Lab proofs" items 1 to 4). It starts from the
 cluster with production VMs (m8_storage.staged) and uses the "small" VM,
 placed on mox1 and mox3, as the backed-up VM. The lab's appliance VM
 (Ubuntu, its own OpenZFS) plays the appliance with a plain pool on its

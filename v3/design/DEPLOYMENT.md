@@ -161,7 +161,8 @@ commands only read.
    them now: every listed disk is selected, each can be deselected, and a
    destructive confirmation names them by serial. `bmac-inventory` then
    re-identifies each disk by serial, WWN, and the old pool's GUID, refuses
-   on any mismatch, runs `zpool labelclear -f` on the labelled devices only,
+   on any mismatch, runs `zpool labelclear -f` on the labelled devices only
+   (zeroing the four label slots itself where the live image has no ZFS),
    checks the labels are gone, and the inventory is read again. If the
    operator declines, the warning stays on the host's card and in the
    installation steps, with v2's instructions for recovering at the
