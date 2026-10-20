@@ -4,7 +4,6 @@ secrets.env
 tailscale.jsonc
 config/*.conf
 config/*.cer
-cluster_state.txt
 __pycache__/
 artifacts/
 config/artifacts/

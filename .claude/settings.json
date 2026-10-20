@@ -1,0 +1,13 @@
+
+{
+  "permissions": {
+    "deny": [
+      "Read(*.env)",
+      "Read(*.key)",
+      "Read(*.cer)",
+      "Read(tailscale.jsonc)",
+      "Read(__pycache__/**)",
+      "Read(artifacts/**)"
+    ]
+  }
+}
