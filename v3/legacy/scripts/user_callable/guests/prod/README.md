@@ -66,7 +66,7 @@ The `PROD_VM_MEMORY_GIB` cluster default and the prompt are whole GiB values.
 The creator converts the selected value to MiB only for the registry and
 Proxmox APIs.
 Default staging FQDNs are derived later as
-`stageNprodN.<primary-FQDN>`, such as `stage1prod1.mydomain.com`. This keeps the
+`stageNprodN.<primary-FQDN>`, such as `stage1prod1.example.com`. This keeps the
 staging name directly beneath the application's domain so a first-level
 wildcard certificate can cover it.
 

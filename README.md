@@ -84,14 +84,14 @@ After creating a production VM, you can test creation and teardown of a staging 
 ### Instructions for Cloudflare Setup
 
 
-1. Under Domains | Overview click on your app's domain (such as mydomain.com), then under Domains | DNS, add a new DNS record with these settings:
+1. Under Domains | Overview click on your app's domain (such as example.com), then under Domains | DNS, add a new DNS record with these settings:
     Name: www
     Type: A
     IPv4 Address: 192.0.2.1
     Proxied: Turned On
 
 
-2. Create two Load Balancing monitors, one for the prod pool and one for the staging pool.  Each of these two pools will typically just have the single endpoint - the IP of the proxmox host you assign as the owner of your prod VM, and the IP of the proxmox host that's acting as the standby for your prod VM, respectively. Traffic will be sent to the pool associated with this monitor in your load-balancer.  Within the Proxmox cluster, that traffic will then be directed to the prod VM which must be setup to respond to HTTP /healthz GET requests with 200 (and "ok" response body) for requests to your mydomain.com domain. The sample app deploy script, `deploy_hello_app_to_prod.sh`, will set up NGINX on a prod VM to respond to /healthz GET requests in this fashion. If you're still on the domains page then click "Back to Domains" to see the whole left-side menu and then under "Delivery & performance" | "Load Balancing" use the "Monitors" tab and create one monitor each for mox1 and mox2 (2 monitors total) with these settings (note that if you haven't yet enabled Load Balancing on your account, which costs ~$5/month, you'll need to enable it):
+2. Create two Load Balancing monitors, one for the prod pool and one for the staging pool.  Each of these two pools will typically just have the single endpoint - the IP of the proxmox host you assign as the owner of your prod VM, and the IP of the proxmox host that's acting as the standby for your prod VM, respectively. Traffic will be sent to the pool associated with this monitor in your load-balancer.  Within the Proxmox cluster, that traffic will then be directed to the prod VM which must be setup to respond to HTTP /healthz GET requests with 200 (and "ok" response body) for requests to your example.com domain. The sample app deploy script, `deploy_hello_app_to_prod.sh`, will set up NGINX on a prod VM to respond to /healthz GET requests in this fashion. If you're still on the domains page then click "Back to Domains" to see the whole left-side menu and then under "Delivery & performance" | "Load Balancing" use the "Monitors" tab and create one monitor each for mox1 and mox2 (2 monitors total) with these settings (note that if you haven't yet enabled Load Balancing on your account, which costs ~$5/month, you'll need to enable it):
 
     ```
     Name: prod-via-prod-host-http-healthz
@@ -137,12 +137,12 @@ After creating a production VM, you can test creation and teardown of a staging 
     Notification Email: enter your email address here
     ```
 
-4. Now back on the "Load Balancing" page on the "Load Balancers" tab you need to create two load balancers, one for the traffic to the prod VM on the primary/prod host, and the other for traffic to possible staging guests on the standby/stage host, for a total of 2 load balancers, with these settings.  PAY VERY CLOSE ATTENTION to the Hostename field and note that for the staging hostname you must use the *.mydomain.com format:
+4. Now back on the "Load Balancing" page on the "Load Balancers" tab you need to create two load balancers, one for the traffic to the prod VM on the primary/prod host, and the other for traffic to possible staging guests on the standby/stage host, for a total of 2 load balancers, with these settings.  PAY VERY CLOSE ATTENTION to the Hostename field and note that for the staging hostname you must use the *.example.com format:
 
     ```
-    Hostname: mydomain.com
+    Hostname: example.com
     proxy (orange checkbox): CHECKED
-    load balancer description: mydomain.com for prod
+    load balancer description: example.com for prod
     Session Affinity: UNCHECKED
     Adaptive Routing: UNCHECKED
     Pools: Add prod pool and then stage pool in that order (this order is CRITICAL)
@@ -151,9 +151,9 @@ After creating a production VM, you can test creation and teardown of a staging 
     Traffic Steering: Off - this is what you want as this will do active/passive failover for you
     Custom Rules: none
 
-    Hostname: *.mydomain.com
+    Hostname: *.example.com
     proxy (orange checkbox): CHECKED
-    load balancer description: *.mydomain.com for staging
+    load balancer description: *.example.com for staging
     Session Affinity: UNCHECKED
     Adaptive Routing: UNCHECKED
     Pools: Add stage pool and then prod pool in that order (this order is CRITICAL)
@@ -166,10 +166,10 @@ After creating a production VM, you can test creation and teardown of a staging 
 5. Now Under Domains (click on your domain) | Rules | Overview, use "Create Rule" and choose "Redirect Rule" and in its settings choose these:
 
     ```
-    Rule Name: Redirect from http/https www.mydomain.com to https mydomain.com
+    Rule Name: Redirect from http/https www.example.com to https example.com
     CHECK "Wildcard pattern"
-    Request URL: http*://www.mydomain.com/*
-    Target URL: https://mydomain.com/${2}
+    Request URL: http*://www.example.com/*
+    Target URL: https://example.com/${2}
     Status code: 301 - Permanent Redirect
     UNCHECKED "Preserve query string"
     Place at: First
@@ -179,7 +179,7 @@ After creating a production VM, you can test creation and teardown of a staging 
 
     ```
     Private Key type: RSA (2048)
-    Hostnames: mydomain.com and *.mydomain.com
+    Hostnames: example.com and *.example.com
     Validity: 15 years
     Save the certificate to a .cer file on your workstation.  This is the public key.
     Save the private key to a .key file in the same dir as the .cer file.  This is the private key.  Never share it.

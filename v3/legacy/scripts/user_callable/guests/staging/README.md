@@ -80,7 +80,7 @@ The registry atomically reserves:
 - a live-checked free Proxmox VMID;
 - a deterministic locally-administered MAC;
 - `stageNprodN.<source-primary-domain>` by default (for example,
-  `stage1prod1.mydomain.com`), or the exact optional
+  `stage1prod1.example.com`), or the exact optional
   override entered by the operator.
 
 Before allocation, the creator loads
