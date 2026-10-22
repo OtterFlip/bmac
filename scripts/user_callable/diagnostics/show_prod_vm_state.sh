@@ -23,7 +23,7 @@ usage() {
 Usage: scripts/user_callable/diagnostics/show_prod_vm_state.sh prodN
 
 Inspect one registered production VM without changing guest, Proxmox, HA,
-replication, route, or registry configuration. QGA and guest SSH inspection
+replication, tunnel, or registry configuration. QGA and guest SSH inspection
 commands can create normal process/audit log entries.
 EOF
 }
@@ -140,7 +140,7 @@ resource_json="$(registry_cmd get "$RESOURCE_NAME")" || {
   exit 1
 }
 orchestration_json="$(registry_cmd orchestration-get "$RESOURCE_NAME")" || exit 1
-routes_json="$(registry_cmd list-routes)" || exit 1
+tunnel_json="$(registry_cmd tunnel-productions)" || exit 1
 cluster_vms_json="$(pvesh_get /cluster/resources --type vm)" || exit 1
 ha_resources_json="$(pvesh_get /cluster/ha/resources)" || exit 1
 replication_json="$(pvesh_get /cluster/replication)" || exit 1
@@ -150,7 +150,7 @@ ha_rules_json="$(
 
 write_json "${RUN_DIR}/resource.json" "$resource_json"
 write_json "${RUN_DIR}/orchestration.json" "$orchestration_json"
-write_json "${RUN_DIR}/routes.json" "$routes_json"
+write_json "${RUN_DIR}/tunnel.json" "$tunnel_json"
 write_json "${RUN_DIR}/cluster-vms.json" "$cluster_vms_json"
 write_json "${RUN_DIR}/ha-resources.json" "$ha_resources_json"
 write_json "${RUN_DIR}/replication.json" "$replication_json"
@@ -201,7 +201,7 @@ ALIASES_CSV="${fields[11]}"
 }
 
 section "Registry and orchestration records" \
-  "show the durable source of truth for identity, placement, lifecycle, routes, and resume state."
+  "show the durable source of truth for identity, placement, lifecycle, domains, and resume state."
 run "Production resource record" python3 -m json.tool "${RUN_DIR}/resource.json"
 run "Production orchestration record" \
   python3 -m json.tool "${RUN_DIR}/orchestration.json"
@@ -213,12 +213,12 @@ printf '  ip=%s mac=%s volume=%s\n' \
 printf '  primary=%s aliases=%s\n' "$PRIMARY_DOMAIN" "${ALIASES_CSV:-none}"
 
 section "Cross-layer contract validation" \
-  "require registry, live QEMU identity, HA request/rule, routes, and replication topology to agree."
+  "require registry, live QEMU identity, HA request/rule, tunnel input, and replication topology to agree."
 contract_ready=1
 if python3 - \
   "${RUN_DIR}/resource.json" \
   "${RUN_DIR}/orchestration.json" \
-  "${RUN_DIR}/routes.json" \
+  "${RUN_DIR}/tunnel.json" \
   "${RUN_DIR}/cluster-vms.json" \
   "${RUN_DIR}/ha-resources.json" \
   "${RUN_DIR}/ha-rules.json" \
@@ -226,7 +226,7 @@ if python3 - \
 import json
 import sys
 
-resource, orchestration, routes, vms, ha, rules, replication = [
+resource, orchestration, tunnel, vms, ha, rules, replication = [
     json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]
 ]
 name = resource["name"]
@@ -242,7 +242,6 @@ def require(condition, message):
 
 require(resource["kind"] == "production", "registry kind is production")
 require(resource["state"] == "active", "registry state is active")
-require(resource["routes_enabled"] is True, "registry routes are enabled")
 require(orchestration.get("install_phase") == "network-finalized",
         "install phase is network-finalized")
 
@@ -304,19 +303,27 @@ actual_targets = {row.get("target") for row in jobs}
 require(len(jobs) == len(expected_targets) and actual_targets == expected_targets,
         "replication jobs exactly match placement minus owner")
 
-resource_routes = [row for row in routes if row.get("resource") == name]
-expected_domains = {
-    resource["domains"]["primary"],
-    *resource["domains"]["aliases"],
-}
-require({row.get("domain") for row in resource_routes} == expected_domains,
-        "registered routes exactly match primary and alias domains")
+tunnel_rows = [row for row in tunnel if row.get("name") == name]
+require(
+    len(tunnel_rows) == 1
+    and tunnel_rows[0]["ip"] == resource["ip"]
+    and tunnel_rows[0]["primary"] == resource["domains"]["primary"]
+    and tunnel_rows[0]["aliases"] == resource["domains"]["aliases"],
+    "tunnel input maps the primary and alias domains to this VM's slot",
+)
 PY
 then
   printf '\n  [PASS] Cross-layer production contract is internally consistent.\n'
 else
   contract_ready=0
   printf '\n  [FAIL] Cross-layer production contract validation failed.\n'
+fi
+if node_exec "$COORDINATOR" /usr/local/lib/app-ha-proxmox/lib/tunnel_sync.sh --check \
+  >/dev/null 2>&1; then
+  printf '  [PASS] %s'"'"'s tunnel config matches the registry.\n' "$COORDINATOR"
+else
+  contract_ready=0
+  printf '  [FAIL] %s'"'"'s tunnel config differs from the registry; run update_cluster_runtime.sh or sync_cluster_network.sh.\n' "$COORDINATOR"
 fi
 
 section "Live Proxmox, HA, replication, and disk state" \
@@ -469,7 +476,7 @@ section "Production VM diagnostic verdict" \
   "summarize whether durable policy and live guest health agree."
 verdict_rc=1
 if ((contract_ready && runtime_ready)); then
-  printf '  [HEALTHY] %s is active, HA-managed, replicated, routed, QGA-responsive, and reachable by strict SSH.\n' \
+  printf '  [HEALTHY] %s is active, HA-managed, replicated, in the tunnel config, QGA-responsive, and reachable by strict SSH.\n' \
     "$RESOURCE_NAME"
   verdict_rc=0
 else
@@ -477,16 +484,16 @@ else
 fi
 
 section "Hello application deployment (optional)" \
-  "report whether scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh has deployed the hello app inside the guest; informational only."
+  "report whether scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh has deployed the example todo app inside the guest; informational only."
 hello_answer=""
 if bmac_ui_is_json; then
   bmac_ui_confirm --id hello_app --question \
-    --title "Check whether the hello app is deployed inside $RESOURCE_NAME?" \
+    --title "Check whether the example todo app is deployed inside $RESOURCE_NAME?" \
     --message "This check runs from this workstation using exactly: ssh $RESOURCE_NAME" \
     --confirm-label "Check it" --cancel-label "Skip" && hello_answer=y
 elif [[ -t 0 ]]; then
   printf 'This check runs from this workstation using exactly: ssh %s\n' "$RESOURCE_NAME"
-  read -r -p "Check whether the hello app is deployed inside $RESOURCE_NAME? [y/N] " \
+  read -r -p "Check whether the example todo app is deployed inside $RESOURCE_NAME? [y/N] " \
     hello_answer || hello_answer=""
 fi
 if [[ ! "$hello_answer" =~ ^[Yy]([Ee][Ss])?$ ]]; then
@@ -498,9 +505,6 @@ elif ssh -o BatchMode=yes -o ConnectTimeout=8 "$RESOURCE_NAME" \
 set -u
 set -o pipefail
 primary_domain="$1"
-site=/etc/nginx/sites-available/hello-app
-link=/etc/nginx/sites-enabled/hello-app
-index=/var/www/hello-app/index.html
 deployed=1
 
 check() {
@@ -514,23 +518,19 @@ check() {
   fi
 }
 
-check "nginx is installed" command -v nginx
-check "managed NGINX site exists at $site" \
-  grep -Eq 'Managed by (app|scripts/user_callable/guests/prod)/deploy_hello_app_to_prod[.]sh' "$site"
-check "NGINX site is enabled at $link" \
-  test "$(readlink "$link" 2>/dev/null)" = ../sites-available/hello-app
-check "hello page exists at $index" grep -Fq '<h1>Hello, world!</h1>' "$index"
+check "the app is installed at /usr/local/bin/hello-todo" test -x /usr/local/bin/hello-todo
+check "hello-todo.service is enabled" systemctl is-enabled --quiet hello-todo.service
+check "hello-todo.service is active" systemctl is-active --quiet hello-todo.service
 check "origin certificate and key are installed" \
-  test -s /etc/nginx/ssl/cloudflare-origin.pem -a -s /etc/nginx/ssl/cloudflare-origin.key
-check "nginx.service is active" systemctl is-active --quiet nginx
+  test -s /etc/hello-todo/cert.pem -a -s /etc/hello-todo/key.pem
 if command -v curl >/dev/null 2>&1; then
-  check "HTTPS /healthz for $primary_domain returns ok" bash -c '
+  check "HTTPS /api/v1/info for $primary_domain answers" bash -c '
 curl --noproxy "*" -fsS -k --max-time 5 \
-  --resolve "$1:443:127.0.0.1" "https://$1/healthz" | grep -Fxq ok
+  --resolve "$1:443:127.0.0.1" "https://$1/api/v1/info" | grep -Fq "\"max_todos\""
 ' -- "$primary_domain"
-  check "HTTPS / for $primary_domain serves the hello page" bash -c '
+  check "HTTPS / for $primary_domain serves the todo page" bash -c '
 curl --noproxy "*" -fsS -k --max-time 5 \
-  --resolve "$1:443:127.0.0.1" "https://$1/" | grep -Fq "<h1>Hello, world!</h1>"
+  --resolve "$1:443:127.0.0.1" "https://$1/" | grep -Fq "<title>Todos</title>"
 ' -- "$primary_domain"
 else
   printf '  [FAIL] curl is not installed, so local HTTPS checks cannot run\n'
@@ -539,11 +539,11 @@ fi
 ((deployed))
 GUEST
 then
-  printf '  [DEPLOYED] The hello app is deployed and serving on %s.\n' "$RESOURCE_NAME"
+  printf '  [DEPLOYED] The example todo app is deployed and serving on %s.\n' "$RESOURCE_NAME"
 else
-  printf '  [NOT DEPLOYED] The hello app is missing or incomplete on %s; see scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh.\n' \
+  printf '  [NOT DEPLOYED] The example todo app is missing or incomplete on %s; see scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh.\n' \
     "$RESOURCE_NAME"
-  bmac_ui_next_step "The hello app is missing or incomplete on $RESOURCE_NAME." \
+  bmac_ui_next_step "The example todo app is missing or incomplete on $RESOURCE_NAME." \
     --command "scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh" --workflow deploy_hello_app_to_prod
 fi
 bmac_ui_step_done

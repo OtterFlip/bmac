@@ -14,7 +14,6 @@ umask 077
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CONFIG_LIB="${SCRIPT_DIR}/config.sh"
 REGISTRY="${SCRIPT_DIR}/cluster_registry.py"
-HAPROXY_SYNC="${SCRIPT_DIR}/sync_haproxy_routes.sh"
 TEST_MODE="${APP_HA_CLEANUP_TEST_MODE:-0}"
 MAX_SECONDS=120
 
@@ -376,8 +375,6 @@ if row["kind"] != "staging" or sys.argv[2] != expected or owner != sys.argv[3]:
     raise SystemExit("destroy-vm cleanup identity differs from registry")
 if row["state"] != "cleanup_pending":
     raise SystemExit("staging cleanup plan is not committed")
-if row["routes_enabled"]:
-    raise SystemExit("staging route must be disabled before VM destruction")
 for value in (row["vmid"], row["name"]):
     sys.stdout.buffer.write(str(value).encode() + b"\0")
 PY
@@ -441,8 +438,6 @@ if (
     raise SystemExit("staging storage identity is incomplete")
 if row["state"] != "cleanup_pending":
     raise SystemExit("staging cleanup plan is not committed")
-if row["routes_enabled"]:
-    raise SystemExit("staging route must be disabled before storage cleanup")
 if volume is not None and volume != sys.argv[2]:
     raise SystemExit("cleanup volume differs from registry")
 if not re.fullmatch(
@@ -556,8 +551,6 @@ if stage["kind"] != "staging":
     raise SystemExit("snapshot cleanup resource is not staging")
 if stage["state"] != "cleanup_pending":
     raise SystemExit("staging cleanup plan is not committed")
-if stage["routes_enabled"]:
-    raise SystemExit("staging route must be disabled before snapshot cleanup")
 snapshot = stage["proxmox"]["snapshot"]
 if snapshot is None:
     raise SystemExit("staging snapshot dependency is absent")
@@ -878,23 +871,6 @@ PY
   log "$cleanup_id: staging replication job $target is absent"
 }
 
-route_is_disabled() {
-  local resource_file="$1" target="$2"
-  python3 - "$resource_file" "$target" <<'PY'
-import json
-import sys
-row = json.load(open(sys.argv[1], encoding="utf-8"))
-raise SystemExit(
-    0
-    if row["kind"] == "staging"
-    and row["name"] == sys.argv[2]
-    and row["state"] == "cleanup_pending"
-    and row["routes_enabled"] is False
-    else 1
-)
-PY
-}
-
 run_with_lifecycle_lock() {
   local status=0
   exec {payload_lock_fd}>"${LOCK_DIR}/app-ha-guest-role-hook.lock"
@@ -975,20 +951,10 @@ PY
   done
 }
 
-flush_route_cleanup() {
-  (($# > 0)) || return 0
-  if "$HAPROXY_SYNC"; then
-    mark_completed "$@" ||
-      log "HAProxy was synchronized but route completion could not be recorded"
-  else
-    log "HAProxy synchronization failed; route cleanup remains pending"
-  fi
-}
-
 process_records() {
   local cleanup_file="${WORK_DIR}/cleanup.json" resource_file
   local cleanup_id name resource_id action target status
-  local -a fields=() route_ids=()
+  local -a fields=()
   registry list --record-type cleanup >"$cleanup_file" || return 1
   mapfile -d '' -t fields < <(
     python3 - "$cleanup_file" "$LOCAL_NODE" <<'PY'
@@ -996,7 +962,6 @@ import json
 import sys
 
 priority = {
-    "remove-route": 5,
     "destroy-vm": 10,
     "destroy-volume": 20,
     "delete-snapshot": 30,
@@ -1034,10 +999,6 @@ PY
     resource_id="${fields[index + 2]}"
     action="${fields[index + 3]}"
     target="${fields[index + 4]}"
-    if [[ "$action" != remove-route && ${#route_ids[@]} -gt 0 ]]; then
-      flush_route_cleanup "${route_ids[@]}"
-      route_ids=()
-    fi
     resource_file="${WORK_DIR}/resource-${cleanup_id}.json"
     if ! load_resource "$name" "$resource_id" "$resource_file"; then
       log "$cleanup_id: resource identity is absent or changed; refusing action"
@@ -1068,11 +1029,6 @@ PY
         remove_replication_action "$cleanup_id" "$target" "$resource_file" ||
           status=$?
         ;;
-      remove-route)
-        route_is_disabled "$resource_file" "$target" || status=75
-        ((status != 0)) || route_ids+=("$cleanup_id")
-        continue
-        ;;
       *)
         status=75
         ;;
@@ -1086,10 +1042,6 @@ PY
       log "$cleanup_id: action remains pending"
     fi
   done
-
-  if ((${#route_ids[@]} > 0)) && ! deadline_reached; then
-    flush_route_cleanup "${route_ids[@]}"
-  fi
 }
 
 main() {
@@ -1118,7 +1070,6 @@ main() {
   fi
 
   require_file "$REGISTRY"
-  require_file "$HAPROXY_SYNC"
   require_commands flock findmnt fuser lsblk pvesh pvesm pvesr python3 qm zfs
   install -d -m 0755 "$LOCK_DIR"
   exec 9>"${LOCK_DIR}/app-ha-deferred-cleanup.lock"

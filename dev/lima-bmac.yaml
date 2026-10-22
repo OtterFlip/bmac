@@ -4,9 +4,9 @@
 # Lima VM for running the complete BMAC test suite on a Mac. See
 # dev/README.md.
 #
-# Debian 13 is the same userland as Proxmox VE 9 and the fixed HAProxy LXC,
-# so the Proxmox-host-only suites (lifecycle hook, deferred cleanup, prod ISO
-# preparation, haproxy -c) run here as they would on a mox host.
+# Debian 13 is the same userland as Proxmox VE 9, so the Proxmox-host-only
+# suites (lifecycle hook, deferred cleanup, prod ISO preparation, guest
+# networking) run here as they would on a mox host.
 #
 # Do not create this instance by hand: dev/run-tests-in-vm.sh creates it on
 # first use and mounts only this checkout, writable, at the same absolute path
@@ -45,10 +45,8 @@ provision:
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y --no-install-recommends \
-      bsdutils ca-certificates curl git haproxy iproute2 jq openssl \
+      bsdutils ca-certificates curl git iproute2 jq openssl \
       psmisc python3 util-linux xorriso
-    # Only the haproxy binary is needed for `haproxy -c`; not the service.
-    systemctl disable --now haproxy
 - mode: user
   script: |
     #!/bin/bash

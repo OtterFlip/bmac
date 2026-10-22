@@ -64,13 +64,18 @@ qs_collect() {
 }
 
 # Record, in parallel, whether this workstation reaches each member directly.
+QS_TRANSFER_STATUS='python3 -I /usr/local/lib/app-ha-proxmox/lib/transfer_counter.py status 2>/dev/null || true'
+
 qs_check_ssh() {
   local node
   local -a pids=()
   bmac_ui_step "Check SSH from this workstation to every member"
   for node in "${CONTROL_MEMBER_NODES[@]}"; do
+    # The same connection reads the host's monthly transfer counter. A host
+    # without the counter still counts as reachable; it just reports nothing.
     (
-      if mox_is_reachable "$node"; then
+      if mox_ssh "$node" bash -c "$QS_TRANSFER_STATUS" </dev/null \
+        >"${QS_RUN_DIR}/transfer-${node}.json" 2>/dev/null; then
         printf '%s\tok\n' "$node"
       else
         printf '%s\tfailed\n' "$node"

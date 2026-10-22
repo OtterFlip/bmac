@@ -8,11 +8,32 @@ import { EmptyState, KV, Meter, StatusPill } from "@/components/status";
 import { AttentionBanner, PageBody, PageHeader } from "@/components/layout/Page";
 import { ExternalButton, SkeletonRows, SourceRefresh, Table, WorkflowTiles, openExternal, proxmoxUrl, useSource } from "./common";
 import { bytes, duration, percent } from "@/lib/format";
+import type { HostTransfer } from "@/protocol/state";
 
 const SLOT_STATE_HELP: Record<string, string> = {
   member: "The cluster registry records this host slot as a joined cluster member.",
   joining: "The cluster registry has reserved this host slot for a host that is still being added; it becomes a member once the join finishes.",
 };
+
+const GiB = 1024 ** 3;
+
+function TransferCell({ transfer }: { transfer: HostTransfer | null }) {
+  if (!transfer) return <span className="text-fg-subtle">—</span>;
+  const period = transfer.period_start && transfer.next_reset ? ` from ${transfer.period_start}; resets ${transfer.next_reset}` : "";
+  const help = `Inbound + outbound on the public interface${period}.`;
+  const limit = transfer.limit_gib ? transfer.limit_gib * GiB : null;
+  return (
+    <Tooltip content={limit ? `${help} ${percent(transfer.total_bytes / limit)} of the monthly limit used.` : `${help} No monthly limit is set.`}>
+      <div>
+        <div className="mb-1 whitespace-nowrap text-[11.5px] text-fg-muted tabular-nums">
+          {bytes(transfer.total_bytes)}
+          {limit ? ` / ${bytes(limit, 0)}` : ""}
+        </div>
+        {limit && <Meter fraction={transfer.total_bytes / limit} />}
+      </div>
+    </Tooltip>
+  );
+}
 
 export function HostsPage() {
   const { data, status, error, nextSteps } = useSource("list_hosts");
@@ -27,8 +48,8 @@ export function HostsPage() {
         <div className="mb-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
           <Card>
             <CardHeader icon={<Server />} title="Nodes" subtitle={data ? `${data.cluster.online_count} of ${data.cluster.host_count} online` : undefined} />
-            <Table head={["Host", "Status", "CPU", "Memory", "Root disk", "Uptime", "Role", ""]}>
-              {loading && <SkeletonRows cols={8} />}
+            <Table head={["Host", "Status", "CPU", "Memory", "Root disk", "Transfer", "Uptime", "Role", ""]}>
+              {loading && <SkeletonRows cols={9} />}
               {data?.hosts.map((h) => (
                 <tr key={h.name}>
                   <td>
@@ -56,6 +77,9 @@ export function HostsPage() {
                   <td className="w-[140px]">
                     <div className="mb-1 whitespace-nowrap text-[11.5px] text-fg-muted tabular-nums">{bytes(h.disk_used, 0)} / {bytes(h.disk_total, 0)}</div>
                     <Meter fraction={h.disk_total ? (h.disk_used ?? 0) / h.disk_total : null} />
+                  </td>
+                  <td className="w-[140px]">
+                    <TransferCell transfer={h.transfer} />
                   </td>
                   <td className="whitespace-nowrap text-fg-muted tabular-nums">{h.online ? duration(h.uptime_seconds) : "—"}</td>
                   <td>
@@ -118,7 +142,7 @@ export function HostsPage() {
         </div>
 
         <h2 className="mb-2.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-fg-subtle">Host operations</h2>
-        <WorkflowTiles ids={["add_proxmox_host", "remove_proxmox_host", "update_cluster_runtime", "show_proxmox_host_state", "show_cluster_state"]} />
+        <WorkflowTiles ids={["add_proxmox_host", "remove_proxmox_host", "update_cluster_runtime", "sync_cluster_network", "show_proxmox_host_state", "show_cluster_state"]} />
       </PageBody>
     </>
   );

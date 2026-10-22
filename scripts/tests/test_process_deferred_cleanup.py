@@ -64,17 +64,17 @@ class DeferredCleanupTest(unittest.TestCase):
                     "PRIVATE_SUBNET_CIDR=10.213.0.0/24",
                     "PROXMOX_MIGRATION_NETWORK=10.213.0.240/28",
                     "DATACENTER_PRIVATE_VLAN_GATEWAY=10.213.0.1",
-                    "GUEST_EGRESS_VIP=10.213.0.10/24",
+                    "GUEST_GATEWAY_IP=10.213.0.10",
+                    "GUEST_GATEWAY_MAC=02:00:0a:d5:00:0a",
                     "MOX_IP_START=10.213.0.11",
                     "MOX_IP_END=10.213.0.20",
                     "MOX_REPLICATION_IP_START=10.213.0.241",
                     "MOX_REPLICATION_IP_END=10.213.0.250",
-                    "HAPROXY_IP_START=10.213.0.21",
-                    "HAPROXY_IP_END=10.213.0.30",
-                    "PRODUCTION_IP_START=10.213.0.31",
-                    "PRODUCTION_IP_END=10.213.0.50",
-                    "STAGING_IP_START=10.213.0.51",
-                    "STAGING_IP_END=10.213.0.200",
+                    "VM_SLOT_START=10.213.0.110",
+                    "MAX_PROD_VMS=10",
+                    "MAX_STAGING_VMS_PER_PROD=9",
+                    "CLOUDFLARE_ACCOUNT_ID=0123456789abcdef0123456789abcdef",
+                    "CLOUDFLARE_TUNNEL_ID=00000000-0000-0000-0000-000000000000",
                     "PRODUCTION_VM_TAG=custom-production",
                     "STAGING_VM_TAG=custom-staging",
                     "EVICTABLE_VM_TAG=custom-evictable",
@@ -104,21 +104,6 @@ os.execv({str(REGISTRY_SOURCE)!r}, [{str(REGISTRY_SOURCE)!r}, *sys.argv[1:]])
             encoding="utf-8",
         )
         registry_wrapper.chmod(0o755)
-        sync = self.install_lib / "sync_haproxy_routes.sh"
-        sync.write_text(
-            """#!/usr/bin/env bash
-set -Eeuo pipefail
-python3 - "$FAKE_ACTIONS" <<'PY'
-import json
-import sys
-with open(sys.argv[1], "a", encoding="utf-8") as stream:
-    stream.write(json.dumps(["haproxy-sync"]) + "\\n")
-PY
-[[ "${FAKE_HAPROXY_FAIL:-0}" != 1 ]]
-""",
-            encoding="utf-8",
-        )
-        sync.chmod(0o755)
 
         self.actions = self.root / "actions.jsonl"
         self.actions.write_text("", encoding="utf-8")
@@ -367,23 +352,17 @@ else:
             "--network",
             "10.213.0.0/24",
             "--guest-gateway",
-            "10.213.0.10/24",
+            "10.213.0.10",
             "--mox-ip-start",
             "10.213.0.11",
             "--mox-ip-end",
             "10.213.0.20",
-            "--haproxy-ip-start",
-            "10.213.0.21",
-            "--haproxy-ip-end",
-            "10.213.0.30",
-            "--production-ip-start",
-            "10.213.0.31",
-            "--production-ip-end",
-            "10.213.0.50",
-            "--staging-ip-start",
-            "10.213.0.51",
-            "--staging-ip-end",
-            "10.213.0.200",
+            "--vm-slot-start",
+            "10.213.0.110",
+            "--max-production",
+            "10",
+            "--max-staging-per-production",
+            "9",
         )
         self.registry(
             "allocate-prod",
@@ -392,7 +371,7 @@ else:
             "--purpose",
             "myapp",
             "--primary-domain",
-            "myapp.com",
+            "example.com",
             "--placement",
             "mox1,mox2",
             "--initial-node",
@@ -482,7 +461,6 @@ else:
             "stage1prod1",
             "--state",
             "stopped",
-            "--routes-enabled",
         )
         self.registry("update", "stage1prod1", "--state", "ready")
         self.registry("update", "stage1prod1", "--state", "active")
@@ -491,7 +469,6 @@ else:
             "stage1prod1",
             "--state",
             "stopping",
-            "--routes-disabled",
         )
         self.registry(
             "defer-cleanup",
@@ -518,32 +495,6 @@ else:
             "vm-100@stg-base-stage1prod1-260914T220000Z",
             "--reason",
             "test cleanup",
-        )
-        self.registry(
-            "defer-cleanup",
-            "--resource",
-            "stage1prod1",
-            "--node",
-            "mox1",
-            "--action",
-            "remove-route",
-            "--target",
-            "stage1prod1",
-            "--reason",
-            "test route cleanup",
-        )
-        self.registry(
-            "defer-cleanup",
-            "--resource",
-            "stage1prod1",
-            "--node",
-            "mox2",
-            "--action",
-            "remove-route",
-            "--target",
-            "stage1prod1",
-            "--reason",
-            "test route cleanup",
         )
         self.registry(
             "update",
@@ -581,12 +532,11 @@ else:
             if line
         ]
 
-    def test_reachable_snapshot_and_route_cleanup_then_remote_finalize(self) -> None:
+    def test_reachable_snapshot_cleanup_then_remote_finalize(self) -> None:
         self.run_helper("mox1")
         cleanup = self.registry("list", "--record-type", "cleanup")
         states = {(row["node"], row["action"]): row["state"] for row in cleanup}
         self.assertEqual(states[("mox1", "delete-snapshot")], "completed")
-        self.assertEqual(states[("mox1", "remove-route")], "completed")
         self.assertEqual(states[("mox2", "delete-snapshot")], "pending")
         self.registry("get", "stage1prod1")
 
@@ -601,10 +551,6 @@ else:
             for index, row in enumerate(rows)
             if row[:3] == ["pvesr", "mox1", "schedule-now"]
         )
-        route_sync = next(
-            index for index, row in enumerate(rows) if row == ["haproxy-sync"]
-        )
-        self.assertLess(route_sync, pve_delete)
         self.assertLess(pve_delete, replication_cleanup)
         self.assertFalse(any(row[0] == "zfs" and "destroy" in row for row in rows))
 
@@ -742,7 +688,7 @@ else:
             any(row[:3] == ["zfs", "mox2", "destroy"] for row in self.action_rows())
         )
 
-    def test_lifecycle_lock_does_not_block_route_or_snapshot_convergence(self) -> None:
+    def test_lifecycle_lock_does_not_block_snapshot_convergence(self) -> None:
         lock_path = self.lock_dir / "app-ha-guest-role-hook.lock"
         with lock_path.open("w", encoding="utf-8") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -751,20 +697,7 @@ else:
         states = {
             (row["node"], row["action"]): row["state"] for row in cleanup
         }
-        self.assertEqual(states[("mox1", "remove-route")], "completed")
         self.assertEqual(states[("mox1", "delete-snapshot")], "completed")
-
-    def test_failed_haproxy_sync_keeps_route_and_resource_pending(self) -> None:
-        self.base_environment["FAKE_HAPROXY_FAIL"] = "1"
-        self.run_helper("mox1")
-        cleanup = self.registry("list", "--record-type", "cleanup")
-        route = next(
-            row
-            for row in cleanup
-            if row["node"] == "mox1" and row["action"] == "remove-route"
-        )
-        self.assertEqual(route["state"], "pending")
-        self.assertEqual(self.registry("get", "stage1prod1")["state"], "cleanup_pending")
 
     def test_guid_mismatch_is_never_destroyed(self) -> None:
         state = self.read_fake_state()

@@ -20,7 +20,6 @@ PATCH_HELPER="${REPO_ROOT}/scripts/utilities/patch_staging_clone.sh"
 GUEST_TREE_HELPER="${REPO_ROOT}/scripts/utilities/patch_staging_guest_tree.py"
 REMOTE_INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_INSTALL_ROOT}/lib/cluster_registry.py"
-REMOTE_HAPROXY_SYNC="${REMOTE_INSTALL_ROOT}/lib/sync_haproxy_routes.sh"
 
 DRY_RUN=false
 REPLICATION_TIMEOUT_SECONDS=14400
@@ -35,7 +34,6 @@ COORDINATOR=""
 RUN_DIR=""
 REMOTE_RUN_DIR=""
 ROOT_PASSWORD_HASH=""
-DOMAIN_OVERRIDE=""
 NETWORK_LINK_DOWN=false
 START_AFTER_CREATION=true
 SETUP_WORKSTATION_JUMP_SSH=true
@@ -79,7 +77,6 @@ SNAPSHOT_ATTACHED=false
 CLONE_MAY_EXIST=false
 VM_MAY_EXIST=false
 DISK_ATTACHED=false
-ROUTES_ENABLED=false
 PATCH_SUCCEEDED=false
 COMMITTED=false
 ROLLBACK_RUNNING=false
@@ -374,8 +371,8 @@ load_and_validate_config() {
 
   local name
   local required=(
-    PROXMOX_CLUSTER_NAME MAX_MOX_HOSTS PRIVATE_SUBNET_CIDR GUEST_EGRESS_VIP
-    STAGING_IP_START STAGING_IP_END STAGING_GUEST_VM_ROOT_PASSWORD
+    PROXMOX_CLUSTER_NAME MAX_MOX_HOSTS PRIVATE_SUBNET_CIDR GUEST_GATEWAY_IP
+    VM_SLOT_START MAX_STAGING_VMS_PER_PROD STAGING_GUEST_VM_ROOT_PASSWORD
     PRODUCTION_VM_TAG STAGING_VM_TAG EVICTABLE_VM_TAG PURPOSE_TAG_PREFIX
     GUEST_ROLE_HOOK_PATH CLUSTER_STATE_DIR PROD_VM_STORAGE PROD_VM_CPU_TYPE
     STAGING_VM_CORES STAGING_VM_MEMORY_GIB STAGING_VM_STORAGE
@@ -397,7 +394,7 @@ load_and_validate_config() {
   validate_positive_integer "STAGING_VM_CORES" "$STAGING_VM_CORES"
   validate_positive_integer "STAGING_VM_MEMORY_GIB" "$STAGING_VM_MEMORY_GIB"
   split_dns_servers "${GUEST_DNS_SERVERS:-${PROXMOX_DNS_SERVER:-}}"
-  GUEST_GATEWAY="${GUEST_EGRESS_VIP%/*}"
+  GUEST_GATEWAY="$GUEST_GATEWAY_IP"
 
   # Derive a one-way crypt hash, then remove every secret-layer variable
   # before any SSH/SCP child can inherit it. Neither value is logged.
@@ -570,8 +567,6 @@ select_coordinator() {
   info "Coordinator: $COORDINATOR"
   node_exec "$COORDINATOR" test -x "$REMOTE_REGISTRY" ||
     die "Installed cluster registry is unavailable on $COORDINATOR"
-  node_exec "$COORDINATOR" test -x "$REMOTE_HAPROXY_SYNC" ||
-    die "Installed HAProxy route sync is unavailable on $COORDINATOR"
   registry_cmd record-staging-snapshot --help >/dev/null ||
     die "Installed cluster registry lacks staging snapshot metadata support"
   registry_cmd record-staging-snapshot-intent --help >/dev/null ||
@@ -931,14 +926,14 @@ printf "%s\n" "$MAX_STAGING_VM_COUNT_ON_THIS_HOST"
   local capacity
   capacity="$(
     python3 - "${RUN_DIR}/resources.json" "$STAGING_NODE" \
-      "$SOURCE_NAME" "$STAGING_HOST_LIMIT" <<'PY'
+      "$SOURCE_NAME" "$MAX_STAGING_VMS_PER_PROD" <<'PY'
 import json
 import sys
 
 rows = json.load(open(sys.argv[1], encoding="utf-8"))
 node = sys.argv[2]
 source = sys.argv[3]
-limit = int(sys.argv[4])
+slots = int(sys.argv[4])
 count = sum(
     1
     for row in rows
@@ -950,13 +945,11 @@ used = {
     if row.get("kind") == "staging" and row.get("source") == source
 }
 candidate = next(
-    (value for value in range(1, limit + 1) if value not in used),
+    (value for value in range(1, slots + 1) if value not in used),
     None,
 )
 if candidate is None:
-    raise SystemExit(
-        f"stage number range 1-{limit} is exhausted for source {source}"
-    )
+    raise SystemExit(f"all {slots} staging slots of {source} are in use")
 print(f"{count}\t{candidate}")
 PY
   )" || die "Could not determine staging capacity on $STAGING_NODE"
@@ -1125,7 +1118,7 @@ used = {
     for row in [*live, *registered]
     if str(row.get("vmid", "")).isdigit()
 }
-while value in used or 9111 <= value <= 9120:
+while value in used:
     value += 1
 print(value)
 PY
@@ -1310,12 +1303,6 @@ PY
   prompt_boolean_default SETUP_WORKSTATION_JUMP_SSH \
     "Set up permanent jump SSH after the VM has started?" true
 
-  prompt_optional DOMAIN_OVERRIDE \
-    "Exact staging FQDN override (blank atomically selects the lowest free number; currently expected stage${STAGING_CANDIDATE_INDEX}${SOURCE_NAME}.${SOURCE_PRIMARY_DOMAIN})"
-  if [[ -n "$DOMAIN_OVERRIDE" ]]; then
-    DOMAIN_OVERRIDE="$(normalize_domain "$DOMAIN_OVERRIDE")" ||
-      die "Invalid staging domain override"
-  fi
   if prompt_yes "Create the staging NIC initially link-down?"; then
     NETWORK_LINK_DOWN=true
   else
@@ -1343,12 +1330,12 @@ PY
 # The JSON-mode form of the option prompts in collect_request: one form,
 # validated as a whole. Sets the same globals the terminal prompts do.
 collect_options_json() {
-  local cores memory start jump domain link_down sanitizer normalized
+  local cores memory start jump link_down sanitizer
   local sanitizer_supplied="$SANITIZER_FILE" snapshot_note="a new snapshot"
   [[ -z "$SNAPSHOT_SHARED_FROM" ]] ||
     snapshot_note="the snapshot shared with ${SNAPSHOT_SHARED_WITH//,/, }"
   bmac_ui_group_begin staging_options "Staging VM options" \
-    "Clone of $SOURCE_NAME from ${snapshot_note} on $STAGING_NODE. Leave the FQDN blank to use the lowest free number (currently stage${STAGING_CANDIDATE_INDEX}${SOURCE_NAME}.${SOURCE_PRIMARY_DOMAIN})."
+    "Clone of $SOURCE_NAME from ${snapshot_note} on $STAGING_NODE. It takes the lowest free staging slot of $SOURCE_NAME (currently stage${STAGING_CANDIDATE_INDEX}${SOURCE_NAME}.${SOURCE_PRIMARY_DOMAIN})."
   [[ -n "$CORES_OVERRIDE" ]] ||
     bmac_ui_group_add cores --id cores --type integer --label "vCPU cores" \
       --default "$STAGING_VM_CORES" --min 1 --required
@@ -1359,9 +1346,6 @@ collect_options_json() {
     --label "Start the VM automatically after it has been created" --default true
   bmac_ui_group_add jump --id setup_jump_ssh --type boolean \
     --label "Set up permanent jump SSH after the VM has started" --default true
-  bmac_ui_group_add domain --id domain_override \
-    --label "Exact staging FQDN override" \
-    --placeholder "stage${STAGING_CANDIDATE_INDEX}${SOURCE_NAME}.${SOURCE_PRIMARY_DOMAIN}"
   bmac_ui_group_add link_down --id link_down --type boolean \
     --label "Create the staging NIC initially link-down" --default false
   [[ -n "$sanitizer_supplied" ]] ||
@@ -1375,10 +1359,6 @@ collect_options_json() {
     fi
     if [[ -z "$MEMORY_GIB_OVERRIDE" && ! "$memory" =~ ^[1-9][0-9]*$ ]]; then
       bmac_ui_field_error memory_gib "Enter a positive whole number of GiB"
-    fi
-    normalized=""
-    if [[ -n "$domain" ]] && ! normalized="$(normalize_domain "$domain" 2>/dev/null)"; then
-      bmac_ui_field_error domain_override "Not a valid staging domain"
     fi
     if [[ -z "$sanitizer_supplied" && -n "$sanitizer" ]]; then
       SANITIZER_FILE="$sanitizer"
@@ -1395,7 +1375,6 @@ collect_options_json() {
   requested_memory_gib="${MEMORY_GIB_OVERRIDE:-$memory}"
   START_AFTER_CREATION="$([[ "$start" == true ]] && echo true || echo false)"
   SETUP_WORKSTATION_JUMP_SSH="$([[ "$jump" == true ]] && echo true || echo false)"
-  DOMAIN_OVERRIDE="$normalized"
   NETWORK_LINK_DOWN="$([[ "$link_down" == true ]] && echo true || echo false)"
   [[ -n "$sanitizer_supplied" ]] || SANITIZER_FILE="$sanitizer"
 }
@@ -1404,31 +1383,28 @@ dry_run_summary() {
   local candidate
   candidate="$(
     python3 - "${RUN_DIR}/resources.json" "$SOURCE_NAME" \
-      "$SOURCE_PRIMARY_DOMAIN" "$DOMAIN_OVERRIDE" "$PRIVATE_SUBNET_CIDR" \
-      "$STAGING_HOST_LIMIT" <<'PY'
+      "$SOURCE_PRIMARY_DOMAIN" "$VM_SLOT_START" \
+      "$MAX_STAGING_VMS_PER_PROD" <<'PY'
 import ipaddress
 import json
 import sys
 rows = json.load(open(sys.argv[1], encoding="utf-8"))
-source, primary, override, subnet, raw_limit = sys.argv[2:]
-limit = int(raw_limit)
+source, primary, slot_start, raw_slots = sys.argv[2:]
+slots = int(raw_slots)
 suffixes = {
     row["index"] for row in rows
     if row.get("kind") == "staging" and row.get("source") == source
 }
 suffix = next(
-    (value for value in range(1, limit + 1) if value not in suffixes),
+    (value for value in range(1, slots + 1) if value not in suffixes),
     None,
 )
 if suffix is None:
-    raise SystemExit(
-        f"stage number range 1-{limit} is exhausted for source {source}"
-    )
+    raise SystemExit(f"all {slots} staging slots of {source} are in use")
 name = f"stage{suffix}{source}"
-used = {ipaddress.ip_address(row["ip"]) for row in rows}
-network = ipaddress.ip_network(subnet)
-address = next(network.network_address + value for value in range(51, 201) if network.network_address + value not in used)
-domain = override or f"stage{suffix}{source}.{primary}"
+# stageKprodN's fixed slot: prodN's slot plus K.
+address = ipaddress.ip_address(slot_start) + 10 * (int(source[len("prod"):]) - 1) + suffix
+domain = f"stage{suffix}{source}.{primary}"
 print(f"{name}\t{address}\t{domain}")
 PY
   )"
@@ -1521,7 +1497,6 @@ reserve_staging() {
     --disk-allocation sparse
     --replication-interval "$SOURCE_REPLICATION_MINUTES"
   )
-  [[ -z "$DOMAIN_OVERRIDE" ]] || args+=(--domain "$DOMAIN_OVERRIDE")
   local result resource
   result="$(registry_cmd "${args[@]}")" ||
     die "Atomic staging allocation failed"
@@ -2162,15 +2137,6 @@ attach_patched_disk() {
   registry_update_stage --state stopped
 }
 
-enable_route_and_sync() {
-  CURRENT_PHASE="enabling staging route and syncing HAProxy"
-  require_source_unchanged
-  registry_update_stage --routes-enabled
-  ROUTES_ENABLED=true
-  mox_ssh "$COORDINATOR" "$REMOTE_HAPROXY_SYNC" </dev/null ||
-    die "HAProxy route synchronization failed"
-}
-
 offer_start() {
   COMMITTED=true
   if [[ "$START_AFTER_CREATION" != true ]]; then
@@ -2478,7 +2444,6 @@ refresh_staging_for_rollback() {
 rollback_registry() {
   refresh_staging_for_rollback || return 0
   local -a args=(
-    --routes-disabled
     --clear-owner-node
     --clear-volume
     --clear-snapshot
@@ -2811,25 +2776,6 @@ record_deferred_rollback_cleanup() {
         >/dev/null 2>&1 || true
     done
   fi
-  record_deferred_route_cleanup
-}
-
-record_deferred_route_cleanup() {
-  local node
-  [[ "$REGISTRY_RESERVED" == true ]] || return 0
-  ((${#CLUSTER_NODES[@]} > 0)) || {
-    warn "No validated configured nodes are available for route cleanup"
-    return 1
-  }
-  for node in "${CLUSTER_NODES[@]}"; do
-    registry_cmd defer-cleanup \
-      --resource "$STAGING_NAME" \
-      --node "$node" \
-      --action remove-route \
-      --target "$STAGING_NAME" \
-      --reason "staging rollback requires converged HAProxy route removal" \
-      >/dev/null 2>&1 || true
-  done
 }
 
 rollback_failed_creation() {
@@ -2842,8 +2788,7 @@ rollback_failed_creation() {
   if [[ "$REGISTRY_RESERVED" == false &&
     "$SNAPSHOT_MAY_EXIST" == false &&
     "$CLONE_MAY_EXIST" == false &&
-    "$VM_MAY_EXIST" == false &&
-    "$ROUTES_ENABLED" == false ]]; then
+    "$VM_MAY_EXIST" == false ]]; then
     warn "No staging resources had been allocated; no rollback actions were needed."
     return 0
   fi
@@ -2852,7 +2797,7 @@ rollback_failed_creation() {
   else
     warn "Rolling back newly-created staging resources; production is never started or modified beyond its staging snapshot."
   fi
-  local storage_ok=true snapshot_ok=true registry_ok=true route_ok=true
+  local storage_ok=true snapshot_ok=true registry_ok=true
   remove_staging_vm_and_clone || storage_ok=false
   if [[ "$storage_ok" == true ]]; then
     delete_snapshot_and_trigger_cleanup || snapshot_ok=false
@@ -2869,7 +2814,7 @@ rollback_failed_creation() {
       refresh_staging_for_rollback || true
       registry_cmd update "$STAGING_NAME" \
         --expected-revision "$STAGING_REVISION" \
-        --state cleanup_pending --routes-disabled >/dev/null 2>&1 || true
+        --state cleanup_pending >/dev/null 2>&1 || true
     fi
   fi
   if [[ "$storage_ok" == true && "$snapshot_ok" == true &&
@@ -2878,35 +2823,20 @@ rollback_failed_creation() {
     refresh_staging_for_rollback || true
     registry_cmd update "$STAGING_NAME" \
       --expected-revision "$STAGING_REVISION" \
-      --state cleanup_pending --routes-disabled >/dev/null 2>&1 || true
-  fi
-  if [[ "$ROUTES_ENABLED" == true && "$storage_ok" == true &&
-    "$snapshot_ok" == true && "$registry_ok" == true ]]; then
-    if ! mox_ssh "$COORDINATOR" "$REMOTE_HAPROXY_SYNC" \
-      </dev/null >/dev/null 2>&1; then
-      warn "Rollback could not converge HAProxy route removal"
-      route_ok=false
-      record_deferred_route_cleanup
-      refresh_staging_for_rollback || true
-      registry_cmd update "$STAGING_NAME" \
-        --expected-revision "$STAGING_REVISION" \
-        --state cleanup_pending --routes-disabled >/dev/null 2>&1 || true
-    fi
+      --state cleanup_pending >/dev/null 2>&1 || true
   fi
   if [[ "$storage_ok" == true && "$snapshot_ok" == true &&
-    "$registry_ok" == true && "$route_ok" == true &&
-    "$REGISTRY_RESERVED" == true ]]; then
+    "$registry_ok" == true && "$REGISTRY_RESERVED" == true ]]; then
     if ! registry_cmd release "$STAGING_NAME" >/dev/null 2>&1; then
       registry_ok=false
-      record_deferred_route_cleanup
       refresh_staging_for_rollback || true
       registry_cmd update "$STAGING_NAME" \
         --expected-revision "$STAGING_REVISION" \
-        --state cleanup_pending --routes-disabled >/dev/null 2>&1 || true
+        --state cleanup_pending >/dev/null 2>&1 || true
     fi
   fi
   if [[ "$storage_ok" != true || "$snapshot_ok" != true ||
-    "$registry_ok" != true || "$route_ok" != true ]]; then
+    "$registry_ok" != true ]]; then
     warn "Rollback was incomplete. The registry record was retained when needed for cleanup."
   elif [[ -n "$SNAPSHOT_SHARED_FROM" ]]; then
     warn "Rollback removed the VM, clone, and registry allocation; the shared source snapshot $SNAPSHOT_NAME was kept."
@@ -3013,7 +2943,7 @@ main() {
   create_unattached_vm
   patch_clone_offline
   attach_patched_disk
-  enable_route_and_sync
+  require_source_unchanged
   offer_start
   print_completion
 }

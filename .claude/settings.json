@@ -5,7 +5,7 @@
       "Read(*.env)",
       "Read(*.key)",
       "Read(*.cer)",
-      "Read(tailscale.jsonc)",
+      "Read(cert.pem)",
       "Read(__pycache__/**)",
       "Read(artifacts/**)"
     ]

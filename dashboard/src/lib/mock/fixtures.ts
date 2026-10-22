@@ -59,6 +59,7 @@ function host(
     is_control: control,
     is_probe: probe,
     ssh_from_here: true,
+    transfer: { total_bytes: (40 + nodeid * 85) * GiB, limit_gib: nodeid === 1 ? 2000 : null, used_percent: nodeid === 1 ? 6.25 : null, period_start: "2026-09-24", next_reset: "2026-10-24" },
   };
 }
 
@@ -76,8 +77,6 @@ export function guestsState(): GuestsState {
         node: "mox1",
         ip: "10.213.0.101",
         placement: ["mox1", "mox2"],
-        routes: 2,
-        routes_enabled: true,
         domain: "app.example.com",
         cores: 8,
         memory_mb: 32768,
@@ -98,8 +97,6 @@ export function guestsState(): GuestsState {
         node: "mox3",
         ip: "10.213.0.102",
         placement: ["mox3", "mox1", "mox2"],
-        routes: 1,
-        routes_enabled: true,
         domain: "api.example.com",
         cores: 16,
         memory_mb: 65536,
@@ -128,8 +125,6 @@ export function guestsState(): GuestsState {
         node: "mox2",
         ip: "10.213.0.201",
         placement: ["mox2"],
-        routes: 1,
-        routes_enabled: true,
         domain: "stage1.app.example.com",
         cores: 4,
         memory_mb: 16384,
@@ -148,8 +143,6 @@ export function guestsState(): GuestsState {
         node: "mox2",
         ip: "10.213.0.202",
         placement: ["mox2"],
-        routes: 1,
-        routes_enabled: true,
         domain: "stage2.app.example.com",
         cores: 2,
         memory_mb: 8192,

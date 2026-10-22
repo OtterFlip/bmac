@@ -24,6 +24,8 @@ import subprocess
 import sys
 import time
 
+GIB = 1024**3
+
 
 # ---------------------------------------------------------------------------
 # Collection (runs on a Proxmox host).
@@ -139,9 +141,6 @@ def collect_guests(args):
     resources, err = registry(args, "list")
     if err:
         errors.append(err)
-    routes, err = registry(args, "list-routes")
-    if err:
-        errors.append(err)
     live, err = pvesh("/cluster/resources", "--type", "vm")
     if err:
         errors.append(err)
@@ -156,7 +155,6 @@ def collect_guests(args):
         errors.append(err)
     return {
         "resources": resources or [],
-        "routes": routes or [],
         "live": live or [],
         "ha_resources": ha_resources or [],
         "ha_status": ha_status or [],
@@ -321,6 +319,34 @@ def int_or_none(value):
         return None
 
 
+def read_transfer(directory, name):
+    """The host's transfer_counter.py status, as fetched over SSH, or None."""
+    if not directory or not name:
+        return None
+    try:
+        data = json.load(open(os.path.join(directory, f"transfer-{name}.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("total_bytes"), int):
+        return None
+    return {
+        "total_bytes": data["total_bytes"],
+        "limit_gib": int_or_none(data.get("limit_gib")),
+        "used_percent": data.get("used_percent"),
+        "period_start": data.get("period_start"),
+        "next_reset": data.get("next_reset"),
+    }
+
+
+def transfer_text(transfer):
+    if not transfer:
+        return "-"
+    text = f"{transfer['total_bytes'] / GIB:.1f} GiB"
+    if transfer["limit_gib"]:
+        text += f" of {transfer['limit_gib']} GiB"
+    return text
+
+
 def render_hosts(report, args, ui):
     now = report.get("collected_at") or int(time.time())
     problems = []
@@ -372,6 +398,7 @@ def render_hosts(report, args, ui):
             "is_control": name == control_node,
             "is_probe": name == report.get("probe"),
             "ssh_from_here": ssh.get(name) if ssh else None,
+            "transfer": read_transfer(args.transfer_dir, name) if ssh.get(name) else None,
         }
         hosts.append(host)
         if not online:
@@ -435,7 +462,7 @@ def render_hosts(report, args, ui):
           f"{'needed (even host count)' if needed else 'not needed (odd host count)' if needed is False else ''}")
     heading("HOSTS")
     table(
-        ["HOST", "STATE", "SSH FROM HERE", "UPTIME", "CPU", "MEMORY", "SLOT", "ROLE"],
+        ["HOST", "STATE", "SSH FROM HERE", "UPTIME", "CPU", "MEMORY", "TRANSFER", "SLOT", "ROLE"],
         [
             [
                 host["name"],
@@ -444,6 +471,7 @@ def render_hosts(report, args, ui):
                 duration(host["uptime_seconds"]) if host["online"] else "-",
                 f"{(host['cpu_fraction'] or 0) * 100:.0f}% of {host['cores'] or '?'}" if host["online"] else "-",
                 f"{size(host['memory_used'])} / {size(host['memory_total'])}" if host["online"] else "-",
+                transfer_text(host["transfer"]),
                 host["slot_state"] or "-",
                 ", ".join(role for role, on in (("control", host["is_control"]), ("probe", host["is_probe"])) if on) or "-",
             ]
@@ -522,10 +550,6 @@ def render_guests(report, args, ui):
         int(row["vmid"]): row for row in report.get("live") or []
         if str(row.get("vmid", "")).isdigit()
     }
-    route_counts = {}
-    for route in report.get("routes") or []:
-        name = route.get("resource")
-        route_counts[name] = route_counts.get(name, 0) + 1
     replication_by_guest = {}
     for job in report.get("replication") or []:
         guest = int_or_none(job.get("guest"))
@@ -549,8 +573,6 @@ def render_guests(report, args, ui):
             "node": observed.get("node"),
             "ip": resource.get("ip"),
             "placement": resource.get("placement") or [],
-            "routes": route_counts.get(resource.get("name"), 0),
-            "routes_enabled": bool(resource.get("routes_enabled")),
             "domain": domains.get("primary"),
             "cores": spec.get("cores"),
             "memory_mb": spec.get("memory_mb"),
@@ -632,7 +654,7 @@ def render_guests(report, args, ui):
         heading("PRODUCTION VMS")
         if production:
             table(
-                ["NAME", "VMID", "REGISTRY", "LIVE", "NODE", "PLACEMENT", "HA", "REPLICATION", "ROUTES", "DOMAIN"],
+                ["NAME", "VMID", "REGISTRY", "LIVE", "NODE", "PLACEMENT", "HA", "REPLICATION", "IP", "DOMAIN"],
                 [
                     [
                         row["name"], row["vmid"], row["registry_state"], row["live_status"],
@@ -641,7 +663,7 @@ def render_guests(report, args, ui):
                         (f"{row['replication']['jobs'] - row['replication']['failing']}/{row['replication']['jobs']} ok, "
                          f"{ago(row['replication']['oldest_last_sync'], now)}")
                         if row["replication"]["jobs"] else "none",
-                        row["routes"], row["domain"] or "-",
+                        row["ip"], row["domain"] or "-",
                     ]
                     for row in production
                 ],
@@ -867,6 +889,7 @@ def main(argv=None):
     render.add_argument("kind", choices=sorted(RENDERERS))
     render.add_argument("--report", required=True)
     render.add_argument("--ssh-file", default="")
+    render.add_argument("--transfer-dir", default="")
     render.add_argument("--qdevice-host", default="")
     render.add_argument("--kind-filter", default="", choices=("", "production", "staging"))
     render.add_argument("--guest", default="")

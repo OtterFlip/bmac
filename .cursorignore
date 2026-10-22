@@ -2,8 +2,8 @@
 *.key
 *.cer
 secrets.env
-tailscale.jsonc
 __pycache__/
 __pycache__/*
 artifacts/
 artifacts/*
+cert.pem

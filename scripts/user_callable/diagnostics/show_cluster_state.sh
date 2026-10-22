@@ -423,7 +423,6 @@ unit_report() {
 
 node="$(hostname -s)"
 index="${node#mox}"
-vmid=""
 internal_domain=""
 remote_prod_config_loaded=0
 remote_prod_iso_url=""
@@ -431,10 +430,6 @@ remote_prod_iso_sha256=""
 remote_prod_install_mode=""
 remote_cluster_config_sha256=""
 remote_iso_storage=""
-if [[ "$node" =~ ^mox([0-9]+)$ ]]; then
-  index="${BASH_REMATCH[1]}"
-  vmid="$((9110 + index))"
-fi
 if [[ -f /usr/local/lib/app-ha-proxmox/lib/config.sh &&
       ! -L /usr/local/lib/app-ha-proxmox/lib/config.sh ]]; then
   # shellcheck source=/dev/null
@@ -454,11 +449,6 @@ section "Identity, privilege, versions, uptime, and clock" \
   "verify that SSH reached the intended node and capture the software/time baseline before interpreting cluster behavior."
 printf 'Expected node: %s\n' "$expected"
 printf 'Actual node:   %s\n' "$node"
-if [[ -n "$vmid" ]]; then
-  printf 'Expected local HAProxy LXC VMID from naming convention: %s\n' "$vmid"
-else
-  printf 'Expected local HAProxy LXC VMID: unavailable (hostname does not match moxN)\n'
-fi
 run "Effective user" id
 run "Host identity" hostnamectl
 run_if_command pveversion "Proxmox package/version inventory" pveversion -v
@@ -574,7 +564,7 @@ run_if_command corosync-cfgtool "Corosync link/ring status" corosync-cfgtool -s
 run_if_command corosync-qdevice-tool "Corosync QDevice client status" corosync-qdevice-tool -s
 
 section "Core Proxmox, Corosync, HA, and custom service states" \
-  "a healthy quorum is not enough if pmxcfs, HA daemons, routing, keepalived, or your app-ha synchronization services are stopped."
+  "a healthy quorum is not enough if pmxcfs, HA daemons, the guest gateway, egress health, the tunnel replica, or your app-ha services are stopped."
 for unit in \
   pve-cluster.service \
   pvedaemon.service \
@@ -584,21 +574,16 @@ for unit in \
   corosync-qdevice.service \
   pve-ha-lrm.service \
   pve-ha-crm.service \
-  keepalived.service \
-  app-ha-guest-egress.service \
-  app-ha-haproxy-route-sync.timer \
-  app-ha-haproxy-ingress.service \
+  app-ha-guest-network.service \
+  app-ha-egress-health.service \
+  app-ha-transfer-counter.timer \
+  app-ha-cloudflared.service \
+  app-ha-tunnel-sync.timer \
   app-ha-deferred-cleanup.timer
 do
   unit_report "$unit"
 done
 
-if command -v keepalived >/dev/null 2>&1 && [[ -r /etc/keepalived/keepalived.conf ]]; then
-  run "Parse/validate keepalived configuration without starting it" \
-    keepalived --config-test --use-file=/etc/keepalived/keepalived.conf
-else
-  printf '\n[INFO] keepalived or /etc/keepalived/keepalived.conf is absent; config validation skipped.\n'
-fi
 
 section "Production ISO preparation readiness" \
   "prove this node has the newly installed URL/cache/build tooling and matching configuration required before add_prod_vm.sh is resumed."
@@ -834,37 +819,26 @@ run_if_command proxmox-boot-tool "Proxmox boot synchronization/status" proxmox-b
 run "Mounted filesystem capacity" df -hT
 run "Mounted filesystem inode usage" df -ih
 
-section "Custom guest-egress and HAProxy ingress nftables" \
-  "your custom HA design depends on these runtime rule tables; listing them verifies their current programmed state without changing rules."
+section "Shared guest gateway, egress, transfer, and tunnel replica" \
+  "guests reach the internet through this host's own gateway (or a fallback host), and web traffic reaches them through every host's tunnel replica; these checks show each piece's current state without changing it."
+lib=/usr/local/lib/app-ha-proxmox/lib
+if [[ -x "$lib/guest_network.sh" ]]; then
+  run "Shared guest gateway, egress NAT, and routing tables" "$lib/guest_network.sh" verify
+  run "Guest egress route (table 200)" ip -4 route show table 200
+  run "Egress health and fallback" python3 -I "$lib/egress_health.py" status
+  run "Monthly public-interface transfer" python3 -I "$lib/transfer_counter.py" status
+  run "Tunnel config matches the registry" "$lib/tunnel_sync.sh" --check
+  run "Tunnel replica readiness" curl -fsS --max-time 3 http://127.0.0.1:20241/ready
+  run "Recent tunnel connections (must be protocol=http2)" bash -c \
+    'journalctl -u app-ha-cloudflared.service --since -1h --no-pager | grep -E "Registered tunnel connection" | tail -n 4'
+else
+  printf '\n[INFO] %s/guest_network.sh is absent; guest network checks skipped.\n' "$lib"
+fi
 if command -v nft >/dev/null 2>&1; then
+  run "app_ha_guest_gateway bridge table" nft list table bridge app_ha_guest_gateway
   run "app_ha_guest_egress IPv4 table" nft list table ip app_ha_guest_egress
-  run "app_ha_haproxy_ingress inet table" nft list table inet app_ha_haproxy_ingress
 else
   printf '\n[INFO] nft is not installed.\n'
-fi
-
-section "Local HAProxy LXC" \
-  "each moxN is expected to use LXC VMID 9110+N; this checks container state, HAProxy config validity, and host-vs-container generation synchronization."
-if [[ -z "$vmid" ]]; then
-  printf '\n[SKIP] Cannot derive HAProxy LXC VMID because hostname %q does not match moxN.\n' "$node"
-elif ! command -v pct >/dev/null 2>&1; then
-  printf '\n[SKIP] pct is not installed.\n'
-else
-  status="$(pct status "$vmid" 2>&1)"
-  rc=$?
-  printf '\n[CHECK] LXC %s status\n  $ pct status %q\n%s\n[exit %d]\n' "$vmid" "$vmid" "$status" "$rc"
-  if (( rc == 0 )) && grep -q 'status: running' <<<"$status"; then
-    run "HAProxy service inside LXC $vmid" pct exec "$vmid" -- systemctl is-active haproxy
-    run "HAProxy configuration syntax inside LXC $vmid" pct exec "$vmid" -- haproxy -c -f /etc/haproxy/haproxy.cfg
-    if [[ -r /run/app-ha-haproxy-ingress-current ]]; then
-      run "Host's current HAProxy ingress generation" cat /run/app-ha-haproxy-ingress-current
-    else
-      printf '\n[INFO] /run/app-ha-haproxy-ingress-current is absent on the host.\n'
-    fi
-    run "HAProxy LXC's active generation" pct exec "$vmid" -- cat /etc/haproxy/app-ha-active-generation
-  else
-    printf '\n[INFO] LXC %s is absent or not running, so in-container HAProxy checks are skipped.\n' "$vmid"
-  fi
 fi
 
 section "Failed units and recent errors" \
@@ -879,42 +853,32 @@ run "Locale environment" locale
 MOX
 done
 
-# The ingress registry is cluster-shared, so querying it once is enough. Use the
+# The registry is cluster-shared, so querying it once is enough. Use the
 # first reachable candidate as the inspection point.
 registry_host="${reachable_mox[0]}"
-banner "SHARED INGRESS REGISTRY - queried via ${registry_host}"
+banner "SHARED REGISTRY - queried via ${registry_host}"
 note "Why: this registry is shared cluster state, so one healthy Proxmox member can report it without repeating identical output from every node."
 ssh "${SSH_OPTS[@]}" "$registry_host" 'bash -s' <<'REGISTRY'
 set -u
 path=/usr/local/lib/app-ha-proxmox/lib/cluster_registry.py
 if [[ -x "$path" ]]; then
-  printf '[CHECK] Shared ingress registry status\n'
-  printf '  $ %q ingress-status\n' "$path"
-  "$path" ingress-status
-  rc=$?
-  printf '[exit %d]\n' "$rc"
-
-  printf '\n[CHECK] Registered and live production/staging guest inventory\n'
+  printf '[CHECK] Registered and live production/staging guest inventory\n'
   resources="$("$path" list)"
   live="$(pvesh get /cluster/resources --type vm --output-format json)"
-  routes="$("$path" list-routes)"
-  python3 - "$resources" "$live" "$routes" <<'PY'
+  python3 - "$resources" "$live" <<'PY'
 import json
 import sys
 
-resources, live, routes = map(json.loads, sys.argv[1:])
+resources, live = map(json.loads, sys.argv[1:])
 live_by_vmid = {
     int(row["vmid"]): row
     for row in live
     if str(row.get("vmid", "")).isdigit()
 }
-route_counts = {}
-for route in routes:
-    route_counts[route["resource"]] = route_counts.get(route["resource"], 0) + 1
 
 print(
     f"{'NAME':<12} {'KIND':<11} {'REGISTRY':<16} {'VMID':>6} "
-    f"{'LIVE':<9} {'OWNER':<8} {'IP':<16} {'ROUTES':>6} PLACEMENT"
+    f"{'LIVE':<9} {'OWNER':<8} {'IP':<16} {'FQDN':<32} PLACEMENT"
 )
 for resource in sorted(
     resources,
@@ -929,7 +893,7 @@ for resource in sorted(
         f"{resource['name']:<12} {resource['kind']:<11} "
         f"{resource['state']:<16} {vmid:>6} {live_state:<9} "
         f"{live_owner:<8} {resource['ip']:<16} "
-        f"{route_counts.get(resource['name'], 0):>6} {placement}"
+        f"{resource['domains']['primary']:<32} {placement}"
     )
 
 snapshot_users = {}
@@ -971,7 +935,7 @@ else:
 PY
   printf '[exit %d]\n' "$?"
 else
-  printf '[INFO] %s is absent or not executable; shared ingress registry check skipped.\n' "$path"
+  printf '[INFO] %s is absent or not executable; shared registry check skipped.\n' "$path"
 fi
 REGISTRY
 

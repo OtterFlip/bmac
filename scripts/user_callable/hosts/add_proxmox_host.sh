@@ -16,11 +16,19 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 # shellcheck source=../../lib/ui_protocol.sh
 source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
+# shellcheck source=../../lib/guest_network_settings.sh
+source "${REPO_ROOT}/scripts/lib/guest_network_settings.sh"
 CONFIG_LIB="${SCRIPT_DIR}/../../lib/config.sh"
-CLUSTER_REGISTRY_SOURCE="${SCRIPT_DIR}/../../host_runtime/cluster_registry.py"
-HAPROXY_RENDERER_SOURCE="${SCRIPT_DIR}/../../host_runtime/haproxy_routes.py"
-HAPROXY_SYNC_SOURCE="${SCRIPT_DIR}/../../host_runtime/sync_haproxy_routes.sh"
-DEFERRED_CLEANUP_SOURCE="${SCRIPT_DIR}/../../host_runtime/process_deferred_cleanup.sh"
+RUNTIME_SOURCE_DIR="${SCRIPT_DIR}/../../host_runtime"
+CLUSTER_REGISTRY_SOURCE="${RUNTIME_SOURCE_DIR}/cluster_registry.py"
+DEFERRED_CLEANUP_SOURCE="${RUNTIME_SOURCE_DIR}/process_deferred_cleanup.sh"
+# Runtime files installed beside config.sh and the lifecycle hook in
+# /usr/local/lib/app-ha-proxmox/lib on every mox host.
+RUNTIME_LIB_FILES=(
+  cluster_registry.py process_deferred_cleanup.sh
+  guest_network.sh egress_health.py egress_probe_targets.txt transfer_counter.py
+  tunnel_config.py tunnel_sync.sh cloudflared_setup.sh
+)
 RPOOL_MIRROR_SOURCE="${SCRIPT_DIR}/../../host_runtime/rpool_mirror.sh"
 RPOOL_MIRROR_TOOL=/usr/local/sbin/app-ha-rpool-mirror
 PROD_ISO_BUILDER_SOURCE="${SCRIPT_DIR}/../../host_runtime/build_ubuntu_autoinstall.py"
@@ -561,12 +569,10 @@ load_configuration() {
     PROXMOX_INTERNAL_DOMAIN
     MAX_MOX_HOSTS PRIVATE_SUBNET_CIDR PRIVATE_SUBNET_PREFIX
     MOX_IP_START MOX_IP_END MOX_IP_START_OCTET
-    HAPROXY_IP_START HAPROXY_IP_END HAPROXY_IP_START_OCTET
-    GUEST_EGRESS_VIP PRODUCTION_IP_START PRODUCTION_IP_END
-    STAGING_IP_START STAGING_IP_END VRRP_PRIORITY
-    HAPROXY_LXC_VMID HAPROXY_LXC_HOSTNAME HAPROXY_LXC_IP
-    HAPROXY_LXC_GATEWAY HAPROXY_LXC_ROOTFS_GB HAPROXY_LXC_MEMORY_MB
-    HAPROXY_LXC_CORES HAPROXY_LXC_STORAGE GUEST_ROLE_HOOK_PATH
+    GUEST_GATEWAY_IP GUEST_GATEWAY_MAC VM_SLOT_START VM_SLOT_END
+    MAX_PROD_VMS MAX_STAGING_VMS_PER_PROD
+    CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_TUNNEL_ID CLOUDFLARE_TUNNEL_SECRET
+    PROXMOX_HOST_TRANSFER_RESET_DAY_EFFECTIVE GUEST_ROLE_HOOK_PATH
     PRODUCTION_VM_TAG STAGING_VM_TAG EVICTABLE_VM_TAG
     CLUSTER_STATE_DIR PROD_VM_CORES PROD_VM_MEMORY_GIB PROD_VM_DISK_GB
     PROD_VM_REPLICATION_INTERVAL STAGING_VM_CORES STAGING_VM_MEMORY_GIB
@@ -587,10 +593,8 @@ load_configuration() {
   [[ "$PROXMOX_PRIVATE_BRIDGE" =~ ^[A-Za-z0-9_.:-]+$ ]] || fail "Unsafe PROXMOX_PRIVATE_BRIDGE"
   [[ "$PROXMOX_CLUSTER_NAME" =~ ^[A-Za-z0-9_-]+$ ]] || fail "Unsafe PROXMOX_CLUSTER_NAME"
   [[ "$PROXMOX_QDEVICE_HOST" =~ ^[A-Za-z0-9._-]+$ ]] || fail "Unsafe PROXMOX_QDEVICE_HOST"
-  [[ "$HAPROXY_LXC_HOSTNAME" =~ ^[A-Za-z0-9._-]+$ ]] || fail "Unsafe HAPROXY_LXC_HOSTNAME"
-  [[ "$HAPROXY_LXC_VMID" =~ ^[1-9][0-9]{2,8}$ ]] || fail "HAPROXY_LXC_VMID must be a numeric Proxmox VMID"
-  [[ "$HAPROXY_LXC_ROOTFS_GB" =~ ^[1-9][0-9]*$ ]] || fail "Invalid HAPROXY_LXC_ROOTFS_GB"
-  [[ "$HAPROXY_LXC_MEMORY_MB" =~ ^[1-9][0-9]*$ ]] || fail "Invalid HAPROXY_LXC_MEMORY_MB"
+  [[ "$CLOUDFLARE_TUNNEL_SECRET" =~ ^[A-Za-z0-9+/=]{32,}$ ]] ||
+    fail "CLOUDFLARE_TUNNEL_SECRET in secrets.env must be the tunnel's base64 TunnelSecret"
   [[ -z "${LUKS_PASSWORD:-}${LUKS_PASSPHRASE:-}${CRYPT_PASSWORD:-}" ]] ||
     fail "Remove the LUKS secret from configuration; it must only be entered at the target host console"
 
@@ -636,22 +640,17 @@ if gateway not in public.network:
 private = ipaddress.ip_interface(os.environ["PROXMOX_SECONDARY_IP"])
 migration_address = ipaddress.ip_interface(os.environ["MOX_REPLICATION_IP"])
 migration = ipaddress.ip_network(os.environ["PROXMOX_MIGRATION_NETWORK"], strict=True)
-haproxy = ipaddress.ip_interface(os.environ["HAPROXY_LXC_IP"])
-haproxy_gateway = ipaddress.ip_address(os.environ["HAPROXY_LXC_GATEWAY"])
-egress_vip = ipaddress.ip_interface(os.environ["GUEST_EGRESS_VIP"])
+guest_gateway = ipaddress.ip_address(os.environ["GUEST_GATEWAY_IP"])
 if migration_address.network != migration:
     raise SystemExit("MOX_REPLICATION_IP must use PROXMOX_MIGRATION_NETWORK exactly")
 for label, address in (
     ("host private IP", private.ip),
-    ("HAProxy IP", haproxy.ip),
-    ("guest-egress VIP", egress_vip.ip),
+    ("guest gateway", guest_gateway),
 ):
     if address in migration:
         raise SystemExit(f"{label} must be outside PROXMOX_MIGRATION_NETWORK")
-if haproxy_gateway != private.ip:
-    raise SystemExit("HAPROXY_LXC_GATEWAY must be this host's PROXMOX_SECONDARY_IP address")
-if len({private.ip, migration_address.ip, egress_vip.ip, haproxy.ip}) != 4:
-    raise SystemExit("Host, replication, egress VIP, and HAProxy addresses must be distinct")
+if len({private.ip, migration_address.ip, guest_gateway}) != 3:
+    raise SystemExit("Host, replication, and guest gateway addresses must be distinct")
 PY
 
   HOST_ID="$SELECTED_HOST"
@@ -722,17 +721,20 @@ preflight() {
     fail "Missing production/staging guest hook: $GUEST_ROLE_HOOK_SOURCE"
   local shared_source
   for shared_source in "$CONFIG_LIB" "$CLUSTER_CONFIG_SOURCE" \
-    "$CLUSTER_REGISTRY_SOURCE" "$HAPROXY_RENDERER_SOURCE" \
-    "$HAPROXY_SYNC_SOURCE" "$DEFERRED_CLEANUP_SOURCE" \
+    "${RUNTIME_LIB_FILES[@]/#/${RUNTIME_SOURCE_DIR}/}" \
     "$PROD_ISO_BUILDER_SOURCE" "$PROD_ISO_PREPARER_SOURCE" \
     "$GUEST_ROLE_HOOK_SOURCE"; do
     [[ -f "$shared_source" && ! -L "$shared_source" ]] ||
       fail "Missing shared orchestration source: $shared_source"
   done
-  bash -n "$CONFIG_LIB" "$HAPROXY_SYNC_SOURCE" "$DEFERRED_CLEANUP_SOURCE" \
-    "$PROD_ISO_PREPARER_SOURCE" "$GUEST_ROLE_HOOK_SOURCE"
-  PYTHONDONTWRITEBYTECODE=1 python3 "$CLUSTER_REGISTRY_SOURCE" --help >/dev/null
-  PYTHONDONTWRITEBYTECODE=1 python3 "$HAPROXY_RENDERER_SOURCE" --help >/dev/null
+  bash -n "$CONFIG_LIB" "$PROD_ISO_PREPARER_SOURCE" "$GUEST_ROLE_HOOK_SOURCE"
+  local runtime_file
+  for runtime_file in "${RUNTIME_LIB_FILES[@]}"; do
+    case "$runtime_file" in
+      *.sh) bash -n "${RUNTIME_SOURCE_DIR}/${runtime_file}" ;;
+      *.py) PYTHONDONTWRITEBYTECODE=1 python3 "${RUNTIME_SOURCE_DIR}/${runtime_file}" --help >/dev/null ;;
+    esac
+  done
   PYTHONDONTWRITEBYTECODE=1 python3 "$PROD_ISO_BUILDER_SOURCE" --help >/dev/null
 
   if [[ "$HARDWARE_INVENTORY_MODE" == idrac ]]; then
@@ -3899,275 +3901,6 @@ reconcile_cluster_control_plane() {
   exec {cluster_lock_fd}>&-
 }
 
-configure_guest_egress() {
-  log "Configuring the quorum-aware floating guest egress gateway"
-  remote_apt_script "$HOST_ID" "$MOX_INDEX" "$PROXMOX_SECONDARY_IP" \
-    "$GUEST_EGRESS_VIP" "$PROXMOX_PRIVATE_BRIDGE" "$PROXMOX_IP" \
-    "$PRIVATE_SUBNET_PREFIX" "$MOX_IP_START_OCTET" "$MAX_MOX_HOSTS" "$VRRP_PRIORITY" \
-    "$PRODUCTION_IP_START" "$STAGING_IP_END" <<'REMOTE'
-set -Eeuo pipefail
-host_id="$1"; host_index="$2"; private_cidr="$3"; vip_cidr="$4"
-bridge="$5"; public_ip="$6"; subnet_prefix="$7"; mox_start="$8"; max_hosts="$9"
-priority="${10}"; production_start="${11}"; staging_end="${12}"
-private_ip="${private_cidr%/*}"
-vip_ip="${vip_cidr%/*}"
-
-[[ "$host_id" == "mox${host_index}" ]]
-[[ "$host_index" =~ ^([1-9]|10)$ && "$max_hosts" =~ ^([1-9]|10)$ ]]
-((host_index <= max_hosts))
-((max_hosts >= 2))
-[[ "$private_ip" == "${subnet_prefix}.$((mox_start + host_index - 1))" ]]
-[[ "$priority" =~ ^[1-9][0-9]*$ && "$priority" -le 255 ]]
-
-peer_lines=""
-peer_set=""
-peer_count=0
-for ((index = 1; index <= max_hosts; index += 1)); do
-  candidate="${subnet_prefix}.$((mox_start + index - 1))"
-  [[ "$candidate" == "$private_ip" ]] && continue
-  peer_lines+="        ${candidate}"$'\n'
-  peer_set+="${candidate}, "
-  peer_count=$((peer_count + 1))
-done
-((peer_count == max_hosts - 1))
-peer_set="${peer_set%, }"
-
-public_if="$(ip -4 route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')"
-[[ -n "$public_if" && "$public_if" != "$bridge" ]]
-ip -4 -o address show dev "$public_if" |
-  awk -v ip="$public_ip" '$4 ~ ("^" ip "/") { found=1 } END { exit !found }'
-
-apt_wait_for_locks
-apt-get -o DPkg::Lock::Timeout=60 update
-DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y keepalived
-
-cat >/etc/sysctl.d/91-app-ha-guest-egress.conf <<'EOF'
-net.ipv4.ip_forward=1
-EOF
-sysctl --system >/dev/null
-
-install -d -m 0755 /etc/nftables.d
-cat >/etc/nftables.d/app-ha-guest-egress.nft <<EOF
-table ip app_ha_guest_egress {
-  chain vrrp_input {
-    type filter hook input priority -190; policy accept;
-    iifname "$bridge" ip protocol 112 ip saddr { $peer_set } ip daddr $private_ip counter accept
-    iifname "$bridge" ip protocol 112 counter drop
-  }
-
-  chain vrrp_output {
-    type filter hook output priority -190; policy accept;
-    oifname "$bridge" ip protocol 112 ip saddr $private_ip ip daddr { $peer_set } counter accept
-    oifname "$bridge" ip protocol 112 counter drop
-  }
-
-  chain forward {
-    type filter hook forward priority -190; policy accept;
-    iifname != "$bridge" ip saddr $production_start-$staging_end counter drop
-    iifname "$bridge" oifname "$public_if" ip saddr $production_start-$staging_end counter accept
-    iifname "$public_if" oifname "$bridge" ip daddr $production_start-$staging_end ct state established,related counter accept
-  }
-
-  chain postrouting {
-    type nat hook postrouting priority srcnat; policy accept;
-    iifname "$bridge" oifname "$public_if" ip saddr $production_start-$staging_end masquerade
-  }
-}
-EOF
-
-# Reconcile Proxmox host-firewall rules as well as the nft guard. An nft
-# accept verdict is not final if a later Proxmox firewall chain rejects VRRP.
-# Proxmox's pve-iface validator rejects hyphens even though Linux and its VM
-# bridge parser accept them, so interface binding remains in the earlier nft
-# chains while these rules repeat the exact protocol/address constraints.
-rules_json="$(pvesh get "/nodes/$host_id/firewall/rules" --output-format json)"
-while IFS= read -r position; do
-  pvesh delete "/nodes/$host_id/firewall/rules/$position"
-done < <(
-  jq -r '
-    [.[] | select(
-      ((.comment // "") | startswith("app-ha managed VRRP peer ")) or
-      (.comment // "") == "app-ha managed guest egress forward"
-    )] |
-    sort_by(.pos) | reverse | .[].pos
-  ' <<<"$rules_json"
-)
-for ((index = 1; index <= max_hosts; index += 1)); do
-  candidate="${subnet_prefix}.$((mox_start + index - 1))"
-  [[ "$candidate" == "$private_ip" ]] && continue
-  pvesh create "/nodes/$host_id/firewall/rules" \
-    --pos 0 --type in --action ACCEPT --enable 1 \
-    --proto 112 --source "$candidate" --dest "$private_ip" \
-    --comment "app-ha managed VRRP peer $candidate inbound"
-  pvesh create "/nodes/$host_id/firewall/rules" \
-    --pos 0 --type out --action ACCEPT --enable 1 \
-    --proto 112 --source "$private_ip" --dest "$candidate" \
-    --comment "app-ha managed VRRP peer $candidate outbound"
-done
-pvesh create "/nodes/$host_id/firewall/rules" \
-  --pos 0 --type forward --action ACCEPT --enable 1 \
-  --source "$production_start-$staging_end" \
-  --comment "app-ha managed guest egress forward"
-rules_json="$(pvesh get "/nodes/$host_id/firewall/rules" --output-format json)"
-managed_rule_count="$(
-  jq -r '
-    [.[] | select(
-      ((.comment // "") | startswith("app-ha managed VRRP peer ")) and
-      .action == "ACCEPT" and (.enable | tostring) == "1" and
-      (.proto | tostring) == "112"
-    )] | length
-  ' <<<"$rules_json"
-)"
-((managed_rule_count == peer_count * 2))
-jq -e --arg source "$production_start-$staging_end" '
-  any(.[];
-    (.comment // "") == "app-ha managed guest egress forward" and
-    .type == "forward" and .action == "ACCEPT" and
-    (.enable | tostring) == "1" and
-    (.iface // "") == "" and .source == $source
-  )
-' <<<"$rules_json" >/dev/null
-
-cat >/usr/local/sbin/app-ha-load-guest-egress <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-nft list table ip app_ha_guest_egress >/dev/null 2>&1 &&
-  nft delete table ip app_ha_guest_egress
-nft -f /etc/nftables.d/app-ha-guest-egress.nft
-EOF
-chmod 0755 /usr/local/sbin/app-ha-load-guest-egress
-
-cat >/etc/systemd/system/app-ha-guest-egress.service <<'EOF'
-[Unit]
-Description=app-ha production and staging guest egress NAT
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/app-ha-load-guest-egress
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-cat >/usr/local/sbin/app-ha-check-egress-router <<EOF
-#!/usr/bin/env bash
-set -Eeuo pipefail
-[[ "\$(sysctl -n net.ipv4.ip_forward)" == 1 ]]
-ip -br link show dev "$bridge" |
-  awk '\$2 == "UP" { found=1 } END { exit !found }'
-ip -br link show dev "$public_if" |
-  awk '\$2 == "UP" { found=1 } END { exit !found }'
-ip -4 route get 1.1.1.1 |
-  awk -v dev="$public_if" '{ for (i=1; i<=NF; i++) if (\$i == "dev" && \$(i+1) == dev) found=1 } END { exit !found }'
-ip -4 -o address show dev "$public_if" |
-  awk -v ip="$public_ip" '\$4 ~ ("^" ip "/") { found=1 } END { exit !found }'
-nft list table ip app_ha_guest_egress >/dev/null
-nft -nn list chain ip app_ha_guest_egress vrrp_input |
-  grep -Fq 'ip protocol 112'
-nft -nn list chain ip app_ha_guest_egress vrrp_output |
-  grep -Fq 'ip protocol 112'
-nft list chain ip app_ha_guest_egress forward |
-  grep -Fq 'ct state established,related'
-nft list chain ip app_ha_guest_egress postrouting |
-  grep -Fq 'masquerade'
-! nft -nn list ruleset |
-  awk '/hook forward/ && /policy drop/ { found=1 } END { exit !found }'
-if command -v iptables >/dev/null 2>&1; then
-  ! iptables -w -S FORWARD |
-    awk '\$1 == "-P" && \$2 == "FORWARD" && \$3 == "DROP" { found=1 } END { exit !found }'
-fi
-pvecm status 2>/dev/null |
-  awk '\$1 == "Quorate:" && \$2 == "Yes" { found=1 } END { exit !found }'
-curl -4 --interface "$public_ip" --connect-timeout 3 --max-time 4 \
-  --fail --silent --show-error https://1.1.1.1/cdn-cgi/trace >/dev/null
-EOF
-chmod 0755 /usr/local/sbin/app-ha-check-egress-router
-
-cat >/usr/local/sbin/app-ha-egress-vrrp-notify <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-state="${1:?VRRP state is required}"
-logger -t app-ha-egress "guest egress gateway entered ${state}"
-EOF
-chmod 0755 /usr/local/sbin/app-ha-egress-vrrp-notify
-
-cat >/etc/keepalived/keepalived.conf <<EOF
-global_defs {
-    router_id $host_id
-    enable_script_security
-    script_user root
-    vrrp_check_unicast_src
-}
-
-vrrp_script app_ha_egress_ready {
-    script "/usr/local/sbin/app-ha-check-egress-router"
-    interval 15
-    timeout 6
-    fall 3
-    rise 2
-}
-
-vrrp_instance APP_HA_GUEST_EGRESS {
-    state BACKUP
-    interface $bridge
-    virtual_router_id 10
-    priority $priority
-    advert_int 1
-    nopreempt
-
-    unicast_src_ip $private_ip
-    unicast_peer {
-$peer_lines    }
-
-    virtual_ipaddress {
-        $vip_cidr dev $bridge
-    }
-
-    track_interface {
-        $public_if
-    }
-
-    track_script {
-        app_ha_egress_ready
-    }
-
-    garp_master_delay 1
-    garp_master_repeat 5
-    garp_master_refresh 60
-    garp_master_refresh_repeat 2
-
-    notify_master "/usr/local/sbin/app-ha-egress-vrrp-notify MASTER"
-    notify_backup "/usr/local/sbin/app-ha-egress-vrrp-notify BACKUP"
-    notify_fault "/usr/local/sbin/app-ha-egress-vrrp-notify FAULT"
-}
-EOF
-
-install -d -m 0755 /etc/systemd/system/keepalived.service.d
-cat >/etc/systemd/system/keepalived.service.d/app-ha.conf <<'EOF'
-[Unit]
-After=app-ha-guest-egress.service pve-cluster.service
-Requires=app-ha-guest-egress.service
-EOF
-
-systemctl daemon-reload
-systemctl enable app-ha-guest-egress.service
-systemctl restart app-ha-guest-egress.service
-keepalived --config-test --use-file=/etc/keepalived/keepalived.conf
-systemctl enable keepalived.service
-systemctl restart keepalived.service
-
-systemctl is-active app-ha-guest-egress.service
-systemctl is-active keepalived.service
-nft list table ip app_ha_guest_egress
-ip -4 address show dev "$bridge"
-printf 'Floating gateway %s is managed by Keepalived; this node is priority %s.\n' "$vip_ip" "$priority"
-REMOTE
-  write_state guest-egress-configured
-}
-
 install_guest_role_hook() {
   log "Verifying the generic production/staging VM lifecycle guard"
   remote_script "$GUEST_ROLE_HOOK_NAME" "$GUEST_ROLE_HOOK_COMPAT_NAME" <<'REMOTE'
@@ -4199,17 +3932,16 @@ REMOTE
 }
 
 install_shared_orchestration_tools() {
-  log "Installing shared app-ha registry, ingress, and cleanup tools on online mox nodes"
+  log "Installing shared app-ha registry, networking, tunnel, and cleanup tools on online mox nodes"
   local remote_stage="/tmp/app-ha-orchestration-${CONFIG_EFFECTIVE_SHA256:0:16}"
+  local name
   remote rm -rf "$remote_stage"
   remote install -d -m 0700 "$remote_stage"
   copy_to_host "$CONFIG_LIB" "${remote_stage}/config.sh"
   copy_to_host "$CLUSTER_CONFIG_SOURCE" "${remote_stage}/cluster.conf"
-  copy_to_host "$CLUSTER_REGISTRY_SOURCE" "${remote_stage}/cluster_registry.py"
-  copy_to_host "$HAPROXY_RENDERER_SOURCE" "${remote_stage}/haproxy_routes.py"
-  copy_to_host "$HAPROXY_SYNC_SOURCE" "${remote_stage}/sync_haproxy_routes.sh"
-  copy_to_host "$DEFERRED_CLEANUP_SOURCE" \
-    "${remote_stage}/process_deferred_cleanup.sh"
+  for name in "${RUNTIME_LIB_FILES[@]}"; do
+    copy_to_host "${RUNTIME_SOURCE_DIR}/${name}" "${remote_stage}/${name}"
+  done
   copy_to_host "$PROD_ISO_BUILDER_SOURCE" \
     "${remote_stage}/build_ubuntu_autoinstall.py"
   copy_to_host "$PROD_ISO_PREPARER_SOURCE" \
@@ -4218,16 +3950,15 @@ install_shared_orchestration_tools() {
     "${remote_stage}/${GUEST_ROLE_HOOK_NAME}"
 
   remote_apt_script "$remote_stage" "$CLUSTER_STATE_DIR" "$PRIVATE_SUBNET_CIDR" \
-    "$GUEST_EGRESS_VIP" "$MAX_MOX_HOSTS" "$PRODUCTION_VM_TAG" \
+    "$GUEST_GATEWAY_IP" "$MAX_MOX_HOSTS" "$PRODUCTION_VM_TAG" \
     "$STAGING_VM_TAG" "$EVICTABLE_VM_TAG" "$PROD_VM_CORES" \
     "$((PROD_VM_MEMORY_GIB * 1024))" "$PROD_VM_DISK_GB" "$PROD_VM_REPLICATION_INTERVAL" \
     "$STAGING_VM_CORES" "$((STAGING_VM_MEMORY_GIB * 1024))" \
     "${STAGING_VM_DISK_GB:-$PROD_VM_DISK_GB}" \
     "${MOX_SSH_CONNECT_TIMEOUT:-8}" "$GUEST_ROLE_HOOK_NAME" \
     "$GUEST_ROLE_HOOK_COMPAT_NAME" "$PROXMOX_INTERNAL_DOMAIN" \
-    "$MOX_IP_START" "$MOX_IP_END" "$HAPROXY_IP_START" "$HAPROXY_IP_END" \
-    "$PRODUCTION_IP_START" "$PRODUCTION_IP_END" \
-    "$STAGING_IP_START" "$STAGING_IP_END" "$CONTROL_NODE" <<'REMOTE'
+    "$MOX_IP_START" "$MOX_IP_END" "$VM_SLOT_START" "$MAX_PROD_VMS" \
+    "$MAX_STAGING_VMS_PER_PROD" "$CONTROL_NODE" "${RUNTIME_LIB_FILES[*]}" <<'REMOTE'
 set -Eeuo pipefail
 source_dir="$1"; state_dir="$2"; network="$3"; guest_gateway="$4"
 max_hosts="$5"; production_tag="$6"; staging_tag="$7"; evictable_tag="$8"
@@ -4237,10 +3968,9 @@ staging_disk="${15}"; connect_timeout="${16}"; hook_name="${17}"
 compat_hook_name="${18}"
 internal_domain="${19}"
 mox_ip_start="${20}"; mox_ip_end="${21}"
-haproxy_ip_start="${22}"; haproxy_ip_end="${23}"
-production_ip_start="${24}"; production_ip_end="${25}"
-staging_ip_start="${26}"; staging_ip_end="${27}"
-control_node="${28}"
+vm_slot_start="${22}"; max_production="${23}"; max_staging_per_production="${24}"
+control_node="${25}"
+read -r -a lib_files <<<"${26}"
 [[ "$control_node" =~ ^mox([1-9]|10)$ ]]
 install_root=/usr/local/lib/app-ha-proxmox
 
@@ -4255,74 +3985,63 @@ if ! command -v fuser >/dev/null 2>&1 ||
   DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y \
     curl psmisc util-linux xorriso
 fi
-for command_name in bash curl findmnt flock fuser jq lsblk pvesh pvesm \
+for command_name in bash curl findmnt flock fuser jq lsblk nft pvesh pvesm \
   python3 qm scp sha256sum ssh systemctl tar xorriso zfs; do
   command -v "$command_name" >/dev/null 2>&1 || {
     printf 'Required orchestration command is unavailable: %s\n' "$command_name" >&2
     exit 1
   }
 done
-for source in config.sh cluster.conf cluster_registry.py haproxy_routes.py \
-  sync_haproxy_routes.sh process_deferred_cleanup.sh \
-  build_ubuntu_autoinstall.py prepare_prod_iso.sh "$hook_name"; do
-  [[ -f "$source_dir/$source" && ! -L "$source_dir/$source" ]]
-done
-bash -n "$source_dir/config.sh" "$source_dir/sync_haproxy_routes.sh" \
-  "$source_dir/process_deferred_cleanup.sh" "$source_dir/prepare_prod_iso.sh" \
-  "$source_dir/$hook_name"
-PYTHONDONTWRITEBYTECODE=1 python3 "$source_dir/cluster_registry.py" --help >/dev/null
-PYTHONDONTWRITEBYTECODE=1 python3 "$source_dir/haproxy_routes.py" --help >/dev/null
-PYTHONDONTWRITEBYTECODE=1 \
-  python3 "$source_dir/build_ubuntu_autoinstall.py" --help >/dev/null
 
+# Validate a staged runtime tree: every file present, shells parse, Python runs.
+validate_tree() {
+  local root="$1" name
+  for name in lib/config.sh "${lib_files[@]/#/lib/}" "lib/$hook_name" \
+    guests/prod/build_ubuntu_autoinstall.py guests/prod/prepare_prod_iso.sh \
+    config/cluster.conf; do
+    [[ -f "$root/$name" && ! -L "$root/$name" ]] || {
+      printf 'Missing staged runtime file: %s\n' "$name" >&2
+      return 1
+    }
+  done
+  for name in lib/config.sh "lib/$hook_name" guests/prod/prepare_prod_iso.sh \
+    "${lib_files[@]/#/lib/}"; do
+    [[ "$name" != *.sh ]] || bash -n "$root/$name"
+  done
+  for name in "${lib_files[@]}"; do
+    [[ "$name" != *.py ]] ||
+      PYTHONDONTWRITEBYTECODE=1 python3 "$root/lib/$name" --help >/dev/null
+  done
+  PYTHONDONTWRITEBYTECODE=1 \
+    python3 "$root/guests/prod/build_ubuntu_autoinstall.py" --help >/dev/null
+}
+
+# Atomically install a staged runtime tree (same layout as the bundle).
 install_tree() {
-  local source_root="$1"
+  local root="$1" name mode
   install -d -m 0755 \
     "$install_root/lib" "$install_root/config" "$install_root/guests/prod"
   install -d -o root -g root -m 0700 /var/lib/app-ha-proxmox/iso-cache
-  install -o root -g root -m 0755 "$source_root/config.sh" \
-    "$install_root/lib/.config.sh.new"
-  install -o root -g root -m 0755 "$source_root/cluster_registry.py" \
-    "$install_root/lib/.cluster_registry.py.new"
-  install -o root -g root -m 0755 "$source_root/haproxy_routes.py" \
-    "$install_root/lib/.haproxy_routes.py.new"
-  install -o root -g root -m 0755 "$source_root/sync_haproxy_routes.sh" \
-    "$install_root/lib/.sync_haproxy_routes.sh.new"
-  install -o root -g root -m 0755 \
-    "$source_root/process_deferred_cleanup.sh" \
-    "$install_root/lib/.process_deferred_cleanup.sh.new"
-  install -o root -g root -m 0755 "$source_root/$hook_name" \
-    "$install_root/lib/.${hook_name}.new"
-  install -o root -g root -m 0755 \
-    "$source_root/build_ubuntu_autoinstall.py" \
-    "$install_root/guests/prod/.build_ubuntu_autoinstall.py.new"
-  install -o root -g root -m 0755 "$source_root/prepare_prod_iso.sh" \
-    "$install_root/guests/prod/.prepare_prod_iso.sh.new"
-  install -o root -g root -m 0644 "$source_root/cluster.conf" \
+  install -o root -g root -m 0644 "$root/config/cluster.conf" \
     "$install_root/config/.cluster.conf.new"
   mv -f "$install_root/config/.cluster.conf.new" "$install_root/config/cluster.conf"
-  mv -f "$install_root/lib/.config.sh.new" "$install_root/lib/config.sh"
-  mv -f "$install_root/lib/.cluster_registry.py.new" \
-    "$install_root/lib/cluster_registry.py"
-  mv -f "$install_root/lib/.haproxy_routes.py.new" \
-    "$install_root/lib/haproxy_routes.py"
-  mv -f "$install_root/lib/.sync_haproxy_routes.sh.new" \
-    "$install_root/lib/sync_haproxy_routes.sh"
-  mv -f "$install_root/lib/.process_deferred_cleanup.sh.new" \
-    "$install_root/lib/process_deferred_cleanup.sh"
-  mv -f "$install_root/lib/.${hook_name}.new" \
-    "$install_root/lib/$hook_name"
-  mv -f "$install_root/guests/prod/.build_ubuntu_autoinstall.py.new" \
-    "$install_root/guests/prod/build_ubuntu_autoinstall.py"
-  mv -f "$install_root/guests/prod/.prepare_prod_iso.sh.new" \
-    "$install_root/guests/prod/prepare_prod_iso.sh"
+  for name in config.sh "${lib_files[@]}" "$hook_name"; do
+    mode=0755
+    [[ "$name" != *.txt ]] || mode=0644
+    install -o root -g root -m "$mode" "$root/lib/$name" \
+      "$install_root/lib/.${name}.new"
+    mv -f "$install_root/lib/.${name}.new" "$install_root/lib/$name"
+  done
+  for name in build_ubuntu_autoinstall.py prepare_prod_iso.sh; do
+    install -o root -g root -m 0755 "$root/guests/prod/$name" \
+      "$install_root/guests/prod/.${name}.new"
+    mv -f "$install_root/guests/prod/.${name}.new" \
+      "$install_root/guests/prod/$name"
+  done
   # Runtimes installed before config/ was named env/ keep a stale copy there.
   rm -f "$install_root/env/cluster.conf"
   [[ ! -d "$install_root/env" ]] || rmdir --ignore-fail-on-non-empty "$install_root/env"
 }
-
-install_tree "$source_dir"
-"$install_root/lib/config.sh" --check --no-secrets >/dev/null
 
 install_runtime() {
   local content
@@ -4370,65 +4089,59 @@ Persistent=false
 [Install]
 WantedBy=timers.target
 EOF
-  cat >/etc/systemd/system/app-ha-haproxy-route-sync.service <<EOF
+  # A backstop: a host that was offline when a production guest was added or
+  # removed catches up with the registry within a few minutes.
+  cat >/etc/systemd/system/app-ha-tunnel-sync.service <<EOF
 [Unit]
-Description=Converge and fail-close local app-ha HAProxy ingress
+Description=Bring this host's Cloudflare Tunnel config up to date with the registry
 After=network-online.target pve-cluster.service
 Wants=network-online.target pve-cluster.service
-Before=app-ha-haproxy-ingress.service
+ConditionPathExists=/etc/cloudflared/bmac-tunnel.json
 
 [Service]
 Type=oneshot
-ExecStart=$install_root/lib/sync_haproxy_routes.sh --local-reconcile
+ExecStart=$install_root/lib/tunnel_sync.sh --local
 TimeoutStartSec=180
-UMask=0077
 EOF
-  cat >/etc/systemd/system/app-ha-haproxy-route-sync.timer <<'EOF'
+  cat >/etc/systemd/system/app-ha-tunnel-sync.timer <<'EOF'
 [Unit]
-Description=Continuously reconcile app-ha HAProxy ingress
+Description=Periodically reconcile the Cloudflare Tunnel config
 
 [Timer]
-OnBootSec=20s
-OnUnitActiveSec=1min
-RandomizedDelaySec=10s
-AccuracySec=5s
+OnBootSec=1min
+OnUnitActiveSec=5min
+RandomizedDelaySec=60s
+AccuracySec=15s
 Persistent=false
-Unit=app-ha-haproxy-route-sync.service
 
 [Install]
 WantedBy=timers.target
 EOF
-  install -d -m 0755 \
-    /etc/systemd/system/app-ha-haproxy-ingress.service.d
-  cat >/etc/systemd/system/app-ha-haproxy-ingress.service.d/route-sync.conf <<EOF
-[Unit]
-After=app-ha-haproxy-route-sync.service
-Wants=app-ha-haproxy-route-sync.service
-
-[Service]
-ExecStartPre=
-ExecStartPre=$install_root/lib/sync_haproxy_routes.sh --assert-local-current
-EOF
   chmod 0644 /etc/systemd/system/app-ha-deferred-cleanup.service \
     /etc/systemd/system/app-ha-deferred-cleanup.timer \
-    /etc/systemd/system/app-ha-haproxy-route-sync.service \
-    /etc/systemd/system/app-ha-haproxy-route-sync.timer \
-    /etc/systemd/system/app-ha-haproxy-ingress.service.d/route-sync.conf
+    /etc/systemd/system/app-ha-tunnel-sync.service \
+    /etc/systemd/system/app-ha-tunnel-sync.timer
   systemctl daemon-reload
   systemctl enable --now app-ha-deferred-cleanup.timer
-  systemctl enable app-ha-haproxy-route-sync.timer
+  systemctl enable --now app-ha-tunnel-sync.timer
   pvesm path "local:snippets/$hook_name" >/dev/null
 }
 
-install_runtime
-
+staged="$(mktemp -d /run/app-ha-orchestration.XXXXXX)"
 bundle="$(mktemp /run/app-ha-orchestration.XXXXXX.tar)"
-trap 'rm -f "$bundle"; rm -rf "$source_dir"' EXIT
-tar -C "$install_root" -cf "$bundle" lib/config.sh lib/cluster_registry.py \
-  lib/haproxy_routes.py lib/sync_haproxy_routes.sh \
-  lib/process_deferred_cleanup.sh "lib/$hook_name" \
-  guests/prod/build_ubuntu_autoinstall.py \
-  guests/prod/prepare_prod_iso.sh config/cluster.conf
+trap 'rm -f "$bundle"; rm -rf "$source_dir" "$staged"' EXIT
+install -d -m 0700 "$staged/lib" "$staged/config" "$staged/guests/prod"
+for name in config.sh "${lib_files[@]}" "$hook_name"; do
+  cp -- "$source_dir/$name" "$staged/lib/$name"
+done
+cp -- "$source_dir/cluster.conf" "$staged/config/cluster.conf"
+cp -- "$source_dir/build_ubuntu_autoinstall.py" "$source_dir/prepare_prod_iso.sh" \
+  "$staged/guests/prod/"
+validate_tree "$staged"
+install_tree "$staged"
+"$install_root/lib/config.sh" --check --no-secrets >/dev/null
+install_runtime
+tar -C "$staged" -cf "$bundle" .
 
 nodes_json="$(pvesh get /nodes --output-format json)"
 unexpected="$(jq -r --argjson maximum "$max_hosts" '
@@ -4475,12 +4188,13 @@ for ((index = 1; index <= max_hosts; index += 1)); do
   [[ "$remote_bundle" =~ ^/run/app-ha-orchestration-mox([1-9]|10)-[0-9]+[.]tar$ ]]
   scp "${ssh_options[@]}" "$bundle" "root@${destination}:${remote_bundle}"
   printf -v remote_command '%q ' bash -s -- \
-    "$remote_bundle" "$install_root" "$hook_name" "$compat_hook_name"
+    "$remote_bundle" "$install_root" "$hook_name" "$compat_hook_name" "${lib_files[*]}"
   ssh "${ssh_options[@]}" "root@${destination}" "$remote_command" < <(
-    declare -f apt_lock_holder apt_wait_for_locks
+    declare -f apt_lock_holder apt_wait_for_locks validate_tree install_tree install_runtime
     cat <<'NODE'
 set -Eeuo pipefail
 bundle="$1"; install_root="$2"; hook_name="$3"; compat_hook_name="$4"
+read -r -a lib_files <<<"$5"
 if ! command -v fuser >/dev/null 2>&1 ||
    ! command -v findmnt >/dev/null 2>&1 ||
    ! command -v flock >/dev/null 2>&1 ||
@@ -4492,7 +4206,7 @@ if ! command -v fuser >/dev/null 2>&1 ||
   DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y \
     curl psmisc util-linux xorriso
 fi
-for command_name in bash curl findmnt flock fuser lsblk pvesh pvesm python3 \
+for command_name in bash curl findmnt flock fuser lsblk nft pvesh pvesm python3 \
   qm sha256sum systemctl tar xorriso zfs; do
   command -v "$command_name" >/dev/null 2>&1 || {
     printf 'Required cleanup command is unavailable: %s\n' "$command_name" >&2
@@ -4502,134 +4216,10 @@ done
 incoming="$(mktemp -d /run/app-ha-orchestration.XXXXXX)"
 trap 'rm -rf "$incoming"; rm -f "$bundle"' EXIT
 tar -xf "$bundle" -C "$incoming"
-for source in lib/config.sh lib/cluster_registry.py lib/haproxy_routes.py \
-  lib/sync_haproxy_routes.sh lib/process_deferred_cleanup.sh \
-  "lib/$hook_name" guests/prod/build_ubuntu_autoinstall.py \
-  guests/prod/prepare_prod_iso.sh config/cluster.conf; do
-  [[ -f "$incoming/$source" && ! -L "$incoming/$source" ]]
-done
-bash -n "$incoming/lib/config.sh" "$incoming/lib/sync_haproxy_routes.sh" \
-  "$incoming/lib/process_deferred_cleanup.sh" \
-  "$incoming/guests/prod/prepare_prod_iso.sh" "$incoming/lib/$hook_name"
-PYTHONDONTWRITEBYTECODE=1 python3 "$incoming/lib/cluster_registry.py" --help >/dev/null
-PYTHONDONTWRITEBYTECODE=1 python3 "$incoming/lib/haproxy_routes.py" --help >/dev/null
-PYTHONDONTWRITEBYTECODE=1 \
-  python3 "$incoming/guests/prod/build_ubuntu_autoinstall.py" --help >/dev/null
-install -d -m 0755 \
-  "$install_root/lib" "$install_root/config" "$install_root/guests/prod"
-install -d -o root -g root -m 0700 /var/lib/app-ha-proxmox/iso-cache
-install -o root -g root -m 0644 "$incoming/config/cluster.conf" \
-  "$install_root/config/.cluster.conf.new"
-mv -f "$install_root/config/.cluster.conf.new" "$install_root/config/cluster.conf"
-for name in config.sh cluster_registry.py haproxy_routes.py \
-  sync_haproxy_routes.sh process_deferred_cleanup.sh "$hook_name"; do
-  mode=0755
-  install -o root -g root -m "$mode" "$incoming/lib/$name" \
-    "$install_root/lib/.${name}.new"
-  mv -f "$install_root/lib/.${name}.new" "$install_root/lib/$name"
-done
-for name in build_ubuntu_autoinstall.py prepare_prod_iso.sh; do
-  install -o root -g root -m 0755 "$incoming/guests/prod/$name" \
-    "$install_root/guests/prod/.${name}.new"
-  mv -f "$install_root/guests/prod/.${name}.new" \
-    "$install_root/guests/prod/$name"
-done
-rm -f "$install_root/env/cluster.conf"
-[[ ! -d "$install_root/env" ]] || rmdir --ignore-fail-on-non-empty "$install_root/env"
+validate_tree "$incoming"
+install_tree "$incoming"
 "$install_root/lib/config.sh" --check --no-secrets >/dev/null
-
-content="$(
-  pvesh get /storage/local --output-format json |
-    jq -er '.content | select(type == "string" and length > 0)'
-)"
-[[ -n "$content" ]]
-case ",${content}," in
-  *,snippets,*) ;;
-  *) pvesm set local --content "${content},snippets" ;;
-esac
-install -d -m 0755 /var/lib/vz/snippets
-install -o root -g root -m 0755 "$install_root/lib/$hook_name" \
-  "/var/lib/vz/snippets/$hook_name"
-if [[ -n "$compat_hook_name" ]]; then
-  [[ "$compat_hook_name" =~ ^[A-Za-z0-9._-]+[.]sh$ ]]
-  install -o root -g root -m 0755 "$install_root/lib/$hook_name" \
-    "/var/lib/vz/snippets/$compat_hook_name"
-fi
-cat >/etc/systemd/system/app-ha-deferred-cleanup.service <<EOF
-[Unit]
-Description=Process deferred app-ha staging cleanup
-After=pve-cluster.service
-Wants=pve-cluster.service
-
-[Service]
-Type=oneshot
-ExecStart=$install_root/lib/process_deferred_cleanup.sh --max-seconds 120
-TimeoutStartSec=150
-Nice=10
-IOSchedulingClass=idle
-EOF
-cat >/etc/systemd/system/app-ha-deferred-cleanup.timer <<'EOF'
-[Unit]
-Description=Retry deferred app-ha staging cleanup
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=2min
-RandomizedDelaySec=30s
-AccuracySec=15s
-Persistent=false
-
-[Install]
-WantedBy=timers.target
-EOF
-cat >/etc/systemd/system/app-ha-haproxy-route-sync.service <<EOF
-[Unit]
-Description=Converge and fail-close local app-ha HAProxy ingress
-After=network-online.target pve-cluster.service
-Wants=network-online.target pve-cluster.service
-Before=app-ha-haproxy-ingress.service
-
-[Service]
-Type=oneshot
-ExecStart=$install_root/lib/sync_haproxy_routes.sh --local-reconcile
-TimeoutStartSec=180
-UMask=0077
-EOF
-cat >/etc/systemd/system/app-ha-haproxy-route-sync.timer <<'EOF'
-[Unit]
-Description=Continuously reconcile app-ha HAProxy ingress
-
-[Timer]
-OnBootSec=20s
-OnUnitActiveSec=1min
-RandomizedDelaySec=10s
-AccuracySec=5s
-Persistent=false
-Unit=app-ha-haproxy-route-sync.service
-
-[Install]
-WantedBy=timers.target
-EOF
-install -d -m 0755 \
-  /etc/systemd/system/app-ha-haproxy-ingress.service.d
-cat >/etc/systemd/system/app-ha-haproxy-ingress.service.d/route-sync.conf <<EOF
-[Unit]
-After=app-ha-haproxy-route-sync.service
-Wants=app-ha-haproxy-route-sync.service
-
-[Service]
-ExecStartPre=
-ExecStartPre=$install_root/lib/sync_haproxy_routes.sh --assert-local-current
-EOF
-chmod 0644 /etc/systemd/system/app-ha-deferred-cleanup.service \
-  /etc/systemd/system/app-ha-deferred-cleanup.timer \
-  /etc/systemd/system/app-ha-haproxy-route-sync.service \
-  /etc/systemd/system/app-ha-haproxy-route-sync.timer \
-  /etc/systemd/system/app-ha-haproxy-ingress.service.d/route-sync.conf
-systemctl daemon-reload
-systemctl enable --now app-ha-deferred-cleanup.timer
-systemctl enable app-ha-haproxy-route-sync.timer
-pvesm path "local:snippets/$hook_name" >/dev/null
+install_runtime
 NODE
   )
 done
@@ -4641,12 +4231,9 @@ replication_minutes="${replication_schedule##*/}"
   --guest-gateway "$guest_gateway" \
   --mox-ip-start "$mox_ip_start" \
   --mox-ip-end "$mox_ip_end" \
-  --haproxy-ip-start "$haproxy_ip_start" \
-  --haproxy-ip-end "$haproxy_ip_end" \
-  --production-ip-start "$production_ip_start" \
-  --production-ip-end "$production_ip_end" \
-  --staging-ip-start "$staging_ip_start" \
-  --staging-ip-end "$staging_ip_end" \
+  --vm-slot-start "$vm_slot_start" \
+  --max-production "$max_production" \
+  --max-staging-per-production "$max_staging_per_production" \
   --max-hosts "$max_hosts" \
   --production-tag "$production_tag" \
   --staging-tag "$staging_tag" \
@@ -4674,240 +4261,37 @@ REMOTE
   write_state shared-orchestration-tools-installed
 }
 
-create_haproxy_lxc() {
-  has_state haproxy-lxc-generic-ingress-v3-configured && return
-  log "Creating fixed HAProxy LXC $HAPROXY_LXC_VMID on $HOST_ID"
-  remote systemctl stop app-ha-haproxy-route-sync.timer
-  remote_apt_script "$HAPROXY_LXC_VMID" "$HAPROXY_LXC_HOSTNAME" "$HAPROXY_LXC_IP" \
-    "$HAPROXY_LXC_GATEWAY" "$PROXMOX_PRIVATE_BRIDGE" "$HAPROXY_LXC_STORAGE" \
-    "$HAPROXY_LXC_ROOTFS_GB" "$HAPROXY_LXC_MEMORY_MB" \
-    "${HAPROXY_LXC_CORES:-1}" <<'REMOTE'
-set -Eeuo pipefail
-vmid="$1"; name="$2"; ip_cidr="$3"; gateway="$4"; bridge="$5"; storage="$6"
-rootfs_gb="$7"; memory_mb="$8"; cores="$9"
-[[ "$(dpkg --print-architecture)" == amd64 && "$(uname -m)" == x86_64 ]]
-
-# Recover only the exact stopped ARM64 container produced by the former
-# unqualified template selector. Refuse to replace any other VMID collision.
-if pct status "$vmid" >/dev/null 2>&1; then
-  existing_config="$(pct config "$vmid")"
-  existing_arch="$(
-    awk -F ': ' '$1 == "arch" { print $2; count++ } END { if (count != 1) exit 1 }' \
-      <<<"$existing_config"
-  )"
-  if [[ "$existing_arch" != amd64 ]]; then
-    [[ "$existing_arch" == arm64 ]]
-    [[ "$(pct status "$vmid")" == "status: stopped" ]]
-    grep -Fxq "hostname: $name" <<<"$existing_config"
-    existing_net0="$(
-      awk -F ': ' '$1 == "net0" { print $2; count++ } END { if (count != 1) exit 1 }' \
-        <<<"$existing_config"
-    )"
-    for expected in "bridge=$bridge" "gw=$gateway" "ip=$ip_cidr"; do
-      case ",${existing_net0}," in
-        *",${expected},"*) ;;
-        *) exit 1 ;;
-      esac
-    done
-    grep -Eq "^rootfs: ${storage}:[^,]+,size=${rootfs_gb}G(,|$)" \
-      <<<"$existing_config"
-    printf 'Removing exact stopped ARM64 partial HAProxy LXC %s before AMD64 recreation.\n' \
-      "$vmid"
-    pct destroy "$vmid" --purge 1
-  fi
-fi
-
-created_lxc=0
-if ! pct status "$vmid" >/dev/null 2>&1; then
-  created_lxc=1
-  pveam update
-  template="$(
-    pveam available --section system |
-      awk '$2 ~ /^debian-13-standard_.*_amd64[.]tar[.]zst$/ { print $2 }' |
-      sort -V | tail -n1
-  )"
-  [[ "$template" =~ ^debian-13-standard_.*_amd64[.]tar[.]zst$ ]] ||
-    { echo "No Debian 13 AMD64 standard LXC template is available" >&2; exit 1; }
-  [[ -f "/var/lib/vz/template/cache/$template" ]] || pveam download local "$template"
-  pct create "$vmid" "local:vztmpl/$template" \
-    --arch amd64 --tags app-ha-fixed-haproxy \
-    --hostname "$name" --unprivileged 1 --cores "$cores" --memory "$memory_mb" --swap 0 \
-    --rootfs "${storage}:${rootfs_gb}" --onboot 1 --startup order=1 \
-    --net0 "name=eth0,bridge=${bridge},ip=${ip_cidr},gw=${gateway},type=veth,firewall=1"
-fi
-pct set "$vmid" --onboot 1 --startup order=1
-config="$(pct config "$vmid")"
-grep -Fxq "arch: amd64" <<<"$config"
-grep -Fxq "hostname: $name" <<<"$config"
-net0="$(awk -F ': ' '$1 == "net0" { print $2; count++ } END { if (count != 1) exit 1 }' <<<"$config")"
-for expected in "bridge=$bridge" "gw=$gateway" "ip=$ip_cidr"; do
-  case ",${net0}," in
-    *",${expected},"*) ;;
-    *)
-      printf 'Fixed HAProxy LXC %s net0 is missing %s: %s\n' \
-        "$vmid" "$expected" "$net0" >&2
-      exit 1
-      ;;
-  esac
-done
-pct start "$vmid" || true
-for _ in $(seq 1 30); do
-  pct exec "$vmid" -- true 2>/dev/null && break
-  sleep 2
-done
-
-# Give the private-only LXC outbound Internet access before apt runs. The
-# durable ingress/NAT table and systemd unit are installed immediately below.
-lxc_ip="${ip_cidr%/*}"
-public_if="$(ip -4 route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')"
-[[ -n "$public_if" ]]
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
-nft list table inet app_ha_haproxy_bootstrap >/dev/null 2>&1 &&
-  nft delete table inet app_ha_haproxy_bootstrap
-nft add table inet app_ha_haproxy_bootstrap
-nft 'add chain inet app_ha_haproxy_bootstrap forward { type filter hook forward priority -151; policy accept; }'
-nft 'add chain inet app_ha_haproxy_bootstrap postrouting { type nat hook postrouting priority srcnat; policy accept; }'
-nft add rule inet app_ha_haproxy_bootstrap forward ip saddr "$lxc_ip" accept
-nft add rule inet app_ha_haproxy_bootstrap forward ct state established,related accept
-nft add rule inet app_ha_haproxy_bootstrap postrouting ip saddr "$lxc_ip" oifname "$public_if" masquerade
-
-pct exec "$vmid" -- bash -s -- "$created_lxc" < <(
-  declare -f apt_lock_holder apt_wait_for_locks
-  cat <<'LXC'
-set -Eeuo pipefail
-created_lxc="$1"
-export LANG=C.UTF-8
-export LC_ALL=C.UTF-8
-cat >/etc/default/locale <<'EOF'
-LANG=C.UTF-8
-LC_ALL=C.UTF-8
-EOF
-apt_wait_for_locks
-apt-get -o DPkg::Lock::Timeout=60 update
-DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y diffutils haproxy rsyslog
-if [[ "$created_lxc" == 1 || ! -s /etc/haproxy/haproxy.cfg ]]; then
-cat >/etc/haproxy/haproxy.cfg <<EOF
-# Temporary reject-only bootstrap. sync_haproxy_routes.sh replaces this with
-# the deterministic app-ha route generation.
-global
-    log /dev/log local0
-    log /dev/log local1 notice
-    user haproxy
-    group haproxy
-    daemon
-
-defaults
-    log global
-    timeout connect 5s
-    timeout client  60s
-    timeout server  60s
-
-frontend public_http
-    bind :80
-    mode http
-    option httplog
-    default_backend no_configured_http_route
-
-frontend public_tls
-    bind :443
-    mode tcp
-    option tcplog
-    default_backend no_configured_tls_route
-
-backend no_configured_http_route
-    mode http
-    http-request deny deny_status 404
-
-backend no_configured_tls_route
-    mode tcp
-    server no_route 127.0.0.1:1 disabled
-EOF
-fi
-haproxy -c -f /etc/haproxy/haproxy.cfg
-systemctl enable haproxy rsyslog
-systemctl start rsyslog
-systemctl reload-or-restart haproxy
-LXC
-)
-pct exec "$vmid" -- ip -4 route show default |
-  awk -v gateway="$gateway" '$1 == "default" && $3 == gateway { found=1 } END { exit !found }'
-REMOTE
-
-  remote_script "$PROXMOX_IP" "$HAPROXY_LXC_IP" "$HAPROXY_LXC_GATEWAY" \
-    "$HAPROXY_LXC_VMID" <<'REMOTE'
-set -Eeuo pipefail
-public_ip="$1"; lxc_ip="${2%/*}"; private_gateway="$3"; vmid="$4"
-public_if="$(ip -4 route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')"
-[[ -n "$public_if" ]]
-pct exec "$vmid" -- ip -4 route show default |
-  awk -v gateway="$private_gateway" '$1 == "default" && $3 == gateway { found=1 } END { exit !found }'
-cat >/etc/sysctl.d/90-app-ha-haproxy-router.conf <<'EOF'
-net.ipv4.ip_forward=1
-EOF
-sysctl --system >/dev/null
-install -d -m 0755 /etc/nftables.d
-cat >/etc/nftables.d/app-ha-haproxy-ingress.nft <<EOF
-table inet app_ha_haproxy_ingress {
-  chain prerouting {
-    type nat hook prerouting priority dstnat; policy accept;
-    ip daddr $public_ip tcp dport { 80, 443 } dnat ip to $lxc_ip
-  }
-  chain forward {
-    type filter hook forward priority -150; policy accept;
-    ct state established,related accept
-    iifname "$public_if" ip daddr $lxc_ip tcp dport { 80, 443 } accept
-    ip saddr $lxc_ip accept
-  }
-  chain postrouting {
-    type nat hook postrouting priority srcnat; policy accept;
-    ip saddr $lxc_ip oifname "$public_if" masquerade
-  }
-}
-EOF
-cat >/usr/local/sbin/app-ha-load-haproxy-ingress <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-nft list table inet app_ha_haproxy_ingress >/dev/null 2>&1 &&
-  nft delete table inet app_ha_haproxy_ingress
-nft -f /etc/nftables.d/app-ha-haproxy-ingress.nft
-EOF
-chmod 0755 /usr/local/sbin/app-ha-load-haproxy-ingress
-cat >/etc/systemd/system/app-ha-haproxy-ingress.service <<EOF
-[Unit]
-Description=app-ha public ingress DNAT to fixed local HAProxy LXC
-After=network-online.target pve-container@${vmid}.service app-ha-haproxy-route-sync.service
-Wants=network-online.target app-ha-haproxy-route-sync.service
-[Service]
-Type=oneshot
-ExecStartPre=/usr/local/lib/app-ha-proxmox/lib/sync_haproxy_routes.sh --assert-local-current
-ExecStart=/usr/local/sbin/app-ha-load-haproxy-ingress
-RemainAfterExit=yes
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload
-systemctl enable app-ha-haproxy-ingress.service
-/usr/local/lib/app-ha-proxmox/lib/sync_haproxy_routes.sh \
-  --local-reconcile --lock-timeout 240
-systemctl restart app-ha-haproxy-ingress.service
-
-nft list table inet app_ha_haproxy_bootstrap >/dev/null 2>&1 &&
-  nft delete table inet app_ha_haproxy_bootstrap
-systemctl daemon-reload
-systemctl is-active app-ha-haproxy-ingress.service
-nft list table inet app_ha_haproxy_ingress
-REMOTE
-  write_state haproxy-lxc-configured
-  write_state haproxy-lxc-base-v2-configured
-  write_state haproxy-lxc-generic-ingress-v3-configured
+configure_guest_network() {
+  log "Configuring the shared guest gateway, egress NAT, and fallback routing"
+  local settings_file
+  settings_file="$(mktemp "${GENERATED_DIR}/guest-network.XXXXXX.env")"
+  guest_network_settings >"$settings_file"
+  copy_to_host "$settings_file" /root/.app-ha-guest-network.env
+  rm -f "$settings_file"
+  remote /usr/local/lib/app-ha-proxmox/lib/guest_network.sh configure \
+    /root/.app-ha-guest-network.env
+  remote rm -f /root/.app-ha-guest-network.env
+  write_state guest-network-configured
 }
 
-sync_haproxy_routes() {
-  log "Synchronizing registry-backed routes across online HAProxy LXCs"
-  remote /usr/local/lib/app-ha-proxmox/lib/sync_haproxy_routes.sh \
-    --lock-timeout 240
-  remote systemctl start app-ha-haproxy-route-sync.timer
-  write_state haproxy-routes-synchronized
+configure_tunnel() {
+  log "Installing $HOST_ID's Cloudflare Tunnel replica"
+  local secret_file
+  secret_file="$(mktemp "${GENERATED_DIR}/tunnel-secret.XXXXXX")"
+  chmod 0600 "$secret_file"
+  printf '%s\n' "$CLOUDFLARE_TUNNEL_SECRET" >"$secret_file"
+  copy_to_host "$secret_file" /root/.app-ha-tunnel-secret
+  shred -u "$secret_file" 2>/dev/null || rm -f "$secret_file"
+  remote_apt_script "$CLOUDFLARE_ACCOUNT_ID" "$CLOUDFLARE_TUNNEL_ID" <<'REMOTE'
+set -Eeuo pipefail
+trap 'shred -u /root/.app-ha-tunnel-secret 2>/dev/null || rm -f /root/.app-ha-tunnel-secret' EXIT
+lib=/usr/local/lib/app-ha-proxmox/lib
+"$lib/cloudflared_setup.sh" install "$1" "$2" </root/.app-ha-tunnel-secret
+"$lib/tunnel_sync.sh" --local
+systemctl is-active app-ha-cloudflared.service
+"$lib/tunnel_sync.sh" --check
+REMOTE
+  write_state tunnel-replica-configured
 }
 
 final_verify() {
@@ -4931,20 +4315,14 @@ final_verify() {
   fi
 
   log "Running final host verification"
-  remote_script "$PROXMOX_PRIVATE_BRIDGE" "$HAPROXY_LXC_VMID" \
-    "$GUEST_EGRESS_VIP" "$GUEST_ROLE_HOOK_NAME" "$PROXMOX_SECONDARY_IP" \
-    "$MOX_REPLICATION_IP" "$PRIVATE_SUBNET_PREFIX" \
-    "$MOX_IP_START_OCTET" "$MAX_MOX_HOSTS" \
-    "$VRRP_PRIORITY" "$ENCRYPTION_POLICY" \
-    "$PROXMOX_INTERNAL_DOMAIN" \
+  remote_script "$PROXMOX_PRIVATE_BRIDGE" "$GUEST_ROLE_HOOK_NAME" \
+    "$MOX_REPLICATION_IP" "$ENCRYPTION_POLICY" \
     "${EXPECTED_RPOOL_MAPPERS[@]}" <<'REMOTE' |
     tee "${LOG_DIR}/final-verification.txt"
 set -Eeuo pipefail
-bridge="$1"; vmid="$2"; egress_vip="${3%/*}"; hook_name="$4"
-private_ip="${5%/*}"; replication_cidr="$6"; subnet_prefix="$7"
-mox_start="$8"; max_hosts="$9"; priority="${10}"; encryption_policy="${11}"
-internal_domain="${12}"
-shift 12
+bridge="$1"; hook_name="$2"; replication_cidr="$3"; encryption_policy="$4"
+shift 4
+lib=/usr/local/lib/app-ha-proxmox/lib
 pveversion
 pvecm status
 zpool status -P rpool
@@ -4992,100 +4370,22 @@ if [[ "$encryption_policy" == luks ]]; then
 else
   ! awk '$1 ~ /^crypt-rpool-/ { found=1 } END { exit !found }' /etc/crypttab
 fi
-pct status "$vmid"
-pct exec "$vmid" -- systemctl is-active haproxy
-pct exec "$vmid" -- haproxy -c -f /etc/haproxy/haproxy.cfg
-pct exec "$vmid" -- grep -Fq \
-  'Managed by app-ha HAProxy route synchronization' /etc/haproxy/haproxy.cfg
 nft list table inet app_ha_host_guard
-nft list table inet app_ha_haproxy_ingress
-systemctl is-active app-ha-haproxy-ingress.service
-systemctl is-enabled --quiet app-ha-haproxy-route-sync.timer
-systemctl is-active --quiet app-ha-haproxy-route-sync.timer
-nft list table ip app_ha_guest_egress
-/usr/local/sbin/app-ha-check-egress-router
-systemctl is-active keepalived.service
-keepalived --config-test --use-file=/etc/keepalived/keepalived.conf
-vip_owner=""
-for _ in $(seq 1 10); do
-  vip_owner=""
-  vip_owner_count=0
-  queried_node_count=0
-  query_failed=false
-  nodes_json="$(pvesh get /nodes --output-format json)"
-  online_nodes_before="$(
-    jq -r '[.[] | select(.status == "online") | .node] | sort | join("\n")' \
-      <<<"$nodes_json"
-  )"
-  online_node_count="$(
-    jq -r '[.[] | select(.status == "online")] | length' <<<"$nodes_json"
-  )"
-  while IFS= read -r node; do
-    [[ -n "$node" ]] || continue
-    node_fqdn="${node}.${internal_domain}"
-    node_pin="/etc/pve/nodes/${node}/ssh_known_hosts"
-    [[ -s "$node_pin" && ! -L "$node_pin" ]] || {
-      query_failed=true
-      continue
-    }
-    if node_vip_state="$(
-      ssh -o BatchMode=yes -o ClearAllForwardings=yes \
-      -o StrictHostKeyChecking=yes \
-      -o CheckHostIP=no \
-      -o "HostKeyAlias=${node}" \
-      -o "UserKnownHostsFile=${node_pin}" \
-      -o GlobalKnownHostsFile=none "root@$node_fqdn" \
-      "if ip -4 -o address show dev '$bridge' | awk -v vip='$egress_vip' '\$4 ~ (\"^\" vip \"/\") { found=1 } END { exit !found }'; then printf 'owner\n'; else printf 'backup\n'; fi"
-    )"
-    then
-      queried_node_count=$((queried_node_count + 1))
-      if [[ "$node_vip_state" == owner ]]; then
-        vip_owner="$node"
-        vip_owner_count=$((vip_owner_count + 1))
-      elif [[ "$node_vip_state" != backup ]]; then
-        query_failed=true
-      fi
-    else
-      query_failed=true
-    fi
-  done <<<"$online_nodes_before"
-  online_nodes_after="$(
-    pvesh get /nodes --output-format json |
-      jq -r '[.[] | select(.status == "online") | .node] | sort | join("\n")'
-  )"
-  if [[ "$query_failed" == false &&
-        "$online_nodes_before" == "$online_nodes_after" ]] &&
-     ((queried_node_count == online_node_count && vip_owner_count == 1)); then
-    break
-  fi
-  sleep 5
-done
-if [[ "$query_failed" != false ||
-      "$online_nodes_before" != "$online_nodes_after" ]] ||
-   ((queried_node_count != online_node_count || vip_owner_count != 1)); then
-  printf 'Could not prove exactly one stable, reachable online mox owns guest-egress VIP %s (queried %s/%s, owners %s).\n' \
-    "$egress_vip" "$queried_node_count" "$online_node_count" \
-    "$vip_owner_count" >&2
-  exit 1
-fi
-printf 'Guest-egress VIP %s is owned by exactly one node: %s\n' \
-  "$egress_vip" "$vip_owner"
+"$lib/guest_network.sh" verify
+python3 -I "$lib/egress_health.py" status
+python3 -I "$lib/transfer_counter.py" status
+systemctl is-active app-ha-cloudflared.service
+systemctl is-enabled --quiet app-ha-tunnel-sync.timer
+"$lib/tunnel_sync.sh" --check
+# The tunnel must run over TCP: FiberState throttles inbound UDP (QUIC).
+journalctl -u app-ha-cloudflared.service --since "-15min" --no-pager |
+  grep -E 'Registered tunnel connection' | tail -n 4 |
+  awk '/protocol=quic/ { quic=1 } /protocol=http2/ { http2=1 } END { exit !(http2 && !quic) }'
 bash -n "/var/lib/vz/snippets/$hook_name"
 test -x /usr/local/lib/app-ha-proxmox/lib/process_deferred_cleanup.sh
 bash -n /usr/local/lib/app-ha-proxmox/lib/process_deferred_cleanup.sh
 systemctl is-enabled --quiet app-ha-deferred-cleanup.timer
 systemctl is-active --quiet app-ha-deferred-cleanup.timer
-grep -Fq "$egress_vip" /etc/keepalived/keepalived.conf
-grep -Eq "^[[:space:]]*priority[[:space:]]+${priority}[[:space:]]*$" \
-  /etc/keepalived/keepalived.conf
-for ((index = 1; index <= max_hosts; index += 1)); do
-  candidate="${subnet_prefix}.$((mox_start + index - 1))"
-  if [[ "$candidate" == "$private_ip" ]]; then
-    ! grep -Eq "^[[:space:]]*${candidate}[[:space:]]*$" /etc/keepalived/keepalived.conf
-  else
-    grep -Eq "^[[:space:]]*${candidate}[[:space:]]*$" /etc/keepalived/keepalived.conf
-  fi
-done
 REMOTE
   write_state complete
 }
@@ -5176,11 +4476,10 @@ EOF
 
   configure_private_network
   reconcile_cluster_control_plane
-  configure_guest_egress
   install_shared_orchestration_tools
+  configure_guest_network
   install_guest_role_hook
-  create_haproxy_lxc
-  sync_haproxy_routes
+  configure_tunnel
   final_verify
   retire_setup_key_with_admin_identity
   enable_admin_ssh_for_target
@@ -5201,7 +4500,8 @@ EOF
   info "Attach local:snippets/${GUEST_ROLE_HOOK_NAME} to every production and staging VM."
   info "Production ISO downloads/builds use the host cache at /var/lib/app-ha-proxmox/iso-cache."
   info "Production VMs require tag ${PRODUCTION_VM_TAG}; disposable staging VMs require tags ${STAGING_VM_TAG} and ${EVICTABLE_VM_TAG}."
-  info "HAProxy exact Host/TLS-SNI routes are synchronized from the shared app-ha registry."
+  info "Guests use the shared gateway ${GUEST_GATEWAY_IP}, local to whichever host runs them; egress falls back through another host when this host's internet connection is down."
+  info "This host runs a replica of Cloudflare Tunnel ${CLOUDFLARE_TUNNEL_ID}; its FQDN map is generated from the registry."
   info "Production VMs, ZFS replication jobs, and HA resources remain intentionally out of scope."
   bmac_ui_step_done
   bmac_ui_result host "$HOST_ID" role "$SETUP_ROLE" encryption "$ENCRYPTION_POLICY" \

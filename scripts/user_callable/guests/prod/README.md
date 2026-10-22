@@ -29,6 +29,10 @@ afterward through each application's own deployment tooling.
   provisioned with `local-zfs`, disk-backed local ISO storage, and the
   lifecycle hook. A two-node cluster must report its external QDevice alive
   and voting from both placement nodes (three expected/total votes).
+- Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_TUNNEL_ID` in `cluster.conf`
+  and `CLOUDFLARE_TUNNEL_SECRET` in `secrets.env` before host setup, so every
+  host runs a Cloudflare Tunnel replica (see
+  [`BMAC_SIMPLIFIED_NETWORKING.md`](../../../../docs/BMAC_SIMPLIFIED_NETWORKING.md)).
 
 The root console password is read from `PROD_GUEST_VM_ROOT_PASSWORD`, converted
 immediately to a SHA-512 crypt hash using a stable cluster-scoped salt, and
@@ -149,8 +153,10 @@ creator.
 
 The per-VM ISO embeds:
 
-- hostname and fixed `.31-.50/24` address
-- the floating `.10` default route and configured DNS servers
+- hostname and its fixed slot address `VM_SLOT_START+10*(N-1)` (`/24`), for
+  example `.110` for `prod1`
+- the shared `GUEST_GATEWAY_IP` (`.10`) default route and configured DNS
+  servers
 - `qemu-guest-agent` and OpenSSH
 - key-only root SSH for both configured administrators
 - a hashed console root password
@@ -188,19 +194,22 @@ Only after guest verification does the script:
 4. record the VM as an ignored HA resource with `failback=0` and
    `auto-rebalance=0`, add a strict positive PVE 9 node-affinity rule with
    priority `1` on every eligible host, and change the HA request to started;
-5. register the requested primary/alias Host and SNI routes, transactionally
-   synchronize HAProxy, and transition the guest through `ready` to `active`.
+5. run `tunnel_sync.sh --all`, so every host's Cloudflare Tunnel replica maps
+   the primary and alias FQDNs and `stage1prodN.<primary>` through
+   `stage<MAX_STAGING_VMS_PER_PROD>prodN.<primary>` to their slots, and
+   transition the guest through `ready` to `active`.
 
-Ingress mappings intentionally exist before application deployment. HAProxy
-may therefore report the backend unavailable until the application, TLS, and
-health endpoint are ready. The final warning makes that state explicit.
+Tunnel mappings intentionally exist before application deployment.
+Cloudflare therefore shows an error page until the application answers with
+TLS on port 443. The final warning makes that state explicit. Staging VMs
+later created from this guest need no further network change.
 
 ## Application handoff
 
 After `add_prod_vm.sh` completes, provision and deploy the intended
 application over the private guest address, then verify its HTTPS health from
-the mox network and through every public origin. Until then, an unavailable
-backend response is expected. The creator does not deploy application code.
+the mox network and through its public FQDNs. Until then, a Cloudflare error
+page is expected. The creator does not deploy application code.
 
 Every guest SSH and SCP operation uses the selected mox as a strict
 `ProxyJump`. The guest is addressed by its registry private IP and must not
@@ -243,11 +252,13 @@ scripts/user_callable/guests/prod/remove_prod_vm.sh prodN
 The destroyer refuses production resources with staging dependents, requires
 every placement node online, validates exact registry/live identity, tags,
 root and EFI volumes, HA request/rule, and replication topology, then requires
-the exact confirmation `DESTROY prodN`. It disables and converges ingress,
-stops/removes HA, removes the strict node-affinity rule, removes replication
-jobs and target copies, destroys only the validated VM and VMID-owned volumes,
-proves absence on every placement node, clears durable metadata, and archives
-the released registry record. The hash-addressed source ISO cache below
+the exact confirmation `DESTROY prodN`. It stops/removes HA, removes the
+strict node-affinity rule, removes replication jobs and target copies,
+destroys only the validated VM and VMID-owned volumes, proves absence on
+every placement node, clears durable metadata, and archives the released
+registry record. It then runs `tunnel_sync.sh --all` to remove its FQDNs and
+its staging FQDNs from every replica; a host it cannot update catches up
+through its `app-ha-tunnel-sync.timer`. The hash-addressed source ISO cache below
 `/var/lib/app-ha-proxmox/iso-cache` is deliberately retained.
 
 ## Online root-disk growth
@@ -439,9 +450,11 @@ firmware/Secure Boot options, placement, tags, replication targets, HA
 restart/relocate policy, HA rules, or SSH keys cause a closed failure rather
 than adoption or replacement.
 
-The final summary shows the VM name, private IP, primary FQDN, aliases,
-default staging-name pattern, and every public origin IP with the initial node
-first.
+The final summary shows the VM name, private IP, primary FQDN, aliases, its
+staging FQDNs, and the Cloudflare records to add in each zone: proxied
+CNAMEs `@` and `*` pointing to `<tunnel-id>.cfargotunnel.com`, plus Always
+Use HTTPS and bot protection (see README.md's "Instructions for Cloudflare
+Setup").
 
 The `qm`, `pvesr`, and PVE 9 `ha-manager rules` calls cannot be exercised
 off-cluster. Their syntax is kept adjacent to comments in the script; the

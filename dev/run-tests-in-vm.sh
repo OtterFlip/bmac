@@ -9,7 +9,7 @@
 #
 #   dev/run-tests-in-vm.sh                                     everything
 #   dev/run-tests-in-vm.sh -v -k reservation                   extra dev/run_tests.py args
-#   dev/run-tests-in-vm.sh scripts.tests.test_haproxy_routes   specific targets
+#   dev/run-tests-in-vm.sh scripts.tests.test_tunnel_config   specific targets
 #
 # BMAC_LIMA_INSTANCE overrides the instance name (default: bmac).
 

@@ -61,10 +61,6 @@ The suite runs from a clone of this repository on Linux or macOS. It needs:
   it to exist but never read it. Anyone who has used SSH has one; otherwise
   `install -d -m 700 ~/.ssh && install -m 600 /dev/null ~/.ssh/known_hosts`.
 
-`scripts/tests/test_haproxy_routes.py` also runs `haproxy -c` on the
-rendered configuration, but only when a `haproxy` binary is on `PATH`;
-otherwise that one test is skipped.
-
 ### `run_tests.py`
 
 From the repository root:
@@ -91,8 +87,7 @@ skipped.
 | `-v` | List every test with its duration, then the ten slowest |
 
 Also run `bash -n` on every shell script you change. On an amd64 Linux
-workstation the whole suite should pass, with only the HAProxy check
-skipped if `haproxy` is not installed. On a Mac, see
+workstation the whole suite should pass. On a Mac, see
 [Developing on a Mac](#developing-on-a-mac) for what the native run misses
 and how to run the complete suite.
 
@@ -150,11 +145,6 @@ openssl version            # OpenSSL 3.x, not LibreSSL
 python3 --version          # 3.9 or newer
 ```
 
-Do not install HAProxy natively. `scripts/tests/test_haproxy_routes.py` runs
-`haproxy -c` only when a `haproxy` binary is on `PATH`, and the rendered
-configuration names a `haproxy` user that macOS does not have, so installing
-it turns a skipped test into a failing one. The VM runs that check properly.
-
 The tests also need `config/mox1.conf` and `~/.ssh/known_hosts`; see
 [Prerequisites](#prerequisites).
 
@@ -190,13 +180,13 @@ arguments go to `dev/run_tests.py`:
 
 ```bash
 dev/run-tests-in-vm.sh -v -k reservation
-dev/run-tests-in-vm.sh scripts.tests.test_haproxy_routes
+dev/run-tests-in-vm.sh scripts.tests.test_tunnel_config
 ```
 
 Why it is built this way:
 
-- **Debian 13** is the userland of Proxmox VE 9 and of the fixed HAProxy LXC,
-  so GNU tool behavior and the HAProxy version match what the hosts run.
+- **Debian 13** is the userland of Proxmox VE 9, so GNU tool behavior
+  matches what the hosts run.
 - **Only this checkout is mounted**, writable, at the same absolute path as
   on macOS. The config loader rejects symlinked path components, so the path
   must not change, and the checkout must not sit under a symlinked macOS

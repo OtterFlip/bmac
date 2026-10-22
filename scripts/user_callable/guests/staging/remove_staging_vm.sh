@@ -4,7 +4,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Permanently remove one registry-backed staging VM, its linked clone, its
-# source-owned snapshot copies, ingress route, and registry allocation.
+# source-owned snapshot copies, and registry allocation. Its slot's address and
+# FQDN stay reserved for the next staging VM, so no network state changes.
 
 set -Eeuo pipefail
 set +x
@@ -17,7 +18,6 @@ source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
 CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
 REMOTE_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_ROOT}/lib/cluster_registry.py"
-REMOTE_HAPROXY_SYNC="${REMOTE_ROOT}/lib/sync_haproxy_routes.sh"
 
 DRY_RUN=false
 RESOURCE_NAME=""
@@ -37,7 +37,6 @@ SOURCE_PURPOSE=""
 SNAPSHOT_NAME=""
 SNAPSHOT_SHARED_WITH=""
 SNAPSHOT_ALSO_RELEASING=""
-ROUTES_ENABLED=0
 LIVE_PRESENT=0
 SSH_ALIAS=""
 declare -a SOURCE_PLACEMENT=()
@@ -64,7 +63,7 @@ usage() {
 Usage: remove_staging_vm.sh [--dry-run] [stageNprodN]
 
 With no resource argument, lists registered staging guests and prompts for one.
-Permanently removes the selected guest's route, QEMU VM and VM-owned disks,
+Permanently removes the selected guest's QEMU VM and VM-owned disks,
 and linked clone. When no other staging guest shares its source snapshot, that
 one exact snapshot is deleted too, and replication is verified to have removed
 its copies from every production placement node. A snapshot another staging
@@ -366,7 +365,6 @@ values = (
     vmid,
     stage_node,
     volume,
-    "1" if stage.get("routes_enabled") else "0",
     "1" if live_present else "0",
     source["name"],
     source_vmid,
@@ -384,26 +382,25 @@ for value in values:
     sys.stdout.buffer.write(str(value).encode() + b"\0")
 PY
   ) || die "Staging destruction preflight failed"
-  ((${#fields[@]} == 19)) || die "Could not parse destruction plan"
+  ((${#fields[@]} == 18)) || die "Could not parse destruction plan"
   RESOURCE_ID="${fields[0]}"
   RESOURCE_REVISION="${fields[1]}"
   RESOURCE_STATE="${fields[2]}"
   VMID="${fields[3]}"
   STAGING_NODE="${fields[4]}"
   STAGING_VOLUME="${fields[5]}"
-  ROUTES_ENABLED="${fields[6]}"
-  LIVE_PRESENT="${fields[7]}"
-  SOURCE_NAME="${fields[8]}"
-  SOURCE_VMID="${fields[9]}"
-  SOURCE_OWNER="${fields[10]}"
-  SOURCE_PURPOSE="${fields[11]}"
-  SNAPSHOT_NAME="${fields[12]}"
-  IFS=',' read -r -a SOURCE_PLACEMENT <<<"${fields[13]}"
-  IFS=',' read -r -a SOURCE_VOLUMES <<<"${fields[14]}"
-  STAGING_DOMAIN="${fields[15]}"
-  IFS=',' read -r -a CLUSTER_NODES <<<"${fields[16]}"
-  SNAPSHOT_SHARED_WITH="${fields[17]}"
-  SNAPSHOT_ALSO_RELEASING="${fields[18]}"
+  LIVE_PRESENT="${fields[6]}"
+  SOURCE_NAME="${fields[7]}"
+  SOURCE_VMID="${fields[8]}"
+  SOURCE_OWNER="${fields[9]}"
+  SOURCE_PURPOSE="${fields[10]}"
+  SNAPSHOT_NAME="${fields[11]}"
+  IFS=',' read -r -a SOURCE_PLACEMENT <<<"${fields[12]}"
+  IFS=',' read -r -a SOURCE_VOLUMES <<<"${fields[13]}"
+  STAGING_DOMAIN="${fields[14]}"
+  IFS=',' read -r -a CLUSTER_NODES <<<"${fields[15]}"
+  SNAPSHOT_SHARED_WITH="${fields[16]}"
+  SNAPSHOT_ALSO_RELEASING="${fields[17]}"
 }
 
 snapshot_taken_label() {
@@ -592,17 +589,7 @@ queue_cleanup_plan() {
       >/dev/null ||
       die "Could not queue exact snapshot cleanup on $node"
   done
-  for node in "${CLUSTER_NODES[@]}"; do
-    registry_cmd defer-cleanup \
-      --resource "$RESOURCE_NAME" \
-      --node "$node" \
-      --action remove-route \
-      --target "$RESOURCE_NAME" \
-      --reason "operator requested staging route removal" \
-      >/dev/null ||
-      die "Could not queue route cleanup on $node"
-  done
-  registry_update --state cleanup_pending --routes-disabled
+  registry_update --state cleanup_pending
 }
 
 wait_for_durable_cleanup() {
@@ -635,7 +622,6 @@ elif (
     len(matches) == 1
     and matches[0].get("id") == sys.argv[3]
     and matches[0].get("state") == "cleanup_pending"
-    and matches[0].get("routes_enabled") is False
 ):
     print("pending")
 else:
@@ -779,7 +765,7 @@ main() {
   fi
   [[ -z "$SNAPSHOT_ALSO_RELEASING" ]] ||
     info "Also releasing this snapshot: ${SNAPSHOT_ALSO_RELEASING//,/, }"
-  info "Domain/route enabled: $STAGING_DOMAIN / $ROUTES_ENABLED"
+  info "FQDN: $STAGING_DOMAIN (its slot stays reserved for the next staging VM)"
   info "Live VM present: $LIVE_PRESENT"
   bmac_ui_plan_begin "Destroy $RESOURCE_NAME" "Validated against the live cluster; nothing has changed yet."
   bmac_ui_plan_item remove "$RESOURCE_NAME" "VMID $VMID, state $RESOURCE_STATE, on $STAGING_NODE"
@@ -789,7 +775,7 @@ main() {
   else
     bmac_ui_plan_item remove "source snapshot" "$SNAPSHOT_NAME of $SOURCE_NAME (taken $snapshot_taken) on ${SOURCE_PLACEMENT[*]}"
   fi
-  bmac_ui_plan_item remove "route" "$STAGING_DOMAIN (enabled: $ROUTES_ENABLED)"
+  bmac_ui_plan_item keep "FQDN" "$STAGING_DOMAIN stays mapped to its slot for the next staging VM"
   bmac_ui_plan_item keep "$SOURCE_NAME" "The production source VM (VMID $SOURCE_VMID) is not changed"
   BMAC_UI_DRY_RUN="$DRY_RUN" bmac_ui_plan_end
   if [[ "$DRY_RUN" == true ]]; then
@@ -828,25 +814,17 @@ main() {
   [[ "$SSH_ALIAS" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] ||
     die "SSH alias is unsafe"
 
-  log "Disabling staging ingress and committing durable cleanup"
+  log "Committing durable cleanup"
   case "$RESOURCE_STATE" in
     active)
-      registry_update --state stopping --routes-disabled
+      registry_update --state stopping
       ;;
-    ready)
-      registry_update --routes-disabled
-      ;;
-    stopping | stopped | failed)
-      registry_update --routes-disabled
-      ;;
+    ready | stopping | stopped | failed) ;;
     *)
       die "Unsupported staging destruction state: $RESOURCE_STATE"
       ;;
   esac
   queue_cleanup_plan
-  mox_ssh "$COORDINATOR" "$REMOTE_HAPROXY_SYNC" \
-    --lock-timeout 240 </dev/null ||
-    die "Could not converge HAProxy after route removal"
 
   log "Waiting for the shared cleanup workers to remove the exact staging payload"
   wait_for_durable_cleanup
@@ -858,11 +836,11 @@ main() {
   log "Staging VM destruction complete"
   info "Destroyed resource: $RESOURCE_NAME (former VMID $VMID)"
   if [[ -n "$still_used_by" ]]; then
-    info "Removed route, VM disks, linked clone, and registry metadata."
+    info "Removed VM disks, linked clone, and registry metadata."
     info "Kept snapshot $SNAPSHOT_NAME; it is still used by ${still_used_by//,/, }."
   else
     snapshot_deleted=true
-    info "Removed route, VM disks, linked clone, $SNAPSHOT_NAME and its replicated copies, and registry metadata."
+    info "Removed VM disks, linked clone, $SNAPSHOT_NAME and its replicated copies, and registry metadata."
   fi
   bmac_ui_step_done
   bmac_ui_result destroyed "$RESOURCE_NAME" former_vmid "$VMID" source "$SOURCE_NAME" \

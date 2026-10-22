@@ -45,10 +45,11 @@ Host-specific derived values are authoritative:
 
 - `moxN`: internal FQDN `moxN.pve.internal` and private host address `.10+N`
   (`.11` through `.20`)
-- `haproxyN`: private address `.20+N` (`.21` through `.30`)
-- local HAProxy gateway: the corresponding mox private address
-- HAProxy VMID: `9110+N` (`9111` through `9120`)
-- VRRP priority: `200-N`
+- `prodN`: VM slot `VM_SLOT_START+10*(N-1)` (`MAX_PROD_VMS` is 1-10, and
+  `VM_SLOT_START`'s last octet must end in 0)
+- `stageKprodN`: `prodN`'s slot plus `K` (`MAX_STAGING_VMS_PER_PROD` is 1-9)
+- guest gateway: `GUEST_GATEWAY_IP` with the locally administered unicast
+  `GUEST_GATEWAY_MAC`, identical on every mox
 
 The library also exports validation/prompt helpers, `mox_is_reachable`,
 `reachable_mox_hosts`, `first_reachable_mox`, `mox_ssh`, `ssh_via_mox`,
@@ -64,18 +65,30 @@ internal FQDN over the private VLAN and use Proxmox 9's native per-node
 
 The registry defaults to the root-only pmxcfs hierarchy
 `/etc/pve/priv/app-ha`. `--state-dir` is available for tests. It stores only
-typed policy, resource, route, placement, and cleanup metadata. VMIDs are
-supplied by the caller after checking the Proxmox API; the registry reserves
-them and rejects duplicates and the HAProxy range.
+typed policy, resource, placement, and cleanup metadata. VMIDs are
+supplied by the caller after checking the Proxmox API; the registry records
+them and rejects duplicates. Production and staging addresses come from the
+policy's fixed VM slots.
 
 ```bash
-sudo scripts/host_runtime/cluster_registry.py init
+sudo scripts/host_runtime/cluster_registry.py init --help
 sudo scripts/host_runtime/cluster_registry.py list
+sudo scripts/host_runtime/cluster_registry.py list --record-type policy
 sudo scripts/host_runtime/cluster_registry.py allocate-prod --help
 sudo scripts/host_runtime/cluster_registry.py allocate-staging --help
 sudo scripts/host_runtime/cluster_registry.py update --help
-sudo scripts/host_runtime/cluster_registry.py list-routes
+sudo scripts/host_runtime/cluster_registry.py tunnel-productions
+sudo scripts/host_runtime/cluster_registry.py update-slots --help
 ```
+
+`init` takes `--network`, `--guest-gateway`, `--mox-ip-start`,
+`--mox-ip-end`, `--vm-slot-start`, `--max-production`, and
+`--max-staging-per-production`, and writes the policy's `network` record
+(`cidr`, `guest_gateway`, `mox_host_range`, and `vm_slots`). `update-slots`
+changes `vm_slots` later and is refused when a registered VM would move.
+`tunnel-productions` lists every production guest's slot and domains for the
+tunnel config. Cleanup actions are `delete-snapshot`, `destroy-vm`,
+`destroy-volume`, and `remove-replication`.
 
 `update PRODN --disk-bytes N` records the exact root disk size after
 `scripts/user_callable/guests/prod/extend_prod_vm_disk.sh` grows a production zvol. It accepts only
@@ -89,7 +102,7 @@ idempotent.
 
 `reconcile --live` safely selects node, QEMU config, and attached-volume facts
 from the local Proxmox API. For complete reconciliation (HA affinity,
-replication health, ZFS snapshot GUIDs, and rendered routes), `--observed`
+replication health, and ZFS snapshot GUIDs), `--observed`
 accepts a typed, secret-free observation assembled by the orchestrator:
 
 ```json
@@ -101,7 +114,6 @@ accepts a typed, secret-free observation assembled by the orchestrator:
   "replication_jobs": [],
   "volumes": [],
   "snapshots": [],
-  "routes": [],
   "cleanup_completed": []
 }
 ```
@@ -127,25 +139,33 @@ The registry also records host slots and the control node:
   compare-and-set the control node. New hosts join through it, and it holds
   the control-plane lock.
 
-## `haproxy_routes.py` and `sync_haproxy_routes.sh`
+## Guest networking and tunnel runtime
 
-`haproxy_routes.py` converts the registry's exact enabled Host/SNI routes into
-a deterministic, reject-by-default HAProxy generation. The synchronizer runs
-only through an online, quorate coordinator; stages and validates every
-currently configured proxy; persists the desired generation and per-node
-application state in pmxcfs; disables stale ingress on failure; and
-transactionally reloads or rolls back. A node keeps public ingress through a
-graceful reload only when `haproxy_routes.py compare` proves its live
-generation cannot route any request differently from the candidate; pmxcfs
-records that as a bounded per-node allowance. Every other stale node closes
-before the desired pointer moves. Boot and periodic services reconcile a
-returning node before its public DNAT path is enabled. Generation retention is
-bounded.
+These host-runtime files implement
+[`BMAC_SIMPLIFIED_NETWORKING.md`](../../docs/BMAC_SIMPLIFIED_NETWORKING.md):
+
+- `guest_network.sh configure|apply|ensure-gateway|verify` installs the shared
+  guest gateway (`bmacgw0`/`bmacgw0br`), the `bridge app_ha_guest_gateway` and
+  `ip app_ha_guest_egress` nftables tables, slot-range masquerade, route
+  table 200 and the per-host fallback tables, from
+  `/etc/app-ha/guest-network.env`.
+- `guest_network_settings.sh` (in this directory) prints that settings file
+  from the loaded `cluster.conf` and `moxN.conf`, so host setup and
+  `sync_cluster_network.sh` install identical settings.
+- `egress_health.py` probes `egress_probe_targets.txt` over HTTPS and points
+  table 200 at a fallback mox when every target fails; `status` reports the
+  current state.
+- `transfer_counter.py` counts monthly received plus sent bytes on the public
+  NIC against the optional `moxN.conf` cap.
+- `tunnel_config.py` renders the Cloudflare Tunnel `config.yml` from the
+  registry; `tunnel_sync.sh --local|--all|--check` installs a changed config
+  and restarts replicas one host at a time; `cloudflared_setup.sh` installs
+  `cloudflared` and writes the credentials file.
 
 ## `process_deferred_cleanup.sh`
 
 This root-only, timer-driven worker processes schema-validated cleanup records
-for its local node. It revalidates QEMU, HA, ZFS, snapshot GUID, route, and
+for its local node. It revalidates QEMU, HA, ZFS, snapshot GUID, and
 registry identity before every destructive action. Offline or ambiguous work
 remains pending; it never invents completion evidence.
 
@@ -338,7 +358,8 @@ await finalization.
 From the repository root, every library test, in parallel:
 
 ```bash
-dev/run_tests.py scripts/tests/test_{disk_inventory,haproxy_routes,host_storage}.py \
+dev/run_tests.py scripts/tests/test_{disk_inventory,host_storage}.py \
+  scripts/tests/test_{egress_health,guest_network,transfer_counter,tunnel_config}.py \
   scripts/tests/test_{process_deferred_cleanup,quick_state,report_stale_jump_ssh}.py \
   scripts/tests/test_{rpool_mirror,shared_libs,storage_state,ui_json_forms,ui_protocol}.py
 ```

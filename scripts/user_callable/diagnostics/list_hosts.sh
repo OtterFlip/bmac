@@ -38,7 +38,8 @@ memory use, registry slot, and which host is the control node, plus cluster
 quorum, votes, and QDevice registration and voting. Everything is read through
 one reachable member, so this takes seconds rather than minutes.
 
-  --no-ssh-check  Skip checking SSH from this workstation to every host.
+  --no-ssh-check  Skip checking SSH from this workstation to every host (and
+                  reading each host's monthly transfer counter over it).
   --json          Emit bmac-ui NDJSON events instead of a terminal report.
 
 Nothing is changed. Exit status: 0 when the state was read (problems are
@@ -61,6 +62,6 @@ qs_collect hosts
 render_args=(--qdevice-host "${PROXMOX_QDEVICE_HOST:-}")
 if [[ "$SSH_CHECK" == true ]]; then
   qs_check_ssh
-  render_args+=(--ssh-file "${QS_RUN_DIR}/ssh.tsv")
+  render_args+=(--ssh-file "${QS_RUN_DIR}/ssh.tsv" --transfer-dir "$QS_RUN_DIR")
 fi
 qs_render hosts "${render_args[@]}"

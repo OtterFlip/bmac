@@ -38,10 +38,9 @@ SPEC.loader.exec_module(builder)
 def request_fixture() -> dict:
     return {
         "hostname": "prod1",
-        "address": "10.213.0.31/24",
+        "address": "10.213.0.110/24",
         "gateway": "10.213.0.10",
-        "production_ip_start": "10.213.0.31",
-        "production_ip_end": "10.213.0.50",
+        "vm_slot_start": "10.213.0.110",
         "nameservers": ["1.1.1.1", "2606:4700:4700::1111"],
         "mac": "02:11:22:33:44:55",
         "root_password_hash": "$6$testsalt$not-a-plaintext-password-value",
@@ -63,7 +62,7 @@ class AutoinstallBuilderTest(unittest.TestCase):
         network = autoinstall["network"]["ethernets"]["private"]
         self.assertEqual(network["match"]["macaddress"], "02:11:22:33:44:55")
         self.assertEqual(network["set-name"], "lan0")
-        self.assertEqual(network["addresses"], ["10.213.0.31/24"])
+        self.assertEqual(network["addresses"], ["10.213.0.110/24"])
         self.assertEqual(
             network["routes"], [{"to": "default", "via": "10.213.0.10"}]
         )
@@ -118,7 +117,7 @@ class AutoinstallBuilderTest(unittest.TestCase):
 
         invalid = request_fixture()
         invalid["hostname"] = "prod2"
-        with self.assertRaisesRegex(builder.BuildError, "registry formula"):
+        with self.assertRaisesRegex(builder.BuildError, "VM slot formula"):
             builder.validate_request(invalid)
 
     def test_grub_entry_uses_escaped_local_nocloud_seed(self) -> None:
@@ -615,8 +614,11 @@ RUN_DIR={temporary!r}
 RESOURCE_NAME=prod1
 PROD_PRIVATE_IP=10.213.0.31
 GUEST_GATEWAY=10.213.0.10
-PRODUCTION_IP_START=10.213.0.31
-PRODUCTION_IP_END=10.213.0.50
+VM_SLOT_START=10.213.0.110
+MAX_PROD_VMS=10
+MAX_STAGING_VMS_PER_PROD=9
+CLOUDFLARE_ACCOUNT_ID=0123456789abcdef0123456789abcdef
+CLOUDFLARE_TUNNEL_ID=00000000-0000-0000-0000-000000000000
 VM_MAC=02:11:22:33:44:55
 ROOT_PASSWORD_HASH='$6$testsalt$hashonly'
 ADMIN_1_PUBLIC_SSH_KEY='ssh-ed25519 AAAAone admin1'
@@ -851,7 +853,6 @@ REGISTERED_OWNER_NODE=
 REGISTERED_ROOT_VOLUME=
 REGISTRY_REPLICATION_CSV=
 REGISTRY_HA_CSV=
-ROUTES_ENABLED=0
 validate_or_complete_existing_disk_allocation
 RESOURCE_STATE=provisioning
 validate_or_complete_existing_disk_allocation
@@ -1141,17 +1142,17 @@ printf '%s\\n' "$ROOT_VOLUME"
                         "PRIVATE_SUBNET_CIDR=10.213.0.0/24",
                         "PROXMOX_MIGRATION_NETWORK=10.213.0.240/28",
                         "DATACENTER_PRIVATE_VLAN_GATEWAY=10.213.0.1",
-                        "GUEST_EGRESS_VIP=10.213.0.10/24",
+                        "GUEST_GATEWAY_IP=10.213.0.10",
+                        "GUEST_GATEWAY_MAC=02:00:0a:d5:00:0a",
                         "MOX_IP_START=10.213.0.11",
                         "MOX_IP_END=10.213.0.20",
                         "MOX_REPLICATION_IP_START=10.213.0.241",
                         "MOX_REPLICATION_IP_END=10.213.0.250",
-                        "HAPROXY_IP_START=10.213.0.21",
-                        "HAPROXY_IP_END=10.213.0.30",
-                        "PRODUCTION_IP_START=10.213.0.31",
-                        "PRODUCTION_IP_END=10.213.0.50",
-                        "STAGING_IP_START=10.213.0.51",
-                        "STAGING_IP_END=10.213.0.200",
+                        "VM_SLOT_START=10.213.0.110",
+                        "MAX_PROD_VMS=10",
+                        "MAX_STAGING_VMS_PER_PROD=9",
+                        "CLOUDFLARE_ACCOUNT_ID=0123456789abcdef0123456789abcdef",
+                        "CLOUDFLARE_TUNNEL_ID=00000000-0000-0000-0000-000000000000",
                         "PROD_GUEST_OS_ISO_URL=https://example.test/ubuntu-live-server-amd64.iso",
                         f"PROD_GUEST_OS_ISO_SHA256={'0' * 64}",
                         "ADMIN_1_PUBLIC_SSH_KEY=ssh-ed25519 AAAAone admin1",
@@ -1322,7 +1323,6 @@ else:
             "--strict 1",
             "--failback 0",
             "--auto-rebalance 0",
-            "--routes-enabled",
             "ms-cert=2023k",
             'row["last_sync"] > int(sys.argv[4])',
             "Qdevice",
@@ -1331,9 +1331,8 @@ else:
             "hashlib.sha256(rows[0]",
             "app-ha-prod-root-v1:",
             'openssl passwd -6 -salt "$password_salt" -stdin',
-            "REMOTE_HAPROXY_SYNC",
-            "--lock-timeout 240",
-            "Waiting up to 240 seconds for any current HAProxy route sync",
+            '"$REMOTE_TUNNEL_SYNC" --all',
+            "cfargotunnel.com",
             "REMOTE_ISO_PREPARER",
             "SOURCE_ISO_CACHE_PATH",
             "PROD_GUEST_OS_ISO_URL",
@@ -1365,7 +1364,8 @@ else:
         )
         for value in forbidden:
             self.assertNotIn(value, text)
-        self.assertNotIn("--routes-disabled", text)
+        self.assertNotIn("--routes-", text)
+        self.assertNotIn("HAPROXY", text)
         self.assertIn('affinity_nodes+=("${node}:1")', text)
         self.assertNotIn('affinity_nodes+=("$node")', text)
         self.assertLess(

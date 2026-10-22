@@ -3,10 +3,12 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Deploy a minimal static NGINX HTTPS application to one registry-backed
-# production VM. The production VM's registered primary/alias domains and all
-# possible default stageNprodN.<primary-domain> names are installed as exact
-# NGINX server names so staging clones inherit a usable configuration.
+# Deploy BMAC's example app to one registry-backed production VM: a small
+# todo list (hello_todo/, Rust) that serves HTTPS itself with the domain's
+# Cloudflare Origin certificate and keeps its data in a SQLite file. It is
+# built here into one static binary and installed as hello-todo.service, so
+# the VM needs no web server or database service. Its JSON API lives under
+# /api/v1/, the path BMAC's Cloudflare setup never challenges.
 
 set -Eeuo pipefail
 set +x
@@ -18,7 +20,8 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)"
 source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
 bmac_ui_bootstrap "$@"
 CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
-APT_LOCK_LIB="${REPO_ROOT}/scripts/lib/apt_lock_wait.sh"
+APP_DIR="${SCRIPT_DIR}/hello_todo"
+BUILD_TARGET=x86_64-unknown-linux-musl
 REMOTE_INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_INSTALL_ROOT}/lib/cluster_registry.py"
 
@@ -32,11 +35,12 @@ OWNER_NODE=""
 REMOTE_STAGE_DIR=""
 CERT_PATH=""
 KEY_PATH=""
+APP_BINARY=""
 MAX_STAGE_SUFFIX=0
 
 declare -a ALIAS_DOMAINS=()
 declare -a PLACEMENT_NODES=()
-declare -a SERVER_NAMES=()
+declare -a HOSTNAMES=()
 declare -a CERT_EXTRA_NAMES=()
 
 log() {
@@ -123,9 +127,6 @@ load_config() {
   require_regular_file "$CONFIG_LIB" "Configuration library"
   # shellcheck source=../../../lib/config.sh
   source "$CONFIG_LIB"
-  require_regular_file "$APT_LOCK_LIB" "Apt lock wait library"
-  # shellcheck source=../../../lib/apt_lock_wait.sh
-  source "$APT_LOCK_LIB"
   load_proxmox_config --no-secrets >/dev/null ||
     die "Could not load config/cluster.conf"
 
@@ -229,117 +230,30 @@ PY
 }
 
 preflight_target_tools() {
-  local missing_raw missing_tool
-  local -a missing=()
-  local -a required_tools=(
-    bash apt-get systemctl install cp rm ln mktemp grep cat curl find sed sleep journalctl tail
-  )
-
-  log "Verify required CLI tools on $RESOURCE_NAME"
-  cat <<EOF2
-
-This deployment uses standard Ubuntu utilities plus curl on the target guest.
-NGINX itself does not need to be preinstalled; the deployment will install the
-Ubuntu nginx package automatically if the nginx command is absent.
-
-Please ensure these target-side commands are available before proceeding:
-
-    curl
-
-The script will verify all commands it depends on now.
-EOF2
-
-  prompt_yes "Have you ensured the required target-side CLI tools are available on $RESOURCE_NAME?" || {
-    printf '\nInstall curl if needed, for example:\n\n'
-    printf "    ssh %s 'apt-get update && apt-get install -y curl'\n\n" "$RESOURCE_NAME"
-    die "Target prerequisites were not confirmed"
-  }
-
-  missing_raw="$(
-    ssh -o BatchMode=yes "$RESOURCE_NAME" bash -s -- "${required_tools[@]}" <<'REMOTE'
+  local missing
+  log "Verify the commands the install uses on $RESOURCE_NAME"
+  missing="$(
+    ssh -o BatchMode=yes "$RESOURCE_NAME" bash -s -- \
+      systemctl install mv cp mktemp curl openssl ss journalctl <<'REMOTE'
 set -Eeuo pipefail
-shift 0
 for command_name in "$@"; do
-  command -v "$command_name" >/dev/null 2>&1 || printf '%s\n' "$command_name"
+  command -v "$command_name" >/dev/null 2>&1 || printf '%s ' "$command_name"
 done
 REMOTE
-  )" || die "Could not verify target-side CLI prerequisites on $RESOURCE_NAME"
-
-  if [[ -n "$missing_raw" ]]; then
-    while IFS= read -r missing_tool; do
-      [[ -n "$missing_tool" ]] && missing+=("$missing_tool")
-    done <<<"$missing_raw"
-
-    printf '\nMissing target-side commands:\n' >&2
-    printf '    %s\n' "${missing[@]}" >&2
-    if printf '%s\n' "${missing[@]}" | grep -Fxq curl; then
-      printf '\nInstall curl, then rerun this script:\n\n' >&2
-      printf "    ssh %s 'apt-get update && apt-get install -y curl'\n\n" "$RESOURCE_NAME" >&2
-    fi
-    die "Required target-side CLI tools are missing"
-  fi
-
-  info "All required target-side CLI tools are available."
-}
-
-check_existing_nginx_conflicts() {
-  local output
-
-  log "Check for conflicting enabled NGINX hostnames"
-
-  # A fresh guest may not have NGINX yet. In that case there cannot be an
-  # enabled NGINX server-name conflict, and the deployment installs NGINX.
-  if ! ssh -o BatchMode=yes "$RESOURCE_NAME" 'command -v nginx >/dev/null 2>&1' </dev/null; then
-    info "NGINX is not installed yet; no existing NGINX hostname conflicts can exist."
-    return 0
-  fi
-
-  output="$(
-    ssh -o BatchMode=yes "$RESOURCE_NAME" bash -s -- "${SERVER_NAMES[@]}" <<'REMOTE'
-set -Eeuo pipefail
-
-managed=/etc/nginx/sites-enabled/hello-app
-found=false
-
-for root in /etc/nginx/sites-enabled /etc/nginx/conf.d; do
-  [[ -d "$root" ]] || continue
-  while IFS= read -r -d '' path; do
-    [[ "$path" == "$managed" ]] && continue
-    [[ -f "$path" ]] || continue
-    for hostname in "$@"; do
-      if grep -Fq -- "$hostname" "$path"; then
-        printf '%s: %s\n' "$path" "$hostname"
-        found=true
-      fi
-    done
-  done < <(find -L "$root" -maxdepth 1 -type f -print0 2>/dev/null)
-done
-
-[[ "$found" == false ]]
-REMOTE
-  )" && {
-    info "No conflicting enabled NGINX configuration references the managed hostnames."
-    return 0
-  }
-
-  if [[ -n "$output" ]]; then
-    printf '\nPotential NGINX hostname conflicts were found on %s:\n' "$RESOURCE_NAME" >&2
-    printf '    %s\n' "$output" >&2
-    printf '\nThe deployment will not disable unrelated NGINX sites automatically.\n' >&2
-    die "Resolve or disable the conflicting NGINX configuration, then rerun the script"
-  fi
-
-  die "Could not inspect existing NGINX configuration on $RESOURCE_NAME"
+  )" || die "Could not check the commands available on $RESOURCE_NAME"
+  [[ -z "$missing" ]] ||
+    die "$RESOURCE_NAME lacks: ${missing% } (install them with apt, then rerun)"
+  info "Every command the install uses is available."
 }
 
 show_rerun_behavior() {
   cat <<'EOF2'
 
-This deployment script is safe to rerun after a failed attempt. It does not
-resume from an internal checkpoint; rerunning starts the workflow again,
-rediscovers the production resource, revalidates the certificate/key, and
-reapplies the same managed files. A failed remote deployment restores the
-previous NGINX files before exiting. Temporary staging files are also removed.
+This deployment script is safe to rerun, including to upgrade the app. Each
+run rebuilds the app, revalidates the certificate/key, and reinstalls the
+same files; the todo data is kept. A failed remote deployment restores the
+previous app files and service before exiting, and temporary files are
+removed.
 EOF2
 }
 
@@ -357,39 +271,23 @@ confirm_guest_ssh() {
 }
 
 compute_stage_limit() {
-  local node limit max=0
-
   log "Determine all possible default staging hostnames"
-  for node in "${PLACEMENT_NODES[@]}"; do
-    limit="$(
-      bash -c '
-set -Eeuo pipefail
-source "$1"
-load_proxmox_config --host "$2" --no-secrets >/dev/null
-printf "%s\n" "$MAX_STAGING_VM_COUNT_ON_THIS_HOST"
-' bash "$CONFIG_LIB" "$node"
-    )" || die "Could not load MAX_STAGING_VM_COUNT_ON_THIS_HOST for $node"
-
-    validate_positive_integer "MAX_STAGING_VM_COUNT_ON_THIS_HOST for $node" "$limit"
-    info "$node staging limit: $limit"
-    ((limit > max)) && max="$limit"
-  done
-
-  ((max > 0)) || die "Could not determine a staging limit"
-  MAX_STAGE_SUFFIX="$max"
-  info "NGINX will cover stage suffixes 1-$MAX_STAGE_SUFFIX."
-  info "The maximum across placement hosts is used so an HA owner move cannot make the inherited config too narrow."
+  # Staging numbers are bounded by the production VM's staging slots, so the
+  # names stay valid wherever its staging clones run.
+  validate_positive_integer "MAX_STAGING_VMS_PER_PROD" "${MAX_STAGING_VMS_PER_PROD:-}"
+  MAX_STAGE_SUFFIX="$MAX_STAGING_VMS_PER_PROD"
+  info "Staging clones can answer as stage1-stage$MAX_STAGE_SUFFIX (MAX_STAGING_VMS_PER_PROD)."
 }
 
-build_server_names() {
-  local alias i name
+build_hostnames() {
+  local i name
   declare -A seen=()
 
-  SERVER_NAMES=()
+  HOSTNAMES=()
   for name in "$PRIMARY_DOMAIN" "${ALIAS_DOMAINS[@]}"; do
     [[ -n "$name" ]] || continue
     if [[ -z "${seen[$name]:-}" ]]; then
-      SERVER_NAMES+=("$name")
+      HOSTNAMES+=("$name")
       seen["$name"]=1
     fi
   done
@@ -397,13 +295,13 @@ build_server_names() {
   for ((i = 1; i <= MAX_STAGE_SUFFIX; i++)); do
     name="stage${i}${RESOURCE_NAME}.${PRIMARY_DOMAIN}"
     if [[ -z "${seen[$name]:-}" ]]; then
-      SERVER_NAMES+=("$name")
+      HOSTNAMES+=("$name")
       seen["$name"]=1
     fi
   done
 
-  printf '\nNGINX will accept these exact hostnames:\n'
-  printf '    %s\n' "${SERVER_NAMES[@]}"
+  printf '\nThe certificate must cover these hostnames (staging clones inherit the app):\n'
+  printf '    %s\n' "${HOSTNAMES[@]}"
 }
 
 name_is_covered_by_primary_wildcard() {
@@ -429,7 +327,7 @@ In the Cloudflare dashboard for the zone containing $PRIMARY_DOMAIN:
   1. Open SSL/TLS -> Origin Server.
   2. Under Origin Certificates, choose Create Certificate.
   3. Choose "Generate private key and CSR with Cloudflare".
-     ECC or RSA is acceptable; NGINX supports either.
+     ECC or RSA is acceptable; the app supports either.
   4. Make sure the certificate hostnames include:
 
          $PRIMARY_DOMAIN
@@ -452,8 +350,9 @@ EOF2
      Protect the private-key backup with mode 0600.
 
 Do not discard the private key after this deployment. Cloudflare Origin CA
-certificates are intended for the Cloudflare-to-origin TLS connection; direct
-browser access to the origin may not trust them.
+certificates are intended for the Cloudflare-to-origin TLS connection (here,
+from the cluster's tunnel replicas); direct browser access to the VM would not
+trust them.
 EOF2
   if bmac_ui_is_json; then
     local names="$PRIMARY_DOMAIN and *.$PRIMARY_DOMAIN"
@@ -525,125 +424,88 @@ collect_and_validate_certificate() {
   [[ -n "$cert_pub_hash" && "$cert_pub_hash" == "$key_pub_hash" ]] ||
     die "The certificate and private key do not match"
 
-  for name in "${SERVER_NAMES[@]}"; do
+  for name in "${HOSTNAMES[@]}"; do
     openssl x509 -in "$CERT_PATH" -noout -checkhost "$name" >/dev/null 2>&1 ||
-      die "The certificate does not cover NGINX hostname: $name"
+      die "The certificate does not cover hostname: $name"
   done
 
   # No "--" here: BSD/macOS chmod stops option parsing at the mode, so it reads
   # a following "--" as a file name. KEY_PATH is an absolute resolved path.
   chmod 0600 "$KEY_PATH" || die "Could not set the private-key backup to mode 0600"
 
-  info "Certificate/key pair matches and covers every configured NGINX hostname."
+  info "Certificate/key pair matches and covers every hostname."
   info "Local certificate backup retained at: $CERT_PATH"
   info "Local private-key backup retained at: $KEY_PATH"
 }
 
-write_nginx_assets() {
-  local names_file="$RUN_DIR/server_names.txt"
-  local site_file="$RUN_DIR/hello-app.nginx"
-  local index_file="$RUN_DIR/index.html"
-  local remote_helper="$RUN_DIR/remote-install.sh"
-  local name
-
-  : >"$names_file"
-  for name in "${SERVER_NAMES[@]}"; do
-    printf '        %s\n' "$name" >>"$names_file"
-  done
-
-  cat >"$site_file" <<EOF2
-# Managed by scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh for $RESOURCE_NAME.
-# Production aliases and every default staging name are intentionally listed
-# explicitly so staging clones inherit a ready-to-use NGINX configuration.
-
-server {
-    listen 80;
-    listen [::]:80;
-
-    server_name
-$(cat "$names_file")
-        ;
-
-    location = /healthz {
-        access_log off;
-        default_type text/plain;
-        return 200 "ok\\n";
-    }
-
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
+# One static binary, built here, so the VM needs nothing but the binary.
+build_app() {
+  local target_dir="${PROXMOX_ARTIFACTS_DIR}/hello-todo-build"
+  log "Build the todo app ($BUILD_TARGET)"
+  [[ "$(uname -s)" == Linux ]] ||
+    die "The todo app is built for the VM on this workstation, which must run Linux"
+  require_regular_file "$APP_DIR/Cargo.toml" "Todo app manifest"
+  require_regular_file "$APP_DIR/Cargo.lock" "Todo app lockfile"
+  command -v cargo >/dev/null 2>&1 ||
+    die "cargo is not installed; install Rust from https://rustup.rs and rerun"
+  if command -v rustup >/dev/null 2>&1 &&
+    ! rustup target list --installed 2>/dev/null | grep -Fxq "$BUILD_TARGET"; then
+    die "The Rust $BUILD_TARGET target is missing; install it with: rustup target add $BUILD_TARGET"
+  fi
+  [[ -n "${CC_x86_64_unknown_linux_musl:-}" ]] || command -v musl-gcc >/dev/null 2>&1 ||
+    die "musl-gcc is missing (it compiles the app's bundled SQLite and TLS code); install it with: sudo apt install musl-tools"
+  install -d -m 0700 "$target_dir"
+  CARGO_TARGET_DIR="$target_dir" cargo build --release --locked \
+    --manifest-path "$APP_DIR/Cargo.toml" --target "$BUILD_TARGET" ||
+    die "The todo app did not build"
+  APP_BINARY="$target_dir/$BUILD_TARGET/release/hello-todo"
+  require_regular_file "$APP_BINARY" "Built todo app binary"
+  info "Built $APP_BINARY ($(wc -c <"$APP_BINARY" | tr -d ' ') bytes)"
 }
 
-server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-
-    server_name
-$(cat "$names_file")
-        ;
-
-    ssl_certificate     /etc/nginx/ssl/cloudflare-origin.pem;
-    ssl_certificate_key /etc/nginx/ssl/cloudflare-origin.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-    root /var/www/hello-app;
-    index index.html;
-
-    location = /healthz {
-        access_log off;
-        default_type text/plain;
-        return 200 "ok\\n";
-    }
-
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
+# Port 443 must be free for the app, or already the app's own.
+check_port_443() {
+  local holder
+  log "Check that port 443 on $RESOURCE_NAME is free for the app"
+  holder="$(
+    ssh -o BatchMode=yes "$RESOURCE_NAME" bash -s <<'REMOTE'
+set -Eeuo pipefail
+ss -Hltnp 'sport = :443' 2>/dev/null | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | sort -u | tr '\n' ' '
+REMOTE
+  )" || die "Could not inspect listening ports on $RESOURCE_NAME"
+  holder="${holder% }"
+  if [[ -n "$holder" && "$holder" != hello-todo ]]; then
+    printf '\n%s already listens on port 443 on %s.\n' "$holder" "$RESOURCE_NAME" >&2
+    printf 'If it is NGINX from the earlier example app, remove it first:\n\n' >&2
+    printf "    ssh %s 'systemctl disable --now nginx'\n\n" "$RESOURCE_NAME" >&2
+    die "Port 443 on $RESOURCE_NAME is in use by $holder"
+  fi
+  info "Port 443 is ${holder:+used by the app already}${holder:-free}."
 }
-EOF2
 
-  cat >"$index_file" <<EOF2
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hello</title>
-</head>
-<body>
-  <h1>Hello, world!</h1>
-  <p>Deployed to $RESOURCE_NAME.</p>
-</body>
-</html>
-EOF2
-
-  cat >"$remote_helper" <<'EOF2'
+write_remote_installer() {
+  cat >"$RUN_DIR/remote-install.sh" <<'EOF2'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 set +x
 umask 077
 
-EOF2
-  printf '%s\n\n' "$APT_LOCK_WAIT_FUNCTIONS" >>"$remote_helper"
-  cat >>"$remote_helper" <<'EOF2'
 stage_dir="${1:?remote staging directory is required}"
 primary_domain="${2:?primary domain is required}"
 
-cert_dst=/etc/nginx/ssl/cloudflare-origin.pem
-key_dst=/etc/nginx/ssl/cloudflare-origin.key
-site_dst=/etc/nginx/sites-available/hello-app
-site_link=/etc/nginx/sites-enabled/hello-app
-default_link=/etc/nginx/sites-enabled/default
-index_dst=/var/www/hello-app/index.html
+binary_dst=/usr/local/bin/hello-todo
+unit_dst=/etc/systemd/system/hello-todo.service
+cert_dst=/etc/hello-todo/cert.pem
+key_dst=/etc/hello-todo/key.pem
 
-backup_dir="$(mktemp -d /run/hello-app-backup.XXXXXX)"
+backup_dir="$(mktemp -d /run/hello-todo-backup.XXXXXX)"
 committed=false
 backups_ready=false
 
 backup_path() {
   local path="$1" name="$2"
-  if [[ -e "$path" || -L "$path" ]]; then
-    cp -a --no-dereference "$path" "$backup_dir/$name"
+  if [[ -e "$path" ]]; then
+    cp -a "$path" "$backup_dir/$name"
     printf '1' >"$backup_dir/$name.present"
   else
     printf '0' >"$backup_dir/$name.present"
@@ -654,21 +516,23 @@ restore_path() {
   local path="$1" name="$2"
   rm -f -- "$path"
   if [[ "$(cat "$backup_dir/$name.present")" == 1 ]]; then
-    cp -a --no-dereference "$backup_dir/$name" "$path"
+    cp -a "$backup_dir/$name" "$path"
   fi
 }
 
 rollback() {
   set +e
   [[ "$backups_ready" == true ]] || return 0
+  systemctl stop hello-todo.service >/dev/null 2>&1
+  restore_path "$binary_dst" binary
+  restore_path "$unit_dst" unit
   restore_path "$cert_dst" cert
   restore_path "$key_dst" key
-  restore_path "$site_dst" site
-  restore_path "$site_link" site-link
-  restore_path "$default_link" default-link
-  restore_path "$index_dst" index
-  if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
-    systemctl is-active --quiet nginx && systemctl reload nginx >/dev/null 2>&1 || true
+  systemctl daemon-reload
+  if [[ "$(cat "$backup_dir/unit.present")" == 1 ]]; then
+    systemctl restart hello-todo.service
+  else
+    systemctl disable hello-todo.service >/dev/null 2>&1
   fi
 }
 
@@ -676,7 +540,9 @@ cleanup_remote() {
   local rc=$?
   set +e
   if [[ "$committed" != true && $rc -ne 0 ]]; then
-    printf 'Deployment failed; restoring the previous NGINX files.\n' >&2
+    printf 'Deployment failed; restoring the previous app files.\n' >&2
+    printf 'Recent app log:\n' >&2
+    journalctl -u hello-todo.service --since '-5 minutes' --no-pager 2>/dev/null | tail -n 30 >&2
     rollback
   fi
   rm -rf -- "$backup_dir" "$stage_dir"
@@ -684,181 +550,107 @@ cleanup_remote() {
 }
 trap cleanup_remote EXIT
 
-for file in cloudflare-origin.pem cloudflare-origin.key hello-app.nginx index.html; do
+for file in hello-todo hello-todo.service cert.pem key.pem; do
   [[ -f "$stage_dir/$file" && ! -L "$stage_dir/$file" ]] || {
     printf 'Missing staged file: %s\n' "$file" >&2
     exit 1
   }
 done
 
-if ! command -v nginx >/dev/null 2>&1; then
-  apt_wait_for_locks
-  # The timeout covers another process taking the lock just after the wait above.
-  apt-get -o DPkg::Lock::Timeout=60 update
-  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y nginx
-fi
-
-install -d -m 0755 /etc/nginx/ssl /etc/nginx/sites-available /etc/nginx/sites-enabled /var/www/hello-app
-
+backup_path "$binary_dst" binary
+backup_path "$unit_dst" unit
 backup_path "$cert_dst" cert
 backup_path "$key_dst" key
-backup_path "$site_dst" site
-backup_path "$site_link" site-link
-backup_path "$default_link" default-link
-backup_path "$index_dst" index
 backups_ready=true
 
-install -o root -g root -m 0644 "$stage_dir/cloudflare-origin.pem" "$cert_dst"
-install -o root -g root -m 0600 "$stage_dir/cloudflare-origin.key" "$key_dst"
-install -o root -g root -m 0644 "$stage_dir/hello-app.nginx" "$site_dst"
-install -o root -g root -m 0644 "$stage_dir/index.html" "$index_dst"
-ln -sfn ../sites-available/hello-app "$site_link"
-rm -f -- "$default_link"
+install -d -o root -g root -m 0700 /etc/hello-todo
+install -o root -g root -m 0755 "$stage_dir/hello-todo" "${binary_dst}.new"
+mv -f "${binary_dst}.new" "$binary_dst"
+install -o root -g root -m 0644 "$stage_dir/hello-todo.service" "$unit_dst"
+install -o root -g root -m 0600 "$stage_dir/cert.pem" "$cert_dst"
+install -o root -g root -m 0600 "$stage_dir/key.pem" "$key_dst"
 
-nginx -t
-systemctl enable nginx >/dev/null
-if systemctl is-active --quiet nginx; then
-  systemctl reload nginx
-else
-  systemctl start nginx
-fi
-systemctl is-active --quiet nginx
+systemctl daemon-reload
+systemctl enable hello-todo.service >/dev/null
+systemctl restart hello-todo.service
 
-command -v curl >/dev/null 2>&1 || {
-  printf 'curl disappeared after prerequisite validation; refusing to skip HTTP checks.\n' >&2
-  exit 1
-}
-
-# A graceful NGINX reload is asynchronous. systemctl can report the reload
-# complete while old workers are still accepting requests for a short time.
-# Poll the actual virtual host instead of treating the first request after a
-# reload as authoritative.
-wait_for_http_validation() {
-  local label="$1" expected_status="$2" body_file="$3" body_mode="$4" expected_body="$5"
-  shift 5
-  local attempt status="" curl_rc=0
-  local max_attempts=50
-  local sleep_seconds=0.1
-
-  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-    : >"$body_file"
-    curl_rc=0
-    status="$(
-      curl --noproxy '*' -sS -o "$body_file" -w '%{http_code}' "$@"
-    )" || curl_rc=$?
-
-    if ((curl_rc == 0)) && [[ "$status" == "$expected_status" ]]; then
-      case "$body_mode" in
-        exact)
-          grep -Fxq -- "$expected_body" "$body_file" && return 0
-          ;;
-        contains)
-          grep -Fq -- "$expected_body" "$body_file" && return 0
-          ;;
-        none)
-          return 0
-          ;;
-        *)
-          printf 'Internal error: unknown validation body mode: %s\n' "$body_mode" >&2
-          return 1
-          ;;
-      esac
-    fi
-
-    ((attempt < max_attempts)) && sleep "$sleep_seconds"
-  done
-
-  if ((curl_rc != 0)); then
-    printf '%s failed after %d attempts: final curl exit status was %d.\n' \
-      "$label" "$max_attempts" "$curl_rc" >&2
-  else
-    printf '%s failed after %d attempts: final HTTP status was %s; expected %s.\n' \
-      "$label" "$max_attempts" "${status:-unknown}" "$expected_status" >&2
+# Wait for the new process to answer over HTTPS with the installed certificate.
+expected="$(openssl x509 -in "$cert_dst" -noout -fingerprint -sha256)"
+body="$backup_dir/info.json"
+for ((attempt = 1; attempt <= 50; attempt++)); do
+  if systemctl is-active --quiet hello-todo.service &&
+    status="$(curl --noproxy '*' -sS -k -o "$body" -w '%{http_code}' \
+      --resolve "${primary_domain}:443:127.0.0.1" "https://${primary_domain}/api/v1/info" 2>/dev/null)" &&
+    [[ "$status" == 200 ]] && grep -Fq '"max_todos"' "$body"; then
+    served="$(
+      openssl s_client -connect 127.0.0.1:443 -servername "$primary_domain" </dev/null 2>/dev/null |
+        openssl x509 -noout -fingerprint -sha256
+    )"
+    [[ "$served" == "$expected" ]] || {
+      printf 'The app serves a different certificate than the one installed.\n' >&2
+      exit 1
+    }
+    committed=true
+    printf 'The todo app answers on https://%s/ with the installed certificate.\n' "$primary_domain"
+    exit 0
   fi
-
-  printf '%s final response body follows:\n' "$label" >&2
-  sed -n '1,40p' "$body_file" >&2 || true
-  printf '\nActive NGINX configuration references for %s:\n' "$primary_domain" >&2
-  nginx -T 2>&1 | grep -n -F -C 3 -- "$primary_domain" >&2 || true
-  printf '\nRecent NGINX service log:\n' >&2
-  journalctl -u nginx --since '-2 minutes' --no-pager 2>/dev/null | tail -n 40 >&2 || true
-  return 1
-}
-
-http_health_body="$backup_dir/http-health.body"
-https_health_body="$backup_dir/https-health.body"
-https_root_body="$backup_dir/https-root.body"
-
-wait_for_http_validation \
-  'HTTP /healthz validation' 200 "$http_health_body" exact 'ok' \
-  -H "Host: $primary_domain" \
-  http://127.0.0.1/healthz
-
-wait_for_http_validation \
-  'HTTPS /healthz validation' 200 "$https_health_body" exact 'ok' \
-  -k --resolve "$primary_domain:443:127.0.0.1" \
-  "https://$primary_domain/healthz"
-
-wait_for_http_validation \
-  'HTTPS hello-page validation' 200 "$https_root_body" contains '<h1>Hello, world!</h1>' \
-  -k --resolve "$primary_domain:443:127.0.0.1" \
-  "https://$primary_domain/"
-
-committed=true
-printf 'NGINX deployment validated and active.\n'
+  sleep 0.2
+done
+printf 'The todo app did not answer on port 443 within 10 seconds.\n' >&2
+exit 1
 EOF2
-
-  chmod 0700 "$remote_helper"
+  chmod 0700 "$RUN_DIR/remote-install.sh"
 }
 
 deploy_to_guest() {
-  log "Deploy hello application to $RESOURCE_NAME"
+  log "Deploy the todo app to $RESOURCE_NAME"
 
   REMOTE_STAGE_DIR="$(
     ssh -o BatchMode=yes "$RESOURCE_NAME" \
-      'umask 077; mktemp -d /tmp/hello-app-deploy.XXXXXX' </dev/null
+      'umask 077; mktemp -d /tmp/hello-todo-deploy.XXXXXX' </dev/null
   )" || die "Could not create a temporary deployment directory on $RESOURCE_NAME"
-  [[ "$REMOTE_STAGE_DIR" =~ ^/tmp/hello-app-deploy[.][A-Za-z0-9]+$ ]] ||
+  [[ "$REMOTE_STAGE_DIR" =~ ^/tmp/hello-todo-deploy[.][A-Za-z0-9]+$ ]] ||
     die "Unexpected remote staging path: $REMOTE_STAGE_DIR"
 
-  scp -q "$CERT_PATH" \
-    "$RESOURCE_NAME:$REMOTE_STAGE_DIR/cloudflare-origin.pem" ||
+  scp -q "$APP_BINARY" "$RESOURCE_NAME:$REMOTE_STAGE_DIR/hello-todo" ||
+    die "Could not copy the app to $RESOURCE_NAME"
+  scp -q "$APP_DIR/hello-todo.service" "$RESOURCE_NAME:$REMOTE_STAGE_DIR/hello-todo.service" ||
+    die "Could not copy the service unit to $RESOURCE_NAME"
+  scp -q "$CERT_PATH" "$RESOURCE_NAME:$REMOTE_STAGE_DIR/cert.pem" ||
     die "Could not copy the origin certificate to $RESOURCE_NAME"
-  scp -q "$KEY_PATH" \
-    "$RESOURCE_NAME:$REMOTE_STAGE_DIR/cloudflare-origin.key" ||
+  scp -q "$KEY_PATH" "$RESOURCE_NAME:$REMOTE_STAGE_DIR/key.pem" ||
     die "Could not copy the origin private key to $RESOURCE_NAME"
-  scp -q "$RUN_DIR/hello-app.nginx" \
-    "$RESOURCE_NAME:$REMOTE_STAGE_DIR/hello-app.nginx" ||
-    die "Could not copy the NGINX site to $RESOURCE_NAME"
-  scp -q "$RUN_DIR/index.html" \
-    "$RESOURCE_NAME:$REMOTE_STAGE_DIR/index.html" ||
-    die "Could not copy the hello page to $RESOURCE_NAME"
-  scp -q "$RUN_DIR/remote-install.sh" \
-    "$RESOURCE_NAME:$REMOTE_STAGE_DIR/remote-install.sh" ||
+  scp -q "$RUN_DIR/remote-install.sh" "$RESOURCE_NAME:$REMOTE_STAGE_DIR/remote-install.sh" ||
     die "Could not copy the remote install helper to $RESOURCE_NAME"
 
   ssh -o BatchMode=yes "$RESOURCE_NAME" \
-    "bash '$REMOTE_STAGE_DIR/remote-install.sh' '$REMOTE_STAGE_DIR' '$PRIMARY_DOMAIN'" ||
-    die "Remote NGINX deployment failed"
+    "bash '$REMOTE_STAGE_DIR/remote-install.sh' '$REMOTE_STAGE_DIR' '$PRIMARY_DOMAIN'" </dev/null ||
+    die "Remote deployment failed"
 
   REMOTE_STAGE_DIR=""
 }
 
 print_completion() {
-  log "Hello application deployment complete"
+  log "Todo app deployment complete"
   info "Production VM: $RESOURCE_NAME"
-  info "Primary URL: https://$PRIMARY_DOMAIN/"
-  info "Health URL: https://$PRIMARY_DOMAIN/healthz"
-  info "NGINX site: /etc/nginx/sites-available/hello-app"
-  info "Origin certificate: /etc/nginx/ssl/cloudflare-origin.pem"
-  info "Origin private key: /etc/nginx/ssl/cloudflare-origin.key"
-  info "Staging hostnames configured: stage1${RESOURCE_NAME}.${PRIMARY_DOMAIN} through stage${MAX_STAGE_SUFFIX}${RESOURCE_NAME}.${PRIMARY_DOMAIN}"
+  info "URL: https://$PRIMARY_DOMAIN/"
+  info "API: https://$PRIMARY_DOMAIN/api/v1/todos"
+  info "Service: hello-todo.service (enabled; starts at boot)"
+  info "Program: /usr/local/bin/hello-todo"
+  info "Database: /var/lib/hello-todo/todos.sqlite3"
+  info "Origin certificate and key: /etc/hello-todo/ (root only)"
+  info "Staging clones inherit the app and a copy of its data; they answer on stage1${RESOURCE_NAME}.${PRIMARY_DOMAIN} through stage${MAX_STAGE_SUFFIX}${RESOURCE_NAME}.${PRIMARY_DOMAIN}."
   info "Workstation certificate/key backups remain at the paths you supplied."
-  printf '\nCloudflare should use Full (strict) origin TLS once this certificate is installed.\n'
+  cat <<EOF2
+
+Try the API (the list holds at most 100 todos):
+
+    curl https://$PRIMARY_DOMAIN/api/v1/todos
+    curl -X POST -H 'Content-Type: application/json' -d '{"title":"Hello"}' https://$PRIMARY_DOMAIN/api/v1/todos
+EOF2
   bmac_ui_result resource "$RESOURCE_NAME" url "https://$PRIMARY_DOMAIN/" \
-    health_url "https://$PRIMARY_DOMAIN/healthz"
-  bmac_ui_next_step "Set Cloudflare SSL/TLS to Full (strict) origin TLS for $PRIMARY_DOMAIN now that the origin certificate is installed."
-  bmac_ui_next_step "Open https://$PRIMARY_DOMAIN/ to see the hello page."
+    api_url "https://$PRIMARY_DOMAIN/api/v1/todos"
+  bmac_ui_next_step "Open https://$PRIMARY_DOMAIN/ to use the todo list."
 }
 
 main() {
@@ -871,24 +663,25 @@ main() {
   require_command realpath
   require_command grep
 
-  RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/deploy-hello-app.XXXXXX")"
+  RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/deploy-hello-todo.XXXXXX")"
 
   load_config
   COORDINATOR="$(first_reachable_mox)" || die "No reachable mox host was found"
   info "Registry coordinator: $COORDINATOR"
 
   select_production_resource
+  build_app
   confirm_guest_ssh
   preflight_target_tools
+  check_port_443
   show_rerun_behavior
   compute_stage_limit
-  build_server_names
-  check_existing_nginx_conflicts
+  build_hostnames
   show_cloudflare_instructions
   collect_and_validate_certificate
-  write_nginx_assets
+  write_remote_installer
 
-  printf '\nThis will install/reconfigure NGINX on %s and deploy the hello page.\n' "$RESOURCE_NAME"
+  printf '\nThis will install the todo app as hello-todo.service on %s.\n' "$RESOURCE_NAME"
   prompt_yes "Proceed with deployment?" || die "Deployment cancelled"
 
   deploy_to_guest

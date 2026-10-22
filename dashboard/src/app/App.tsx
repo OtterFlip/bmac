@@ -1,6 +1,7 @@
 import { useEffect } from "react";
-import { FolderGit2, Loader2, TriangleAlert } from "lucide-react";
+import { FolderGit2, Loader2, RefreshCw, TriangleAlert, Unplug } from "lucide-react";
 import { useStore, type Page } from "@/state/store";
+import { CLUSTER_SOURCE_IDS } from "@/protocol/state";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import { Sidebar } from "@/components/layout/Sidebar";
@@ -47,6 +48,34 @@ function NoRepository() {
   );
 }
 
+const CLUSTER_PAGES: Page[] = ["dashboard", "hosts", "production", "staging", "storage", "qdevice"];
+
+/**
+ * Shown while every cluster read so far has failed, e.g. when all hosts are off.
+ * The QDevice check reaches its own host directly, so it can't vouch for the cluster.
+ */
+export function ClusterUnreachable() {
+  const sources = useStore((s) => s.sources);
+  const refreshSources = useStore((s) => s.refreshSources);
+  const entries = CLUSTER_SOURCE_IDS.map((id) => [id, sources[id]] as const);
+  const failed = entries.filter(([, e]) => e.status === "error");
+  const loading = entries.some(([, e]) => e.status === "loading");
+  if (!failed.length || entries.some(([, e]) => e.status === "ok")) return null;
+  return (
+    <div role="alert" className="mx-7 mt-2 mb-4 flex items-center gap-3 rounded-xl border border-danger/30 bg-danger/[0.07] px-4 py-3">
+      <Unplug className="size-4 shrink-0 text-danger" />
+      <div className="min-w-0 flex-1 text-[13px] text-fg">
+        <span className="font-semibold">Can't reach the cluster.</span>
+        <span className="text-fg-muted"> No state is shown until a host answers; nothing here is cached.</span>
+        <div className="selectable mt-0.5 truncate text-[12px] text-fg-subtle" title={failed[0][1].error ?? undefined}>{failed[0][1].error}</div>
+      </div>
+      <Button size="sm" disabled={loading} onClick={() => refreshSources(failed.map(([id]) => id))}>
+        <RefreshCw className={loading ? "animate-spin" : undefined} /> Try again
+      </Button>
+    </div>
+  );
+}
+
 export function App() {
   const ready = useStore((s) => s.ready);
   const bootError = useStore((s) => s.bootError);
@@ -83,6 +112,7 @@ export function App() {
           <Sidebar />
           <main key={page} className="flex min-w-0 flex-1 flex-col animate-fade-in">
             {!repoValid && page !== "settings" && page !== "config" && <NoRepository />}
+            {repoValid && CLUSTER_PAGES.includes(page) && <ClusterUnreachable />}
             <PageView />
           </main>
           {panelOpen && <WorkflowPanel />}

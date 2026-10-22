@@ -126,7 +126,6 @@ echo "TAKEN=$(snapshot_taken_label "$SNAPSHOT_NAME")"
         "name": "stage1prod1",
         "id": "11111111-2222-4333-8444-555555555555",
         "state": "cleanup_pending",
-        "routes_enabled": False,
     }
 
     def run_cleanup_wait(
@@ -209,7 +208,6 @@ echo "RETURNED=$?"
         for label, changed in {
             "reused name": dict(self.CLEANUP_ROW, id="99999999-2222-4333-8444-555555555555"),
             "left cleanup": dict(self.CLEANUP_ROW, state="active"),
-            "routes back": dict(self.CLEANUP_ROW, routes_enabled=True),
         }.items():
             with self.subTest(change=label):
                 completed = self.run_cleanup_wait(
@@ -234,7 +232,7 @@ echo "RETURNED=$?"
         text = SCRIPT.read_text(encoding="utf-8")
         main = text[text.index("main() {") :]
         self.assertLess(
-            main.index('registry_update --state stopping --routes-disabled'),
+            main.index("registry_update --state stopping"),
             main.index("queue_cleanup_plan"),
         )
         self.assertLess(
@@ -248,7 +246,8 @@ echo "RETURNED=$?"
         self.assertIn("--action destroy-vm", text)
         self.assertIn("--action destroy-volume", text)
         self.assertIn("--action delete-snapshot", text)
-        self.assertIn("--action remove-route", text)
+        self.assertNotIn("remove-route", text)
+        self.assertNotIn("HAPROXY", text)
         self.assertIn("--state cleanup_pending", text)
         self.assertIn("app-ha-deferred-cleanup.service", text)
         self.assertIn("replicated copies", text)

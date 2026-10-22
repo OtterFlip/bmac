@@ -1,0 +1,59 @@
+# Copyright (c) 2026 BEENTHERE VENTURES, INC.
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# HTTPS endpoints that egress_health.py rotates through to check a mox host's
+# internet connection: one HEAD request every 5 seconds, each to the next
+# target, so each sees about one request every few minutes from each host.
+# Any HTTP response counts as success. Host setup and the "Sync cluster with
+# cluster.conf" operation keep only the targets that answer; a target that
+# keeps failing while the others answer is retired. Spread across many
+# operators so no single outage looks like a dead connection.
+
+# Google
+https://connectivitycheck.gstatic.com/generate_204
+https://www.google.com/generate_204
+https://clients3.google.com/generate_204
+https://dns.google/resolve?name=example.com
+# Cloudflare
+https://cp.cloudflare.com/generate_204
+https://1.1.1.1/cdn-cgi/trace
+https://1.0.0.1/cdn-cgi/trace
+# Apple
+https://captive.apple.com/hotspot-detect.html
+https://www.apple.com/library/test/success.html
+# Mozilla
+https://detectportal.firefox.com/success.txt
+https://www.mozilla.org/
+# GNOME and Canonical
+https://nmcheck.gnome.org/check_network_status.txt
+https://connectivity-check.ubuntu.com/
+https://archive.ubuntu.com/ubuntu/
+# DNS providers
+https://dns.quad9.net/
+https://www.opendns.com/
+https://dns.adguard-dns.com/
+# Linux and open source
+https://www.kernel.org/
+https://deb.debian.org/debian/
+https://www.debian.org/
+https://enterprise.proxmox.com/
+https://www.gnu.org/
+https://www.python.org/
+https://pypi.org/
+https://registry.npmjs.org/
+https://go.dev/
+# Others
+https://www.wikipedia.org/
+https://github.com/
+https://www.fastly.com/
+https://www.microsoft.com/
+https://www.bing.com/
+https://aws.amazon.com/
+https://duckduckgo.com/
+https://www.example.com/
+https://www.iana.org/
+https://pkgs.tailscale.com/
+https://www.digitalocean.com/
+https://www.hetzner.com/
+https://www.linode.com/
+https://www.dropbox.com/

@@ -7,7 +7,7 @@
 
     dev/run_tests.py                                        every tracked test_*.py
     dev/run_tests.py -j 8 -k reservation                    8 workers, filtered
-    dev/run_tests.py scripts/tests/test_haproxy_routes.py   specific targets
+    dev/run_tests.py scripts/tests/test_tunnel_config.py   specific targets
     dev/run_tests.py scripts.tests.test_rpool_mirror.RpoolMirrorToolTest.test_add
 
 Targets are test files, modules, classes, or single test ids, as accepted by

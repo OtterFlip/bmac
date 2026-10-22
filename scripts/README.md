@@ -8,7 +8,8 @@ SPDX-License-Identifier: GPL-3.0-only
 This directory is the engine of BMAC. The scripts here do all of the real
 work: building and joining Proxmox hosts, managing disks and ZFS mirrors,
 creating and moving production and staging guests, setting up the QDevice,
-routing ingress through HAProxy, and reporting on the state of the cluster.
+providing guest ingress through a Cloudflare Tunnel and egress through each
+host's shared gateway, and reporting on the state of the cluster.
 Everything else in the repository, including the Dashboard, is a way of
 driving these scripts.
 
@@ -50,7 +51,8 @@ requests and events rendered as forms, dialogs, and progress views.
 - `utilities/` holds helpers that only other scripts run, either on the
   workstation or piped or copied to a host for a single run.
 - `host_runtime/` holds the tools installed on every Proxmox host, such as the
-  cluster registry, the HAProxy route synchronizer, and the deferred-cleanup
+  cluster registry, the guest gateway and egress health service, the
+  Cloudflare Tunnel config renderer and synchronizer, and the deferred-cleanup
   worker.
 - `tests/` holds the unit tests. Run them with `dev/run_tests.py` from the
   repository root.

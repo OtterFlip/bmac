@@ -143,7 +143,6 @@ class HostMembershipTest(unittest.TestCase):
 
     def test_graceful_removal_blocks_hosts_that_anything_still_uses(self) -> None:
         vms = [
-            {"vmid": 9112, "type": "lxc", "node": "mox2", "name": "haproxy2"},
             {"vmid": 100, "type": "qemu", "node": "mox1", "name": "prod1"},
             {"vmid": 300, "type": "qemu", "node": "mox3", "name": "other"},
         ]
@@ -212,7 +211,6 @@ class HostMembershipTest(unittest.TestCase):
             {"vmid": 100, "type": "qemu", "node": "mox1", "name": "prod1", "status": "running"},
             {"vmid": 101, "type": "qemu", "node": "mox1", "name": "prod2", "status": "running"},
             {"vmid": 200, "type": "qemu", "node": "mox2", "name": "stage1prod1"},
-            {"vmid": 9112, "type": "lxc", "node": "mox2", "name": "haproxy2"},
         ]
         cleanup = [
             {"id": "c1", "node": "mox2", "state": "pending"},
@@ -366,12 +364,12 @@ class HostMembershipTest(unittest.TestCase):
         order = [
             "require_qdevice_access_afterward",
             "validate_eligibility",
-            "confirm_cloudflare",
             "choose_control_replacement",
             'hm_confirm_phrase',
             "switch_control_node",
             'hm_acquire_control_plane_lock "$HM_COORDINATOR"',
             "remove_qdevice_before_change",
+            "retire_tunnel_replica",
             "power_off_target",
             "delete_target",
             "reconcile_after_removal",

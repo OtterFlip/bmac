@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import unittest
 from pathlib import Path
@@ -14,6 +15,9 @@ SKIPPED_DIRS = {".git", "node_modules", "target", "dist", "__pycache__"}
 # Formats without comments, generated files, and binary files.
 EXEMPT_SUFFIXES = {".json", ".lock", ".png", ".jpg", ".svg", ".ico", ".woff2"}
 EXEMPT_NAMES = {"pnpm-lock.yaml", "VERSION", ".nvmrc"}
+# Operators' private Tailscale policies, kept beside the configuration but
+# never committed.
+EXEMPT_PATTERNS = ("tailscale.json*",)
 HEADER = "SPDX-License-Identifier: GPL-3.0-only"
 COPYRIGHT = "Copyright (c) 2026 BEENTHERE VENTURES, INC."
 
@@ -24,7 +28,11 @@ def source_files() -> list[Path]:
         subdirs[:] = [d for d in subdirs if d not in SKIPPED_DIRS]
         for name in files:
             path = Path(directory, name)
-            if name not in EXEMPT_NAMES and path.suffix not in EXEMPT_SUFFIXES:
+            if (
+                name not in EXEMPT_NAMES
+                and path.suffix not in EXEMPT_SUFFIXES
+                and not any(fnmatch.fnmatch(name, pattern) for pattern in EXEMPT_PATTERNS)
+            ):
                 found.append(path)
     return found
 

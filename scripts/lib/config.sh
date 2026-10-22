@@ -153,10 +153,11 @@ declare -ag _PROXMOX_CONFIG_CLUSTER_KEYS=(
   MAX_MOX_HOSTS PROXMOX_MAX_HOSTS
   PRIVATE_SUBNET_CIDR PROXMOX_PRIVATE_SUBNET
   PROXMOX_PRIVATE_BRIDGE PROXMOX_MIGRATION_NETWORK
-  DATACENTER_PRIVATE_VLAN_GATEWAY GUEST_EGRESS_VIP
+  DATACENTER_PRIVATE_VLAN_GATEWAY GUEST_GATEWAY_IP GUEST_GATEWAY_MAC
   MOX_IP_START MOX_IP_END
   MOX_REPLICATION_IP_START MOX_REPLICATION_IP_END
-  HAPROXY_IP_START HAPROXY_IP_END
+  VM_SLOT_START MAX_PROD_VMS MAX_STAGING_VMS_PER_PROD
+  CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_TUNNEL_ID
   PROXMOX_DNS_SERVER PROXMOX_ADMIN_EMAIL
   PROXMOX_TIMEZONE PROXMOX_COUNTRY PROXMOX_KEYBOARD
   PROXMOX_ISO_FILE_URL PROXMOX_ISO_FILE_SHA256
@@ -166,12 +167,6 @@ declare -ag _PROXMOX_CONFIG_CLUSTER_KEYS=(
   TAILSCALE_TAG PRODUCTION_VM_TAG STAGING_VM_TAG
   EVICTABLE_VM_TAG PRODUCTION_TAG STAGING_TAG EVICTABLE_TAG
   PURPOSE_TAG_PREFIX GUEST_ROLE_HOOK_PATH CLUSTER_STATE_DIR
-  PRODUCTION_IP_START PRODUCTION_IP_END
-  PROD_IP_RANGE_START PROD_IP_RANGE_END
-  STAGING_IP_START STAGING_IP_END
-  STAGING_IP_RANGE_START STAGING_IP_RANGE_END
-  HAPROXY_LXC_ROOTFS_GB HAPROXY_LXC_MEMORY_MB
-  HAPROXY_LXC_CORES HAPROXY_LXC_STORAGE HAPROXY_LXC_TEMPLATE
   PROD_VM_CORES PROD_VM_MEMORY_GIB PROD_VM_DISK_GB
   PROD_VM_STORAGE PROD_VM_BRIDGE PROD_VM_CPU_TYPE
   PROD_VM_REPLICATION_INTERVAL
@@ -187,14 +182,15 @@ declare -ag _PROXMOX_CONFIG_MOX_KEYS=(
   PROXMOX_IP PROXMOX_GATEWAY PROXMOX_PREFIX
   PROXMOX_PUBLIC_MAC PROXMOX_SECONDARY_MAC
   PROXMOX_SECONDARY_IP TAILSCALE_HOSTNAME
-  HAPROXY_LXC_VMID HAPROXY_LXC_HOSTNAME HAPROXY_LXC_IP
-  HAPROXY_LXC_GATEWAY VRRP_PRIORITY
   MAX_PROD_VM_COUNT_ON_THIS_HOST MAX_STAGING_VM_COUNT_ON_THIS_HOST
+  PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB
+  PROXMOX_HOST_TRANSFER_MONTHLY_RESET_DAY
 )
 declare -ag _PROXMOX_CONFIG_ALLOWED_SECRET_KEYS=(
   IDRAC_USER IDRAC_PASSWORD PROXMOX_ROOT_PASSWORD
   PROD_GUEST_VM_ROOT_PASSWORD STAGING_GUEST_VM_ROOT_PASSWORD
   PROXMOX_LUKS_PASSWORD PROXMOX_QDEVICE_ROOT_PASSWORD
+  CLOUDFLARE_TUNNEL_SECRET
 )
 
 _config_initialize_allowlist() {
@@ -644,17 +640,13 @@ mox_index() {
 
 _config_validate_selected_host() {
   local host="$1" index="$2" prefix="$3"
-  local mox_start replication_start migration_prefix haproxy_start
+  local mox_start replication_start migration_prefix
   mox_start="$(_config_ipv4_octet "$MOX_IP_START" "$prefix")" || return
   replication_start="$(_config_ipv4_octet "$MOX_REPLICATION_IP_START" "$prefix")" || return
   migration_prefix="${PROXMOX_MIGRATION_NETWORK#*/}"
-  haproxy_start="$(_config_ipv4_octet "$HAPROXY_IP_START" "$prefix")" || return
   local expected_mox_ip="${prefix}.$((mox_start + index - 1))/24"
   local expected_replication_ip="${prefix}.$((replication_start + index - 1))/${migration_prefix}"
   local expected_fqdn="${host}.${PROXMOX_INTERNAL_DOMAIN}"
-  local expected_haproxy_ip="${prefix}.$((haproxy_start + index - 1))/24"
-  local expected_haproxy_vmid="$((9110 + index))"
-  local expected_vrrp_priority="$((200 - index))"
   local name
 
   ((index <= MAX_MOX_HOSTS)) ||
@@ -666,16 +658,6 @@ _config_validate_selected_host() {
     config_die "PROXMOX_SECONDARY_IP for ${host} must be ${expected_mox_ip}" || return
   [[ -z "${MOX_REPLICATION_IP+x}" || "$MOX_REPLICATION_IP" == "$expected_replication_ip" ]] ||
     config_die "MOX_REPLICATION_IP for ${host} must be ${expected_replication_ip}" || return
-  [[ -z "${HAPROXY_LXC_HOSTNAME+x}" || "$HAPROXY_LXC_HOSTNAME" == "haproxy${index}" ]] ||
-    config_die "HAPROXY_LXC_HOSTNAME for ${host} must be haproxy${index}" || return
-  [[ -z "${HAPROXY_LXC_IP+x}" || "$HAPROXY_LXC_IP" == "$expected_haproxy_ip" ]] ||
-    config_die "HAPROXY_LXC_IP for ${host} must be ${expected_haproxy_ip}" || return
-  [[ -z "${HAPROXY_LXC_GATEWAY+x}" || "$HAPROXY_LXC_GATEWAY" == "${expected_mox_ip%/*}" ]] ||
-    config_die "HAPROXY_LXC_GATEWAY for ${host} must be ${expected_mox_ip%/*}" || return
-  [[ -z "${HAPROXY_LXC_VMID+x}" || "$HAPROXY_LXC_VMID" == "$expected_haproxy_vmid" ]] ||
-    config_die "HAPROXY_LXC_VMID for ${host} must be ${expected_haproxy_vmid}" || return
-  [[ -z "${VRRP_PRIORITY+x}" || "$VRRP_PRIORITY" == "$expected_vrrp_priority" ]] ||
-    config_die "VRRP_PRIORITY for ${host} must be ${expected_vrrp_priority}" || return
 
   MOX_INDEX="$index"
   MOX_HOSTNAME="$host"
@@ -683,25 +665,14 @@ _config_validate_selected_host() {
   PROXMOX_FQDN="$expected_fqdn"
   PROXMOX_SECONDARY_IP="$expected_mox_ip"
   MOX_REPLICATION_IP="$expected_replication_ip"
-  HAPROXY_LXC_HOSTNAME="haproxy${index}"
-  HAPROXY_LXC_IP="$expected_haproxy_ip"
-  HAPROXY_LXC_GATEWAY="${expected_mox_ip%/*}"
-  HAPROXY_LXC_VMID="$expected_haproxy_vmid"
-  VRRP_PRIORITY="$expected_vrrp_priority"
   export MOX_INDEX MOX_HOSTNAME TAILSCALE_HOSTNAME PROXMOX_FQDN
   export PROXMOX_SECONDARY_IP MOX_REPLICATION_IP
-  export HAPROXY_LXC_HOSTNAME HAPROXY_LXC_IP HAPROXY_LXC_GATEWAY
-  export HAPROXY_LXC_VMID VRRP_PRIORITY
   _PROXMOX_CONFIG_PUBLIC_KEYS+=(
     MOX_INDEX MOX_HOSTNAME TAILSCALE_HOSTNAME PROXMOX_FQDN
     PROXMOX_SECONDARY_IP MOX_REPLICATION_IP
-    HAPROXY_LXC_HOSTNAME HAPROXY_LXC_IP HAPROXY_LXC_GATEWAY
-    HAPROXY_LXC_VMID VRRP_PRIORITY
   )
   for name in MOX_INDEX MOX_HOSTNAME TAILSCALE_HOSTNAME PROXMOX_FQDN \
-    PROXMOX_SECONDARY_IP MOX_REPLICATION_IP \
-    HAPROXY_LXC_HOSTNAME HAPROXY_LXC_IP HAPROXY_LXC_GATEWAY \
-    HAPROXY_LXC_VMID VRRP_PRIORITY; do
+    PROXMOX_SECONDARY_IP MOX_REPLICATION_IP; do
     _PROXMOX_CONFIG_DERIVED["$name"]=1
   done
 }
@@ -749,16 +720,11 @@ _config_validate_mirror_serials() {
 }
 
 _config_validate_cluster() {
-  local subnet_ip prefix datacenter_gateway vip_octet
+  local subnet_ip prefix datacenter_gateway gateway_octet
   local mox_start mox_end replication_start replication_end
-  local haproxy_start haproxy_end
-  local prod_start prod_end staging_start staging_end
+  local slot_start slot_end
   _config_alias MAX_MOX_HOSTS PROXMOX_MAX_HOSTS || return
   _config_alias PRIVATE_SUBNET_CIDR PROXMOX_PRIVATE_SUBNET || return
-  _config_alias PRODUCTION_IP_START PROD_IP_RANGE_START || return
-  _config_alias PRODUCTION_IP_END PROD_IP_RANGE_END || return
-  _config_alias STAGING_IP_START STAGING_IP_RANGE_START || return
-  _config_alias STAGING_IP_END STAGING_IP_RANGE_END || return
   _config_alias PRODUCTION_VM_TAG PRODUCTION_TAG || return
   _config_alias STAGING_VM_TAG STAGING_TAG || return
   _config_alias EVICTABLE_VM_TAG EVICTABLE_TAG || return
@@ -766,11 +732,11 @@ _config_validate_cluster() {
   _config_require_from_file cluster "$PROXMOX_CLUSTER_CONFIG" \
     PROXMOX_INTERNAL_DOMAIN MAX_MOX_HOSTS PRIVATE_SUBNET_CIDR \
     PROXMOX_MIGRATION_NETWORK \
-    DATACENTER_PRIVATE_VLAN_GATEWAY GUEST_EGRESS_VIP \
+    DATACENTER_PRIVATE_VLAN_GATEWAY GUEST_GATEWAY_IP GUEST_GATEWAY_MAC \
     MOX_IP_START MOX_IP_END \
     MOX_REPLICATION_IP_START MOX_REPLICATION_IP_END \
-    HAPROXY_IP_START HAPROXY_IP_END \
-    PRODUCTION_IP_START PRODUCTION_IP_END STAGING_IP_START STAGING_IP_END || return
+    VM_SLOT_START MAX_PROD_VMS MAX_STAGING_VMS_PER_PROD \
+    CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_TUNNEL_ID || return
   [[ "$PROXMOX_INTERNAL_DOMAIN" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*[.]internal$ ]] ||
     config_die "PROXMOX_INTERNAL_DOMAIN must be a lowercase private domain ending in .internal" || return
   [[ "$MAX_MOX_HOSTS" =~ ^([1-9]|10)$ ]] ||
@@ -788,7 +754,13 @@ _config_validate_cluster() {
     config_die "PRIVATE_SUBNET_CIDR is not valid IPv4" || return
   datacenter_gateway="$(_config_ipv4_octet "$DATACENTER_PRIVATE_VLAN_GATEWAY" "$prefix")" ||
     config_die "DATACENTER_PRIVATE_VLAN_GATEWAY must belong to ${prefix}.0/24" || return
-  vip_octet="$(_config_ipv4_octet "$GUEST_EGRESS_VIP" "$prefix")" || return
+  [[ "$GUEST_GATEWAY_IP" != */* ]] ||
+    config_die "GUEST_GATEWAY_IP must be a plain address without a prefix length" || return
+  gateway_octet="$(_config_ipv4_octet "$GUEST_GATEWAY_IP" "$prefix")" ||
+    config_die "GUEST_GATEWAY_IP must belong to ${prefix}.0/24" || return
+  # A locally administered unicast MAC: second hex digit 2, 6, A or E.
+  [[ "${GUEST_GATEWAY_MAC,,}" =~ ^[0-9a-f][26ae](:[0-9a-f]{2}){5}$ ]] ||
+    config_die "GUEST_GATEWAY_MAC must be a locally administered unicast MAC such as 02:00:0a:d5:00:0a" || return
   mox_start="$(_config_ipv4_octet "$MOX_IP_START" "$prefix")" ||
     config_die "MOX_IP_START must belong to ${prefix}.0/24" || return
   mox_end="$(_config_ipv4_octet "$MOX_IP_END" "$prefix")" ||
@@ -797,57 +769,49 @@ _config_validate_cluster() {
     config_die "MOX_REPLICATION_IP_START must belong to ${prefix}.0/24" || return
   replication_end="$(_config_ipv4_octet "$MOX_REPLICATION_IP_END" "$prefix")" ||
     config_die "MOX_REPLICATION_IP_END must belong to ${prefix}.0/24" || return
-  haproxy_start="$(_config_ipv4_octet "$HAPROXY_IP_START" "$prefix")" ||
-    config_die "HAPROXY_IP_START must belong to ${prefix}.0/24" || return
-  haproxy_end="$(_config_ipv4_octet "$HAPROXY_IP_END" "$prefix")" ||
-    config_die "HAPROXY_IP_END must belong to ${prefix}.0/24" || return
-  prod_start="$(_config_ipv4_octet "$PRODUCTION_IP_START" "$prefix")" ||
-    config_die "PRODUCTION_IP_START must belong to ${prefix}.0/24" || return
-  prod_end="$(_config_ipv4_octet "$PRODUCTION_IP_END" "$prefix")" ||
-    config_die "PRODUCTION_IP_END must belong to ${prefix}.0/24" || return
-  staging_start="$(_config_ipv4_octet "$STAGING_IP_START" "$prefix")" ||
-    config_die "STAGING_IP_START must belong to ${prefix}.0/24" || return
-  staging_end="$(_config_ipv4_octet "$STAGING_IP_END" "$prefix")" ||
-    config_die "STAGING_IP_END must belong to ${prefix}.0/24" || return
+  slot_start="$(_config_ipv4_octet "$VM_SLOT_START" "$prefix")" ||
+    config_die "VM_SLOT_START must belong to ${prefix}.0/24" || return
+  [[ "$MAX_PROD_VMS" =~ ^([1-9]|10)$ ]] ||
+    config_die "MAX_PROD_VMS must be between 1 and 10" || return
+  [[ "$MAX_STAGING_VMS_PER_PROD" =~ ^[1-9]$ ]] ||
+    config_die "MAX_STAGING_VMS_PER_PROD must be between 1 and 9" || return
+  ((slot_start % 10 == 0)) ||
+    config_die "VM_SLOT_START's last octet must end in 0" || return
+  slot_end=$((slot_start + 10 * MAX_PROD_VMS - 1))
+  ((slot_start >= 10 && slot_end <= 254)) ||
+    config_die "VM slots ${prefix}.${slot_start}-${prefix}.${slot_end} must all be usable host addresses" || return
+  [[ "$CLOUDFLARE_ACCOUNT_ID" =~ ^[0-9a-f]{32}$ ]] ||
+    config_die "CLOUDFLARE_ACCOUNT_ID must be the 32-character lowercase hex AccountTag" || return
+  [[ "$CLOUDFLARE_TUNNEL_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
+    config_die "CLOUDFLARE_TUNNEL_ID must be the tunnel's lowercase UUID" || return
   ((datacenter_gateway >= 1 && datacenter_gateway <= 254)) ||
     config_die "DATACENTER_PRIVATE_VLAN_GATEWAY must be a usable host address" || return
-  ((vip_octet >= 1 && vip_octet <= 254)) ||
-    config_die "GUEST_EGRESS_VIP must be a usable host address" || return
+  ((gateway_octet >= 1 && gateway_octet <= 254)) ||
+    config_die "GUEST_GATEWAY_IP must be a usable host address" || return
   ((mox_start >= 1 && mox_start <= mox_end && mox_end <= 254)) ||
     config_die "MOX_IP_START through MOX_IP_END must be a usable ascending range" || return
   ((replication_start >= 1 && replication_start <= replication_end && replication_end <= 254)) ||
     config_die "MOX_REPLICATION_IP_START through MOX_REPLICATION_IP_END must be a usable ascending range" || return
-  ((haproxy_start >= 1 && haproxy_start <= haproxy_end && haproxy_end <= 254)) ||
-    config_die "HAPROXY_IP_START through HAPROXY_IP_END must be a usable ascending range" || return
-  ((prod_start >= 1 && prod_start <= prod_end && prod_end <= 254)) ||
-    config_die "PRODUCTION_IP_START through PRODUCTION_IP_END must be a usable ascending range" || return
-  ((staging_start >= 1 && staging_start <= staging_end && staging_end <= 254)) ||
-    config_die "STAGING_IP_START through STAGING_IP_END must be a usable ascending range" || return
   ((mox_end - mox_start + 1 >= MAX_MOX_HOSTS)) ||
     config_die "The mox range must contain at least MAX_MOX_HOSTS addresses" || return
   ((replication_end - replication_start + 1 >= MAX_MOX_HOSTS)) ||
     config_die "The mox replication range must contain at least MAX_MOX_HOSTS addresses" || return
-  ((haproxy_end - haproxy_start + 1 >= MAX_MOX_HOSTS)) ||
-    config_die "The HAProxy range must contain at least MAX_MOX_HOSTS addresses" || return
 
   local -a allocation_octets=(
-    "$datacenter_gateway" "$vip_octet"
+    "$datacenter_gateway" "$gateway_octet"
     "$mox_start" "$mox_end" "$replication_start" "$replication_end"
-    "$haproxy_start" "$haproxy_end"
-    "$prod_start" "$prod_end" "$staging_start" "$staging_end"
+    "$slot_start" "$slot_end"
   )
   python3 - "${allocation_octets[@]}" <<'PY' ||
 import sys
 
-gateway, vip, ms, me, rs, re, hs, he, ps, pe, ss, se = map(int, sys.argv[1:])
+gateway, guest_gateway, ms, me, rs, re, ss, se = map(int, sys.argv[1:])
 ranges = {
     "mox": set(range(ms, me + 1)),
     "mox replication": set(range(rs, re + 1)),
-    "HAProxy": set(range(hs, he + 1)),
-    "production": set(range(ps, pe + 1)),
-    "staging": set(range(ss, se + 1)),
+    "VM slot": set(range(ss, se + 1)),
 }
-for address_name, address in (("data-center gateway", gateway), ("guest-egress VIP", vip)):
+for address_name, address in (("data-center gateway", gateway), ("guest gateway", guest_gateway)):
     for range_name, values in ranges.items():
         if address in values:
             raise SystemExit(f"{address_name} overlaps the {range_name} range")
@@ -856,41 +820,48 @@ for index, name in enumerate(names):
     for other in names[index + 1:]:
         if ranges[name] & ranges[other]:
             raise SystemExit(f"{name} and {other} ranges overlap")
-if gateway == vip:
-    raise SystemExit("data-center gateway and guest-egress VIP overlap")
+if gateway == guest_gateway:
+    raise SystemExit("data-center gateway and guest gateway overlap")
 PY
     config_die "Private VLAN address roles must not overlap" || return
 
   python3 - "$PROXMOX_MIGRATION_NETWORK" \
     "$MOX_REPLICATION_IP_START" "$MOX_REPLICATION_IP_END" \
-    "$MOX_IP_START" "$MOX_IP_END" "$GUEST_EGRESS_VIP" <<'PY' ||
+    "$MOX_IP_START" "$MOX_IP_END" "$GUEST_GATEWAY_IP" \
+    "${prefix}.${slot_start}" "${prefix}.${slot_end}" <<'PY' ||
 import ipaddress
 import sys
 
 network = ipaddress.ip_network(sys.argv[1], strict=True)
 start, end = (ipaddress.ip_address(value) for value in sys.argv[2:4])
 normal_start, normal_end = (ipaddress.ip_address(value) for value in sys.argv[4:6])
-vip = ipaddress.ip_interface(sys.argv[6]).ip
+gateway = ipaddress.ip_address(sys.argv[6])
+slot_start, slot_end = (ipaddress.ip_address(value) for value in sys.argv[7:9])
 if start not in network or end not in network:
     raise SystemExit("replication address range is outside PROXMOX_MIGRATION_NETWORK")
-if any(
-    address in network
-    for address in (normal_start, normal_end, vip)
-):
-    raise SystemExit("migration network also matches a normal host or floating VIP address")
+if any(address in network for address in (normal_start, normal_end, gateway)):
+    raise SystemExit("migration network also matches a normal host or the guest gateway address")
+if slot_start <= network.broadcast_address and network.network_address <= slot_end:
+    raise SystemExit("migration network overlaps the VM slots")
 PY
     config_die "Dedicated migration/replication network is invalid" || return
 
   PRIVATE_SUBNET_PREFIX="$prefix"
   MOX_IP_START_OCTET="$mox_start"
-  HAPROXY_IP_START_OCTET="$haproxy_start"
-  export PRIVATE_SUBNET_PREFIX MOX_IP_START_OCTET HAPROXY_IP_START_OCTET
+  VM_SLOT_START_OCTET="$slot_start"
+  VM_SLOT_END_OCTET="$slot_end"
+  VM_SLOT_END="${prefix}.${slot_end}"
+  export PRIVATE_SUBNET_PREFIX MOX_IP_START_OCTET
+  export VM_SLOT_START_OCTET VM_SLOT_END_OCTET VM_SLOT_END
   _PROXMOX_CONFIG_PUBLIC_KEYS+=(
-    PRIVATE_SUBNET_PREFIX MOX_IP_START_OCTET HAPROXY_IP_START_OCTET
+    PRIVATE_SUBNET_PREFIX MOX_IP_START_OCTET
+    VM_SLOT_START_OCTET VM_SLOT_END_OCTET VM_SLOT_END
   )
-  _PROXMOX_CONFIG_DERIVED["PRIVATE_SUBNET_PREFIX"]=1
-  _PROXMOX_CONFIG_DERIVED["MOX_IP_START_OCTET"]=1
-  _PROXMOX_CONFIG_DERIVED["HAPROXY_IP_START_OCTET"]=1
+  local derived
+  for derived in PRIVATE_SUBNET_PREFIX MOX_IP_START_OCTET \
+    VM_SLOT_START_OCTET VM_SLOT_END_OCTET VM_SLOT_END; do
+    _PROXMOX_CONFIG_DERIVED["$derived"]=1
+  done
 
   local name
   for name in PROXMOX_ISO_FILE_SHA256 PROD_GUEST_OS_ISO_SHA256; do
@@ -912,8 +883,7 @@ PY
   for name in ADMIN_1_PUBLIC_SSH_KEY ADMIN_2_PUBLIC_SSH_KEY; do
     [[ -z "${!name+x}" ]] || _config_validate_public_key "$name" || return
   done
-  for name in HAPROXY_LXC_ROOTFS_GB HAPROXY_LXC_MEMORY_MB HAPROXY_LXC_CORES \
-    PROD_VM_CORES PROD_VM_MEMORY_GIB PROD_VM_DISK_GB \
+  for name in PROD_VM_CORES PROD_VM_MEMORY_GIB PROD_VM_DISK_GB \
     STAGING_VM_CORES STAGING_VM_MEMORY_GIB STAGING_VM_DISK_GB \
     MOX_SSH_CONNECT_TIMEOUT; do
     [[ -z "${!name+x}" ]] || _config_validate_positive_integer "$name" "${!name}" || return
@@ -921,6 +891,31 @@ PY
   for name in PROXMOX_PRIVATE_BRIDGE PROD_VM_BRIDGE STAGING_VM_BRIDGE; do
     [[ -z "${!name+x}" ]] || _config_validate_interface "$name" || return
   done
+}
+
+# The optional monthly transfer cap. A reset day above 28 is treated as 28,
+# so the reset happens in every month; the effective day is derived.
+_config_validate_transfer_cap() {
+  local source_file="$1" day=1
+  if [[ -n "${PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB+x}" ]]; then
+    _config_require_from_file mox "$source_file" PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB || return
+    _config_validate_positive_integer PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB \
+      "$PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB" || return
+  fi
+  if [[ -n "${PROXMOX_HOST_TRANSFER_MONTHLY_RESET_DAY+x}" ]]; then
+    _config_require_from_file mox "$source_file" PROXMOX_HOST_TRANSFER_MONTHLY_RESET_DAY || return
+    _config_validate_positive_integer PROXMOX_HOST_TRANSFER_MONTHLY_RESET_DAY \
+      "$PROXMOX_HOST_TRANSFER_MONTHLY_RESET_DAY" || return
+    day=$((10#$PROXMOX_HOST_TRANSFER_MONTHLY_RESET_DAY))
+    if ((day > 28)); then
+      printf 'WARNING: PROXMOX_HOST_TRANSFER_MONTHLY_RESET_DAY=%s is treated as 28\n' "$day" >&2
+      day=28
+    fi
+  fi
+  PROXMOX_HOST_TRANSFER_RESET_DAY_EFFECTIVE="$day"
+  export PROXMOX_HOST_TRANSFER_RESET_DAY_EFFECTIVE
+  _PROXMOX_CONFIG_PUBLIC_KEYS+=(PROXMOX_HOST_TRANSFER_RESET_DAY_EFFECTIVE)
+  _PROXMOX_CONFIG_DERIVED["PROXMOX_HOST_TRANSFER_RESET_DAY_EFFECTIVE"]=1
 }
 
 _config_validate_mox() {
@@ -937,6 +932,9 @@ _config_validate_mox() {
     [[ "${!name}" =~ ^[1-9][0-9]*$ ]] ||
       config_die "${name} must be a positive integer" || return
   done
+  ((MAX_STAGING_VM_COUNT_ON_THIS_HOST <= MAX_STAGING_VMS_PER_PROD)) ||
+    config_die "MAX_STAGING_VM_COUNT_ON_THIS_HOST must be no more than MAX_STAGING_VMS_PER_PROD (${MAX_STAGING_VMS_PER_PROD})" || return
+  _config_validate_transfer_cap "$source_file" || return
   if [[ -n "${IDRAC_IP:-}" ]]; then
     _config_require_from_file mox "$source_file" IDRAC_IP || return
     _config_validate_ipv4 "$IDRAC_IP" ||
@@ -1313,8 +1311,9 @@ config_main() {
     config_info "Derived mox FQDN: ${PROXMOX_FQDN}"
     config_info "Derived mox address: ${PROXMOX_SECONDARY_IP}"
     config_info "Derived migration/replication address: ${MOX_REPLICATION_IP}"
-    config_info "Derived HAProxy address/VMID: ${HAPROXY_LXC_IP} / ${HAPROXY_LXC_VMID}"
+    config_info "Monthly transfer cap: ${PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB:-none} GiB (resets on day ${PROXMOX_HOST_TRANSFER_RESET_DAY_EFFECTIVE})"
   fi
+  config_info "VM slots: ${VM_SLOT_START}-${VM_SLOT_END} (${MAX_PROD_VMS} production, ${MAX_STAGING_VMS_PER_PROD} staging each)"
   config_info "Secret layer loaded: ${CONFIG_SECRETS_LOADED}"
   config_info "Effective non-secret SHA-256: ${CONFIG_EFFECTIVE_SHA256}"
 }

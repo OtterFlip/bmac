@@ -4,7 +4,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Destructively remove one registry-backed production VM and every owned
-# Proxmox/HA/replication/route artifact. The shared source ISO cache is kept.
+# Proxmox/HA/replication artifact, then drop its FQDNs from the Cloudflare
+# Tunnel config. The shared source ISO cache is kept.
 
 set -Eeuo pipefail
 set +x
@@ -18,7 +19,7 @@ bmac_ui_bootstrap "$@"
 CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
 REMOTE_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_ROOT}/lib/cluster_registry.py"
-REMOTE_HAPROXY_SYNC="${REMOTE_ROOT}/lib/sync_haproxy_routes.sh"
+REMOTE_TUNNEL_SYNC="${REMOTE_ROOT}/lib/tunnel_sync.sh"
 
 DRY_RUN=false
 RESOURCE_NAME=""
@@ -42,13 +43,18 @@ info() {
   printf '    %s\n' "$*"
 }
 
+warn() {
+  printf 'WARNING: %s\n' "$*" >&2
+}
+
 usage() {
   cat <<'EOF'
 Usage: remove_prod_vm.sh [--dry-run] prodN
 
 Permanently removes one production VM after exact identity validation:
-routes, HA request and node-affinity rule, replication jobs and target copies,
-QEMU config and owned volumes, orchestration metadata, and registry allocation.
+HA request and node-affinity rule, replication jobs and target copies, QEMU
+config and owned volumes, orchestration metadata, and registry allocation. Its
+FQDNs are then removed from every host's Cloudflare Tunnel config.
 The shared hash-addressed source ISO cache is deliberately retained.
 EOF
 }
@@ -301,7 +307,6 @@ values_out = (
     resource["initial_node"],
     ",".join(placement),
     resource["proxmox"]["volume_id"] or "",
-    "1" if resource["routes_enabled"] else "0",
     orchestration.get("final_network_enabled") is True and "yes" or "no",
     startup,
     orchestration.get("source_iso_sha256", ""),
@@ -314,7 +319,7 @@ for value in values_out:
     sys.stdout.buffer.write(str(value).encode() + b"\0")
 PY
 ) || die "Production destruction preflight failed"
-((${#fields[@]} == 19)) || die "Could not parse destruction preflight"
+((${#fields[@]} == 18)) || die "Could not parse destruction preflight"
 
 RESOURCE_ID="${fields[1]}"
 RESOURCE_STATE="${fields[2]}"
@@ -326,16 +331,15 @@ LIVE_PRESENT="${fields[7]}"
 INITIAL_NODE="${fields[8]}"
 IFS=',' read -r -a PLACEMENT_NODES <<<"${fields[9]}"
 ROOT_VOLUME="${fields[10]}"
-ROUTES_ENABLED="${fields[11]}"
-FINAL_NETWORK="${fields[12]}"
-STARTUP_SHA256="${fields[13]}"
-SOURCE_ISO_SHA256="${fields[14]}"
-INSTALL_MODE="${fields[15]}"
-HA_STATE="${fields[16]}"
-IFS=',' read -r -a HA_RULES <<<"${fields[17]}"
-[[ -n "${fields[17]}" ]] || HA_RULES=()
-IFS=',' read -r -a REPLICATION_JOBS <<<"${fields[18]}"
-[[ -n "${fields[18]}" ]] || REPLICATION_JOBS=()
+FINAL_NETWORK="${fields[11]}"
+STARTUP_SHA256="${fields[12]}"
+SOURCE_ISO_SHA256="${fields[13]}"
+INSTALL_MODE="${fields[14]}"
+HA_STATE="${fields[15]}"
+IFS=',' read -r -a HA_RULES <<<"${fields[16]}"
+[[ -n "${fields[16]}" ]] || HA_RULES=()
+IFS=',' read -r -a REPLICATION_JOBS <<<"${fields[17]}"
+[[ -n "${fields[17]}" ]] || REPLICATION_JOBS=()
 
 validate_live_vm_config() {
   config_text="$(node_exec "$OWNER_NODE" qm config "$VMID")" ||
@@ -430,14 +434,13 @@ info "Root volume: $ROOT_VOLUME"
 info "EFI volume: $EFI_VOLUME"
 info "HA state/rules: ${HA_STATE:-none} / ${HA_RULES[*]:-none}"
 info "Replication jobs: ${REPLICATION_JOBS[*]:-none}"
-info "Routes enabled: $ROUTES_ENABLED"
 info "Shared source cache: $CACHE_ISO ($cache_state; retained)"
 bmac_ui_plan_begin "Destroy $RESOURCE_NAME" "Validated against the live cluster; nothing has changed yet."
 bmac_ui_plan_item remove "$RESOURCE_NAME" "VMID $VMID, state $RESOURCE_STATE, owner $OWNER_NODE, placement ${PLACEMENT_NODES[*]}"
 bmac_ui_plan_item remove "disks" "Root ${ROOT_VOLUME:-none}, EFI ${EFI_VOLUME:-none}, and every replica"
 bmac_ui_plan_item remove "HA" "State ${HA_STATE:-none}; rules ${HA_RULES[*]:-none}"
 bmac_ui_plan_item remove "replication" "${REPLICATION_JOBS[*]:-none}"
-bmac_ui_plan_item remove "routes" "Enabled: $ROUTES_ENABLED"
+bmac_ui_plan_item remove "tunnel FQDNs" "Its FQDNs and its staging slots' FQDNs are removed from the Cloudflare Tunnel config"
 bmac_ui_plan_item remove "registry" "Resource $RESOURCE_ID metadata is archived and the allocation released"
 bmac_ui_plan_item keep "source ISO cache" "$CACHE_ISO ($cache_state)"
 BMAC_UI_DRY_RUN="$DRY_RUN" bmac_ui_plan_end
@@ -450,11 +453,11 @@ if [[ "$DRY_RUN" == true ]]; then
   exit 0
 fi
 
-printf '\nTHIS PERMANENTLY DESTROYS %s, ALL OWNED VM DISKS/REPLICAS, HA/RULES, ROUTES, AND REGISTRY METADATA.\n' \
+printf '\nTHIS PERMANENTLY DESTROYS %s, ALL OWNED VM DISKS/REPLICAS, HA/RULES, AND REGISTRY METADATA.\n' \
   "$RESOURCE_NAME"
 if bmac_ui_is_json; then
   bmac_ui_confirm --id destroy --severity critical --title "Destroy $RESOURCE_NAME?" \
-    --message "This permanently destroys $RESOURCE_NAME, all owned VM disks and replicas, HA resources and rules, routes, and registry metadata." \
+    --message "This permanently destroys $RESOURCE_NAME, all owned VM disks and replicas, HA resources and rules, and registry metadata, and removes its FQDNs from the tunnel." \
     --confirm-label "Destroy $RESOURCE_NAME" --text "DESTROY ${RESOURCE_NAME}" &&
     confirmation="DESTROY ${RESOURCE_NAME}" || confirmation=""
 else
@@ -491,28 +494,21 @@ registry_update() {
   )"
 }
 
-log "Disabling ingress routes and entering teardown state"
+log "Entering teardown state"
 case "$RESOURCE_STATE" in
   active)
-    registry_update --state stopping --routes-disabled
+    registry_update --state stopping
     RESOURCE_STATE=stopping
     ;;
   ready | replicating | provisioning)
-    registry_update --state stopped --routes-disabled
+    registry_update --state stopped
     RESOURCE_STATE=stopped
     ;;
-  stopping | stopped | reserved | failed)
-    registry_update --routes-disabled
-    ;;
+  stopping | stopped | reserved | failed) ;;
   *)
     die "Unsupported production destruction state: $RESOURCE_STATE"
     ;;
 esac
-ROUTES_ENABLED=0
-info "Waiting up to 240 seconds for any current HAProxy route sync to finish, then converging route removal."
-mox_ssh "$COORDINATOR" "$REMOTE_HAPROXY_SYNC" \
-  --lock-timeout 240 </dev/null ||
-  die "Could not converge HAProxy after route removal"
 
 if [[ -n "$HA_STATE" ]]; then
   log "Stopping and removing the HA resource"
@@ -665,6 +661,11 @@ LEASE_ACQUIRED=false
 registry_cmd release "$RESOURCE_NAME" >/dev/null ||
   die "Could not archive and release the registry resource"
 
+log "Removing $RESOURCE_NAME's FQDNs from every host's Cloudflare Tunnel config"
+if ! mox_ssh "$COORDINATOR" "$REMOTE_TUNNEL_SYNC" --all </dev/null; then
+  warn "Not every host's tunnel config was updated; each host's tunnel sync timer will catch up within a few minutes"
+fi
+
 if [[ "$CACHE_WAS_VALID" == true ]]; then
   # shellcheck disable=SC2016 # This script is intentionally evaluated remotely.
   node_exec "$INITIAL_NODE" bash -c '
@@ -680,7 +681,7 @@ fi
 
 log "Production VM destruction complete"
 info "Destroyed resource: $RESOURCE_NAME (former VMID $VMID)"
-info "Removed routes, HA resource/rules, replication, owner and replica volumes, and registry metadata."
+info "Removed HA resource/rules, replication, owner and replica volumes, registry metadata, and its tunnel FQDNs."
 info "Retained shared source cache: $CACHE_ISO"
 bmac_ui_step_done
 bmac_ui_result destroyed "$RESOURCE_NAME" former_vmid "$VMID"

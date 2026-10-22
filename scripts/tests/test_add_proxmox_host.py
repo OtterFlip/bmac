@@ -12,6 +12,7 @@ from pathlib import Path
 
 HOSTS_DIR = Path(__file__).resolve().parent.parent / "user_callable" / "hosts"
 SCRIPT = HOSTS_DIR / "add_proxmox_host.sh"
+GUEST_NETWORK = HOSTS_DIR.parent.parent / "host_runtime" / "guest_network.sh"
 INVENTORY_SCRIPT = HOSTS_DIR / "inventory_disks.sh"
 QDEVICE_LIB = HOSTS_DIR.parents[1] / "lib" / "qdevice.sh"
 MOX1_CONFIG = HOSTS_DIR.parents[2] / "config" / "mox1.conf"
@@ -138,9 +139,10 @@ Flags:            Quorate Qdevice
             self.assertIn("-o DPkg::Lock::Timeout=60", line, f"line {number + 1}")
             if " update" in line:
                 self.assertEqual(lines[number - 1].strip(), "apt_wait_for_locks", f"line {number + 1}")
-        self.assertEqual(checked, 12)
-        self.assertEqual(source.count("remote_apt_script "), 5)
-        self.assertEqual(source.count("declare -f apt_lock_holder apt_wait_for_locks"), 2)
+        self.assertEqual(checked, 8)
+        self.assertEqual(source.count("remote_apt_script "), 4)
+        # The fan-out ships the apt helpers to every other mox host.
+        self.assertEqual(source.count("declare -f apt_lock_holder apt_wait_for_locks"), 1)
 
     def test_current_prepared_iso_defers_source_iso_requirement(self) -> None:
         self.run_bash(
@@ -626,13 +628,9 @@ Flags:            Quorate Qdevice
             'cryptsetup open --test-passphrase --key-file="\\$key_file"',
             source,
         )
-        self.assertIn("ip protocol 112 ip saddr { $peer_set }", source)
-        self.assertIn("app-ha-haproxy-route-sync.timer", source)
-        self.assertIn(
-            "ExecStartPre=$install_root/lib/sync_haproxy_routes.sh "
-            "--assert-local-current",
-            source,
-        )
+        self.assertIn("app-ha-tunnel-sync.timer", source)
+        self.assertIn("ExecStart=$install_root/lib/tunnel_sync.sh --local", source)
+        self.assertIn("ConditionPathExists=/etc/cloudflared/bmac-tunnel.json", source)
         self.assertIn('UserKnownHostsFile=${pin}', source)
         self.assertIn('HostKeyAlias=${peer_node}', source)
         self.assertIn("GlobalKnownHostsFile=none", source)
@@ -818,35 +816,6 @@ Flags:            Quorate Qdevice
         self.assertIn("Managed mox identity markers in /etc/hosts", source)
         self.assertIn("admin-ssh-enabled", source)
         self.assertIn("setup-key-retired", source)
-
-    def test_vrrp_health_and_final_verification_require_one_vip_owner(self) -> None:
-        source = SCRIPT.read_text(encoding="utf-8")
-        self.assertEqual(
-            source.count("nft -nn list chain ip app_ha_guest_egress"),
-            2,
-        )
-        self.assertIn("Could not prove exactly one stable, reachable online mox", source)
-        self.assertIn("vip_owner_count == 1", source)
-
-    def test_haproxy_is_reconciled_before_strict_ingress_start(self) -> None:
-        source = SCRIPT.read_text(encoding="utf-8")
-        start = source.index("systemctl enable app-ha-haproxy-ingress.service")
-        section = source[start : source.index("write_state haproxy-lxc-configured", start)]
-        self.assertLess(
-            section.index("--local-reconcile --lock-timeout 240"),
-            section.index("systemctl restart app-ha-haproxy-ingress.service"),
-        )
-        self.assertIn("export LANG=C.UTF-8", source)
-        self.assertIn("LC_ALL=C.UTF-8", source)
-        self.assertEqual(source.count("--lock-timeout 240"), 2)
-        self.assertNotIn("enable --now app-ha-haproxy-route-sync.timer", source)
-        sync_section = source[
-            source.index("sync_haproxy_routes()") : source.index("final_verify()")
-        ]
-        self.assertLess(
-            sync_section.index("--lock-timeout 240"),
-            sync_section.index("systemctl start app-ha-haproxy-route-sync.timer"),
-        )
 
     def test_manual_mapper_helper_reports_all_outcomes(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
@@ -1051,50 +1020,58 @@ Flags:            Quorate Qdevice
         self.assertNotIn(r'touch "\$marker"', source)
 
     def test_hyphenated_bridge_is_not_sent_to_pve_iface_validator(self) -> None:
-        source = SCRIPT.read_text(encoding="utf-8")
-        self.assertNotIn('--enable 1 --iface "$bridge"', source)
-        self.assertIn(
-            'iifname != "$bridge" ip saddr '
-            "$production_start-$staging_end counter drop",
-            source,
-        )
-        self.assertIn('(.iface // "") == "" and .source == $source', source)
+        # Proxmox's pve-iface validator rejects hyphens, so the firewall rules
+        # carry only address constraints; the nft chains bind interfaces.
+        source = GUEST_NETWORK.read_text(encoding="utf-8")
+        self.assertNotIn("--iface", source)
+        self.assertIn('--pos 0 --type forward --action ACCEPT --enable 1 --source "$slots"', source)
+        self.assertIn('--pos 0 --type forward --action ACCEPT --enable 1 --source "$moxes"', source)
 
-    def test_keepalived_does_not_track_its_own_vrrp_interface_twice(self) -> None:
+    def test_guest_network_and_tunnel_steps_follow_the_runtime_install(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("    interface $bridge", source)
-        self.assertIn(
-            "    track_interface {\n"
-            "        $public_if\n"
-            "    }",
-            source,
-        )
-        self.assertNotIn(
-            "    track_interface {\n"
-            "        $bridge\n",
-            source,
-        )
+        main = source[source.index("\nmain() {") :]
+        order = [
+            "configure_private_network",
+            "reconcile_cluster_control_plane",
+            "install_shared_orchestration_tools",
+            "configure_guest_network",
+            "install_guest_role_hook",
+            "configure_tunnel",
+            "final_verify",
+        ]
+        positions = [main.index(f"  {step}\n") for step in order]
+        self.assertEqual(positions, sorted(positions))
+        for retired in ("haproxy", "keepalived", "vrrp"):
+            self.assertNotIn(retired, source.lower())
+        self.assertNotIn("GUEST_EGRESS_VIP", source)
+
+    def test_tunnel_secret_never_appears_in_a_command_line(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        section = source[source.index("configure_tunnel() {") : source.index("final_verify() {")]
+        # The secret travels as a mode-0600 file over scp and is shredded on
+        # both ends; only the account and tunnel IDs are arguments.
+        self.assertIn('chmod 0600 "$secret_file"', section)
+        self.assertIn('copy_to_host "$secret_file" /root/.app-ha-tunnel-secret', section)
+        self.assertIn('shred -u "$secret_file"', section)
+        self.assertIn("shred -u /root/.app-ha-tunnel-secret", section)
+        self.assertIn('remote_apt_script "$CLOUDFLARE_ACCOUNT_ID" "$CLOUDFLARE_TUNNEL_ID"', section)
+        self.assertEqual(section.count("CLOUDFLARE_TUNNEL_SECRET"), 1)
+
+    def test_final_verification_requires_http2_tunnel_connections(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        section = source[source.index("final_verify() {") : source.index("\nmain() {")]
+        self.assertIn('"$lib/guest_network.sh" verify', section)
+        self.assertIn('"$lib/tunnel_sync.sh" --check', section)
+        self.assertIn("exit !(http2 && !quic)", section)
 
     def test_storage_content_uses_supported_proxmox_api(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertNotIn("pvesm config", source)
+        # install_runtime is defined once and shipped to every other host.
         self.assertEqual(
             source.count("pvesh get /storage/local --output-format json"),
-            2,
+            1,
         )
-
-    def test_haproxy_lxc_is_pinned_to_amd64_with_guarded_partial_recovery(self) -> None:
-        source = SCRIPT.read_text(encoding="utf-8")
-        self.assertNotIn(
-            "awk '$2 ~ /^debian-13-standard_/ {print $2}'",
-            source,
-        )
-        self.assertIn("_amd64[.]tar[.]zst$", source)
-        self.assertIn("--arch amd64 --tags app-ha-fixed-haproxy", source)
-        self.assertIn('grep -Fxq "arch: amd64" <<<"$config"', source)
-        self.assertIn('[[ "$existing_arch" == arm64 ]]', source)
-        self.assertIn('[[ "$(pct status "$vmid")" == "status: stopped" ]]', source)
-        self.assertIn('pct destroy "$vmid" --purge 1', source)
 
     def test_generated_host_names_are_application_agnostic(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
@@ -1106,8 +1083,8 @@ Flags:            Quorate Qdevice
             "/etc/crypttab.app-ha-before-shared-unlock",
             'if ($3 != "app-ha-rpool"',
             "table inet app_ha_host_guard",
-            "table ip app_ha_guest_egress",
-            "vrrp_script app_ha_egress_ready",
+            "/usr/local/lib/app-ha-proxmox/lib/guest_network.sh configure",
+            "app-ha-cloudflared.service",
         ):
             self.assertIn(expected, source)
 

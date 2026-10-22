@@ -37,54 +37,11 @@ PMXCFS_ROOT = Path("/etc/pve")
 PMXCFS_LOCK_DIR = PMXCFS_ROOT / "priv" / "lock"
 DEFAULT_STATE_DIR = PMXCFS_ROOT / "priv" / "app-ha"
 MAX_JSON_BYTES = 1024 * 1024
-MAX_ROUTES = 4096
 MAX_HISTORY_RECORDS = 256
 MAX_COMPLETED_CLEANUP_RECORDS = 512
 MAX_CLEANUP_RECORDS = 4096
-MAX_INGRESS_GENERATIONS = 8
-INGRESS_NODE_STATES = {"pending", "staged", "applied", "reject-only"}
-INGRESS_GENERATION_KEYS = {
-    "schema_version",
-    "record_type",
-    "generation",
-    "bundle_sha256",
-    "route_count",
-    "created_at",
-}
-INGRESS_DESIRED_KEYS = {
-    "schema_version",
-    "record_type",
-    "generation",
-    "bundle_sha256",
-    "route_count",
-    "nodes",
-    "created_at",
-    "updated_at",
-    "revision",
-}
-INGRESS_NODE_STATUS_KEYS = {
-    "schema_version",
-    "record_type",
-    "node",
-    "desired_generation",
-    "applied_generation",
-    "state",
-    "created_at",
-    "updated_at",
-    "revision",
-}
-INGRESS_TRANSITION_KEYS = {
-    "schema_version",
-    "record_type",
-    "generation",
-    "allowances",
-    "created_at",
-    "updated_at",
-    "revision",
-}
-INGRESS_ALLOWANCE_KEYS = {"node", "generation", "expires_at"}
-MIN_INGRESS_COMPATIBLE_WINDOW_SECONDS = 60
-MAX_INGRESS_COMPATIBLE_WINDOW_SECONDS = 3600
+MAX_PRODUCTION_SLOTS = 10
+MAX_STAGING_SLOTS_PER_PRODUCTION = 9
 INSTALL_PHASES = {
     "unknown",
     "unstarted",
@@ -192,13 +149,11 @@ STATE_TRANSITIONS: dict[str, dict[str, set[str]]] = {
 }
 
 RELEASE_STATES = {"reserved", "stopped", "failed", "cleanup_pending"}
-ROUTABLE_STATES = {"stopped", "ready", "active"}
 CLEANUP_ACTIONS = {
     "delete-snapshot",
     "destroy-vm",
     "destroy-volume",
     "remove-replication",
-    "remove-route",
 }
 
 RESOURCE_KEYS = {
@@ -220,7 +175,6 @@ RESOURCE_KEYS = {
     "placement",
     "initial_node",
     "owner_node",
-    "routes_enabled",
     "spec",
     "proxmox",
     "created_at",
@@ -373,12 +327,6 @@ def normalize_allocation_id(value: str | None) -> str | None:
 def validate_vmid(vmid: int, policy: dict[str, Any]) -> None:
     if vmid < 100 or vmid > 999_999_999:
         raise RegistryError("VMID must be between 100 and 999999999")
-    reserved = policy["network"]["haproxy_vmid_range"]
-    if reserved["start"] <= vmid <= reserved["end"]:
-        raise RegistryError(
-            f"VMID {vmid} is reserved for fixed HAProxy LXCs "
-            f"({reserved['start']}-{reserved['end']})"
-        )
 
 
 def flatten_nodes(values: Sequence[str] | None) -> list[str]:
@@ -453,9 +401,6 @@ def validate_cleanup_target(action: str, value: str) -> str:
             raise RegistryError(
                 "remove-replication cleanup target must be VMID-JOB"
             )
-    elif action == "remove-route":
-        if not RESOURCE_RE.fullmatch(target):
-            raise RegistryError("remove-route cleanup target must be a resource name")
     else:
         raise RegistryError(f"unsupported cleanup action: {action}")
     return target
@@ -471,29 +416,6 @@ def validate_sha256(value: Any, description: str) -> str:
     if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
         raise RegistryError(f"{description} must be a lowercase SHA-256")
     return value
-
-
-def validate_ingress_generation_record(value: Any) -> None:
-    if not isinstance(value, dict):
-        raise RegistryError("ingress generation record must be an object")
-    require_exact_keys(
-        value, INGRESS_GENERATION_KEYS, "ingress generation record"
-    )
-    if value["schema_version"] != SCHEMA_VERSION:
-        raise RegistryError("ingress generation schema version is unsupported")
-    if value["record_type"] != "haproxy-generation":
-        raise RegistryError("ingress generation has the wrong record_type")
-    validate_sha256(value["generation"], "ingress generation")
-    validate_sha256(value["bundle_sha256"], "ingress bundle digest")
-    if (
-        isinstance(value["route_count"], bool)
-        or not isinstance(value["route_count"], int)
-        or not 0 <= value["route_count"] <= MAX_ROUTES
-    ):
-        raise RegistryError(
-            f"ingress route_count must be between 0 and {MAX_ROUTES}"
-        )
-    parse_timestamp(value["created_at"])
 
 
 def _validate_revision(value: Any, context: str) -> None:
@@ -529,119 +451,6 @@ def validate_cluster_control_record(value: Any, policy: dict[str, Any]) -> None:
     _validate_revision(value["revision"], "cluster control")
     parse_timestamp(value["created_at"])
     parse_timestamp(value["updated_at"])
-
-
-def validate_ingress_desired_record(
-    value: Any, policy: dict[str, Any]
-) -> None:
-    if not isinstance(value, dict):
-        raise RegistryError("ingress desired record must be an object")
-    require_exact_keys(value, INGRESS_DESIRED_KEYS, "ingress desired record")
-    if value["schema_version"] != SCHEMA_VERSION:
-        raise RegistryError("ingress desired schema version is unsupported")
-    if value["record_type"] != "haproxy-desired":
-        raise RegistryError("ingress desired record has the wrong record_type")
-    validate_sha256(value["generation"], "desired ingress generation")
-    validate_sha256(value["bundle_sha256"], "desired ingress bundle digest")
-    if (
-        isinstance(value["route_count"], bool)
-        or not isinstance(value["route_count"], int)
-        or not 0 <= value["route_count"] <= MAX_ROUTES
-    ):
-        raise RegistryError(
-            f"desired ingress route_count must be between 0 and {MAX_ROUTES}"
-        )
-    expected_nodes = [
-        f"mox{index}"
-        for index in range(1, policy["limits"]["max_hosts"] + 1)
-    ]
-    if value["nodes"] != expected_nodes:
-        raise RegistryError(
-            "desired ingress nodes must contain every configured mox in order"
-        )
-    if not isinstance(value["revision"], int) or value["revision"] < 1:
-        raise RegistryError("ingress desired revision must be a positive integer")
-    created = parse_timestamp(value["created_at"])
-    updated = parse_timestamp(value["updated_at"])
-    if updated < created:
-        raise RegistryError("ingress desired updated_at predates created_at")
-
-
-def validate_ingress_node_status(
-    value: Any, policy: dict[str, Any]
-) -> None:
-    if not isinstance(value, dict):
-        raise RegistryError("ingress node status must be an object")
-    require_exact_keys(
-        value, INGRESS_NODE_STATUS_KEYS, "ingress node status"
-    )
-    if value["schema_version"] != SCHEMA_VERSION:
-        raise RegistryError("ingress node status schema version is unsupported")
-    if value["record_type"] != "haproxy-node-status":
-        raise RegistryError("ingress node status has the wrong record_type")
-    validate_nodes([value["node"]], policy, exactly_one=True)
-    validate_sha256(
-        value["desired_generation"], "node desired ingress generation"
-    )
-    if value["applied_generation"] is not None:
-        validate_sha256(
-            value["applied_generation"], "node applied ingress generation"
-        )
-    if (
-        not isinstance(value["state"], str)
-        or value["state"] not in INGRESS_NODE_STATES
-    ):
-        raise RegistryError("ingress node status state is invalid")
-    if value["state"] == "applied" and (
-        value["applied_generation"] != value["desired_generation"]
-    ):
-        raise RegistryError(
-            "applied ingress node status must match its desired generation"
-        )
-    if not isinstance(value["revision"], int) or value["revision"] < 1:
-        raise RegistryError("ingress node status revision must be positive")
-    created = parse_timestamp(value["created_at"])
-    updated = parse_timestamp(value["updated_at"])
-    if updated < created:
-        raise RegistryError("ingress node status updated_at predates created_at")
-
-
-def validate_ingress_transition_record(
-    value: Any, policy: dict[str, Any]
-) -> None:
-    if not isinstance(value, dict):
-        raise RegistryError("ingress transition record must be an object")
-    require_exact_keys(
-        value, INGRESS_TRANSITION_KEYS, "ingress transition record"
-    )
-    if value["schema_version"] != SCHEMA_VERSION:
-        raise RegistryError("ingress transition schema version is unsupported")
-    if value["record_type"] != "haproxy-transition":
-        raise RegistryError("ingress transition has the wrong record_type")
-    validate_sha256(value["generation"], "ingress transition generation")
-    allowances = value["allowances"]
-    if not isinstance(allowances, list) or not allowances:
-        raise RegistryError("ingress transition allowances must be a non-empty list")
-    nodes: list[str] = []
-    for allowance in allowances:
-        if not isinstance(allowance, dict):
-            raise RegistryError("ingress transition allowance must be an object")
-        require_exact_keys(
-            allowance, INGRESS_ALLOWANCE_KEYS, "ingress transition allowance"
-        )
-        nodes.extend(validate_nodes([allowance["node"]], policy, exactly_one=True))
-        validate_sha256(allowance["generation"], "allowed previous generation")
-        if allowance["generation"] == value["generation"]:
-            raise RegistryError("an allowance must name a previous generation")
-        parse_timestamp(allowance["expires_at"])
-    if nodes != sorted(set(nodes), key=lambda node: int(node[3:])):
-        raise RegistryError("ingress transition allowances must be unique and ordered")
-    if not isinstance(value["revision"], int) or value["revision"] < 1:
-        raise RegistryError("ingress transition revision must be positive")
-    created = parse_timestamp(value["created_at"])
-    updated = parse_timestamp(value["updated_at"])
-    if updated < created:
-        raise RegistryError("ingress transition updated_at predates created_at")
 
 
 def validate_orchestration_record(value: Any) -> None:
@@ -995,11 +804,6 @@ class Registry:
         self.cleanup_dir = root / "deferred-cleanup"
         self.history_dir = root / "history"
         self.orchestration_dir = root / "orchestration"
-        self.ingress_dir = root / "ingress"
-        self.ingress_generations_dir = self.ingress_dir / "generations"
-        self.ingress_nodes_dir = self.ingress_dir / "nodes"
-        self.ingress_desired_path = self.ingress_dir / "desired.json"
-        self.ingress_transition_path = self.ingress_dir / "transition.json"
         self.hosts_dir = root / "hosts"
         self.control_path = root / "cluster-control.json"
         self.lock_timeout = lock_timeout
@@ -1012,9 +816,6 @@ class Registry:
         ensure_directory(self.cleanup_dir)
         ensure_directory(self.history_dir)
         ensure_directory(self.orchestration_dir)
-        ensure_directory(self.ingress_dir)
-        ensure_directory(self.ingress_generations_dir)
-        ensure_directory(self.ingress_nodes_dir)
         ensure_directory(self.hosts_dir)
 
     def lock(self) -> AllocatorLock:
@@ -1045,15 +846,6 @@ class Registry:
             raise RegistryError(f"invalid resource name: {name!r}")
         return self.orchestration_dir / f"{name}.json"
 
-    def ingress_generation_path(self, generation: str) -> Path:
-        validate_sha256(generation, "ingress generation")
-        return self.ingress_generations_dir / f"{generation}.json"
-
-    def ingress_node_path(self, node: str) -> Path:
-        if not MOX_RE.fullmatch(node):
-            raise RegistryError(f"invalid ingress node name: {node!r}")
-        return self.ingress_nodes_dir / f"{node}.json"
-
     def host_slot_path(self, node: str) -> Path:
         if not MOX_RE.fullmatch(node):
             raise RegistryError(f"invalid host slot name: {node!r}")
@@ -1081,88 +873,6 @@ class Registry:
         record = read_json_file(self.control_path, "cluster control record")
         validate_cluster_control_record(record, policy)
         return record
-
-    def ingress_desired(self) -> dict[str, Any] | None:
-        if not self.ingress_desired_path.exists():
-            return None
-        policy = self.policy()
-        desired = read_json_file(
-            self.ingress_desired_path, "desired ingress generation"
-        )
-        validate_ingress_desired_record(desired, policy)
-        generation_path = self.ingress_generation_path(desired["generation"])
-        generation = read_json_file(
-            generation_path, "desired ingress generation metadata"
-        )
-        validate_ingress_generation_record(generation)
-        if any(
-            generation[field] != desired[field]
-            for field in ("generation", "bundle_sha256", "route_count")
-        ):
-            raise RegistryError(
-                "desired ingress pointer differs from generation metadata"
-            )
-        return desired
-
-    def ingress_transition(self) -> dict[str, Any] | None:
-        if not self.ingress_transition_path.exists():
-            return None
-        policy = self.policy()
-        transition = read_json_file(
-            self.ingress_transition_path, "ingress transition"
-        )
-        validate_ingress_transition_record(transition, policy)
-        return transition
-
-    def ingress_node_statuses(self) -> list[dict[str, Any]]:
-        policy = self.policy()
-        records: list[dict[str, Any]] = []
-        if not self.ingress_nodes_dir.exists():
-            return records
-        for path in sorted(self.ingress_nodes_dir.glob("*.json")):
-            record = read_json_file(path, "ingress node status")
-            validate_ingress_node_status(record, policy)
-            if path.name != f"{record['node']}.json":
-                raise RegistryError(
-                    f"ingress node status filename does not match record: {path}"
-                )
-            records.append(record)
-        return sorted(records, key=lambda record: int(record["node"][3:]))
-
-    def prune_ingress_generations(
-        self,
-        current_generation: str,
-        keep: int = MAX_INGRESS_GENERATIONS,
-    ) -> None:
-        """Bound immutable ingress-generation metadata while retaining desired."""
-
-        if keep < 1:
-            raise RegistryError("ingress generation retention must be positive")
-        validate_sha256(current_generation, "current ingress generation")
-        records: list[tuple[str, str, Path]] = []
-        for path in sorted(self.ingress_generations_dir.glob("*.json")):
-            record = read_json_file(path, "ingress generation metadata")
-            validate_ingress_generation_record(record)
-            if path.name != f"{record['generation']}.json":
-                raise RegistryError(
-                    f"ingress generation filename does not match record: {path}"
-                )
-            records.append((record["created_at"], record["generation"], path))
-        retained = {
-            current_generation,
-            *list(
-                generation
-                for _created, generation, _path in sorted(records, reverse=True)
-                if generation != current_generation
-            )[: keep - 1],
-        }
-        removed = False
-        for _created, generation, path in records:
-            if generation not in retained:
-                path.unlink()
-                removed = True
-        if removed:
-            _fsync_directory(self.ingress_generations_dir)
 
     def resources(self) -> list[dict[str, Any]]:
         policy = self.policy()
@@ -1234,10 +944,63 @@ class Registry:
         return record
 
 
+def slot_octet(policy: dict[str, Any], production: int, stage: int = 0) -> int:
+    """Return the host octet of prodN (stage 0) or stageKprodN's fixed slot."""
+
+    slots = policy["network"]["vm_slots"]
+    if not 1 <= production <= slots["max_production"]:
+        raise RegistryError(
+            f"prod{production} is outside the {slots['max_production']} production slots"
+        )
+    if not 0 <= stage <= slots["max_staging_per_production"]:
+        raise RegistryError(
+            f"stage{stage}prod{production} is outside the "
+            f"{slots['max_staging_per_production']} staging slots per production guest"
+        )
+    return slots["start"] + 10 * (production - 1) + stage
+
+
+def slot_address(policy: dict[str, Any], production: int, stage: int = 0) -> str:
+    network = ipaddress.ip_network(policy["network"]["cidr"])
+    return str(network.network_address + slot_octet(policy, production, stage))
+
+
+def _validate_vm_slots(
+    slots: Any, mox_range: dict[str, int], gateway_octet: int
+) -> None:
+    if not isinstance(slots, dict) or set(slots) != {
+        "start",
+        "max_production",
+        "max_staging_per_production",
+    }:
+        raise RegistryError("policy vm_slots must have start and both maxima")
+    for key in slots:
+        if isinstance(slots[key], bool) or not isinstance(slots[key], int):
+            raise RegistryError(f"policy vm_slots {key} must be an integer")
+    if not 1 <= slots["max_production"] <= MAX_PRODUCTION_SLOTS:
+        raise RegistryError(f"max production slots must be 1-{MAX_PRODUCTION_SLOTS}")
+    if not 1 <= slots["max_staging_per_production"] <= MAX_STAGING_SLOTS_PER_PRODUCTION:
+        raise RegistryError(
+            f"max staging slots per production guest must be 1-{MAX_STAGING_SLOTS_PER_PRODUCTION}"
+        )
+    first = slots["start"]
+    last = first + 10 * slots["max_production"] - 1
+    if first % 10 != 0 or not 10 <= first or last > 254:
+        raise RegistryError("VM slot start must end in 0 and every slot must be a usable host address")
+    slot_octets = set(range(first, last + 1))
+    if slot_octets & set(range(mox_range["start"], mox_range["end"] + 1)):
+        raise RegistryError("VM slots overlap the mox host range")
+    if gateway_octet in slot_octets:
+        raise RegistryError("guest gateway overlaps the VM slots")
+
+
 def build_policy(args: argparse.Namespace) -> dict[str, Any]:
     try:
         network = ipaddress.ip_network(args.network, strict=True)
-        gateway = ipaddress.ip_interface(args.guest_gateway)
+        gateway_value = args.guest_gateway
+        if "/" not in gateway_value:
+            gateway_value = f"{gateway_value}/{network.prefixlen}"
+        gateway = ipaddress.ip_interface(gateway_value)
     except ValueError as exc:
         raise RegistryError(f"invalid policy network: {exc}") from exc
     if not isinstance(network, ipaddress.IPv4Network) or network.prefixlen != 24:
@@ -1261,38 +1024,25 @@ def build_policy(args: argparse.Namespace) -> dict[str, Any]:
             raise RegistryError(f"{label} must be a usable host address")
         return octet
 
-    ranges: dict[str, dict[str, int]] = {}
-    for name, start_value, end_value in (
-        ("mox_host_range", args.mox_ip_start, args.mox_ip_end),
-        ("haproxy_range", args.haproxy_ip_start, args.haproxy_ip_end),
-        ("production_range", args.production_ip_start, args.production_ip_end),
-        ("staging_range", args.staging_ip_start, args.staging_ip_end),
-    ):
-        start = address_octet(start_value, f"{name} start")
-        end = address_octet(end_value, f"{name} end")
-        if start > end:
-            raise RegistryError(f"{name} must be an ascending range")
-        ranges[name] = {"start": start, "end": end}
-
-    range_names = list(ranges)
-    for index, name in enumerate(range_names):
-        current = set(range(ranges[name]["start"], ranges[name]["end"] + 1))
-        for other in range_names[index + 1 :]:
-            candidate = set(range(ranges[other]["start"], ranges[other]["end"] + 1))
-            if current & candidate:
-                raise RegistryError(f"{name} and {other} overlap")
+    mox_range = {
+        "start": address_octet(args.mox_ip_start, "mox host range start"),
+        "end": address_octet(args.mox_ip_end, "mox host range end"),
+    }
+    if mox_range["start"] > mox_range["end"]:
+        raise RegistryError("mox host range must be an ascending range")
     gateway_octet = int(gateway.ip) - int(network.network_address)
     if not 1 <= gateway_octet <= 254:
         raise RegistryError("guest gateway must be a usable host address")
-    if any(
-        value["start"] <= gateway_octet <= value["end"]
-        for value in ranges.values()
-    ):
-        raise RegistryError("guest gateway overlaps an allocation range")
-    if ranges["mox_host_range"]["end"] - ranges["mox_host_range"]["start"] + 1 < args.max_hosts:
+    if mox_range["start"] <= gateway_octet <= mox_range["end"]:
+        raise RegistryError("guest gateway overlaps the mox host range")
+    if mox_range["end"] - mox_range["start"] + 1 < args.max_hosts:
         raise RegistryError("mox host range is smaller than max hosts")
-    if ranges["haproxy_range"]["end"] - ranges["haproxy_range"]["start"] + 1 < args.max_hosts:
-        raise RegistryError("HAProxy range is smaller than max hosts")
+    vm_slots = {
+        "start": address_octet(args.vm_slot_start, "VM slot start"),
+        "max_production": args.max_production,
+        "max_staging_per_production": args.max_staging_per_production,
+    }
+    _validate_vm_slots(vm_slots, mox_range, gateway_octet)
 
     tags = {
         "production": validate_safe_identifier(args.production_tag, "production tag"),
@@ -1309,20 +1059,14 @@ def build_policy(args: argparse.Namespace) -> dict[str, Any]:
         "network": {
             "cidr": str(network),
             "guest_gateway": str(gateway),
-            **ranges,
-            "haproxy_vmid_range": {"start": 9111, "end": 9120},
+            "mox_host_range": mox_range,
+            "vm_slots": vm_slots,
         },
         "limits": {
             "max_hosts": args.max_hosts,
-            "max_production": (
-                ranges["production_range"]["end"]
-                - ranges["production_range"]["start"]
-                + 1
-            ),
+            "max_production": vm_slots["max_production"],
             "max_staging": (
-                ranges["staging_range"]["end"]
-                - ranges["staging_range"]["start"]
-                + 1
+                vm_slots["max_production"] * vm_slots["max_staging_per_production"]
             ),
             "reservation_ttl_seconds": args.reservation_ttl_seconds,
         },
@@ -1387,15 +1131,7 @@ def validate_policy(policy: Any) -> None:
         raise RegistryError("policy network must be an object")
     require_exact_keys(
         network_data,
-        {
-            "cidr",
-            "guest_gateway",
-            "mox_host_range",
-            "haproxy_range",
-            "production_range",
-            "staging_range",
-            "haproxy_vmid_range",
-        },
+        {"cidr", "guest_gateway", "mox_host_range", "vm_slots"},
         "policy network",
     )
     try:
@@ -1409,39 +1145,24 @@ def validate_policy(policy: Any) -> None:
         or gateway.network != network
     ):
         raise RegistryError("policy network and guest gateway must share an IPv4 /24")
-    allocation_ranges: dict[str, set[int]] = {}
-    for name in (
-        "mox_host_range",
-        "haproxy_range",
-        "production_range",
-        "staging_range",
+    mox_range = network_data["mox_host_range"]
+    if (
+        not isinstance(mox_range, dict)
+        or set(mox_range) != {"start", "end"}
+        or isinstance(mox_range["start"], bool)
+        or isinstance(mox_range["end"], bool)
+        or not isinstance(mox_range["start"], int)
+        or not isinstance(mox_range["end"], int)
+        or not 1 <= mox_range["start"] <= mox_range["end"] <= 254
     ):
-        value = network_data[name]
-        if (
-            not isinstance(value, dict)
-            or set(value) != {"start", "end"}
-            or isinstance(value["start"], bool)
-            or isinstance(value["end"], bool)
-            or not isinstance(value["start"], int)
-            or not isinstance(value["end"], int)
-            or not 1 <= value["start"] <= value["end"] <= 254
-        ):
-            raise RegistryError(f"policy {name} is not a usable host-octet range")
-        allocation_ranges[name] = set(range(value["start"], value["end"] + 1))
-    if network_data["haproxy_vmid_range"] != {"start": 9111, "end": 9120}:
-        raise RegistryError("policy haproxy_vmid_range must be 9111-9120")
-    range_names = list(allocation_ranges)
-    for index, name in enumerate(range_names):
-        for other in range_names[index + 1 :]:
-            if allocation_ranges[name] & allocation_ranges[other]:
-                raise RegistryError(f"policy {name} and {other} overlap")
+        raise RegistryError("policy mox_host_range is not a usable host-octet range")
     gateway_octet = int(gateway.ip) - int(network.network_address)
     if (
         not 1 <= gateway_octet <= 254
-        or gateway.network.prefixlen != 24
-        or any(gateway_octet in values for values in allocation_ranges.values())
+        or mox_range["start"] <= gateway_octet <= mox_range["end"]
     ):
-        raise RegistryError("policy guest gateway is invalid or overlaps an allocation range")
+        raise RegistryError("policy guest gateway is invalid or overlaps the mox host range")
+    _validate_vm_slots(network_data["vm_slots"], mox_range, gateway_octet)
 
     limits = policy["limits"]
     require_exact_keys(
@@ -1456,16 +1177,13 @@ def validate_policy(policy: Any) -> None:
     )
     if not isinstance(limits["max_hosts"], int) or not 1 <= limits["max_hosts"] <= 10:
         raise RegistryError("policy max_hosts must be between 1 and 10")
-    if (
-        len(allocation_ranges["mox_host_range"]) < limits["max_hosts"]
-        or len(allocation_ranges["haproxy_range"]) < limits["max_hosts"]
+    if mox_range["end"] - mox_range["start"] + 1 < limits["max_hosts"]:
+        raise RegistryError("policy mox host range is too small")
+    slots = network_data["vm_slots"]
+    if limits["max_production"] != slots["max_production"] or limits["max_staging"] != (
+        slots["max_production"] * slots["max_staging_per_production"]
     ):
-        raise RegistryError("policy host allocation ranges are too small")
-    if (
-        limits["max_production"] != len(allocation_ranges["production_range"])
-        or limits["max_staging"] != len(allocation_ranges["staging_range"])
-    ):
-        raise RegistryError("policy allocation limits do not match IP ranges")
+        raise RegistryError("policy allocation limits do not match the VM slots")
     if (
         not isinstance(limits["reservation_ttl_seconds"], int)
         or limits["reservation_ttl_seconds"] < 60
@@ -1613,7 +1331,7 @@ def validate_resource(resource: Any, policy: dict[str, Any]) -> None:
     if staging_base != domains["staging_base"]:
         raise RegistryError("resource staging base is not normalized")
     if staging_base in {primary, *aliases}:
-        raise RegistryError("resource staging base must differ from routed domains")
+        raise RegistryError("resource staging base must differ from its domains")
 
     placement = validate_nodes(resource["placement"], policy)
     if placement != resource["placement"]:
@@ -1622,10 +1340,6 @@ def validate_resource(resource: Any, policy: dict[str, Any]) -> None:
         raise RegistryError("resource initial node must belong to placement")
     if resource["owner_node"] is not None and resource["owner_node"] not in placement:
         raise RegistryError("resource owner node must belong to placement")
-    if not isinstance(resource["routes_enabled"], bool):
-        raise RegistryError("routes_enabled must be boolean")
-    if resource["routes_enabled"] and resource["state"] not in ROUTABLE_STATES:
-        raise RegistryError("routes may only be enabled for stopped, ready, or active guests")
     validate_spec(resource["spec"])
 
     proxmox = resource["proxmox"]
@@ -1754,10 +1468,8 @@ def validate_resource(resource: Any, policy: dict[str, Any]) -> None:
             raise RegistryError("production resource has staging identity")
         if int(match.group("production")) != resource["index"]:
             raise RegistryError("production resource index does not match its name")
-        production_range = policy["network"]["production_range"]
-        expected_octet = production_range["start"] + resource["index"] - 1
-        if expected_octet > production_range["end"] or octet != expected_octet:
-            raise RegistryError("production resource name/IP formula is invalid")
+        if octet != slot_octet(policy, resource["index"]):
+            raise RegistryError("production resource address is not its VM slot")
         if purpose["source_resource"] is not None:
             raise RegistryError("production purpose may not have a source resource")
     else:
@@ -1768,9 +1480,9 @@ def validate_resource(resource: Any, policy: dict[str, Any]) -> None:
             raise RegistryError("staging source/name relationship is invalid")
         if int(match.group("stage")) != resource["index"]:
             raise RegistryError("staging index does not match its name")
-        staging_range = policy["network"]["staging_range"]
-        if not staging_range["start"] <= octet <= staging_range["end"]:
-            raise RegistryError("staging IP is outside its configured range")
+        source_index = int(match.group("source")[len("prod"):])
+        if octet != slot_octet(policy, source_index, resource["index"]):
+            raise RegistryError("staging resource address is not its VM slot")
         if purpose["source_resource"] != resource["source"]:
             raise RegistryError("staging purpose source does not match source resource")
         if len(placement) != 1:
@@ -1821,10 +1533,6 @@ def validate_registry_invariants(resources: Sequence[dict[str, Any]]) -> None:
             if prior:
                 raise RegistryError(f"duplicate domain {domain!r}: {prior} and {name}")
             unique_fields["domain"][domain] = name
-    if len(unique_fields["domain"]) > MAX_ROUTES:
-        raise RegistryError(
-            f"registry route count exceeds renderer limit of {MAX_ROUTES}"
-        )
     staging_snapshot_keys: dict[tuple[str, str], str] = {}
     for resource in resources:
         if resource["kind"] != "staging":
@@ -2054,7 +1762,6 @@ def base_resource(
         "placement": placement,
         "initial_node": initial_node,
         "owner_node": None,
-        "routes_enabled": False,
         "spec": spec,
         "proxmox": {
             "ha_nodes": [],
@@ -2098,7 +1805,45 @@ def command_init(registry: Registry, args: argparse.Namespace) -> Any:
         return {"created": True, "policy": policy}
 
 
+def command_update_slots(registry: Registry, args: argparse.Namespace) -> Any:
+    with registry.lock():
+        policy = registry.policy()
+        network = ipaddress.ip_network(policy["network"]["cidr"])
+        try:
+            start = ipaddress.ip_address(args.vm_slot_start)
+        except ValueError as exc:
+            raise RegistryError(f"invalid VM slot start: {exc}") from exc
+        if start not in network:
+            raise RegistryError("VM slot start must belong to the policy /24")
+        vm_slots = {
+            "start": int(start) - int(network.network_address),
+            "max_production": args.max_production,
+            "max_staging_per_production": args.max_staging_per_production,
+        }
+        if vm_slots == policy["network"]["vm_slots"]:
+            return {"changed": False, "policy": policy}
+        updated = json.loads(json.dumps(policy))
+        updated["network"]["vm_slots"] = vm_slots
+        updated["limits"]["max_production"] = vm_slots["max_production"]
+        updated["limits"]["max_staging"] = (
+            vm_slots["max_production"] * vm_slots["max_staging_per_production"]
+        )
+        validate_policy(updated)
+        for resource in registry.resources():
+            try:
+                validate_resource(resource, updated)
+            except RegistryError as exc:
+                raise RegistryError(
+                    f"{resource['name']} would not keep its address under the new "
+                    f"slot settings ({exc}); remove it first"
+                ) from exc
+        atomic_write_json(registry.policy_path, updated)
+        return {"changed": True, "policy": updated}
+
+
 def command_list(registry: Registry, args: argparse.Namespace) -> Any:
+    if args.record_type == "policy":
+        return registry.policy()
     if args.record_type == "cleanup":
         records = registry.cleanup_records()
         if args.state:
@@ -2139,7 +1884,7 @@ def command_allocate_prod(registry: Registry, args: argparse.Namespace) -> Any:
         raise RegistryError("primary domain may not also be an alias")
     staging_base = normalize_domain(args.staging_dns_base or f"staging.{primary}")
     if staging_base in {primary, *aliases}:
-        raise RegistryError("staging DNS base must differ from production routes")
+        raise RegistryError("staging DNS base must differ from production domains")
     allocation_id = normalize_allocation_id(args.allocation_id)
     validate_vmid(args.vmid, policy)
     spec = effective_spec(args, policy, "production")
@@ -2173,11 +1918,9 @@ def command_allocate_prod(registry: Registry, args: argparse.Namespace) -> Any:
             None,
         )
         if index is None:
-            raise RegistryError("production allocation range is exhausted")
-        network = ipaddress.ip_network(policy["network"]["cidr"])
+            raise RegistryError("every production slot is in use")
         name = f"prod{index}"
-        production_start = policy["network"]["production_range"]["start"]
-        ip = str(network.network_address + production_start + index - 1)
+        ip = slot_address(policy, index)
         resource = base_resource(
             policy=policy,
             kind="production",
@@ -2223,13 +1966,11 @@ def command_allocate_staging(registry: Registry, args: argparse.Namespace) -> An
         if source["owner_node"] == placement[0]:
             raise RegistryError("staging node may not be the source production owner")
 
-        requested_domain = normalize_domain(args.domain) if args.domain else None
         spec = effective_spec(args, policy, "staging")
         request = {
             "kind": "staging",
             "source": source["name"],
             "vmid": args.vmid,
-            "domain": requested_domain,
             "placement": placement,
             "spec": spec,
         }
@@ -2259,41 +2000,24 @@ def command_allocate_staging(registry: Registry, args: argparse.Namespace) -> An
             for record in resources
             if record["kind"] == "staging" and record["source"] == source["name"]
         }
+        max_stages = policy["network"]["vm_slots"]["max_staging_per_production"]
         suffix = next(
             (
                 candidate
-                for candidate in range(1, args.placement_limit + 1)
+                for candidate in range(1, max_stages + 1)
                 if candidate not in used_suffixes
             ),
             None,
         )
         if suffix is None:
             raise RegistryError(
-                f"stage number range 1-{args.placement_limit} is exhausted "
-                f"for source {source['name']}"
+                f"all {max_stages} staging slots of {source['name']} are in use"
             )
         name = f"stage{suffix}{source['name']}"
-        domain = (
-            requested_domain
-            if requested_domain is not None
-            else normalize_domain(
-                f"stage{suffix}{source['name']}.{source['domains']['primary']}"
-            )
+        domain = normalize_domain(
+            f"stage{suffix}{source['name']}.{source['domains']['primary']}"
         )
-
-        used_ips = {ipaddress.ip_address(record["ip"]) for record in resources}
-        network = ipaddress.ip_network(policy["network"]["cidr"])
-        staging_range = policy["network"]["staging_range"]
-        ip = next(
-            (
-                network.network_address + octet
-                for octet in range(staging_range["start"], staging_range["end"] + 1)
-                if network.network_address + octet not in used_ips
-            ),
-            None,
-        )
-        if ip is None:
-            raise RegistryError("staging IP allocation range is exhausted")
+        ip = slot_address(policy, source["index"], suffix)
         resource = base_resource(
             policy=policy,
             kind="staging",
@@ -2301,7 +2025,7 @@ def command_allocate_staging(registry: Registry, args: argparse.Namespace) -> An
             index=suffix,
             source=source["name"],
             vmid=args.vmid,
-            ip=str(ip),
+            ip=ip,
             purpose={
                 "slug": source["purpose"]["slug"],
                 "source_resource": source["name"],
@@ -2693,13 +2417,6 @@ def command_update(registry: Registry, args: argparse.Namespace) -> Any:
             if args.owner_node not in updated["placement"]:
                 raise RegistryError("owner node must belong to placement")
             updated["owner_node"] = args.owner_node
-            changed = True
-        if args.routes_enabled is not None:
-            if args.routes_enabled and updated["state"] not in ROUTABLE_STATES:
-                raise RegistryError(
-                    "routes may only be enabled in stopped, ready, or active state"
-                )
-            updated["routes_enabled"] = args.routes_enabled
             changed = True
         if args.purpose is not None:
             if current["kind"] != "production":
@@ -3106,8 +2823,6 @@ def command_release(registry: Registry, args: argparse.Namespace) -> Any:
                     f"state {resource['state']} is not releasable; transition to a "
                     "stopped/failed/cleanup state or use --force"
                 )
-            if resource["routes_enabled"]:
-                raise RegistryError("disable routes before releasing the resource")
             proxmox = resource["proxmox"]
             if (
                 resource["owner_node"] is not None
@@ -3237,8 +2952,6 @@ def command_finalize_staging_cleanup(
             raise RegistryError(
                 f"{args.name} is {resource['state']}, not cleanup_pending"
             )
-        if resource["routes_enabled"]:
-            raise RegistryError("staging routes must be disabled before finalization")
 
         owned_cleanup = [
             record
@@ -3262,22 +2975,6 @@ def command_finalize_staging_cleanup(
         cleanup_source = by_name.get(resource["source"])
         if cleanup_source is None or cleanup_source["kind"] != "production":
             raise RegistryError("staging cleanup source production is missing")
-        route_target = resource["name"]
-        missing_route_nodes = [
-            node
-            for node in cleanup_source["placement"]
-            if (
-                node,
-                "remove-route",
-                route_target,
-            )
-            not in completed_identities
-        ]
-        if missing_route_nodes:
-            raise RegistryError(
-                "HAProxy route removal is incomplete on: "
-                + ", ".join(missing_route_nodes)
-            )
 
         proxmox = resource["proxmox"]
         if resource["owner_node"] is not None:
@@ -3600,391 +3297,28 @@ def command_control_set(registry: Registry, args: argparse.Namespace) -> Any:
         return {"changed": True, "control": updated}
 
 
-def build_routes(resources: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    routes: list[dict[str, Any]] = []
-    for resource in resources:
-        if not resource["routes_enabled"] or resource["state"] not in ROUTABLE_STATES:
-            continue
-        for domain in [resource["domains"]["primary"], *resource["domains"]["aliases"]]:
-            routes.append(
-                {
-                    "domain": domain,
-                    "resource": resource["name"],
-                    "kind": resource["kind"],
-                    "purpose": resource["purpose"]["slug"],
-                    "ip": resource["ip"],
-                    "http_port": 80,
-                    "https_port": 443,
-                }
-            )
-            if len(routes) > MAX_ROUTES:
-                raise RegistryError(
-                    f"registry route count exceeds renderer limit of {MAX_ROUTES}"
-                )
-    return sorted(routes, key=lambda route: (route["domain"], route["resource"]))
+def tunnel_productions(resources: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return every production guest's tunnel input, whatever its state.
 
-
-def command_list_routes(registry: Registry, args: argparse.Namespace) -> Any:
-    return build_routes(registry.resources())
-
-
-def command_ingress_begin(registry: Registry, args: argparse.Namespace) -> Any:
-    """Durably publish desired generation before changing any live ingress."""
-
-    generation = validate_sha256(args.generation, "ingress generation")
-    bundle_sha256 = validate_sha256(
-        args.bundle_sha256, "ingress bundle digest"
-    )
-    if not 0 <= args.route_count <= MAX_ROUTES:
-        raise RegistryError(
-            f"ingress route count must be between 0 and {MAX_ROUTES}"
-        )
-    with registry.lock():
-        policy = registry.policy()
-        nodes = validate_nodes(flatten_nodes(args.node), policy)
-        expected_nodes = [
-            f"mox{index}"
-            for index in range(1, policy["limits"]["max_hosts"] + 1)
-        ]
-        if nodes != expected_nodes:
-            raise RegistryError(
-                "ingress begin must name every configured mox in order"
-            )
-        now = utc_now()
-        generation_path = registry.ingress_generation_path(generation)
-        if generation_path.exists():
-            generation_record = read_json_file(
-                generation_path, "ingress generation metadata"
-            )
-            validate_ingress_generation_record(generation_record)
-            if any(
-                generation_record[field] != expected
-                for field, expected in (
-                    ("generation", generation),
-                    ("bundle_sha256", bundle_sha256),
-                    ("route_count", args.route_count),
-                )
-            ):
-                raise RegistryError(
-                    "ingress generation was already recorded with different metadata"
-                )
-        else:
-            generation_record = {
-                "schema_version": SCHEMA_VERSION,
-                "record_type": "haproxy-generation",
-                "generation": generation,
-                "bundle_sha256": bundle_sha256,
-                "route_count": args.route_count,
-                "created_at": now,
-            }
-            validate_ingress_generation_record(generation_record)
-            atomic_write_json(generation_path, generation_record)
-
-        statuses_by_node = {
-            record["node"]: record for record in registry.ingress_node_statuses()
-        }
-        transition = build_ingress_transition(
-            registry,
-            policy,
-            generation,
-            parse_compatible_allowances(getattr(args, "compatible", None), nodes),
-            statuses_by_node,
-            getattr(args, "compatible_window_seconds", 600),
-            now,
-        )
-        # The allowance names the new generation, so it is inert until the
-        # desired pointer below commits that generation.
-        if transition is None:
-            registry.ingress_transition_path.unlink(missing_ok=True)
-        else:
-            atomic_write_json(registry.ingress_transition_path, transition)
-
-        existing_desired = registry.ingress_desired()
-        desired_unchanged = (
-            existing_desired is not None
-            and existing_desired["generation"] == generation
-            and existing_desired["bundle_sha256"] == bundle_sha256
-            and existing_desired["route_count"] == args.route_count
-            and existing_desired["nodes"] == nodes
-        )
-        if desired_unchanged:
-            desired = existing_desired
-        else:
-            desired = {
-                "schema_version": SCHEMA_VERSION,
-                "record_type": "haproxy-desired",
-                "generation": generation,
-                "bundle_sha256": bundle_sha256,
-                "route_count": args.route_count,
-                "nodes": nodes,
-                "created_at": (
-                    existing_desired["created_at"]
-                    if existing_desired is not None
-                    else now
-                ),
-                "updated_at": now,
-                "revision": (
-                    existing_desired["revision"] + 1
-                    if existing_desired is not None
-                    else 1
-                ),
-            }
-            validate_ingress_desired_record(desired, policy)
-            atomic_write_json(registry.ingress_desired_path, desired)
-
-        statuses: list[dict[str, Any]] = []
-        for node in nodes:
-            existing = statuses_by_node.get(node)
-            if (
-                existing is not None
-                and existing["desired_generation"] == generation
-            ):
-                status = existing
-            else:
-                applied_generation = (
-                    existing["applied_generation"]
-                    if existing is not None
-                    else None
-                )
-                status = {
-                    "schema_version": SCHEMA_VERSION,
-                    "record_type": "haproxy-node-status",
-                    "node": node,
-                    "desired_generation": generation,
-                    "applied_generation": applied_generation,
-                    "state": (
-                        "applied"
-                        if applied_generation == generation
-                        else "pending"
-                    ),
-                    "created_at": (
-                        existing["created_at"] if existing is not None else now
-                    ),
-                    "updated_at": now,
-                    "revision": (
-                        existing["revision"] + 1 if existing is not None else 1
-                    ),
-                }
-                validate_ingress_node_status(status, policy)
-                atomic_write_json(registry.ingress_node_path(node), status)
-            statuses.append(status)
-
-        registry.prune_ingress_generations(
-            generation, MAX_INGRESS_GENERATIONS
-        )
-        return {"desired": desired, "nodes": statuses, "transition": transition}
-
-
-def parse_compatible_allowances(
-    values: Sequence[str] | None, nodes: Sequence[str]
-) -> dict[str, str]:
-    allowances: dict[str, str] = {}
-    for value in values or ():
-        node, separator, previous = value.partition("=")
-        if not separator or node not in nodes:
-            raise RegistryError(
-                f"--compatible must be NODE=GENERATION for a configured mox: {value!r}"
-            )
-        if node in allowances:
-            raise RegistryError(f"--compatible repeats {node}")
-        allowances[node] = validate_sha256(previous, "allowed previous generation")
-    return allowances
-
-
-def build_ingress_transition(
-    registry: Registry,
-    policy: dict[str, Any],
-    generation: str,
-    requested: dict[str, str],
-    statuses_by_node: dict[str, dict[str, Any]],
-    window_seconds: int,
-    now: str,
-) -> dict[str, Any] | None:
-    """Authorize named nodes to keep serving a compatible previous generation.
-
-    Each allowance is bounded in time. A retry of the same rollout keeps the
-    original deadline so repeated coordinator runs cannot extend it.
+    Its slot and domains are fixed from allocation to release, so the tunnel
+    config only changes when a production guest is allocated or released.
     """
 
-    if not requested:
-        return None
-    if not (
-        MIN_INGRESS_COMPATIBLE_WINDOW_SECONDS
-        <= window_seconds
-        <= MAX_INGRESS_COMPATIBLE_WINDOW_SECONDS
-    ):
-        raise RegistryError(
-            "compatible rollout window must be between "
-            f"{MIN_INGRESS_COMPATIBLE_WINDOW_SECONDS} and "
-            f"{MAX_INGRESS_COMPATIBLE_WINDOW_SECONDS} seconds"
-        )
-    existing = registry.ingress_transition()
-    prior: dict[str, dict[str, Any]] = {}
-    if existing is not None and existing["generation"] == generation:
-        prior = {allowance["node"]: allowance for allowance in existing["allowances"]}
-    deadline = (
-        parse_timestamp(now) + dt.timedelta(seconds=window_seconds)
-    ).isoformat()
-    allowances: list[dict[str, Any]] = []
-    for node in sorted(requested, key=lambda name: int(name[3:])):
-        previous = requested[node]
-        if previous == generation:
-            raise RegistryError(f"{node} allowance must name a previous generation")
-        status = statuses_by_node.get(node)
-        if (
-            status is None
-            or status["applied_generation"] != previous
-            or status["state"] == "reject-only"
-        ):
-            raise RegistryError(
-                f"{node} has not durably applied {previous[:16]}; "
-                "it cannot keep serving it during the rollout"
-            )
-        earlier = prior.get(node)
-        allowances.append(
-            {
-                "node": node,
-                "generation": previous,
-                "expires_at": (
-                    earlier["expires_at"]
-                    if earlier is not None and earlier["generation"] == previous
-                    else deadline
-                ),
-            }
-        )
-    transition = {
-        "schema_version": SCHEMA_VERSION,
-        "record_type": "haproxy-transition",
-        "generation": generation,
-        "allowances": allowances,
-        "created_at": (
-            existing["created_at"]
-            if existing is not None and existing["generation"] == generation
-            else now
-        ),
-        "updated_at": now,
-        "revision": existing["revision"] + 1 if existing is not None else 1,
-    }
-    validate_ingress_transition_record(transition, policy)
-    return transition
-
-
-def active_ingress_allowances(
-    desired: dict[str, Any] | None,
-    transition: dict[str, Any] | None,
-    now: dt.datetime,
-) -> list[dict[str, Any]]:
-    if desired is None or transition is None:
-        return []
-    if transition["generation"] != desired["generation"]:
-        return []
-    return [
-        allowance
-        for allowance in transition["allowances"]
-        if parse_timestamp(allowance["expires_at"]) > now
-    ]
-
-
-def command_ingress_finalize(registry: Registry, args: argparse.Namespace) -> Any:
-    """Withdraw rollout allowances once every allowed node applied desired."""
-
-    generation = validate_sha256(args.generation, "ingress generation")
-    with registry.lock():
-        desired = registry.ingress_desired()
-        if desired is None or desired["generation"] != generation:
-            raise RegistryError(
-                "refusing to finalize a superseded ingress generation"
-            )
-        transition = registry.ingress_transition()
-        if transition is None:
-            return {"finalized": False, "reason": "no-transition"}
-        if transition["generation"] == generation:
-            statuses = {
-                record["node"]: record
-                for record in registry.ingress_node_statuses()
-            }
-            pending = [
-                allowance["node"]
-                for allowance in transition["allowances"]
-                if statuses.get(allowance["node"], {}).get("state") != "applied"
-                or statuses[allowance["node"]]["applied_generation"] != generation
-            ]
-            if pending:
-                raise RegistryError(
-                    "rollout allowances remain for unapplied nodes: "
-                    + ", ".join(pending)
-                )
-        registry.ingress_transition_path.unlink(missing_ok=True)
-        return {"finalized": True, "generation": generation}
-
-
-def command_ingress_mark(registry: Registry, args: argparse.Namespace) -> Any:
-    generation = validate_sha256(args.generation, "ingress generation")
-    with registry.lock():
-        policy = registry.policy()
-        desired = registry.ingress_desired()
-        if desired is None:
-            raise RegistryError("no desired ingress generation has been published")
-        if desired["generation"] != generation:
-            raise RegistryError(
-                "refusing to mark a node for a superseded ingress generation"
-            )
-        node = validate_nodes([args.node], policy, exactly_one=True)[0]
-        if node not in desired["nodes"]:
-            raise RegistryError("ingress node is outside the desired node set")
-        path = registry.ingress_node_path(node)
-        now = utc_now()
-        if path.exists():
-            existing = read_json_file(path, "ingress node status")
-            validate_ingress_node_status(existing, policy)
-        else:
-            existing = None
-        applied_generation = (
-            generation
-            if args.state == "applied"
-            else (
-                existing["applied_generation"]
-                if existing is not None
-                else None
-            )
-        )
-        if (
-            existing is not None
-            and existing["desired_generation"] == generation
-            and existing["applied_generation"] == applied_generation
-            and existing["state"] == args.state
-        ):
-            return existing
-        status = {
-            "schema_version": SCHEMA_VERSION,
-            "record_type": "haproxy-node-status",
-            "node": node,
-            "desired_generation": generation,
-            "applied_generation": applied_generation,
-            "state": args.state,
-            "created_at": (
-                existing["created_at"] if existing is not None else now
-            ),
-            "updated_at": now,
-            "revision": existing["revision"] + 1 if existing is not None else 1,
+    rows = [
+        {
+            "name": resource["name"],
+            "ip": resource["ip"],
+            "primary": resource["domains"]["primary"],
+            "aliases": list(resource["domains"]["aliases"]),
         }
-        validate_ingress_node_status(status, policy)
-        atomic_write_json(path, status)
-        return status
+        for resource in resources
+        if resource["kind"] == "production"
+    ]
+    return sorted(rows, key=lambda row: int(row["name"][len("prod"):]))
 
 
-def command_ingress_status(registry: Registry, args: argparse.Namespace) -> Any:
-    desired = registry.ingress_desired()
-    transition = registry.ingress_transition()
-    return {
-        "desired": desired,
-        "nodes": registry.ingress_node_statuses(),
-        "transition": transition,
-        # Evaluated against the reader's clock; every consumer is local.
-        "active_allowances": active_ingress_allowances(
-            desired, transition, dt.datetime.now(dt.timezone.utc)
-        ),
-    }
+def command_tunnel_productions(registry: Registry, args: argparse.Namespace) -> Any:
+    return tunnel_productions(registry.resources())
 
 
 OBSERVED_KEYS = {
@@ -3995,7 +3329,6 @@ OBSERVED_KEYS = {
     "replication_jobs",
     "volumes",
     "snapshots",
-    "routes",
     "cleanup_completed",
 }
 
@@ -4261,7 +3594,6 @@ def reconcile_report(
     vms = _index_observed(observed, "vms", "vmid")
     ha_resources = _index_observed(observed, "ha_resources", "vmid")
     volumes = _index_observed(observed, "volumes", "id")
-    routes = _index_observed(observed, "routes", "domain")
 
     if vms is not None:
         allowed_vm_keys = {
@@ -4305,21 +3637,6 @@ def reconcile_report(
         for volume in volumes.values():
             require_exact_keys(volume, {"id"}, "observed volume")
             validate_safe_identifier(volume["id"], "observed volume id")
-
-    if routes is not None:
-        for observed_route in routes.values():
-            require_exact_keys(
-                observed_route, {"domain", "resource", "ip"}, "observed route"
-            )
-            domain = normalize_domain(observed_route["domain"])
-            if domain != observed_route["domain"]:
-                raise RegistryError("observed route domain is not normalized")
-            if not RESOURCE_RE.fullmatch(observed_route["resource"]):
-                raise RegistryError("observed route resource name is invalid")
-            try:
-                ipaddress.ip_address(observed_route["ip"])
-            except (TypeError, ValueError) as exc:
-                raise RegistryError("observed route IP is invalid") from exc
 
     replications_by_vmid: dict[int, list[dict[str, Any]]] | None = None
     if "replication_jobs" in observed:
@@ -4590,37 +3907,6 @@ def reconcile_report(
                     vm_name,
                 )
 
-    if routes is not None:
-        expected_routes = {route["domain"]: route for route in build_routes(updated_resources)}
-        for domain, expected in expected_routes.items():
-            actual = routes.get(domain)
-            if actual is None:
-                issue(
-                    issues,
-                    "error",
-                    "route-missing",
-                    f"expected route {domain} is absent",
-                    expected["resource"],
-                )
-                continue
-            if actual["resource"] != expected["resource"] or actual["ip"] != expected["ip"]:
-                issue(
-                    issues,
-                    "error",
-                    "route-mismatch",
-                    f"route {domain} targets the wrong resource or IP",
-                    expected["resource"],
-                )
-        for domain, actual in routes.items():
-            if domain not in expected_routes:
-                issue(
-                    issues,
-                    "warning",
-                    "route-orphan",
-                    f"observed route {domain} is not enabled in the registry",
-                    actual.get("resource"),
-                )
-
     completed = observed.get("cleanup_completed")
     if completed is not None:
         if not isinstance(completed, list) or not all(
@@ -4772,12 +4058,9 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--guest-gateway", required=True)
     init.add_argument("--mox-ip-start", required=True)
     init.add_argument("--mox-ip-end", required=True)
-    init.add_argument("--haproxy-ip-start", required=True)
-    init.add_argument("--haproxy-ip-end", required=True)
-    init.add_argument("--production-ip-start", required=True)
-    init.add_argument("--production-ip-end", required=True)
-    init.add_argument("--staging-ip-start", required=True)
-    init.add_argument("--staging-ip-end", required=True)
+    init.add_argument("--vm-slot-start", required=True)
+    init.add_argument("--max-production", type=int, required=True)
+    init.add_argument("--max-staging-per-production", type=int, required=True)
     init.add_argument("--max-hosts", type=int, default=10)
     init.add_argument("--production-tag", default="app-ha-production")
     init.add_argument("--staging-tag", default="app-ha-staging")
@@ -4795,10 +4078,19 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--replication-interval", default="15")
     init.set_defaults(handler=command_init)
 
+    update_slots = subparsers.add_parser(
+        "update-slots",
+        help="change the VM slot settings when no registered guest would move",
+    )
+    update_slots.add_argument("--vm-slot-start", required=True)
+    update_slots.add_argument("--max-production", type=int, required=True)
+    update_slots.add_argument("--max-staging-per-production", type=int, required=True)
+    update_slots.set_defaults(handler=command_update_slots)
+
     list_parser = subparsers.add_parser("list", help="list registry records")
     list_parser.add_argument(
         "--record-type",
-        choices=("resources", "cleanup", "history"),
+        choices=("resources", "cleanup", "history", "policy"),
         default="resources",
     )
     list_parser.add_argument("--kind", choices=("production", "staging"))
@@ -4826,13 +4118,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     staging = subparsers.add_parser(
         "allocate-staging",
-        help="atomically reserve the next prodXsY and staging-range IP",
+        help="atomically reserve the next stageKprodN of a production guest and its fixed slot address",
     )
     staging.add_argument("--source", required=True)
     staging.add_argument("--vmid", type=int, required=True)
     staging.add_argument("--placement", action="append", required=True)
     staging.add_argument("--placement-limit", type=int, required=True)
-    staging.add_argument("--domain")
     staging.add_argument("--allocation-id")
     add_spec_arguments(staging)
     staging.set_defaults(handler=command_allocate_staging)
@@ -4910,14 +4201,6 @@ def build_parser() -> argparse.ArgumentParser:
     owner = update.add_mutually_exclusive_group()
     owner.add_argument("--owner-node")
     owner.add_argument("--clear-owner-node", action="store_true")
-    route_group = update.add_mutually_exclusive_group()
-    route_group.add_argument(
-        "--routes-enabled", dest="routes_enabled", action="store_true"
-    )
-    route_group.add_argument(
-        "--routes-disabled", dest="routes_enabled", action="store_false"
-    )
-    update.set_defaults(routes_enabled=None)
     update.add_argument("--purpose", help="new unique production purpose slug")
     update.add_argument("--primary-domain")
     aliases = update.add_mutually_exclusive_group()
@@ -5036,67 +4319,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     finalize_cleanup.set_defaults(handler=command_finalize_staging_cleanup)
 
-    routes = subparsers.add_parser(
-        "list-routes", help="render exact enabled Host/SNI registry routes as JSON"
+    tunnel = subparsers.add_parser(
+        "tunnel-productions",
+        help="list every production guest's slot and domains for the tunnel config",
     )
-    routes.set_defaults(handler=command_list_routes)
-
-    ingress_begin = subparsers.add_parser(
-        "ingress-begin",
-        help=(
-            "durably publish one desired HAProxy generation before applying it"
-        ),
-    )
-    ingress_begin.add_argument("--generation", required=True)
-    ingress_begin.add_argument("--bundle-sha256", required=True)
-    ingress_begin.add_argument("--route-count", type=int, required=True)
-    ingress_begin.add_argument(
-        "--node",
-        action="append",
-        required=True,
-        help="configured mox node; repeat in mox1..moxN order",
-    )
-    ingress_begin.add_argument(
-        "--compatible",
-        action="append",
-        default=[],
-        metavar="NODE=GENERATION",
-        help=(
-            "allow NODE to keep serving its applied GENERATION while the new "
-            "generation rolls out; repeat per node"
-        ),
-    )
-    ingress_begin.add_argument(
-        "--compatible-window-seconds",
-        type=int,
-        default=600,
-        help="upper bound on each rollout allowance (default: 600)",
-    )
-    ingress_begin.set_defaults(handler=command_ingress_begin)
-
-    ingress_finalize = subparsers.add_parser(
-        "ingress-finalize",
-        help="withdraw rollout allowances after every allowed node applied",
-    )
-    ingress_finalize.add_argument("--generation", required=True)
-    ingress_finalize.set_defaults(handler=command_ingress_finalize)
-
-    ingress_mark = subparsers.add_parser(
-        "ingress-mark",
-        help="atomically record one node's desired-generation apply status",
-    )
-    ingress_mark.add_argument("--generation", required=True)
-    ingress_mark.add_argument("--node", required=True)
-    ingress_mark.add_argument(
-        "--state", choices=sorted(INGRESS_NODE_STATES), required=True
-    )
-    ingress_mark.set_defaults(handler=command_ingress_mark)
-
-    ingress_status = subparsers.add_parser(
-        "ingress-status",
-        help="read desired HAProxy generation and per-node apply statuses",
-    )
-    ingress_status.set_defaults(handler=command_ingress_status)
+    tunnel.set_defaults(handler=command_tunnel_productions)
 
     reconcile = subparsers.add_parser(
         "reconcile",

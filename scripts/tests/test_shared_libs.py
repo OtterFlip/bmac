@@ -205,23 +205,17 @@ class RegistryCliTest(unittest.TestCase):
             "--network",
             "10.213.0.0/24",
             "--guest-gateway",
-            "10.213.0.10/24",
+            "10.213.0.10",
             "--mox-ip-start",
             "10.213.0.11",
             "--mox-ip-end",
             "10.213.0.20",
-            "--haproxy-ip-start",
-            "10.213.0.21",
-            "--haproxy-ip-end",
-            "10.213.0.30",
-            "--production-ip-start",
-            "10.213.0.31",
-            "--production-ip-end",
-            "10.213.0.50",
-            "--staging-ip-start",
-            "10.213.0.51",
-            "--staging-ip-end",
-            "10.213.0.200",
+            "--vm-slot-start",
+            "10.213.0.110",
+            "--max-production",
+            "10",
+            "--max-staging-per-production",
+            "9",
         )
 
     def tearDown(self) -> None:
@@ -261,7 +255,7 @@ class RegistryCliTest(unittest.TestCase):
         *,
         vmid: int = 100,
         purpose: str = "myapp",
-        domain: str = "myapp.com",
+        domain: str = "example.com",
         allocation_id: str | None = None,
         staging_base: str | None = None,
     ) -> dict:
@@ -286,50 +280,11 @@ class RegistryCliTest(unittest.TestCase):
         assert isinstance(result, dict)
         return result
 
-    def begin_ingress(
-        self,
-        generation: str,
-        *,
-        bundle_sha256: str = "b" * 64,
-        route_count: int = 1,
-        compatible: Sequence[str] = (),
-        expected: int = 0,
-    ) -> dict:
-        arguments = [
-            "ingress-begin",
-            "--generation",
-            generation,
-            "--bundle-sha256",
-            bundle_sha256,
-            "--route-count",
-            str(route_count),
-        ]
-        for index in range(1, 11):
-            arguments.extend(["--node", f"mox{index}"])
-        for allowance in compatible:
-            arguments.extend(["--compatible", allowance])
-        result, completed = self.run_registry(*arguments, expected=expected)
-        if expected:
-            return {"stderr": completed.stderr}
-        assert isinstance(result, dict)
-        return result
-
-    def mark_ingress(self, generation: str, node: str, state: str) -> None:
-        self.run_registry(
-            "ingress-mark",
-            "--generation",
-            generation,
-            "--node",
-            node,
-            "--state",
-            state,
-        )
-
     def test_deterministic_allocations_release_and_reuse(self) -> None:
-        first = self.allocate_prod(staging_base="preview.myapp.com")
+        first = self.allocate_prod(staging_base="preview.example.com")
         second = self.allocate_prod(vmid=101, purpose="docs", domain="docs.example.com")
-        self.assertEqual((first["resource"]["name"], first["resource"]["ip"]), ("prod1", "10.213.0.31"))
-        self.assertEqual((second["resource"]["name"], second["resource"]["ip"]), ("prod2", "10.213.0.32"))
+        self.assertEqual((first["resource"]["name"], first["resource"]["ip"]), ("prod1", "10.213.0.110"))
+        self.assertEqual((second["resource"]["name"], second["resource"]["ip"]), ("prod2", "10.213.0.120"))
 
         stage_one, _ = self.run_registry(
             "allocate-staging",
@@ -355,15 +310,15 @@ class RegistryCliTest(unittest.TestCase):
         )
         self.assertEqual(
             (stage_one["resource"]["name"], stage_one["resource"]["ip"]),
-            ("stage1prod1", "10.213.0.51"),
+            ("stage1prod1", "10.213.0.111"),
         )
         self.assertEqual(
             stage_one["resource"]["domains"]["primary"],
-            "stage1prod1.myapp.com",
+            "stage1prod1.example.com",
         )
         self.assertEqual(
             (stage_two["resource"]["name"], stage_two["resource"]["ip"]),
-            ("stage2prod1", "10.213.0.52"),
+            ("stage2prod1", "10.213.0.112"),
         )
         _, capacity_error = self.run_registry(
             "allocate-staging",
@@ -393,7 +348,7 @@ class RegistryCliTest(unittest.TestCase):
         )
         self.assertEqual(
             (replacement["resource"]["name"], replacement["resource"]["ip"]),
-            ("stage1prod1", "10.213.0.51"),
+            ("stage1prod1", "10.213.0.111"),
         )
 
     def test_registry_uses_configured_network_and_allocation_ranges(self) -> None:
@@ -406,23 +361,17 @@ class RegistryCliTest(unittest.TestCase):
                     "--network",
                     "10.77.0.0/24",
                     "--guest-gateway",
-                    "10.77.0.5/24",
+                    "10.77.0.5",
                     "--mox-ip-start",
                     "10.77.0.40",
                     "--mox-ip-end",
                     "10.77.0.49",
-                    "--haproxy-ip-start",
-                    "10.77.0.60",
-                    "--haproxy-ip-end",
-                    "10.77.0.69",
-                    "--production-ip-start",
+                    "--vm-slot-start",
                     "10.77.0.80",
-                    "--production-ip-end",
-                    "10.77.0.99",
-                    "--staging-ip-start",
-                    "10.77.0.120",
-                    "--staging-ip-end",
-                    "10.77.0.199",
+                    "--max-production",
+                    "5",
+                    "--max-staging-per-production",
+                    "3",
                 )
                 production = self.allocate_prod()
                 self.assertEqual(production["resource"]["ip"], "10.77.0.80")
@@ -438,7 +387,7 @@ class RegistryCliTest(unittest.TestCase):
                     "5",
                 )
                 assert isinstance(staging, dict)
-                self.assertEqual(staging["resource"]["ip"], "10.77.0.120")
+                self.assertEqual(staging["resource"]["ip"], "10.77.0.81")
             finally:
                 self.state = original_state
 
@@ -501,7 +450,7 @@ class RegistryCliTest(unittest.TestCase):
         with self.assertRaises(cluster_registry.RegistryError):
             cluster_registry.validate_spec(spec)
 
-    def test_stage_number_is_lowest_free_within_required_host_limit(self) -> None:
+    def test_stage_number_is_lowest_free_slot_and_host_limit_still_applies(self) -> None:
         production, _ = self.run_registry(
             "allocate-prod",
             "--vmid",
@@ -509,7 +458,7 @@ class RegistryCliTest(unittest.TestCase):
             "--purpose",
             "myapp",
             "--primary-domain",
-            "myapp.com",
+            "example.com",
             "--placement",
             "mox1,mox2,mox3",
             "--initial-node",
@@ -526,9 +475,10 @@ class RegistryCliTest(unittest.TestCase):
         )
         self.run_registry("update", "prod1", "--state", "stopped")
 
-        for vmid, node, expected_name in (
-            ("200", "mox2", "stage1prod1"),
-            ("201", "mox3", "stage2prod1"),
+        for vmid, node, expected_name, expected_ip in (
+            ("200", "mox2", "stage1prod1", "10.213.0.111"),
+            ("201", "mox3", "stage2prod1", "10.213.0.112"),
+            ("202", "mox2", "stage3prod1", "10.213.0.113"),
         ):
             allocated, _ = self.run_registry(
                 "allocate-staging",
@@ -541,24 +491,13 @@ class RegistryCliTest(unittest.TestCase):
                 "--placement-limit",
                 "2",
             )
-            self.assertEqual(allocated["resource"]["name"], expected_name)
+            self.assertEqual(
+                (allocated["resource"]["name"], allocated["resource"]["ip"]),
+                (expected_name, expected_ip),
+            )
 
-        _, exhausted = self.run_registry(
-            "allocate-staging",
-            "--source",
-            "prod1",
-            "--vmid",
-            "202",
-            "--placement",
-            "mox2",
-            "--placement-limit",
-            "2",
-            expected=1,
-        )
-        self.assertIn("stage number range 1-2 is exhausted", exhausted.stderr)
-
-        self.run_registry("release", "stage1prod1")
-        replacement, _ = self.run_registry(
+        # mox2 holds two staging guests: its host limit refuses a third.
+        _, full_host = self.run_registry(
             "allocate-staging",
             "--source",
             "prod1",
@@ -568,11 +507,48 @@ class RegistryCliTest(unittest.TestCase):
             "mox2",
             "--placement-limit",
             "2",
+            expected=1,
         )
-        self.assertEqual(replacement["resource"]["name"], "stage1prod1")
+        self.assertIn("limit 2", full_host.stderr)
+        # Every staging slot of prod1 in use: the slots refuse a tenth.
+        for stage, vmid in zip(range(4, 10), range(204, 210)):
+            self.run_registry(
+                "allocate-staging", "--source", "prod1", "--vmid", str(vmid),
+                "--placement", "mox3", "--placement-limit", "9",
+            )
+        _, exhausted = self.run_registry(
+            "allocate-staging",
+            "--source",
+            "prod1",
+            "--vmid",
+            "210",
+            "--placement",
+            "mox3",
+            "--placement-limit",
+            "20",
+            expected=1,
+        )
+        self.assertIn("all 9 staging slots of prod1 are in use", exhausted.stderr)
+
+        self.run_registry("release", "stage1prod1")
+        replacement, _ = self.run_registry(
+            "allocate-staging",
+            "--source",
+            "prod1",
+            "--vmid",
+            "211",
+            "--placement",
+            "mox2",
+            "--placement-limit",
+            "2",
+        )
+        self.assertEqual(
+            (replacement["resource"]["name"], replacement["resource"]["ip"]),
+            ("stage1prod1", "10.213.0.111"),
+        )
         self.assertEqual(
             replacement["resource"]["domains"]["primary"],
-            "stage1prod1.myapp.com",
+            "stage1prod1.example.com",
         )
 
     def test_production_orchestration_lease_and_install_sentinel(self) -> None:
@@ -768,26 +744,13 @@ class RegistryCliTest(unittest.TestCase):
             expected=1,
         )
         self.assertIn("duplicate production purpose", duplicate_purpose.stderr)
-        _, reserved_vmid = self.run_registry(
-            "allocate-prod",
-            "--vmid",
-            "9111",
-            "--purpose",
-            "other",
-            "--primary-domain",
-            "other.example.com",
-            "--placement",
-            "mox1",
-            expected=1,
-        )
-        self.assertIn("reserved for fixed HAProxy", reserved_vmid.stderr)
 
         self.allocate_prod(vmid=102, purpose="docs", domain="docs.example.com")
         _, duplicate_domain = self.run_registry(
             "update",
             "prod2",
             "--primary-domain",
-            "myapp.com",
+            "example.com",
             expected=1,
         )
         self.assertIn("duplicate domain", duplicate_domain.stderr)
@@ -818,12 +781,8 @@ class RegistryCliTest(unittest.TestCase):
         retry_stage, _ = self.run_registry(*stage)
         self.assertEqual(first_stage["resource"]["id"], retry_stage["resource"]["id"])
 
-    def test_transitions_routes_and_reconcile(self) -> None:
+    def test_transitions_tunnel_input_and_reconcile(self) -> None:
         self.allocate_prod()
-        _, invalid = self.run_registry(
-            "update", "prod1", "--routes-enabled", expected=1
-        )
-        self.assertIn("routes may only be enabled", invalid.stderr)
         self.run_registry(
             "update",
             "prod1",
@@ -843,10 +802,12 @@ class RegistryCliTest(unittest.TestCase):
             "mox1,mox2",
             "--replication-targets",
             "mox2",
-            "--routes-enabled",
         )
-        routes, _ = self.run_registry("list-routes")
-        self.assertEqual([route["domain"] for route in routes], ["myapp.com"])
+        productions, _ = self.run_registry("tunnel-productions")
+        self.assertEqual(
+            productions,
+            [{"name": "prod1", "ip": "10.213.0.110", "primary": "example.com", "aliases": []}],
+        )
 
         observation = {
             "schema_version": 1,
@@ -860,7 +821,7 @@ class RegistryCliTest(unittest.TestCase):
                     "name": "prod1",
                     "node": "mox1",
                     "status": "stopped",
-                    "ip": "10.213.0.31",
+                    "ip": "10.213.0.110",
                     "mac": None,
                     "tags": ["app-ha-production"],
                     "volume_ids": ["local-zfs:vm-100-disk-0"],
@@ -869,13 +830,6 @@ class RegistryCliTest(unittest.TestCase):
             "ha_resources": [{"vmid": 100, "nodes": ["mox1", "mox2"]}],
             "replication_jobs": [{"vmid": 100, "target": "mox2", "healthy": True}],
             "volumes": [{"id": "local-zfs:vm-100-disk-0"}],
-            "routes": [
-                {
-                    "domain": "myapp.com",
-                    "resource": "prod1",
-                    "ip": "10.213.0.31",
-                }
-            ],
             "cleanup_completed": [],
         }
         report, _ = self.run_registry("reconcile", "--observed", "-", stdin=observation)
@@ -1303,21 +1257,6 @@ class RegistryCliTest(unittest.TestCase):
                 "source copy cleanup",
             )
             cleanup_ids.append(queued["cleanup"]["id"])
-        for node in ("mox1", "mox2"):
-            route, _ = self.run_registry(
-                "defer-cleanup",
-                "--resource",
-                "stage1prod1",
-                "--node",
-                node,
-                "--action",
-                "remove-route",
-                "--target",
-                "stage1prod1",
-                "--reason",
-                "route cleanup",
-            )
-            cleanup_ids.append(route["cleanup"]["id"])
 
         _, pending = self.run_registry(
             "finalize-staging-cleanup",
@@ -1389,7 +1328,7 @@ class RegistryCliTest(unittest.TestCase):
             "--purpose",
             "myapp",
             "--primary-domain",
-            "myapp.com",
+            "example.com",
             "--placement",
             "mox1",
             expected=1,
@@ -1403,7 +1342,7 @@ class RegistryCliTest(unittest.TestCase):
             "--purpose",
             "myapp",
             "--primary-domain",
-            "myapp.com",
+            "example.com",
             "--placement",
             "mox1",
             global_arguments=(
@@ -1489,235 +1428,6 @@ class RegistryCliTest(unittest.TestCase):
             self.assertEqual(simulated.stale_break_requests, 1)
             self.assertEqual(simulated.forbidden_calls, [])
 
-    def test_registry_enforces_renderer_route_limit(self) -> None:
-        resource = self.allocate_prod()["resource"]
-        resource["state"] = "stopped"
-        resource["routes_enabled"] = True
-        resource["domains"]["aliases"] = [
-            f"route-{index}.example.com"
-            for index in range(cluster_registry.MAX_ROUTES - 1)
-        ]
-        cluster_registry.validate_registry_invariants([resource])
-        self.assertEqual(
-            len(cluster_registry.build_routes([resource])),
-            cluster_registry.MAX_ROUTES,
-        )
-
-        over_limit = copy.deepcopy(resource)
-        over_limit["domains"]["aliases"].append("one-too-many.example.com")
-        with self.assertRaisesRegex(
-            cluster_registry.RegistryError,
-            "renderer limit",
-        ):
-            cluster_registry.validate_registry_invariants([over_limit])
-        with self.assertRaisesRegex(
-            cluster_registry.RegistryError,
-            "renderer limit",
-        ):
-            cluster_registry.build_routes([over_limit])
-
-    def test_ingress_state_recovers_coordinator_crash_and_partial_commit(
-        self,
-    ) -> None:
-        generation = "a" * 64
-        first = self.begin_ingress(generation)
-        self.assertEqual(first["desired"]["generation"], generation)
-        self.run_registry(
-            "ingress-mark",
-            "--generation",
-            generation,
-            "--node",
-            "mox1",
-            "--state",
-            "applied",
-        )
-        self.run_registry(
-            "ingress-mark",
-            "--generation",
-            generation,
-            "--node",
-            "mox2",
-            "--state",
-            "staged",
-        )
-
-        # A new coordinator repeats ingress-begin after the prior process
-        # disappears. Durable applied/staged states must survive that crash.
-        recovered = self.begin_ingress(generation)
-        states = {record["node"]: record for record in recovered["nodes"]}
-        self.assertEqual(states["mox1"]["state"], "applied")
-        self.assertEqual(states["mox1"]["applied_generation"], generation)
-        self.assertEqual(states["mox2"]["state"], "staged")
-        self.assertIsNone(states["mox2"]["applied_generation"])
-        completed, _ = self.run_registry(
-            "ingress-mark",
-            "--generation",
-            generation,
-            "--node",
-            "mox2",
-            "--state",
-            "applied",
-        )
-        self.assertEqual(completed["applied_generation"], generation)
-
-    def test_offline_node_remains_pending_until_new_generation_applies(
-        self,
-    ) -> None:
-        old_generation = "1" * 64
-        new_generation = "2" * 64
-        self.begin_ingress(old_generation)
-        for node in ("mox1", "mox2"):
-            self.run_registry(
-                "ingress-mark",
-                "--generation",
-                old_generation,
-                "--node",
-                node,
-                "--state",
-                "applied",
-            )
-
-        changed = self.begin_ingress(
-            new_generation, bundle_sha256="c" * 64, route_count=2
-        )
-        states = {record["node"]: record for record in changed["nodes"]}
-        self.assertEqual(states["mox1"]["state"], "pending")
-        self.assertEqual(states["mox2"]["state"], "pending")
-        self.assertEqual(states["mox2"]["applied_generation"], old_generation)
-        self.run_registry(
-            "ingress-mark",
-            "--generation",
-            new_generation,
-            "--node",
-            "mox1",
-            "--state",
-            "applied",
-        )
-        self.run_registry(
-            "ingress-mark",
-            "--generation",
-            new_generation,
-            "--node",
-            "mox2",
-            "--state",
-            "reject-only",
-        )
-        status, _ = self.run_registry("ingress-status")
-        by_node = {record["node"]: record for record in status["nodes"]}
-        self.assertEqual(by_node["mox1"]["state"], "applied")
-        self.assertEqual(by_node["mox2"]["state"], "reject-only")
-        self.assertEqual(by_node["mox2"]["applied_generation"], old_generation)
-
-    def test_compatible_rollout_allowance_survives_retry_until_finalized(
-        self,
-    ) -> None:
-        previous = "1" * 64
-        generation = "2" * 64
-        self.begin_ingress(previous)
-        for node in ("mox1", "mox2"):
-            self.mark_ingress(previous, node, "applied")
-
-        plan = self.begin_ingress(
-            generation,
-            bundle_sha256="c" * 64,
-            compatible=(f"mox2={previous}", f"mox1={previous}"),
-        )
-        allowances = plan["transition"]["allowances"]
-        self.assertEqual([item["node"] for item in allowances], ["mox1", "mox2"])
-        status, _ = self.run_registry("ingress-status")
-        self.assertEqual(
-            {(item["node"], item["generation"]) for item in status["active_allowances"]},
-            {("mox1", previous), ("mox2", previous)},
-        )
-
-        # A coordinator crash followed by a retry must not extend the window.
-        self.mark_ingress(generation, "mox1", "applied")
-        retried = self.begin_ingress(
-            generation, bundle_sha256="c" * 64, compatible=(f"mox2={previous}",)
-        )
-        self.assertEqual(
-            retried["transition"]["allowances"][0]["expires_at"],
-            allowances[1]["expires_at"],
-        )
-
-        _, refused = self.run_registry(
-            "ingress-finalize", "--generation", generation, expected=1
-        )
-        self.assertIn("unapplied nodes: mox2", refused.stderr)
-        self.mark_ingress(generation, "mox2", "applied")
-        finalized, _ = self.run_registry(
-            "ingress-finalize", "--generation", generation
-        )
-        self.assertTrue(finalized["finalized"])
-        status, _ = self.run_registry("ingress-status")
-        self.assertIsNone(status["transition"])
-        self.assertEqual(status["active_allowances"], [])
-
-    def test_compatible_allowance_requires_durably_applied_previous(self) -> None:
-        previous = "1" * 64
-        generation = "2" * 64
-        self.begin_ingress(previous)
-        self.mark_ingress(previous, "mox1", "applied")
-        self.mark_ingress(previous, "mox2", "reject-only")
-        for allowance in (f"mox3={previous}", f"mox2={previous}", f"mox1={'3' * 64}"):
-            with self.subTest(allowance=allowance):
-                refused = self.begin_ingress(
-                    generation,
-                    bundle_sha256="c" * 64,
-                    compatible=(allowance,),
-                    expected=1,
-                )
-                self.assertIn("cannot keep serving it", refused["stderr"])
-        status, _ = self.run_registry("ingress-status")
-        self.assertEqual(status["desired"]["generation"], previous)
-        self.assertIsNone(status["transition"])
-
-    def test_allowance_is_inert_once_expired_or_superseded(self) -> None:
-        previous = "1" * 64
-        generation = "2" * 64
-        self.begin_ingress(previous)
-        self.mark_ingress(previous, "mox1", "applied")
-        self.begin_ingress(
-            generation, bundle_sha256="c" * 64, compatible=(f"mox1={previous}",)
-        )
-        path = self.state / "ingress" / "transition.json"
-        record = json.loads(path.read_text(encoding="utf-8"))
-        record["allowances"][0]["expires_at"] = "2000-01-01T00:00:00+00:00"
-        path.write_text(json.dumps(record), encoding="utf-8")
-        status, _ = self.run_registry("ingress-status")
-        self.assertEqual(status["active_allowances"], [])
-
-        # A strict publication of a different generation removes the record.
-        self.begin_ingress("3" * 64, bundle_sha256="d" * 64)
-        self.assertFalse(path.exists())
-
-    def test_ingress_generation_metadata_retention_is_bounded(self) -> None:
-        registry = cluster_registry.Registry(
-            self.state,
-            lock_timeout=1,
-            stale_lock_seconds=1,
-            break_stale_lock=False,
-        )
-        nodes = [f"mox{index}" for index in range(1, 11)]
-        with mock.patch.object(cluster_registry, "MAX_INGRESS_GENERATIONS", 2):
-            for index in range(4):
-                cluster_registry.command_ingress_begin(
-                    registry,
-                    argparse.Namespace(
-                        generation=f"{index + 1:x}" * 64,
-                        bundle_sha256=f"{index + 5:x}" * 64,
-                        route_count=index,
-                        node=nodes,
-                    ),
-                )
-        retained = sorted(registry.ingress_generations_dir.glob("*.json"))
-        self.assertEqual(len(retained), 2)
-        desired = registry.ingress_desired()
-        assert desired is not None
-        self.assertTrue(
-            registry.ingress_generation_path(desired["generation"]).exists()
-        )
-
     def test_release_bounds_history_and_completed_cleanup_retention(self) -> None:
         resource = self.allocate_prod()["resource"]
         registry = cluster_registry.Registry(
@@ -1741,8 +1451,8 @@ class RegistryCliTest(unittest.TestCase):
                     "resource": "prod9",
                     "resource_id": str(uuid.uuid4()),
                     "node": "mox1",
-                    "action": "remove-route",
-                    "target": "prod9",
+                    "action": "destroy-vm",
+                    "target": "vm:909",
                     "reason": "retention test",
                     "state": "completed",
                     "attempts": 1,
@@ -1784,8 +1494,8 @@ class RegistryCliTest(unittest.TestCase):
                 "resource": resource["name"],
                 "resource_id": resource["id"],
                 "node": "mox1",
-                "action": "remove-route",
-                "target": resource["name"],
+                "action": "destroy-vm",
+                "target": f"vm:{resource['vmid']}",
                 "reason": "retained active completion",
                 "state": "completed",
                 "attempts": 1,
@@ -1858,6 +1568,59 @@ print(json.dumps(value))
         )
         self.assertTrue(report["ok"])
         self.assertEqual(report["checked_sections"], ["nodes", "vms", "volumes"])
+
+    def test_update_slots_refuses_to_move_a_registered_guest(self) -> None:
+        self.allocate_prod()
+        self.run_registry(
+            "allocate-staging", "--source", "prod1", "--vmid", "200",
+            "--placement", "mox2", "--placement-limit", "5",
+        )
+        _, moved = self.run_registry(
+            "update-slots", "--vm-slot-start", "10.213.0.120",
+            "--max-production", "5", "--max-staging-per-production", "9",
+            expected=1,
+        )
+        self.assertIn("would not keep its address", moved.stderr)
+        _, too_few = self.run_registry(
+            "update-slots", "--vm-slot-start", "10.213.0.110",
+            "--max-production", "5", "--max-staging-per-production", "0",
+            expected=1,
+        )
+        self.assertIn("1-9", too_few.stderr)
+        changed, _ = self.run_registry(
+            "update-slots", "--vm-slot-start", "10.213.0.110",
+            "--max-production", "5", "--max-staging-per-production", "3",
+        )
+        self.assertTrue(changed["changed"])
+        self.assertEqual(changed["policy"]["limits"]["max_staging"], 15)
+        unchanged, _ = self.run_registry(
+            "update-slots", "--vm-slot-start", "10.213.0.110",
+            "--max-production", "5", "--max-staging-per-production", "3",
+        )
+        self.assertFalse(unchanged["changed"])
+        policy, _ = self.run_registry("list", "--record-type", "policy")
+        self.assertEqual(
+            policy["network"]["vm_slots"],
+            {"start": 110, "max_production": 5, "max_staging_per_production": 3},
+        )
+
+    def test_tunnel_productions_lists_every_production_guest_in_slot_order(self) -> None:
+        self.allocate_prod(vmid=101, purpose="b", domain="b.example.com")
+        self.allocate_prod(vmid=102, purpose="c", domain="c.example.com")
+        self.run_registry("release", "prod1")
+        self.allocate_prod(vmid=103, purpose="a", domain="a.example.com")
+        self.run_registry(
+            "allocate-staging", "--source", "prod2", "--vmid", "200",
+            "--placement", "mox2", "--placement-limit", "5",
+        )
+        productions, _ = self.run_registry("tunnel-productions")
+        self.assertEqual(
+            [(row["name"], row["ip"], row["primary"]) for row in productions],
+            [
+                ("prod1", "10.213.0.110", "a.example.com"),
+                ("prod2", "10.213.0.120", "c.example.com"),
+            ],
+        )
 
     def test_host_slots_sync_reserve_and_reuse_lowest_free_slot(self) -> None:
         slots, _ = self.run_registry("host-list")
@@ -1980,17 +1743,17 @@ class ConfigLoaderTest(unittest.TestCase):
                     "PRIVATE_SUBNET_CIDR=10.213.0.0/24",
                     "PROXMOX_MIGRATION_NETWORK=10.213.0.240/28",
                     "DATACENTER_PRIVATE_VLAN_GATEWAY=10.213.0.1",
-                    "GUEST_EGRESS_VIP=10.213.0.10/24",
+                    "GUEST_GATEWAY_IP=10.213.0.10",
+                    "GUEST_GATEWAY_MAC=02:00:0a:d5:00:0a",
                     "MOX_IP_START=10.213.0.11",
                     "MOX_IP_END=10.213.0.20",
                     "MOX_REPLICATION_IP_START=10.213.0.241",
                     "MOX_REPLICATION_IP_END=10.213.0.250",
-                    "HAPROXY_IP_START=10.213.0.21",
-                    "HAPROXY_IP_END=10.213.0.30",
-                    "PRODUCTION_IP_START=10.213.0.31",
-                    "PRODUCTION_IP_END=10.213.0.50",
-                    "STAGING_IP_START=10.213.0.51",
-                    "STAGING_IP_END=10.213.0.200",
+                    "VM_SLOT_START=10.213.0.110",
+                    "MAX_PROD_VMS=10",
+                    "MAX_STAGING_VMS_PER_PROD=9",
+                    "CLOUDFLARE_ACCOUNT_ID=0123456789abcdef0123456789abcdef",
+                    "CLOUDFLARE_TUNNEL_ID=00000000-0000-0000-0000-000000000000",
                     "PRODUCTION_VM_TAG=app-ha-production",
                     "STAGING_VM_TAG=app-ha-staging",
                     "EVICTABLE_VM_TAG=evictable",
@@ -2071,7 +1834,7 @@ class ConfigLoaderTest(unittest.TestCase):
             completed.stdout,
         )
         self.assertIn(
-            "Derived HAProxy address/VMID: 10.213.0.30/24 / 9120",
+            "VM slots: 10.213.0.110-10.213.0.209 (10 production, 9 staging each)",
             completed.stdout,
         )
         self.assertIn("Secret layer loaded: 1", completed.stdout)
@@ -2081,17 +1844,13 @@ class ConfigLoaderTest(unittest.TestCase):
             "PRIVATE_SUBNET_CIDR=10.213.0.0/24": "PRIVATE_SUBNET_CIDR=10.77.0.0/24",
             "PROXMOX_MIGRATION_NETWORK=10.213.0.240/28": "PROXMOX_MIGRATION_NETWORK=10.77.0.240/28",
             "DATACENTER_PRIVATE_VLAN_GATEWAY=10.213.0.1": "DATACENTER_PRIVATE_VLAN_GATEWAY=10.77.0.2",
-            "GUEST_EGRESS_VIP=10.213.0.10/24": "GUEST_EGRESS_VIP=10.77.0.5/24",
+            "GUEST_GATEWAY_IP=10.213.0.10": "GUEST_GATEWAY_IP=10.77.0.5",
             "MOX_IP_START=10.213.0.11": "MOX_IP_START=10.77.0.40",
             "MOX_IP_END=10.213.0.20": "MOX_IP_END=10.77.0.49",
             "MOX_REPLICATION_IP_START=10.213.0.241": "MOX_REPLICATION_IP_START=10.77.0.241",
             "MOX_REPLICATION_IP_END=10.213.0.250": "MOX_REPLICATION_IP_END=10.77.0.250",
-            "HAPROXY_IP_START=10.213.0.21": "HAPROXY_IP_START=10.77.0.60",
-            "HAPROXY_IP_END=10.213.0.30": "HAPROXY_IP_END=10.77.0.69",
-            "PRODUCTION_IP_START=10.213.0.31": "PRODUCTION_IP_START=10.77.0.80",
-            "PRODUCTION_IP_END=10.213.0.50": "PRODUCTION_IP_END=10.77.0.99",
-            "STAGING_IP_START=10.213.0.51": "STAGING_IP_START=10.77.0.120",
-            "STAGING_IP_END=10.213.0.200": "STAGING_IP_END=10.77.0.199",
+            "VM_SLOT_START=10.213.0.110": "VM_SLOT_START=10.77.0.60",
+            "MAX_PROD_VMS=10": "MAX_PROD_VMS=5",
         }
         content = self.cluster.read_text(encoding="utf-8")
         for old, new in replacements.items():
@@ -2107,15 +1866,71 @@ class ConfigLoaderTest(unittest.TestCase):
             completed.stdout,
         )
         self.assertIn(
-            "Derived HAProxy address/VMID: 10.77.0.69/24 / 9120",
+            "VM slots: 10.77.0.60-10.77.0.109 (5 production, 9 staging each)",
             completed.stdout,
         )
+
+    def replace_in(self, path: Path, old: str, new: str) -> None:
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(old, text)
+        path.write_text(text.replace(old, new), encoding="utf-8")
+
+    def test_vm_slot_and_gateway_settings_are_validated(self) -> None:
+        for old, new, message in (
+            ("VM_SLOT_START=10.213.0.110", "VM_SLOT_START=10.213.0.115", "must end in 0"),
+            ("MAX_PROD_VMS=10", "MAX_PROD_VMS=11", "MAX_PROD_VMS must be between 1 and 10"),
+            ("MAX_STAGING_VMS_PER_PROD=9", "MAX_STAGING_VMS_PER_PROD=10", "between 1 and 9"),
+            ("VM_SLOT_START=10.213.0.110", "VM_SLOT_START=10.213.0.250", "usable host addresses"),
+            ("VM_SLOT_START=10.213.0.110", "VM_SLOT_START=10.213.0.10", "must not overlap"),
+            ("GUEST_GATEWAY_IP=10.213.0.10", "GUEST_GATEWAY_IP=10.213.0.10/24", "without a prefix length"),
+            ("GUEST_GATEWAY_IP=10.213.0.10", "GUEST_GATEWAY_IP=10.213.0.115", "must not overlap"),
+            ("GUEST_GATEWAY_MAC=02:00:0a:d5:00:0a", "GUEST_GATEWAY_MAC=00:00:0a:d5:00:0a", "locally administered"),
+            ("GUEST_GATEWAY_MAC=02:00:0a:d5:00:0a", "GUEST_GATEWAY_MAC=03:00:0a:d5:00:0a", "locally administered"),
+            ("CLOUDFLARE_TUNNEL_ID=00000000-0000-0000-0000-000000000000", "CLOUDFLARE_TUNNEL_ID=tunnel", "lowercase UUID"),
+            ("CLOUDFLARE_ACCOUNT_ID=0123456789abcdef0123456789abcdef", "CLOUDFLARE_ACCOUNT_ID=ABC", "AccountTag"),
+        ):
+            with self.subTest(new=new):
+                original = self.cluster.read_text(encoding="utf-8")
+                try:
+                    self.replace_in(self.cluster, old, new)
+                    completed = self.run_config("--check", expected=1)
+                    self.assertIn(message, completed.stderr)
+                finally:
+                    self.cluster.write_text(original, encoding="utf-8")
+
+    def test_host_staging_limit_must_fit_the_staging_slots(self) -> None:
+        self.replace_in(self.cluster, "MAX_STAGING_VMS_PER_PROD=9", "MAX_STAGING_VMS_PER_PROD=4")
+        completed = self.run_config("--check", "--host", "mox10", expected=1)
+        self.assertIn("must be no more than MAX_STAGING_VMS_PER_PROD (4)", completed.stderr)
+
+    def test_transfer_cap_reset_day_above_28_is_treated_as_28(self) -> None:
+        with self.mox.open("a", encoding="utf-8") as stream:
+            stream.write(
+                "PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB=301748\n"
+                "PROXMOX_HOST_TRANSFER_MONTHLY_RESET_DAY=31\n"
+            )
+        completed = self.run_config("--check", "--host", "mox10")
+        self.assertIn("Monthly transfer cap: 301748 GiB (resets on day 28)", completed.stdout)
+        self.assertIn("is treated as 28", completed.stderr)
+        self.replace_in(
+            self.mox,
+            "PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB=301748",
+            "PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB=lots",
+        )
+        completed = self.run_config("--check", "--host", "mox10", expected=1)
+        self.assertIn("must be a positive integer", completed.stderr)
+
+    def test_tunnel_secret_belongs_only_in_secrets(self) -> None:
+        with self.cluster.open("a", encoding="utf-8") as stream:
+            stream.write("CLOUDFLARE_TUNNEL_SECRET=must-not-appear\n")
+        completed = self.run_config("--check", expected=1)
+        self.assertIn("CLOUDFLARE_TUNNEL_SECRET", completed.stderr)
 
     def test_internal_domain_must_be_private_and_fqdn_is_derived(self) -> None:
         self.cluster.write_text(
             self.cluster.read_text(encoding="utf-8").replace(
                 "PROXMOX_INTERNAL_DOMAIN=pve.internal",
-                "PROXMOX_INTERNAL_DOMAIN=myapp.com",
+                "PROXMOX_INTERNAL_DOMAIN=example.com",
             ),
             encoding="utf-8",
         )
@@ -2129,7 +1944,7 @@ class ConfigLoaderTest(unittest.TestCase):
 
     def test_explicit_mox_fqdn_is_rejected_because_identity_is_derived(self) -> None:
         with self.mox.open("a", encoding="utf-8") as handle:
-            handle.write("PROXMOX_FQDN=mox10.myapp.com\n")
+            handle.write("PROXMOX_FQDN=mox10.example.com\n")
         completed = self.run_config(
             "--check", "--host", "mox10", "--require-secrets", expected=1
         )

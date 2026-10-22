@@ -17,6 +17,18 @@ export interface HostRow {
   is_control: boolean;
   is_probe: boolean;
   ssh_from_here: boolean | null;
+  /** Public-interface transfer this month, read over SSH from this workstation; null if not read. */
+  transfer: HostTransfer | null;
+}
+
+/** scripts/host_runtime/transfer_counter.py status: inbound + outbound bytes since the last reset. */
+export interface HostTransfer {
+  total_bytes: number;
+  /** PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB, or null when the host has no limit. */
+  limit_gib: number | null;
+  used_percent: number | null;
+  period_start: string | null;
+  next_reset: string | null;
 }
 
 export interface HostsState {
@@ -51,8 +63,6 @@ interface GuestCommon {
   node: string | null;
   ip: string | null;
   placement: string[];
-  routes: number;
-  routes_enabled: boolean;
   domain: string | null;
   cores: number | null;
   memory_mb: number | null;
@@ -240,3 +250,5 @@ export interface StateSources {
 
 export type SourceId = keyof StateSources;
 export const SOURCE_IDS: SourceId[] = ["list_hosts", "list_guests", "list_replication", "list_storage", "list_disks", "check_qdevice_access"];
+/** The sources read through a cluster member; check_qdevice_access is not one of them. */
+export const CLUSTER_SOURCE_IDS: SourceId[] = SOURCE_IDS.filter((id) => id !== "check_qdevice_access");

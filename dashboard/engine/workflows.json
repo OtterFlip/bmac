@@ -18,7 +18,7 @@
     {
       "id": "list_guests",
       "title": "List guests",
-      "summary": "Production and staging VMs with live state, HA, replication, and routes.",
+      "summary": "Production and staging VMs with live state, HA, replication, and addresses.",
       "description": "Reads the BMAC registry and live Proxmox VM, HA, and replication state through one reachable member.",
       "category": "diagnostics",
       "script": "scripts/user_callable/diagnostics/list_guests.sh",
@@ -30,6 +30,20 @@
           { "value": "production", "label": "Production VMs" },
           { "value": "staging", "label": "Staging VMs" }
         ] }
+      ]
+    },
+    {
+      "id": "list_slots",
+      "title": "List VM slots",
+      "summary": "Every fixed production and staging address, who uses it, its FQDNs, and the Cloudflare DNS records each domain needs.",
+      "description": "Lists the VM slots cluster.conf reserves, the registered guest in each (read from the registry through one reachable host), the FQDNs the Cloudflare Tunnel routes to each slot, and the proxied CNAME records each production domain needs. Changes nothing.",
+      "category": "diagnostics",
+      "script": "scripts/user_callable/diagnostics/list_slots.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "offline", "label": "Use cluster.conf only (don't read the registry)", "type": "flag", "flag": "--offline", "advanced": true }
       ]
     },
     {
@@ -90,7 +104,7 @@
       "id": "show_cluster_state",
       "title": "Full cluster state",
       "summary": "Exhaustive read-only report of every host, the QDevice, and the registry.",
-      "description": "Runs the complete read-only diagnostic snapshot on every reachable host and the QDevice: identity, networking, SSH trust, quorum, services, ISO readiness, HA, replication, ZFS, LUKS, SMART, boot, nftables, HAProxy, and the shared registry. Produces a very long report and takes several minutes.",
+      "description": "Runs the complete read-only diagnostic snapshot on every reachable host and the QDevice: identity, networking, SSH trust, quorum, services, ISO readiness, HA, replication, ZFS, LUKS, SMART, boot, nftables, the guest gateway and egress fallback, the tunnel replica, and the shared registry. Produces a very long report and takes several minutes.",
       "category": "diagnostics",
       "script": "scripts/user_callable/diagnostics/show_cluster_state.sh",
       "mode": "read_only",
@@ -169,7 +183,7 @@
       "id": "add_prod_vm",
       "title": "Add production VM",
       "summary": "Allocate the next prodN, install its OS, replicate it, and enable HA.",
-      "description": "Allocates the next prodN, installs its OS, verifies guest identity and SSH, creates replication to every selected placement host, configures HA, and publishes its routes. It can resume its own incomplete allocation after a failure. Start with a dry run.",
+      "description": "Allocates the next prodN, installs its OS, verifies guest identity and SSH, creates replication to every selected placement host, configures HA, and adds its FQDNs (and its staging slots' FQDNs) to every host's Cloudflare Tunnel config. It can resume its own incomplete allocation after a failure. Start with a dry run.",
       "category": "production",
       "script": "scripts/user_callable/guests/prod/add_prod_vm.sh",
       "mode": "mutating",
@@ -187,7 +201,7 @@
       "id": "remove_prod_vm",
       "title": "Remove production VM",
       "summary": "Permanently destroy a production VM and everything BMAC owns for it.",
-      "description": "Permanently removes one production VM after exact identity validation: routes, HA resource and rule, replication jobs and target copies, the VM and its volumes, orchestration metadata, and its registry allocation. Staging VMs derived from it must be removed first.",
+      "description": "Permanently removes one production VM after exact identity validation: HA resource and rule, replication jobs and target copies, the VM and its volumes, orchestration metadata, and its registry allocation, then removes its FQDNs from the Cloudflare Tunnel config. Staging VMs derived from it must be removed first.",
       "category": "production",
       "script": "scripts/user_callable/guests/prod/remove_prod_vm.sh",
       "mode": "mutating",
@@ -259,14 +273,16 @@
     },
     {
       "id": "deploy_hello_app_to_prod",
-      "title": "Deploy example app",
-      "summary": "Install the example NGINX hello app on a production VM.",
-      "description": "Checks SSH to a production VM, installs or updates NGINX, and configures the production and staging hostnames with your Cloudflare origin certificate. An example deployment, not a general deployer.",
+      "title": "Deploy example todo app",
+      "summary": "Build and install the example todo app on a production VM.",
+      "description": "Builds the example todo app (Rust, SQLite) on this workstation, then installs it on a production VM as a systemd service that serves HTTPS with your Cloudflare origin certificate. Needs the Rust x86_64-unknown-linux-musl target and musl-tools. An example deployment, not a general deployer.",
       "category": "production",
       "script": "scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh",
       "mode": "mutating",
       "destructive": false,
-      "platforms": ["linux", "macos"],
+      "platforms": [
+        "linux"
+      ],
       "params": []
     },
     {
@@ -358,6 +374,21 @@
       "platforms": ["linux", "macos"],
       "params": [
         { "id": "dry_run", "label": "Dry run (show hash drift only)", "type": "flag", "flag": "--dry-run", "default": true }
+      ]
+    },
+    {
+      "id": "sync_cluster_network",
+      "title": "Sync cluster with cluster.conf",
+      "summary": "Push cluster.conf's VM slots, guest gateway, transfer caps, and tunnel settings to every host.",
+      "description": "Shows which hosts differ from cluster.conf and their moxN.conf, then (without dry run) updates the registry's VM slots, the installed cluster.conf, every host's shared guest gateway, egress NAT, fallback routing and transfer cap, revalidates the egress probe targets, reinstalls the tunnel credentials, and brings every tunnel config up to date, restarting replicas one host at a time. Refuses slot changes that would move a registered VM. Rarely needed: run it after editing those settings.",
+      "category": "hosts",
+      "script": "scripts/user_callable/hosts/sync_cluster_network.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "supports_dry_run": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "dry_run", "label": "Dry run (show drift only)", "type": "flag", "flag": "--dry-run", "default": true }
       ]
     },
     {

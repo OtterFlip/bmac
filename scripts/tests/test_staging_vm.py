@@ -411,8 +411,6 @@ assert_not_referenced_by_vm
             "zfs clone",
             "qm create",
             "link_down=1",
-            "--routes-enabled",
-            "REMOTE_HAPROXY_SYNC",
             "qm destroy",
             "qm delsnapshot",
             "defer-cleanup",
@@ -446,11 +444,13 @@ assert_not_referenced_by_vm
             text,
         )
         self.assertIn(
-            "currently expected "
+            "lowest free staging slot of $SOURCE_NAME (currently "
             'stage${STAGING_CANDIDATE_INDEX}${SOURCE_NAME}.'
-            "${SOURCE_PRIMARY_DOMAIN}",
+            "${SOURCE_PRIMARY_DOMAIN})",
             text,
         )
+        self.assertNotIn("routes", text)
+        self.assertNotIn("HAPROXY", text)
         self.assertIn(
             'state = "busy" if row.get("pid") else "ready"',
             text,
@@ -570,7 +570,6 @@ REGISTRY_RESERVED=false
 SNAPSHOT_MAY_EXIST=false
 CLONE_MAY_EXIST=false
 VM_MAY_EXIST=false
-ROUTES_ENABLED=false
 rollback_failed_creation
 """,
         )
@@ -695,25 +694,6 @@ main --dry-run
         self.assertIn("-o volmode=full", create_text)
         self.assertIn('zfs set volmode=dev "$dataset"', create_text)
 
-    def test_route_cleanup_uses_only_discovered_cluster_nodes(self) -> None:
-        completed = self.run_sourced(
-            CREATE_SCRIPT,
-            "APP_HA_STAGING_VM_SOURCE_ONLY",
-            r"""
-declare -a CLEANUP_CALLS=()
-registry_cmd() { CLEANUP_CALLS+=("$*"); }
-CLUSTER_NODES=(mox1 mox2)
-REGISTRY_RESERVED=true
-STAGING_NAME=stage1prod1
-record_deferred_route_cleanup
-printf '%s\n' "${CLEANUP_CALLS[@]}"
-""",
-        )
-        self.assertEqual(completed.stdout.count("--action remove-route"), 2)
-        self.assertIn("--node mox1", completed.stdout)
-        self.assertIn("--node mox2", completed.stdout)
-        self.assertNotIn("--node mox3", completed.stdout)
-
 
 class StagingDryRunTest(unittest.TestCase):
     def test_dry_run_reads_live_state_without_mutation_or_secret_export(
@@ -737,17 +717,17 @@ class StagingDryRunTest(unittest.TestCase):
                         "PRIVATE_SUBNET_CIDR=10.213.0.0/24",
                         "PROXMOX_MIGRATION_NETWORK=10.213.0.240/28",
                         "DATACENTER_PRIVATE_VLAN_GATEWAY=10.213.0.1",
-                        "GUEST_EGRESS_VIP=10.213.0.10/24",
+                        "GUEST_GATEWAY_IP=10.213.0.10",
+                        "GUEST_GATEWAY_MAC=02:00:0a:d5:00:0a",
                         "MOX_IP_START=10.213.0.11",
                         "MOX_IP_END=10.213.0.20",
                         "MOX_REPLICATION_IP_START=10.213.0.241",
                         "MOX_REPLICATION_IP_END=10.213.0.250",
-                        "HAPROXY_IP_START=10.213.0.21",
-                        "HAPROXY_IP_END=10.213.0.30",
-                        "PRODUCTION_IP_START=10.213.0.31",
-                        "PRODUCTION_IP_END=10.213.0.50",
-                        "STAGING_IP_START=10.213.0.51",
-                        "STAGING_IP_END=10.213.0.200",
+                        "VM_SLOT_START=10.213.0.110",
+                        "MAX_PROD_VMS=10",
+                        "MAX_STAGING_VMS_PER_PROD=9",
+                        "CLOUDFLARE_ACCOUNT_ID=0123456789abcdef0123456789abcdef",
+                        "CLOUDFLARE_TUNNEL_ID=00000000-0000-0000-0000-000000000000",
                         "PRODUCTION_VM_TAG=app-ha-production",
                         "STAGING_VM_TAG=app-ha-staging",
                         "EVICTABLE_VM_TAG=evictable",
@@ -783,11 +763,6 @@ class StagingDryRunTest(unittest.TestCase):
                             f"TAILSCALE_HOSTNAME=mox{index}",
                             f"PROXMOX_PUBLIC_MAC=02:00:00:00:00:{index:02x}",
                             f"PROXMOX_SECONDARY_MAC=02:00:00:00:01:{index:02x}",
-                            f"HAPROXY_LXC_VMID={9110 + index}",
-                            f"HAPROXY_LXC_HOSTNAME=haproxy{index}",
-                            f"HAPROXY_LXC_IP=10.213.0.{20 + index}/24",
-                            f"HAPROXY_LXC_GATEWAY=10.213.0.{10 + index}",
-                            f"VRRP_PRIORITY={200 - index}",
                             "MAX_PROD_VM_COUNT_ON_THIS_HOST=1",
                             "MAX_STAGING_VM_COUNT_ON_THIS_HOST=5",
                             "",
@@ -809,19 +784,18 @@ class StagingDryRunTest(unittest.TestCase):
                 "index": 1,
                 "source": None,
                 "vmid": 100,
-                "ip": "10.213.0.31",
+                "ip": "10.213.0.110",
                 "mac": "02:11:22:33:44:55",
                 "state": "active",
                 "purpose": {"slug": "myapp", "source_resource": None},
                 "domains": {
-                    "primary": "myapp.com",
+                    "primary": "example.com",
                     "aliases": [],
-                    "staging_base": "staging.myapp.com",
+                    "staging_base": "staging.example.com",
                 },
                 "placement": ["mox1", "mox2"],
                 "initial_node": "mox1",
                 "owner_node": "mox1",
-                "routes_enabled": True,
                 "spec": {
                     "cores": 4,
                     "memory_mb": 8192,
@@ -1000,7 +974,6 @@ else:
                     "\n"  # default RAM GiB
                     "\n"  # start automatically
                     "\n"  # set up jump SSH
-                    "\n"  # no domain override
                     "\n"  # network enabled
                     "\n"  # no optional sanitizer
                     "GO\n"
@@ -1017,10 +990,10 @@ else:
                 msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
             )
             self.assertIn("Registered production resources", completed.stdout)
-            self.assertIn("myapp.com", completed.stdout)
+            self.assertIn("example.com", completed.stdout)
             self.assertIn("Candidate identity (not reserved)", completed.stdout)
-            self.assertIn("stage1prod1 / 10.213.0.51", completed.stdout)
-            self.assertIn("stage1prod1.myapp.com", completed.stdout)
+            self.assertIn("stage1prod1 / 10.213.0.111", completed.stdout)
+            self.assertIn("stage1prod1.example.com", completed.stdout)
             self.assertIn("NIC link-down: false", completed.stdout)
             self.assertIn("Compute: 2 vCPU / 4 GiB RAM", completed.stdout)
             self.assertIn("Start after creation: true", completed.stdout)

@@ -13,11 +13,16 @@ cleanup.
 
 The platform runs one movable production VM per registered application
 resource. Proxmox HA chooses its physical node; asynchronous ZFS replication
-provides recoverable local storage on every eligible placement node. Each
-physical host owns a fixed, non-HA HAProxy LXC. Cloudflare chooses a public
-origin, HAProxy maps an exact hostname to a fixed guest IP, the shared
-Layer-2 VLAN locates that guest's MAC, and Proxmox HA decides where the guest
-runs. Those decisions are intentionally independent.
+provides recoverable local storage on every eligible placement node. Every
+production and staging VM has a fixed address slot derived from
+`cluster.conf`. Cloudflare sends each request to any connected replica of the
+cluster's one Cloudflare Tunnel (every mox runs one), the replica maps the
+exact hostname to that fixed slot address, the shared Layer-2 VLAN locates the
+guest's MAC, and Proxmox HA decides where the guest runs. Outbound, every mox
+provides the same guest gateway address to the guests running on it. Those
+decisions are intentionally independent. The networking design is described
+in full in [`BMAC_SIMPLIFIED_NETWORKING.md`](BMAC_SIMPLIFIED_NETWORKING.md);
+this document summarizes it and must agree with it.
 
 Run repository commands from the repository root. The scripts are
 interactive, fail closed, and resume only after comparing durable state with
@@ -28,8 +33,11 @@ Executable scripts and the files under [`config/`](../config/) win if prose ever
 conflicts. The checked-in files are a FiberState example, not portable
 defaults. In that example:
 
-- guest egress uses floating `10.213.0.10`, not `.1` or `.3`;
-- `.3` has no forwarding, DNAT, VIP, proxy, or gateway role;
+- guest egress uses the shared gateway `10.213.0.10`, which every mox
+  provides to its own guests, not `.1` or `.3`;
+- `.3` has no forwarding, NAT, gateway, or proxy role;
+- no mox accepts inbound web traffic on its public IP; all public ingress
+  arrives through the cluster's Cloudflare Tunnel;
 - production and staging guests do not run Tailscale;
 - supported host names are slots `mox1` through at most `mox10`, recorded in
   the cluster registry; slots may have gaps and freed slots are reused
@@ -39,7 +47,8 @@ defaults. In that example:
   placement and ownership can be changed
   (`scripts/user_callable/guests/prod/change_prod_vm_placement.sh`,
   `scripts/user_callable/guests/prod/change_prod_vm_owner.sh`);
-- staging Host/SNI routing and generic production creation are implemented;
+- fixed VM slots, staging FQDNs, the tunnel, and generic production creation
+  are implemented;
 - the former legacy design documents have been consolidated into this README
   and removed.
 
@@ -50,8 +59,8 @@ defaults. In that example:
 - [Responsibility boundaries](#responsibility-boundaries)
 - [Names, addresses, VMIDs, and MACs](#names-addresses-vmids-and-macs)
 - [Traffic map and ports](#traffic-map-and-ports)
-- [Cloudflare and HAProxy](#cloudflare-and-haproxy)
-- [Guest egress and VRRP](#guest-egress-and-vrrp)
+- [Cloudflare Tunnel](#cloudflare-tunnel)
+- [Shared guest gateway and egress fallback](#shared-guest-gateway-and-egress-fallback)
 - [Corosync, quorum, and QDevice](#corosync-quorum-and-qdevice)
 - [Host storage, LUKS, and mirrors](#host-storage-luks-and-mirrors)
 - [Configuration, secrets, and artifacts](#configuration-secrets-and-artifacts)
@@ -80,17 +89,21 @@ through `mox10`, and removing them again.
 
 The managed workload roles are:
 
-- `prodN`: one generic production QEMU VM with a fixed private IP and MAC,
-  replicated `local-zfs` storage, a strict HA placement rule, and exact
-  production Host/SNI routes. It is active on one placement node at a time.
-- `stageNprodN`: one production-derived, disposable staging QEMU VM. It is a
-  sparse local ZFS clone on one production standby, is never HA-managed, has
-  `onboot=0`, and can be evicted before production starts on that node.
-- `haproxyN`: one fixed, unprivileged Debian 13 LXC on each `moxN`. It is
-  deliberately local, non-HA, starts before ordinary guests, and fronts exact
-  HTTP Host and TLS SNI routes.
+- `prodN`: one generic production QEMU VM with a fixed slot IP and MAC,
+  replicated `local-zfs` storage, a strict HA placement rule, and its primary
+  and alias FQDNs in the tunnel config. It is active on one placement node at
+  a time.
+- `stageKprodN`: one production-derived, disposable staging QEMU VM in staging
+  slot `K` of `prodN`. It is a sparse local ZFS clone on one production
+  standby, is never HA-managed, has `onboot=0`, and can be evicted before
+  production starts on that node. Its FQDN `stageKprodN.<prod primary domain>`
+  is in the tunnel config whether or not the VM exists.
 - `qdevice`: an external Corosync QDevice reached over Tailscale. It is only a
   quorum voter.
+
+Each mox also runs host-level networking services rather than guests: the
+shared guest gateway and its egress fallback, a transfer counter, and a
+`cloudflared` replica of the cluster's tunnel.
 
 This design provides host-level application availability. It does not create
 an active/active application, synchronous storage, zero-RPO recovery, a
@@ -127,12 +140,17 @@ Do not rely on this architecture until all of these are true:
    destructive storage work, LUKS entry, boot observation, and recovery.
 9. Administrators have Tailscale access to mox hosts and the QDevice, strict
    SSH host keys, and key-based root access. Guests remain off Tailscale.
-10. Cloudflare DNS, load balancing, origin allowlisting, certificates, and
-    application-aware health checks are operated outside these scripts.
-11. ZFS replication is asynchronous. The most recent successful replication
+10. One locally managed Cloudflare Tunnel exists for the cluster, created
+    with `cloudflared tunnel create`, and every production domain is a
+    Cloudflare zone in the same account. Cloudflare DNS records, edge
+    certificates, bot protection, and application-aware health checks are
+    operated outside these scripts.
+11. Every mox can reach Cloudflare over outbound TCP 7844. The tunnel runs
+    over HTTP/2 (TCP), never QUIC, because FiberState throttles inbound UDP.
+12. ZFS replication is asynchronous. The most recent successful replication
     is the recovery point after host loss; writes after it can be lost.
-12. The private `/24` is connectivity, not a trust boundary. Same-subnet
-    packets are switched directly and bypass the `.10` router.
+13. The private `/24` is connectivity, not a trust boundary. Same-subnet
+    packets are switched directly and bypass the `.10` gateway.
 
 ### Administrator workstation: Linux or macOS
 
@@ -227,8 +245,10 @@ free to use GNU-only tools:
 - `scripts/utilities/patch_staging_clone.sh`,
   `scripts/utilities/patch_staging_guest_tree.py`;
 - `scripts/host_runtime/app-ha-guest-role-hook.sh`, `scripts/user_callable/hosts/cluster_setup_prereq.sh`;
-- `scripts/host_runtime/cluster_registry.py`, `scripts/host_runtime/haproxy_routes.py`,
-  `scripts/host_runtime/sync_haproxy_routes.sh`, `scripts/host_runtime/process_deferred_cleanup.sh`.
+- `scripts/host_runtime/cluster_registry.py`, `scripts/host_runtime/process_deferred_cleanup.sh`;
+- `scripts/host_runtime/guest_network.sh`, `scripts/host_runtime/egress_health.py`,
+  `scripts/host_runtime/transfer_counter.py`, `scripts/host_runtime/tunnel_config.py`,
+  `scripts/host_runtime/tunnel_sync.sh`, `scripts/host_runtime/cloudflared_setup.sh`.
 
 `scripts/lib/config.sh` is the one file that runs in both places: every workstation
 script sources it, and the hosts keep their own installed copy.
@@ -255,22 +275,23 @@ macOS limits:
 
 ## Responsibility boundaries
 
-- **Cloudflare** owns public DNS, edge TLS, origin health, and selection among
-  deliberately configured mox public origins. It never starts or moves a VM.
-- **Host nftables** accepts the implemented application path by DNATing only
-  public TCP 80/443 to that host's local HAProxy LXC. A separate nftables
-  ruleset provides guest forwarding and masquerade.
-- **HAProxy** maps an exact HTTP Host or TLS SNI to the registry-selected
-  private guest IP. It does not query Proxmox placement or trigger HA.
+- **Cloudflare** owns public DNS, edge TLS, bot protection, and the choice of
+  which connected tunnel replica carries each request. It never starts or
+  moves a VM.
+- **The `cloudflared` replica on each mox** maps an exact FQDN to its fixed
+  slot address over the private VLAN, using a config that BMAC renders from
+  the registry. It does not query Proxmox placement or trigger HA.
+- **Host nftables** provides the shared guest gateway's isolation from the
+  VLAN, guest forwarding, and masquerade. No mox DNATs any public port.
+- **The egress health service on each mox** decides, for that host alone,
+  whether its guests leave through its own internet connection or another
+  mox's. Nothing is elected and nothing is shared.
 - **The private Layer-2 VLAN** carries backend packets to whichever bridge
   currently owns the guest MAC.
 - **Proxmox HA** is the only production placement/failover authority. Manual
   dual starts or HTTP-driven boot scripts would defeat fencing and quorum.
 - **ZFS replication** supplies asynchronous copies to the allowed placement
   nodes.
-- **Keepalived** chooses the quorate mox that owns the guest egress VIP. VIP
-  ownership is independent of production placement and Cloudflare origin
-  choice.
 - **QDevice** votes on quorum only.
 - **Tailscale** is host/QDevice administration and lower-priority Corosync
   transport only.
@@ -291,19 +312,34 @@ Provider inputs map to configuration as follows:
 
 - the shared private VLAN CIDR and provider-reserved VLAN gateway go in
   `PRIVATE_SUBNET_CIDR` and `DATACENTER_PRIVATE_VLAN_GATEWAY`;
-- the floating guest egress address and the mox, HAProxy, production, and
-  staging allocation ranges go in `GUEST_EGRESS_VIP`, `MOX_IP_START/END`,
-  `HAPROXY_IP_START/END`, `PRODUCTION_IP_START/END`, and
-  `STAGING_IP_START/END`;
+- the shared guest gateway address and MAC, the mox range, and the VM slots
+  go in `GUEST_GATEWAY_IP`, `GUEST_GATEWAY_MAC`, `MOX_IP_START/END`,
+  `VM_SLOT_START`, `MAX_PROD_VMS`, and `MAX_STAGING_VMS_PER_PROD`;
 - each server's public IP, public gateway, prefix length, private NIC
-  address, and iDRAC address go in its `config/moxN.conf`;
+  address, optional transfer cap, and iDRAC address go in its
+  `config/moxN.conf`;
+- the Cloudflare account and tunnel IDs go in `CLOUDFLARE_ACCOUNT_ID` and
+  `CLOUDFLARE_TUNNEL_ID`, and the tunnel secret in `secrets.env`;
 - the provider's IPMI VPN URL and credentials are operator access
   information only and are not consumed by these scripts.
 
 The design currently requires one shared IPv4 `/24`, but its first three
-octets and all usable role allocations within it are configurable. Allocation
-ranges and singleton addresses must not overlap. The mox and HAProxy ranges
-must each contain at least `MAX_MOX_HOSTS` addresses.
+octets and all usable role allocations within it are configurable. Ranges and
+singleton addresses must not overlap. The mox range must contain at least
+`MAX_MOX_HOSTS` addresses.
+
+VM slots are fixed and exist whether or not a VM uses them:
+
+```text
+prodN         VM_SLOT_START + 10*(N-1)     1 <= N <= MAX_PROD_VMS (at most 10)
+stageKprodN   prodN's address + K          1 <= K <= MAX_STAGING_VMS_PER_PROD (at most 9)
+```
+
+`VM_SLOT_START`'s last octet must end in 0, so an address's last digit is the
+staging number (0 for production) and its tens digit identifies the
+production VM. Every slot through `VM_SLOT_START + 10*MAX_PROD_VMS - 1` must
+fall inside `PRIVATE_SUBNET_CIDR` without overlapping any other range or
+address. `GUEST_GATEWAY_MAC` must be a locally administered unicast MAC.
 
 The checked-in example uses `10.213.0.0/24` with these assignments:
 
@@ -311,12 +347,11 @@ The checked-in example uses `10.213.0.0/24` with these assignments:
 10.213.0.0        network address
 10.213.0.1        FiberState-reserved; not used as a route or gateway here
 10.213.0.2-.9     reserved; .3 has no special role
-10.213.0.10       Keepalived guest-egress VIP
+10.213.0.10       shared guest gateway, provided by every mox to its own guests
 10.213.0.11-.20   mox1 through mox10
-10.213.0.21-.30   haproxy1 through haproxy10
-10.213.0.31-.50   prod1 through prod20
-10.213.0.51-.200  dynamically allocated staging guests
-10.213.0.201-.240 reserved for future use
+10.213.0.21-.109  reserved for future use
+10.213.0.110-.209 VM slots: prod1 through prod10, each followed by its 9 staging slots
+10.213.0.210-.240 reserved for future use
 10.213.0.241-.250 cluster dedicated migration/replication IPs for mox1 through mox10
 10.213.0.251-.254 reserved for future use
 10.213.0.255      broadcast
@@ -328,11 +363,7 @@ For host index `N`, addresses are derived from the configured range starts:
 host name                 moxN
 internal FQDN             moxN.pve.internal
 host private IP           MOX_IP_START+(N-1), with the private /24 prefix
-fixed proxy name          haproxyN
-fixed proxy IP            HAPROXY_IP_START+(N-1), with the private /24 prefix
-fixed proxy gateway       MOX_IP_START+(N-1)
-fixed proxy VMID          9110+N
-VRRP priority             200-N
+egress fallback table     200+N, fwmark 0x100+N (used by every other mox)
 ```
 
 `PROXMOX_INTERNAL_DOMAIN` controls the private suffix and must end in
@@ -346,120 +377,125 @@ The checked-in non-secret example host definitions are:
 
 ```text
 mox1
-  FQDN/public:   mox1.myapp.com, 38.46.219.67/29 via 38.46.219.65
+  FQDN/public:   mox1.example.com, 38.46.219.67/29 via 38.46.219.65
   private:       10.213.0.11/24
-  HAProxy:       haproxy1, 10.213.0.21/24 via .11, VMID 9111
-  VRRP/iDRAC:    priority 199, iDRAC 10.20.3.63
+  iDRAC:         10.20.3.63
   storage input: one mandatory NVMe mirror pair
 
 mox2
-  FQDN/public:   mox2.myapp.com, 38.129.137.234/28 via 38.129.137.225
+  FQDN/public:   mox2.example.com, 38.129.137.234/28 via 38.129.137.225
   private:       10.213.0.12/24
-  HAProxy:       haproxy2, 10.213.0.22/24 via .12, VMID 9112
-  VRRP/iDRAC:    priority 198, iDRAC 10.20.4.119
+  iDRAC:         10.20.4.119
   storage input: one mandatory NVMe mirror pair
 ```
 
 Only `mox1.conf` and `mox2.conf` currently exist. Adding `moxN` requires its
 `config/moxN.conf`; setup recommends the lowest slot the registry records as
-free, and every address derives from the slot number, so gaps are safe. The VRRP
-configuration on every installed candidate nevertheless lists all other
-addresses through configured `MAX_MOX_HOSTS=10`.
+free, and every address derives from the slot number, so gaps are safe. The
+egress fallback tables on every installed mox nevertheless cover every other
+slot through configured `MAX_MOX_HOSTS=10`.
 
 Production identity is deterministic:
 
-- the first free production name is `prodN`, where `1 <= N <= 20`;
-- its address is `.30+N`, so `prod1` is `.31` and `prod20` is `.50`;
+- the first free production name is `prodN`, where
+  `1 <= N <= MAX_PROD_VMS`;
+- its address is its slot, `VM_SLOT_START + 10*(N-1)`, so in the example
+  `prod1` is `.110` and `prod10` is `.200`;
 - an arbitrary application/workload purpose slug is globally unique among
   production resources, becomes a recognizable `purpose-<slug>` tag, and is
   the production creator's resume key rather than a role selector;
 - the registry chooses a deterministic locally administered unicast MAC from
   the registry UUID and resource name;
 - VMID comes from a live `/cluster/nextid` search and excludes all live and
-  registered VMIDs plus `9111-9120`.
+  registered VMIDs.
 
 Staging identity is source-relative:
 
-- the first unused positive suffix produces `prodNs1`, `prodNs2`, and so on;
-- the registry allocates the first free address in `.51-.200`;
-- the default route is
-  `stageNprodN.<source-primary-FQDN>` (for example,
-  `stage1prod1.mydomiain.com`); an operator may request one other
-  exact FQDN;
+- the lowest free staging number `K` of the source, in
+  `1..MAX_STAGING_VMS_PER_PROD`, produces `stage1prodN`, `stage2prodN`, and
+  so on;
+- its address is the fixed slot `prodN + K`;
+- its FQDN is always `stageKprodN.<source-primary-FQDN>` (for example,
+  `stage1prod1.example.com`); there is no override. That FQDN is already in
+  every replica's tunnel config, so creating or removing a staging VM changes
+  no network state;
 - the staging MAC uses the same deterministic registry formula;
-- name, VMID, IP, MAC, source, placement, route, volume, and snapshot
+- name, VMID, IP, MAC, source, placement, domain, volume, and snapshot
   dependency remain one validated identity. The QEMU `net0` MAC and guest
   netplan MAC must match it exactly.
 
 ## Traffic map and ports
 
-### Public HTTP ingress
+### Public ingress through the Cloudflare Tunnel
 
 ```text
 client
-  -> Cloudflare edge
-  -> selected moxN public IPv4:80
-  -> nftables DNAT, public IP TCP 80 -> haproxyN:80
-  -> HAProxy exact, lowercased HTTP Host map
-  -> registered prodN/stageNprodN private IP:80
-  -> guest web server/application
-```
-
-HAProxy sets `X-Forwarded-Proto: http` and uses `option forwardfor` for HTTP.
-An unknown Host receives a deliberate 404. Port 80 can support redirects and
-ACME HTTP-01, but certificate issuance is outside the generic creators.
-
-### Public HTTPS ingress
-
-```text
-client
-  -> Cloudflare edge TLS
-  -> new origin TLS connection to selected moxN public IPv4:443
-  -> nftables DNAT, public IP TCP 443 -> haproxyN:443
-  -> HAProxy ClientHello inspection and exact, lowercased TLS SNI map
-  -> registered prodN/stageNprodN private IP:443
+  -> Cloudflare edge (Always Use HTTPS, edge TLS, bot protection)
+  -> one connected cloudflared replica, chosen by Cloudflare
+     (an existing outbound HTTP/2 connection from some moxM to Cloudflare)
+  -> exact FQDN lookup in /etc/cloudflared/config.yml
+  -> https://<prodN/stageKprodN slot address>:443 over the private VLAN,
+     verified with originServerName = that FQDN
   -> guest terminates origin TLS
 ```
 
-HAProxy is in TCP mode on 443. It does not decrypt origin TLS and does not use
-PROXY protocol. Unknown or absent SNI is sent to a disabled reject backend.
-Cloudflare headers inside the TLS stream reach the guest unchanged; the
-application must trust client-IP headers only after proving the request came
-through the controlled Cloudflare/HAProxy path.
+No mox listens on, or DNATs, any public port for web traffic. Each replica
+keeps outbound TCP connections to Cloudflare on port 7844, pinned to
+`protocol: http2`. The guest may run on any mox, not only on the one whose
+replica carried the request. An FQDN that is not in the config receives the
+catch-all `http_status:404`. While a staging slot has no VM, its FQDN gets a
+Cloudflare error page because the replica cannot reach the slot address.
+Cloudflare headers reach the guest as request headers; the application must
+trust client-IP headers only after proving the request came through the
+controlled Cloudflare/tunnel path.
 
-### Ingress return path and proxy egress
+### Ingress return path
 
 ```text
-guest -> haproxyN -> moxN fixed private IP -> moxN public interface
-      -> conntrack reverse-DNAT -> Cloudflare -> client
+guest -> moxM private IP (the replica's VLAN address) -> cloudflared on moxM
+      -> the replica's existing connection -> Cloudflare -> client
 ```
 
-`haproxyN` always uses its local `moxN` `.11-.20` address as its default
-gateway. Host nftables masquerades traffic sourced by that LXC through the
-same public interface. This preserves the public host's conntrack return path.
-The proxy must never use `.10`, `.1`, or `.3` as its gateway.
-
-The same LXC masquerade path is used for Debian/HAProxy package egress. A
-backend on another mox is reached directly across the private VLAN; HAProxy
-does not route through the guest egress VIP.
+The guest's client is the replica's private `.11-.20` address on the same
+`/24`, so the reply is switched directly back over the VLAN. The return path
+never involves NAT, conntrack on another mox, or the guest's default gateway.
 
 ### Production and staging Internet egress
 
 ```text
-prodN/stageNprodN (.31-.200)
-  -> default gateway 10.213.0.10
-  -> current Keepalived owner
+prodN/stageKprodN (VM slot range)
+  -> default gateway 10.213.0.10 (GUEST_GATEWAY_MAC)
+  -> bmacgw0 on the mox the guest is running on
+  -> ip rule iif bmacgw0 -> route table 200 (guest-egress)
   -> nftables forward
-  -> masquerade/SNAT through that owner's public IPv4
+  -> masquerade through that mox's own public IPv4
   -> Internet
 ```
 
-The nftables source range is exactly `.31-.200`. Return packets are admitted
-only as established/related traffic for this ruleset. The project does not
-restrict guest destination ports in this NAT layer; guest/Proxmox firewall
-policy must impose any egress controls. External egress allowlists need every
-possible mox public IP. There is no DNAT to `.10`, no forwarding through `.3`,
-and no provider-gateway dependency on `.1`.
+Every mox holds `.10` and `GUEST_GATEWAY_MAC` on its own gateway interface,
+and bridge rules keep both off the VLAN, so a guest's ARP for `.10` is
+answered only by the mox it runs on. The masquerade source set is exactly the
+VM slot range plus the mox private range. Return packets are admitted only as
+established/related traffic for this ruleset. The project does not restrict
+guest destination ports in this NAT layer; guest/Proxmox firewall policy must
+impose any egress controls. External egress allowlists need every possible
+mox public IP. There is no DNAT to `.10`, no forwarding through `.3`, and no
+provider-gateway dependency on `.1`.
+
+### Egress fallback path
+
+```text
+guest on moxA (whose own internet connection is down)
+  -> 10.213.0.10 on moxA
+  -> route table 200, default via moxB's private address
+  -> moxB, arriving on vmbr-private (main route table)
+  -> masquerade through moxB's public IPv4
+  -> Internet; replies return from moxB straight to the guest over the VLAN
+```
+
+Traffic a mox receives from another mox over the VLAN always leaves through
+its own connection and is never passed on again, so loops are impossible.
+See [Shared guest gateway and egress fallback](#shared-guest-gateway-and-egress-fallback).
 
 ### Administration and internal control
 
@@ -467,7 +503,7 @@ and no provider-gateway dependency on `.1`.
 - Workstation to Proxmox UI/API: TCP 8006 over Tailscale.
 - SPICE proxy, if used: TCP 3128 on the management path; public TCP 3128 is
   explicitly dropped.
-- Mox to guest: TCP 22 to the guest's private `.31-.200` address. The
+- Mox to guest: TCP 22 to the guest's private slot address. The
   workstation reaches it through a strict mox SSH `ProxyJump`.
 - QEMU Guest Agent checks use the hypervisor channel, not an IP flow.
 - Mox-to-mox orchestration uses strict Proxmox/root SSH trust and Proxmox API
@@ -483,147 +519,219 @@ and no provider-gateway dependency on `.1`.
 - QDevice voting uses TCP 5403 from mox Tailscale identities to the verified
   literal QDevice Tailscale IPv4. TCP 22 to the QDevice is administrative and
   used during setup.
-- Keepalived peers exchange unicast VRRP, IP protocol 112, between mox
-  `.11-.20` addresses on `vmbr-private`.
+- Tunnel replicas connect outbound to Cloudflare on TCP 7844 (HTTP/2) from
+  each mox's public interface. Each replica's metrics and readiness endpoint
+  listens only on `127.0.0.1:20241`.
+- Egress health probes are outbound HTTPS (TCP 443) requests, every 5 seconds
+  per mox, through its own public interface or, marked with a per-host
+  fwmark, through another mox. They never use UDP or ICMP.
 - Secure migration and ZFS replication use the dedicated
   `10.213.0.240/28` transport CIDR. Each mox host has exactly one `.241-.250`
-  address in that CIDR, preventing its normal private address or floating VIP
-  from also matching Proxmox endpoint selection. Proxmox manages their
+  address in that CIDR, preventing its normal private address or the shared
+  gateway address from also matching Proxmox endpoint selection. Proxmox manages their
   data-channel ports; this project pins the network and secure mode
   rather than exposing those channels publicly or over Tailscale.
 - DNS, NTP, package retrieval, certificate issuance, and application API
-  traffic leave guests through the unrestricted `.10` SNAT path unless guest
-  firewall policy narrows them.
+  traffic leave guests through the unrestricted `.10` masquerade path unless
+  guest firewall policy narrows them.
 - iDRAC virtual media, HTTPS console, and boot observation travel only over
   the FiberState IPMI VPN using provider/vendor ports.
 
 The generated first-boot host guard drops packets addressed to the host's
 public IPv4 on TCP 22, 3128, and 8006. Its chain otherwise has policy
-`accept`. The application ingress table adds only TCP 80/443 DNAT. These
+`accept`. Nothing DNATs or forwards inbound public traffic to a guest. These
 specific rules are not a blanket public firewall: audit every listening
 socket, the complete nftables/Proxmox ruleset, IPv6 exposure, and provider
 firewall policy.
 
-## Cloudflare and HAProxy
+## Cloudflare Tunnel
 
-Cloudflare configuration is external and is never mutated by this repository.
-For each production resource:
+All public ingress arrives through one Cloudflare Tunnel per cluster. Its
+design, the Cloudflare setup steps, and the reasons behind them are in
+[`BMAC_SIMPLIFIED_NETWORKING.md`](BMAC_SIMPLIFIED_NETWORKING.md#ingress-one-cloudflare-tunnel-on-every-proxmox-host);
+this section summarizes what the scripts install and rely on.
 
-1. Use the public origin addresses printed by
-   `add_prod_vm.sh`, with the initial/preferred node first. Additional mox
-   origins are an explicit operator decision.
-2. Configure TCP 443 and, while needed, TCP 80. Restrict origins to current
-   Cloudflare source ranges at the provider/host edge; the generated nftables
-   rule does not do that restriction.
-3. Use a monitor Host header that is one of the exact registered domains.
-   Health should traverse Cloudflare, local HAProxy, and the application.
-   A static HAProxy-only 200 does not prove service health.
-4. Keep origin TLS at Full (strict) once a valid guest certificate is present.
-   HAProxy passes TLS to the guest.
-5. Reserve `stageNprodN.<primary-FQDN>` names in DNS. These are first-level
-   names, so `*.example.com` covers values such as
-   `stage1prod1.example.com`.
+The tunnel is created once, by the operator, with `cloudflared tunnel login`
+and `cloudflared tunnel create bmac-<cluster name>` on the workstation. A
+tunnel created that way is *locally managed*: replicas read their FQDN map
+from a local config file, which BMAC owns. (A tunnel created in the
+Cloudflare dashboard is remotely managed and ignores that file, so it cannot
+be used.) The credentials file it writes holds three values, which go in
+BMAC's configuration: `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_TUNNEL_ID` in
+`cluster.conf`, and `CLOUDFLARE_TUNNEL_SECRET` in `secrets.env`. The
+workstation's `cert.pem` is never copied into the checkout or onto a mox.
 
-The wildcard is only DNS/certificate namespace. The registry and renderer
-still publish one exact Host/SNI entry per staging VM. Unknown production and
-staging names never fall through to a default production backend.
+Every mox runs a replica of the tunnel:
 
-Each fixed HAProxy LXC uses the configured starting size of 1 vCPU, 512 MiB
-RAM, and 8 GiB `local-zfs`; increase it only from measured need. The LXC is
-unprivileged, has `onboot=1` and startup order 1, and is not a Proxmox HA
-resource.
+- `scripts/host_runtime/cloudflared_setup.sh` installs `cloudflared` from
+  Cloudflare's apt repository, writes the credentials file
+  `/etc/cloudflared/bmac-tunnel.json` (mode `0640`, readable only by root and
+  the `cloudflared` user) from the account ID, tunnel ID, and the secret read
+  on stdin, and installs `app-ha-cloudflared.service`, which runs
+  `cloudflared tunnel run` as user `cloudflared` under a strict systemd
+  sandbox. The secret never appears in a command line or the journal.
+- `scripts/host_runtime/tunnel_config.py` renders `/etc/cloudflared/config.yml`
+  from the installed `cluster.conf` and the registry's
+  `tunnel-productions` listing (every production guest's name, slot address,
+  primary domain, and aliases, in any state). For each production guest it
+  maps the primary and alias FQDNs, plus
+  `stage1prodN.<primary>` through
+  `stage<MAX_STAGING_VMS_PER_PROD>prodN.<primary>`, to
+  `https://<slot address>:443` with `originServerName` set to that FQDN. A
+  final catch-all returns `http_status:404`. The file sets
+  `protocol: http2`, because `cloudflared`'s default QUIC transport is UDP and
+  FiberState throttles inbound UDP, and serves metrics only on
+  `127.0.0.1:20241`. The file carries a generation hash of its content.
+- `scripts/host_runtime/tunnel_sync.sh` renders the config and installs it
+  where it changed. `--local` updates only this mox; `--all` (the default)
+  updates this mox first and then every other online mox, one at a time,
+  restarting each replica and waiting for it to report ready before moving on,
+  so at least one replica stays connected; `--check` compares this mox's
+  installed and expected generations and exits 1 if they differ.
+  `add_prod_vm.sh` and `remove_prod_vm.sh` run it with `--all`.
+  `app-ha-tunnel-sync.timer` runs `--local` every five minutes on every mox as
+  a backstop for a host that was offline when a production VM was added or
+  removed.
 
-Routes are generated from quorate pmxcfs by the lowest-numbered online mox:
+The tunnel config changes only when a production VM is created or removed, or
+when the slot settings change. Staging creation and removal never touch it.
+The config is rendered on each mox from pmxcfs and `cluster.conf`; it is not
+itself stored in pmxcfs.
 
-1. Read up to 4096 schema-exact routes.
-2. Validate domains, role/name/IP ranges, unique domains and IP ownership, and
-   ports.
-3. Render deterministic HTTP/SNI maps, HAProxy configuration, manifest, and a
-   SHA-256 generation.
-4. Stage and run `haproxy -c` for every online target before changing desired
-   state. A staging failure leaves the previous generation desired and live.
-5. Recheck coordinator identity, node membership, and quorum. Classify each
-   node that needs the new generation. It is compatible when its ingress is
-   enabled, it provably serves a generation pmxcfs authorizes and records as
-   applied, and `haproxy_routes.py compare` proves that generation cannot
-   route any request differently from the candidate. Disable stale public
-   DNAT on every other node that needs the new generation.
-6. Publish the desired generation, per-node state, and bounded allowances for
-   compatible nodes in pmxcfs, then commit, gracefully reload, and mark each
-   target independently.
-7. Re-enable public DNAT only where pmxcfs status or an unexpired allowance,
-   local generation marker, live HAProxy config, and quorum all agree. A node
-   whose DNAT is already loaded only updates its marker.
-8. Withdraw the allowances once every allowed node applied.
+Cloudflare sends each request to the nearest connected replica and offers no
+way to prefer one. It does not matter which mox carries a guest's traffic,
+because every replica reaches every slot over the VLAN. When a mox loses its
+internet connection, its replica's connections drop and Cloudflare uses the
+remaining replicas within seconds. Nothing spreads requests evenly between
+replicas, so one mox may carry most of the ingress, and that traffic counts
+toward its transfer cap.
 
-`compare` reconstructs the previous generation's routes and requires the
-current renderer to reproduce its files byte-for-byte. Any template, schema,
-or hand-edit difference therefore takes the fail-closed path. A transition
-is compatible only when no domain, resource, or backend IP resolves to a
-different target. That covers adding and removing routes, which is every
-staging create/remove; changing a route's backend or reusing an IP for
-another resource is not. Serving a removed route during the window is safe
-because a backend IP is released only after a successful synchronization,
-and success requires every online node to apply the new generation.
+Cloudflare configuration is external and is never mutated by this
+repository; BMAC holds no Cloudflare API token. For each production domain,
+`add_prod_vm.sh` prints the steps, which take a few minutes:
 
-A failure after desired-state publication leaves strict nodes `reject-only`
-or disabled until periodic reconciliation. A compatible node whose commit or
-reload fails restores its previous configuration and keeps serving it until
-its allowance expires, while periodic reconciliation retries; after expiry it
-fails closed. No node serves a known-stale incompatible route, and the
-synchronizer does not globally roll already-current nodes back.
+1. The domain is a Cloudflare zone in the same account as the tunnel.
+2. Add two proxied DNS records, `@` and `*`, both
+   `CNAME <tunnel ID>.cfargotunnel.com`. Cloudflare's free edge certificate
+   covers the domain and one level below it, which includes every
+   `stageKprodN.<domain>`.
+3. Turn on Always Use HTTPS, so no mox ever needs to accept plain HTTP.
+4. For a web app without an API, stay on the free plan and turn on Bot Fight
+   Mode. For a web app with an API under `/api/`, subscribe the domain to
+   Cloudflare Pro, leave Bot Fight Mode off, turn Super Bot Fight Mode on, and
+   add the `/api/` WAF skip rule as the first custom rule. Bot Fight Mode
+   cannot be skipped by any rule, so this is the only way to keep API calls
+   from ever being challenged; see
+   [API traffic and bot protection](BMAC_SIMPLIFIED_NETWORKING.md#api-traffic-and-bot-protection).
+5. Repeat for an alias domain in a different zone.
 
-Each node's own minute timer checks its ingress without the coordinator's
-lock, so it can observe a commit between reload and marker update. It
-therefore authorizes the generation HAProxy actually serves, requiring the
-marker only as proof that ingress was opened, and re-reads pmxcfs and the
-LXC for a few seconds before closing ingress over an inconsistent snapshot.
-Quorum loss still closes it immediately.
-Host-local generation bundles retain at most four directories, protecting the
-desired and active generations. pmxcfs retains eight generation metadata
-records.
+Keep origin TLS valid for every FQDN the guest serves; the replica verifies
+the guest's certificate against `originServerName`. Several BMAC clusters can
+share one Cloudflare account, each with its own tunnel; clusters never share
+a tunnel.
 
 Cloudflare ingress failover and Proxmox VM recovery run at different speeds.
-The surviving origin can be reachable while production is still restarting,
-so temporary backend failures are expected. Do not couple Cloudflare or
-HAProxy to VM placement merely to hide that interval.
+Replicas can be connected while production is still restarting, so temporary
+backend failures are expected. Do not couple the tunnel to VM placement
+merely to hide that interval.
 
-## Guest egress and VRRP
+## Shared guest gateway and egress fallback
 
-Every configured mox installs the same forwarding and SNAT rules, but only a
-healthy quorate candidate may own `10.213.0.10/24`.
+Every production and staging VM has one NIC on `vmbr-private` and uses
+`GUEST_GATEWAY_IP` (`.10`) as its only default gateway. Every mox provides
+that gateway, but only to the guests running on it. Nothing is elected and
+nothing moves between hosts. The full design is in
+[`BMAC_SIMPLIFIED_NETWORKING.md`](BMAC_SIMPLIFIED_NETWORKING.md#egress-the-shared-gateway).
 
-For `moxN`:
+`scripts/host_runtime/guest_network.sh` builds it on each mox from the
+settings file `/etc/app-ha/guest-network.env`, which host setup and the sync
+operation generate from `cluster.conf` and the host's `moxN.conf`:
 
-- state starts as `BACKUP`;
-- priority is `200-N`, from 199 through 190;
-- VRID is 10;
-- advertisement interval is one second;
-- `nopreempt` is enabled, so a recovered higher-priority node does not
-  displace a healthy current owner;
-- unicast peers are all other `.11-.20` addresses through
-  `MAX_MOX_HOSTS`, including configured future candidates not yet joined;
-- the host and Proxmox firewall rules admit only expected VRRP protocol-112
-  source/destination pairs;
-- takeover sends repeated gratuitous ARP: initial delay 1 second, repeat 5,
-  refresh every 60 seconds, refresh repeat 2.
+- **Gateway interface.** A veth pair: `bmacgw0` holds `GUEST_GATEWAY_IP/32`
+  and `GUEST_GATEWAY_MAC`, and its peer `bmacgw0br` is a port of the private
+  bridge. The address and MAC are the same on every mox. A post-up hook on the
+  private bridge re-attaches the veth if a bridge reload detaches it, and the
+  health service checks it as well.
+- **Kept off the VLAN.** The nftables table `bridge app_ha_guest_gateway`, on
+  the physical private-VLAN NIC in both directions, drops ARP about the
+  gateway address and every frame from or to `GUEST_GATEWAY_MAC`. A guest's
+  ARP for `.10` is therefore answered only by its own mox, and the identical
+  address and MAC on every mox never conflict. Mox addresses, VM-to-VM
+  traffic, Corosync, migration, and replication are unaffected.
+- **Outbound NAT.** The table `ip app_ha_guest_egress` accepts forwarding from
+  `bmacgw0` for the VM slot range, and from the private bridge to the public
+  bridge for the slot range and the mox private range, plus
+  established/related replies, and masquerades both sets out the public
+  bridge. It covers every slot from `cluster.conf`, so VM creation and removal
+  never change it.
+- **Routing.** `ip rule iif bmacgw0` selects route table 200 (`guest-egress`),
+  whose default route is normally this mox's own public gateway. Tables
+  201-210, selected by fwmarks `0x101`-`0x10a`, each hold a default route via
+  one other mox's private address, for probing and using that mox as the
+  fallback.
+- **Kernel settings** in `/etc/sysctl.d/91-app-ha-guest-network.conf`:
+  `ip_forward=1`, `rp_filter=2`, `arp_ignore=1`, `arp_announce=2`,
+  `send_redirects=0` (so a mox forwarding a guest's packet to another mox
+  never tells the guest to bypass `.10`), and `nf_conntrack_tcp_loose=1` (a
+  forwarding mox sees only the outbound half of a fallback connection).
+- **Proxmox host firewall** forward-accept rules commented
+  `app-ha managed guest network forward from VM slots` and
+  `... forward from mox hosts`.
+- **Units.** `app-ha-guest-network.service` applies the state at boot, before
+  `pve-guests.service`; the nft rules live in
+  `/etc/nftables.d/app-ha-guest-network.nft`. `guest_network.sh verify`
+  checks every piece.
 
-The readiness script runs every 15 seconds, times out after 6 seconds, falls
-after 3 failures, and rises after 2 successes. It requires:
+Because the gateway MAC is the same everywhere, a live-migrated guest keeps
+sending to it and its traffic continues at once through the destination
+mox's connection. Outbound connections open before a migration break,
+because the public source address changes.
 
-- private and public interfaces up;
-- the expected public IPv4 and default route;
-- `net.ipv4.ip_forward=1`;
-- the guest-egress nftables table, forwarding, established-return, and
-  masquerade rules;
-- no later nftables or iptables forward policy that is detectably `drop`;
-- local Proxmox quorum;
-- successful public egress bound to that host's public address.
+### Egress fallback
 
-VRRP ownership, production placement, and Cloudflare origin selection can all
-be different hosts. Conntrack and public source addresses are not
-synchronized, so established guest egress sessions usually reset on VIP
-takeover. New sessions work after VRRP and ARP convergence.
+`scripts/host_runtime/egress_health.py` runs as
+`app-ha-egress-health.service` on every mox and decides, for that mox only,
+which internet connection its guests use:
+
+1. Every 5 seconds it sends one HTTPS HEAD request to the next target in a
+   rotation of about 39 independent endpoints
+   (`scripts/host_runtime/egress_probe_targets.txt`) through its own public
+   interface, to an address resolved and cached while the connection was
+   healthy. Any HTTP status with a verified certificate within 4 seconds is a
+   success. Probes are TCP only, never UDP or ICMP.
+2. On a failure it tries the following targets, four at a time; the
+   connection counts as down for that check only when every target fails.
+3. After 3 such checks in a row, it points table 200 at the first other mox
+   through which a probe (sent with that mox's `SO_MARK`) reaches the
+   internet, trying them in order starting with the next slot number after
+   its own and wrapping around. While falling back it also installs the
+   raw-prerouting notrack table `app_ha_egress_fallback` and keeps checking
+   both connections.
+4. After 5 good checks of its own connection, it points table 200 back at
+   its own gateway.
+
+A target that fails on its turn while the following targets answer gets a
+strike; a success clears its strikes, and 5 in a row retire it (never below 5
+active targets). Setup and the sync operation validate the shipped list into
+`/var/lib/app-ha/egress-targets.json` and warn when fewer than 15 work.
+Current state, including the fallback in use and retired targets, is in
+`/run/app-ha/egress-health.json` and shown by `egress_health.py status`.
+Switches are logged. The cluster supports up to 10 mox, any of which can be a
+fallback; a mox that is itself falling back cannot carry another's traffic,
+fails the probe, and is never chosen.
+
+### Transfer counter
+
+`scripts/host_runtime/transfer_counter.py`, run every minute by
+`app-ha-transfer-counter.timer`, adds the bytes received and sent on the
+physical public NIC to a monthly count in `/var/lib/app-ha/transfer.json`.
+Tunnel traffic counts too. The optional `moxN.conf` keys
+`PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB` and
+`PROXMOX_HOST_TRANSFER_MONTHLY_RESET_DAY` (1-28, default 1; a larger value is
+treated as 28) set the provider's cap and reset day. The count resets once per
+period and survives reboots and interface-counter restarts. The counter only
+reports; when a provider cuts a capped mox's connection, the tunnel and the
+egress fallback handle it like any other outage.
 
 ## Corosync, quorum, and QDevice
 
@@ -642,8 +750,8 @@ replication: secure,network=10.213.0.240/28
 ```
 
 Tailscale link 1 can preserve cluster communication during a private-link
-failure, but it does not replace the failed migration, replication, VRRP,
-backend, or guest network.
+failure, but it does not replace the failed migration, replication, egress
+fallback, tunnel backend, or guest network.
 
 QDevice parity is mandatory:
 
@@ -818,9 +926,19 @@ compute/storage policy, DNS, public
 administrator keys, Tailscale host tag, and SSH behavior. Each `moxN.conf`
 owns an optional iDRAC address, exact NVMe serial pairs, optional
 manual-inventory byte capacities, public IP/gateway/prefix/MAC, private
-MAC/address, and repeated derived HAProxy/VRRP values that the loader verifies
-rather than trusts. `config.sh` derives each host's application-agnostic
-internal FQDN.
+MAC/address, per-host production and staging VM limits, and the optional
+monthly transfer cap and reset day. `config.sh` derives each host's
+application-agnostic internal FQDN.
+
+The networking part of the address policy is `GUEST_GATEWAY_IP`,
+`GUEST_GATEWAY_MAC`, `VM_SLOT_START`, `MAX_PROD_VMS` (1-10),
+`MAX_STAGING_VMS_PER_PROD` (1-9), `CLOUDFLARE_ACCOUNT_ID`, and
+`CLOUDFLARE_TUNNEL_ID`. The loader validates the slot range against the
+subnet and every other range, and requires each host's
+`MAX_STAGING_VM_COUNT_ON_THIS_HOST` to be no more than
+`MAX_STAGING_VMS_PER_PROD`. After editing the slot, gateway, or Cloudflare
+keys, or a host's transfer cap, push them with
+`scripts/user_callable/hosts/sync_cluster_network.sh`.
 
 Current creation defaults are:
 
@@ -828,9 +946,8 @@ Current creation defaults are:
 production  4 vCPU, 8 GiB RAM, 128 GiB local-zfs root,
             full/refreserved by default, x86-64-v2-AES, replication */15
 staging     2 vCPU, 4 GiB RAM, source root size, sparse local clone
-guests      vmbr-private, static /24, gateway GUEST_EGRESS_VIP,
+guests      vmbr-private, static slot address /24, gateway GUEST_GATEWAY_IP,
             DNS 1.1.1.1 and 1.0.0.1
-HAProxy     1 vCPU, 512 MiB RAM, 8 GiB local-zfs
 ```
 
 Production and staging prompts can override their documented compute choices;
@@ -847,10 +964,15 @@ PROXMOX_ROOT_PASSWORD
 PROD_GUEST_VM_ROOT_PASSWORD
 STAGING_GUEST_VM_ROOT_PASSWORD
 PROXMOX_LUKS_PASSWORD
+CLOUDFLARE_TUNNEL_SECRET
 ```
 
 `IDRAC_USER` and `IDRAC_PASSWORD` are optional unless host setup is run in
-iDRAC/Redfish inventory mode.
+iDRAC/Redfish inventory mode. `CLOUDFLARE_TUNNEL_SECRET` is the tunnel's
+`TunnelSecret`. Host setup and the sync operation copy it to the target mox
+as a mode-`0600` file, feed it to `cloudflared_setup.sh` on stdin, and shred
+the copy on both ends; on the mox it exists only inside the tunnel's
+credentials file.
 
 Secret values are shell-local, never printed, excluded from the public
 configuration hash, and unset before SSH, Python, or builder children whenever
@@ -895,14 +1017,16 @@ print the exact `mkdir -p ... && mv ...` command that moves it into place.
 
 ## The main workflows
 
-There are fourteen operator workflows in this project: six (1-6) that build
+There are fifteen operator workflows in this project: six (1-6) that build
 hosts and create, grow, or remove guests, four (7-10) that grow, shrink, or
 repair a host's storage, three (11-13) that move production between hosts and
-change cluster membership, and one (14) that replaces a failed QDevice:
+change cluster membership, one (14) that replaces a failed QDevice, and one
+(15) that pushes changed networking settings to every host:
 
 1. `scripts/user_callable/hosts/add_proxmox_host.sh` — destructively install or reconcile
    one `moxN`, create or join the cluster, and install storage, networking,
-   QDevice, VRRP, HAProxy, registry, lifecycle, and cleanup services. Read
+   QDevice, the shared guest gateway and egress fallback, the transfer
+   counter, the tunnel replica, registry, lifecycle, and cleanup services. Read
    [`scripts/user_callable/hosts/README.md`](../scripts/user_callable/hosts/README.md). Usage:
 
    ```bash
@@ -921,10 +1045,12 @@ change cluster membership, and one (14) that replaces a failed QDevice:
    ```
 
 3. `scripts/user_callable/guests/prod/remove_prod_vm.sh` — permanently remove one production VM
-   after exact identity and dependency validation. It removes routes, HA and
+   after exact identity and dependency validation. It removes HA and
    affinity, replication and target copies, QEMU config/disks, orchestration,
-   and registry metadata while retaining the shared source ISO cache. Start
-   with the read-only rehearsal:
+   and registry metadata, then removes its FQDNs and its staging slots' FQDNs
+   from every replica's tunnel config (`tunnel_sync.sh --all`), while
+   retaining the shared source ISO cache. It changes nothing in Cloudflare.
+   Start with the read-only rehearsal:
 
    ```bash
    scripts/user_callable/guests/prod/remove_prod_vm.sh --dry-run prodN
@@ -944,8 +1070,9 @@ change cluster membership, and one (14) that replaces a failed QDevice:
    ```
 
 5. `scripts/user_callable/guests/staging/add_staging_vm.sh` — create one
-   disposable, non-HA `stageNprodN` linked clone from a registered active
-   production VM. Read
+   disposable, non-HA `stageKprodN` linked clone from a registered active
+   production VM in that VM's lowest free staging slot. It changes no network
+   or Cloudflare state. Read
    [`scripts/user_callable/guests/staging/README.md`](../scripts/user_callable/guests/staging/README.md). Start with:
 
    ```bash
@@ -956,9 +1083,10 @@ change cluster membership, and one (14) that replaces a failed QDevice:
 
 6. `scripts/user_callable/guests/staging/remove_staging_vm.sh` — interactively select and
    permanently remove one staging VM after exact identity, clone-origin, and
-   snapshot-GUID validation. It removes only that guest's route, VM-owned
+   snapshot-GUID validation. It removes only that guest's VM-owned
    disks, linked clone, one exact source-owned snapshot and its replicated
-   copies, and registry allocation. Start with:
+   copies, and registry allocation, freeing its slot. It changes no network
+   or Cloudflare state. Start with:
 
    ```bash
    scripts/user_callable/guests/staging/remove_staging_vm.sh --dry-run
@@ -1016,8 +1144,10 @@ scripts/user_callable/hosts/inventory_disks.sh --host moxN
    contacted. Either way it chooses a new control node if needed and frees
    the host's registry slot.
    - Graceful removal retires a healthy host that holds nothing: remove the
-     QDevice, power the host off, `pvecm delnode`, strip its SSH trust, and
-     restore odd vote parity. Requires `REMOVE moxN`.
+     QDevice, stop and disable the host's tunnel replica and delete its
+     tunnel credentials, power the host off, `pvecm delnode`, strip its SSH
+     trust, and restore odd vote parity. Nothing changes in Cloudflare; the
+     other replicas keep serving. Requires `REMOVE moxN`.
    - Forced removal deletes a dead host (an offline member, leftover node
      directory, or stale or unfinished slot) that does not answer SSH, after
      the operator agrees to it. It destroys dependent staging, narrows
@@ -1034,6 +1164,22 @@ scripts/user_callable/hosts/inventory_disks.sh --host moxN
    one. `scripts/user_callable/diagnostics/show_qdevice_state.sh` reports whether a QDevice is
    needed, functional, or inaccessible. The full replacement procedure is in
    [`QDEVICE_MANUAL_SETUP.md`](QDEVICE_MANUAL_SETUP.md#replacing-a-failed-qdevice).
+15. `scripts/user_callable/hosts/sync_cluster_network.sh` (the dashboard's
+   "Sync cluster with cluster.conf" tile) — after editing `cluster.conf`'s
+   slot, gateway, or Cloudflare keys, or a host's transfer cap in its
+   `moxN.conf`, bring every online host in line. `--dry-run` shows each
+   host's drift without changing anything. Otherwise, after `GO`, it runs the
+   registry's `update-slots` (refused if any registered guest would move),
+   pushes the installed `cluster.conf`, regenerates each host's
+   guest-network settings from its `moxN.conf` and reruns
+   `guest_network.sh configure` (which also revalidates the probe targets and
+   applies the transfer cap), reinstalls the tunnel credentials, and finally
+   runs `tunnel_sync.sh --all`. It is rarely needed.
+
+   ```bash
+   scripts/user_callable/hosts/sync_cluster_network.sh --dry-run
+   scripts/user_callable/hosts/sync_cluster_network.sh
+   ```
 
 Workflows 11-13 are described in
 [`scripts/user_callable/guests/prod/README.md`](../scripts/user_callable/guests/prod/README.md#changing-placement) and
@@ -1066,9 +1212,11 @@ Every script lives under `scripts/`:
 - `scripts/utilities/` holds scripts that only other scripts run, on the
   workstation or piped or copied to a host for one run.
 - `scripts/host_runtime/` holds the files installed on every Proxmox host:
-  the registry, HAProxy renderer and synchronizer, deferred-cleanup worker,
-  QEMU lifecycle hook, rpool mirror tool, and production ISO tools. Hosts
-  install them under `/usr/local/lib/app-ha-proxmox` in their own layout.
+  the registry, deferred-cleanup worker, QEMU lifecycle hook, guest network
+  and egress health tools, transfer counter, tunnel config renderer,
+  synchronizer, and installer, rpool mirror tool, and production ISO tools.
+  Hosts install them under `/usr/local/lib/app-ha-proxmox` in their own
+  layout.
 - `scripts/tests/` holds every `test_*.py` and the JSON-mode test driver.
 
 All `test_*.py` files use Python's standard `unittest` framework plus mocked
@@ -1094,8 +1242,9 @@ libraries named in their descriptions.
   workstation diagnostic for the QDevice and reachable `mox1` through
   `mox10`. It reports identity, clocks, Tailscale, firewall/listener state,
   Proxmox/Corosync quorum and links, native per-node SSH trust, QDevice
-  state, services, storage/LUKS and SMART health, nftables, HAProxy
-  generations, failed units, the shared registry, and a joined registered/live
+  state, services, storage/LUKS and SMART health, nftables, the shared guest
+  gateway, egress fallback state, transfer count, and tunnel replica, failed
+  units, the shared registry, and a joined registered/live
   production/staging guest inventory that also flags unregistered QEMU VMs. Unreachable
   uninstalled mox slots are reported and skipped. Redirect its output when a
   durable report is useful:
@@ -1108,7 +1257,9 @@ libraries named in their descriptions.
 - `scripts/user_callable/diagnostics/show_prod_vm_state.sh prodN` is a read-only cross-layer
   production guest diagnostic. It checks registry/orchestration state, live
   QEMU identity and power, HA request and strict node-affinity, replication,
-  routes, ZFS allocation, QGA, private networking, and QGA-attested strict
+  its tunnel input (`tunnel-productions`) and the coordinator's
+  `tunnel_sync.sh --check`, ZFS allocation, QGA, private networking, and
+  QGA-attested strict
   root SSH, then prints a `HEALTHY` or `UNHEALTHY` verdict:
 
   ```bash
@@ -1118,7 +1269,9 @@ libraries named in their descriptions.
 
 - `scripts/user_callable/diagnostics/show_proxmox_host_state.sh [--host moxN]` is a read-only report for one
   host: versions, CPU and RAM, quorum, HA and app-ha services, failed units,
-  network and egress VIP ownership, the guests it runs with their registry
+  network, the shared guest gateway, egress mode (own connection or the
+  fallback host) and retired probe targets, transfer this month, the tunnel
+  replica, the guests it runs with their registry
   roles, the production replicas it stores, pending deferred cleanup, and its
   `rpool` layout. `scripts/utilities/host_storage.py` resolves every vdev through LUKS to
   physical disk serials, marks the boot/ESP vdev, and shows device-removal
@@ -1188,7 +1341,11 @@ libraries named in their descriptions.
   `cluster_registry.py`, Proxmox/QEMU/ZFS tools, and the deferred-cleanup
   service; it protects production starts and rejects unsafe staging starts.
 - `scripts/tests/test_add_proxmox_host.py` tests host safety, QDevice parity, resume,
-  storage, and VRRP invariants without installing a host.
+  storage, and networking invariants without installing a host.
+- `scripts/user_callable/hosts/sync_cluster_network.sh` is workflow 15. It
+  runs from the workstation over strict mox SSH and shares
+  `scripts/lib/guest_network_settings.sh` with host setup to render each
+  host's `/etc/app-ha/guest-network.env`.
 - `scripts/tests/test_app_ha_guest_role_hook.py` tests fail-closed production/staging
   admission and cleanup behavior against synthetic Proxmox and registry state.
 - `scripts/host_runtime/prepare_prod_iso.sh` is installed on every mox and atomically
@@ -1231,14 +1388,17 @@ libraries named in their descriptions.
   Tailscale removal, and the optional pre-network sanitizer.
 - `scripts/tests/test_staging_vm.py` tests staging allocation, source-snapshot
   dependency records, safe offline patching, rollback, and read-only dry-run.
-- `scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh` deploys a minimal NGINX HTTPS hello-world
-  site onto one active registry `prodN`. It uses the guest's workstation SSH
-  alias, installs NGINX if needed, writes a Cloudflare Origin CA certificate
-  and key, and configures the registered primary/alias names plus every
-  default `stageNprodN.<primary-domain>` hostname so a later staging clone
-  inherits a usable site. It is a sample application for platform
-  smoke-testing, not a fifth platform workflow. Real applications still use
-  their own deployment tooling:
+- `scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh` deploys the
+  example todo app (`scripts/user_callable/guests/prod/hello_todo/`) onto one
+  active registry `prodN`. It builds a static musl binary on the Linux
+  workstation, copies it with the Cloudflare Origin CA certificate and key
+  over the guest's workstation SSH alias, and installs `hello-todo.service`
+  (enabled at boot, `DynamicUser`, data in `/var/lib/hello-todo`). The app
+  serves HTTPS on port 443 for any hostname, so a later staging clone answers
+  as `stageKprodN.<primary-domain>` unchanged, and keeps at most 100 todos in
+  SQLite behind a JSON API under `/api/v1/`. It is a sample application for
+  platform smoke-testing, not a fifth platform workflow. Real applications
+  still use their own deployment tooling:
 
   ```bash
   scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh
@@ -1248,23 +1408,31 @@ libraries named in their descriptions.
 shared orchestration layer:
 
 - `scripts/lib/config.sh` strictly parses and validates `config/` without evaluating it,
-  derives mox/HAProxy addressing, and supplies strict SSH/ProxyJump helpers; it
-  depends on Bash and ordinary validation/SSH utilities.
+  derives mox addressing and the VM slot range, and supplies strict
+  SSH/ProxyJump helpers; it depends on Bash and ordinary validation/SSH
+  utilities.
 - `scripts/host_runtime/cluster_registry.py` owns schema-validated, secret-free pmxcfs metadata,
-  deterministic IP/MAC allocation, mutation locking, cleanup records, ingress
-  status, and reconciliation; it uses the Python standard library and, for
-  live reconciliation, `pvesh`.
-- `scripts/host_runtime/haproxy_routes.py` validates exact registry routes and renders one
-  deterministic reject-by-default HAProxy generation using the Python
-  standard library.
-- `scripts/host_runtime/sync_haproxy_routes.sh` retrieves routes through a coordinator,
-  validates every online target before publishing desired state, and keeps
-  stale or partially committed targets fail-closed until reconciliation; it
-  depends on `config.sh`, the registry/renderer, SSH, `pvesh`/`pct`, `jq`,
-  `tar`, nftables, and HAProxy inside each LXC.
+  fixed-slot IP and deterministic MAC allocation, mutation locking, cleanup
+  records, the `tunnel-productions` listing, slot-setting changes
+  (`update-slots`), and reconciliation; it uses the Python standard library
+  and, for live reconciliation, `pvesh`.
+- `scripts/host_runtime/guest_network.sh` installs and verifies the shared
+  guest gateway, its bridge isolation rules, egress NAT, routing tables,
+  kernel settings, firewall rules, and the gateway, egress-health, and
+  transfer-counter units (`configure`, `apply`, `ensure-gateway`, `verify`).
+- `scripts/host_runtime/egress_health.py` is the egress health and fallback
+  service, with `validate-targets`, `run`, and `status` commands, and
+  `scripts/host_runtime/egress_probe_targets.txt` is its shipped probe list.
+- `scripts/host_runtime/transfer_counter.py` keeps the monthly public-NIC
+  transfer count.
+- `scripts/host_runtime/tunnel_config.py` renders the deterministic
+  Cloudflare Tunnel config from the registry and `cluster.conf`;
+  `scripts/host_runtime/tunnel_sync.sh` installs it and restarts replicas one
+  host at a time; `scripts/host_runtime/cloudflared_setup.sh` installs
+  `cloudflared`, the credentials file, and the replica service.
 - `scripts/host_runtime/process_deferred_cleanup.sh` is the bounded, idempotent cleanup worker
   run by the installed systemd timer; unsafe or unreachable work stays
-  pending. It depends on `config.sh`, the registry and route synchronizer, plus
+  pending. It depends on `config.sh`, the registry, plus
   Proxmox, QEMU, ZFS, and block-device inspection tools.
 - `scripts/utilities/host_storage.py` collects a read-only JSON layout of one host's
   `rpool` (vdevs, member disk serials through LUKS, the boot/ESP vdev,
@@ -1279,10 +1447,12 @@ shared orchestration layer:
   mirror-addition and member-replacement records on the host;
   `scripts/lib/disk_workflows.sh` holds the workstation plumbing shared by workflows
   6-9.
-- `scripts/tests/test_shared_libs.py`, `scripts/tests/test_haproxy_routes.py`,
-  `scripts/tests/test_process_deferred_cleanup.py`, and `scripts/tests/test_host_storage.py` test
-  configuration, pmxcfs semantics, registry/IPAM, route rendering,
-  transactions, cleanup guards, and `rpool` layout parsing.
+- `scripts/tests/test_shared_libs.py`, `scripts/tests/test_process_deferred_cleanup.py`,
+  and `scripts/tests/test_host_storage.py` test configuration, pmxcfs
+  semantics, registry/slot allocation, transactions, cleanup guards, and
+  `rpool` layout parsing; `scripts/tests/test_guest_network.py`,
+  `scripts/tests/test_egress_health.py`, `scripts/tests/test_transfer_counter.py`,
+  and `scripts/tests/test_tunnel_config.py` test the networking runtime.
 - [`scripts/lib/README.md`](../scripts/lib/README.md) documents direct library interfaces.
 
 `config/` is the only repository configuration layer for these workflows:
@@ -1312,6 +1482,10 @@ The order matters. Do not create guests before host and cluster convergence.
   `cluster.conf`. Configure a public HTTPS production guest OS ISO URL, its
   independently reviewed hash, and either `ubuntu-autoinstall` or `manual`
   install mode.
+- Create the cluster's Cloudflare Tunnel once with `cloudflared tunnel login`
+  and `cloudflared tunnel create bmac-<cluster name>`, and copy its account
+  ID, tunnel ID, and secret into `cluster.conf` and `secrets.env` (see
+  [Cloudflare setup](BMAC_SIMPLIFIED_NETWORKING.md#cloudflare-setup)).
 - Arrange strict workstation SSH trust for `moxN` names and back up the local
   artifacts location securely.
 
@@ -1348,8 +1522,9 @@ header. If a phase fails, correct the condition and rerun the identical
 command; do not skip the phase marker or manually improvise the next step.
 
 After each join, verify membership, exact QDevice parity, private
-migration/replication, VRRP peers, local HAProxy, shared tools, timers, and
-registry health before proceeding.
+migration/replication, the shared guest gateway and egress health, the
+tunnel replica (connected over HTTP/2, config current), shared tools, timers,
+and registry health before proceeding.
 
 ### 4. Create a generic production VM
 
@@ -1360,20 +1535,22 @@ scripts/user_callable/guests/prod/add_prod_vm.sh
 
 Choose at least two online placement nodes with enough CPU, RAM, and
 `local-zfs` capacity. Complete console/QGA/SSH verification, every initial
-replication, the strict HA rule, and route synchronization before application
-handoff.
+replication, the strict HA rule, and the tunnel config update on every host
+before application handoff.
 
 ### 5. Deploy the application and external ingress
 
 The generic creator intentionally stops at an empty Ubuntu application host.
 Deploy the intended application, origin TLS certificate, and health endpoint
-over the private address. Then configure Cloudflare origins/DNS/health checks
-and verify both public paths.
+over the private address. Then follow the Cloudflare steps the creator
+printed for the domain (proxied `@` and `*` CNAMEs to the tunnel, Always Use
+HTTPS, and bot protection) and verify the public path.
 
 For a first HTTPS smoke test after `add_prod_vm.sh` finishes,
-`scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh` installs a minimal NGINX hello-world site on
-one active `prodN`, including `/healthz` and the registered
-production/staging hostnames. It requires a working `ssh prodN` alias from
+`scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh` installs the example todo app on
+one active `prodN` as a systemd service serving HTTPS on port 443. It
+requires a Linux workstation with the Rust `x86_64-unknown-linux-musl` target
+and `musl-tools`, a working `ssh prodN` alias from
 production creation, `curl` on the guest, and a Cloudflare Origin CA
 certificate covering the primary domain and `*.<primary-domain>`. Real
 applications still use their own deployment tooling after the generic VM is
@@ -1395,9 +1572,9 @@ state.
 
 ### 7. Operate and drill the complete system
 
-Monitor quorum, QDevice, VRRP, routes, HAProxy, Cloudflare origins,
-application health, replication age/failures, pool health/capacity, LUKS
-header backups, and pending cleanup. Exercise planned and unplanned recovery
+Monitor quorum, QDevice, each host's egress mode and transfer count, tunnel
+replicas and config drift, application health, replication age/failures,
+pool health/capacity, LUKS header backups, and pending cleanup. Exercise planned and unplanned recovery
 before depending on the platform.
 
 ## Host workflow in detail
@@ -1440,34 +1617,70 @@ resumable:
    through the control node. Link 0 is private, link 1 is
    Tailscale. The workflow reconciles secure migration/replication and
    QDevice parity only while all configured nodes are online.
-8. **Install routing and orchestration.** It installs guest SNAT/VRRP,
-   distributes the shared app-ha libraries and generic lifecycle hook to all
-   online mox nodes, initializes the registry once, installs cleanup and route
-   timers, creates this host's fixed HAProxy LXC, and converges registry
-   routes.
-9. **Verify the end state.** It checks serial-selected mirror membership and
-   ZFS health in both modes; LUKS mode additionally checks encrypted mappers,
-   crypttab/initramfs, and off-host headers. It also verifies no swap, boot
-   state, private address, Tailscale, quorum, HAProxy, nftables, VRRP, hooks,
-   and timers.
+8. **Install orchestration tools** (`install_shared_orchestration_tools`).
+   It distributes `config.sh`, `cluster_registry.py`,
+   `process_deferred_cleanup.sh`, `guest_network.sh`, `egress_health.py`,
+   `egress_probe_targets.txt`, `transfer_counter.py`, `tunnel_config.py`,
+   `tunnel_sync.sh`, `cloudflared_setup.sh`, the generic lifecycle hook, the
+   production ISO tools, and `cluster.conf` to all online mox nodes; installs
+   the deferred-cleanup and tunnel-sync timers; and initializes the registry
+   once.
+9. **Configure the guest network** (`configure_guest_network`). It renders
+   this host's `/etc/app-ha/guest-network.env` and runs
+   `guest_network.sh configure`: the shared gateway veth, bridge isolation
+   and egress nftables, route table 200 and the per-host fallback tables,
+   kernel settings, Proxmox firewall rules, the bridge post-up hook, probe
+   target validation, and the gateway, egress-health, and transfer-counter
+   units.
+10. **Verify the lifecycle guard** (`install_guest_role_hook`). It checks
+    that the hook on local snippet storage, the cleanup worker, the registry,
+    and the production ISO tools are installed and valid.
+11. **Install the tunnel replica** (`configure_tunnel`). The tunnel secret is
+    copied to the host as a mode-`0600` file and shredded on both ends after
+    `cloudflared_setup.sh` writes the credentials file;
+    `tunnel_sync.sh --local` then writes the config and starts
+    `app-ha-cloudflared.service`, and `tunnel_sync.sh --check` must pass.
+12. **Verify the end state** (`final_verify`). It checks serial-selected
+    mirror membership and ZFS health in both modes; LUKS mode additionally
+    checks encrypted mappers, crypttab/initramfs, and off-host headers. It
+    also verifies no swap, boot state, private address, Tailscale, quorum,
+    the host guard, `guest_network.sh verify`, egress health and transfer
+    counter status, an active replica whose recent connections are all
+    `protocol=http2` and never `quic`, `tunnel_sync.sh --check`, hooks, and
+    timers.
 
 Important installed host-local paths and units include:
 
 ```text
 /usr/local/lib/app-ha-proxmox/lib/config.sh
 /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py
-/usr/local/lib/app-ha-proxmox/lib/haproxy_routes.py
-/usr/local/lib/app-ha-proxmox/lib/sync_haproxy_routes.sh
 /usr/local/lib/app-ha-proxmox/lib/process_deferred_cleanup.sh
+/usr/local/lib/app-ha-proxmox/lib/guest_network.sh
+/usr/local/lib/app-ha-proxmox/lib/egress_health.py
+/usr/local/lib/app-ha-proxmox/lib/egress_probe_targets.txt
+/usr/local/lib/app-ha-proxmox/lib/transfer_counter.py
+/usr/local/lib/app-ha-proxmox/lib/tunnel_config.py
+/usr/local/lib/app-ha-proxmox/lib/tunnel_sync.sh
+/usr/local/lib/app-ha-proxmox/lib/cloudflared_setup.sh
 /usr/local/lib/app-ha-proxmox/config/cluster.conf
 /var/lib/vz/snippets/app-ha-guest-role-hook.sh
+/etc/app-ha/guest-network.env
+/etc/nftables.d/app-ha-guest-network.nft
+/etc/sysctl.d/91-app-ha-guest-network.conf
+/etc/cloudflared/bmac-tunnel.json
+/etc/cloudflared/config.yml
+/var/lib/app-ha/egress-targets.json
+/var/lib/app-ha/transfer.json
+/run/app-ha/egress-health.json
 
 app-ha-host-guard.service
-app-ha-guest-egress.service
-keepalived.service
-app-ha-haproxy-ingress.service
-app-ha-haproxy-route-sync.service
-app-ha-haproxy-route-sync.timer
+app-ha-guest-network.service
+app-ha-egress-health.service
+app-ha-transfer-counter.service
+app-ha-transfer-counter.timer
+app-ha-cloudflared.service
+app-ha-tunnel-sync.service
+app-ha-tunnel-sync.timer
 app-ha-deferred-cleanup.service
 app-ha-deferred-cleanup.timer
 ```
@@ -1477,9 +1690,11 @@ move; it is not a custom pmxcfs registry file.
 
 ### Updating the deployed cluster runtime
 
-After changing the registry, HAProxy renderer, deferred cleanup worker, or
-lifecycle hook in this checkout, update their installed copies before running
-a guest workflow:
+After changing the registry, deferred cleanup worker, lifecycle hook, or any
+of the networking runtime files (`guest_network.sh`, `egress_health.py`,
+`egress_probe_targets.txt`, `transfer_counter.py`, `tunnel_config.py`,
+`tunnel_sync.sh`, `cloudflared_setup.sh`) in this checkout, update their
+installed copies before running a guest workflow:
 
 ```bash
 scripts/user_callable/hosts/update_cluster_runtime.sh --dry-run
@@ -1489,12 +1704,17 @@ scripts/user_callable/hosts/update_cluster_runtime.sh
 The updater requires every configured Proxmox node to be online and directly
 reachable from the workstation. It stages and validates the full bundle on
 all nodes before making changes, atomically replaces the installed files and
-local snippet, synchronizes HAProxy routes, verifies hashes and registry
-readability, and restores the prior files if the update fails. It does not
-restart VMs or require existing guests to reattach their hook.
+local snippet (adding any managed file a node lacks; a rollback removes files
+that were absent before), restarts `app-ha-egress-health.service`, runs
+`tunnel_sync.sh --all`, verifies hashes, registry readability, and
+`tunnel_sync.sh --check` on every node, and restores the prior files if the
+update fails. It does not restart VMs or require existing guests to reattach
+their hook. It does not change networking settings; use
+`sync_cluster_network.sh` for those.
 
 Host setup does not create production VMs, replication jobs, HA resources, or
-Cloudflare configuration. Those belong to later workflows.
+Cloudflare DNS or zone configuration. Those belong to later workflows and the
+operator.
 
 ## Production workflow in detail
 
@@ -1513,7 +1733,7 @@ It requires a quorate expected cluster, at least two online nodes,
 Proxmox VE 9.2+, amd64, `local-zfs`, disk-backed `local` ISO storage,
 executable local lifecycle snippets, strict SSH trust, a reviewed
 guest OS HTTPS source URL/hash, and the installed
-registry/synchronizer/ISO preparation tools.
+registry, tunnel synchronizer, and ISO preparation tools.
 
 The script prompts for:
 
@@ -1532,11 +1752,11 @@ The script prompts for:
 - final VM network enabled/disabled policy.
 
 It records the production domain used to derive first-level
-`stageNprodN.<primary-FQDN>` staging names. It live-checks a candidate VMID,
+`stageKprodN.<primary-FQDN>` staging names. It live-checks a candidate VMID,
 then one cluster-wide registry
-mutation reserves `prodN`, an address from `PRODUCTION_IP_START` through
-`PRODUCTION_IP_END`, a deterministic MAC, VMID, purpose, domains, placement,
-and specification.
+mutation reserves the lowest free `prodN` in `1..MAX_PROD_VMS`, its fixed slot
+address, a deterministic MAC, VMID, purpose, domains, placement, and
+specification.
 
 ### Root credentials and autoinstall
 
@@ -1591,9 +1811,9 @@ The production VM is created stopped and outside HA with:
 - QGA with cloned-disk trim, generic production and purpose tags, the generic
   lifecycle hook, `onboot=0`, and installer CD-ROM first in boot order.
 
-Ubuntu uses direct storage layout, exactly one direct ext4 root, a fixed
-`.31-.50/24` address on interface `lan0`, `.10` gateway, configured DNS,
-OpenSSH, QGA, and no Tailscale.
+Ubuntu uses direct storage layout, exactly one direct ext4 root, its fixed
+production slot address (`/24`) on interface `lan0`, `.10` gateway,
+configured DNS, OpenSSH, QGA, and no Tailscale.
 
 An optional `startup.sh` is limited to 256 KiB, must begin with a shebang, and
 runs as root before `network-pre.target`. Its digest and presence are part of
@@ -1634,7 +1854,7 @@ stays enabled throughout install and attestation; only then is requested
 
 Unexpected name, VMID, node, disk identity/size/options/allocation, EFI/Secure
 Boot, NIC/MAC/bridge, CPU/RAM, tags, hook, boot order, HA, replication,
-placement, route, or SSH state causes a closed failure. A missing previously
+placement, domain, or SSH state causes a closed failure. A missing previously
 provisioned VM is never silently recreated.
 
 ### Replication, placement, and HA ordering
@@ -1661,8 +1881,9 @@ After guest verification:
    this VM and every placement node, all at equal priority `1`.
 9. Request HA state `started`, wait until it is started on an allowed node,
    and revalidate effective replication targets.
-10. Record HA/replication metadata, enable exact routes, converge all online
-    HAProxy nodes, and transition `ready` to `active`.
+10. Record HA/replication metadata, run `tunnel_sync.sh --all` so every
+    online replica serves the primary, alias, and `stage1..N` FQDNs, and
+    transition `ready` to `active`.
 
 HA is not enabled before a healthy initial replica exists everywhere.
 `onboot=0` remains correct because Proxmox HA owns startup.
@@ -1679,10 +1900,11 @@ resource, and rule. They release only the orchestration lease and
 known-safe temporary media. Correct the fault and rerun with the same purpose.
 There is intentionally no destructive production rollback.
 
-After completion, the route exists even though no application is deployed.
-An unavailable backend is expected until application code, services, origin
-certificate, and health endpoint are installed. The generic creator never
-deploys application code.
+After completion, the tunnel routes the VM's FQDNs even though no
+application is deployed. Cloudflare shows an error page until application
+code, services, origin certificate, and health endpoint are installed and
+the domain's DNS records point at the tunnel. The creator prints the
+Cloudflare steps for the domain. It never deploys application code.
 
 ## Staging workflow in detail
 
@@ -1731,20 +1953,23 @@ The workstation accepts:
 --start-timeout-seconds N         default 300
 ```
 
-It prompts for source, optional exact domain override, compute sizing, initial
-NIC link-down, an optional sanitizer, and finally whether to start.
+It prompts for source, compute sizing, initial NIC link-down, an optional
+sanitizer, and finally whether to start. There is no domain prompt.
 
-One mutation reserves a fresh `stageNprodN`, `.51-.200` IP, deterministic MAC,
-live-free VMID, one standby placement, inherited purpose/storage/replication
-policy, and exact `stageNprodN.<source-primary-FQDN>` domain. The registry
-chooses the lowest unused `N` in
-`1..MAX_STAGING_VM_COUNT_ON_THIS_HOST`; callers cannot provide a stage number.
+One mutation reserves a fresh `stageKprodN`, its fixed slot address
+(`prodN + K`), deterministic MAC, live-free VMID, one standby placement,
+inherited purpose/storage/replication policy, and the exact
+`stageKprodN.<source-primary-FQDN>` domain. The registry chooses the lowest
+unused `K` of that source in `1..MAX_STAGING_VMS_PER_PROD`; callers cannot
+provide a stage number. Separately, the standby's
+`MAX_STAGING_VM_COUNT_ON_THIS_HOST` limits how many staging VMs that host
+runs.
 
 Creation then:
 
 1. Transitions to `snapshotting`.
 2. Records a unique
-   `stg-base-stageNprodN-<short-UTC>` intent in pmxcfs, including the source owner,
+   `stg-base-stageKprodN-<short-UTC>` intent in pmxcfs, including the source owner,
    root volume, all snapshotted source volumes, one dependent resource, and
    refcount 1, before touching Proxmox.
 3. Runs a named `qm snapshot` with `vmstate=0`; raw target-only snapshots and
@@ -1786,7 +2011,8 @@ symlink or non-regular substitutions, and:
 
 - changes hostname and `/etc/hosts`;
 - removes existing netplan and installs static `lan0` matched to the exact
-  registry MAC, `.51-.200/24`, `.10` gateway, and configured DNS;
+  registry MAC, its staging slot address (`/24`), `.10` gateway, and
+  configured DNS;
 - replaces only the root shadow hash with the new staging console password;
 - clears machine-id, cloud-init state/logs/network fragments, DHCP and network
   leases, and existing SSH host keys;
@@ -1819,29 +2045,28 @@ outbound behavior. Link-down is the safe default whenever those cannot be
 proven sanitized, even though the interactive script's prompt defaults to an
 enabled link if the operator answers no.
 
-### Route, start, and rollback
+### Start and rollback
 
-After offline validation, the creator enables one exact staging route and
-converges HAProxy. Declining the final start leaves a valid routed, stopped
-VM. If production has moved onto the staging node, the creator leaves staging
-stopped. A hook-refused or timed-out optional start also preserves the valid
-stopped environment.
+After offline validation there is nothing to route: the staging FQDN has
+been in every replica's tunnel config since the source production VM was
+created, so it reaches the slot as soon as the VM's web server answers.
+Declining the final start leaves a valid stopped VM. If production has moved
+onto the staging node, the creator leaves staging stopped. A hook-refused or
+timed-out optional start also preserves the valid stopped environment.
 
-Before route/creation commit, an error trap tries in this order:
+Before creation commit, an error trap tries in this order:
 
 1. stop and destroy only a VM whose exact identity/tags/disks match;
 2. prove the VM absent, then destroy only the unreferenced clone with the
    expected snapshot origin;
 3. delete the source-owned Proxmox snapshot;
 4. trigger replication and prove every tracked snapshot copy absent;
-5. clear/release the registry allocation;
-6. reconverge HAProxy if a route might have existed.
+5. clear/release the registry allocation, freeing the slot.
 
 If any destructive fact is unavailable or ambiguous, the registry resource is
-retained as `cleanup_pending` with routes disabled. Idempotent per-node
-cleanup records preserve the VM, volume, snapshot, and route identities for
-the timer worker. An offline-patch failure never attaches or starts the
-clone.
+retained as `cleanup_pending`. Idempotent per-node cleanup records preserve
+the VM, volume, and snapshot identities for the timer worker. An
+offline-patch failure never attaches or starts the clone.
 
 The retained source snapshot can pin substantial production space. Never
 delete or roll it back, rebuild a replica without it, remove/change its
@@ -1863,16 +2088,17 @@ Before a production start, it:
    allowed placement node, and has exact production/purpose tags;
 2. writes a mode-`0600` start reservation under
    `/run/app-ha-production-starting/<VMID>.reservation`;
-3. discovers local `stageNprodN` VMs with staging and evictable tags;
+3. discovers local `stageKprodN` VMs with staging and evictable tags;
 4. validates every candidate before the first stop: unique registry
    UUID/VMID/name, local owner/placement, non-HA state, exact tags, exact
    `scsi0`/fresh EFI identity, verified source snapshot dependency, and
    matching origin and GUID;
 5. force-stops (`qm stop`, a hard power-off) every candidate that is running,
    then verifies that all of them are stopped;
-6. for each candidate, revalidates it, disables its route, and commits a
-   durable cleanup plan: local `destroy-vm` and `destroy-volume` records plus
-   snapshot and route cleanup on every node;
+6. for each candidate, revalidates it, marks an `active` one `stopping`,
+   revalidates again, and commits a durable cleanup plan (local `destroy-vm`
+   and `destroy-volume` records plus `delete-snapshot` on every node) and the
+   `cleanup_pending` state;
 7. returns so production starts, and leaves the production reservation
    through `post-start`.
 
@@ -1906,24 +2132,25 @@ Before a staging start, the hook:
 If a mox hosting production fails:
 
 1. Corosync and QDevice determine quorum and fence/HA authority.
-2. A healthy quorate Keepalived peer can own `.10`; existing NAT sessions
-   normally reset.
-3. Cloudflare independently marks the failed host/HAProxy origin unhealthy and
-   directs new ingress to another origin.
-4. Proxmox HA chooses an eligible node with a replica.
-5. The production pre-start hook force-stops any verified disposable
+2. The failed host's tunnel replica disappears; Cloudflare sends new requests
+   to the remaining replicas within seconds. Nothing else about the gateway
+   or tunnel changes on the survivors.
+3. Proxmox HA chooses an eligible node with a replica.
+4. The production pre-start hook force-stops any verified disposable
    staging on that destination and queues its destruction and cross-node
    cleanup for after production starts.
-6. Proxmox starts production from the most recent successful replica with the
-   same VMID, MAC, private IP, and route.
-7. The private switch relearns the production MAC. Both fixed proxies continue
-   targeting the same private IP; no route-generation change is needed.
-8. Application health eventually restores the Cloudflare origin path.
+5. Proxmox starts production from the most recent successful replica with the
+   same VMID, MAC, and slot address.
+6. The private switch relearns the production MAC. Every replica continues
+   targeting the same slot address; no tunnel config change is needed.
+7. The restarted VM's ARP for `.10` is answered by its new host, so its
+   egress leaves through that host's connection. Outbound sessions from
+   before the failure are gone.
+8. Requests succeed again once the application answers.
 
 The production RPO is replication age; the recovery-time objective includes
 failure detection, fencing/quorum, staging eviction, VM boot, Layer-2/ARP
-convergence, application start, HAProxy checks, and Cloudflare health
-intervals.
+convergence, and application start.
 
 For planned migration, first stop and validate every staging VM on the
 destination. The lifecycle hook is a pre-start safety net, not a migration
@@ -1943,7 +2170,6 @@ production VM has started.
 Pending local records are ordered:
 
 ```text
-remove-route
 destroy-vm
 destroy-volume
 delete-snapshot
@@ -1951,10 +2177,8 @@ remove-replication
 ```
 
 The worker acts only while the resource UUID still matches and the resource
-is `cleanup_pending` with routes disabled:
+is `cleanup_pending`. No cleanup action touches networking or the tunnel:
 
-- `remove-route` batches a quorum-gated HAProxy convergence and marks
-  completion only after success;
 - `destroy-vm` requires exact staging config/tags/disks, non-HA status, safe
   clone identity, force-stops if required, and destroys only the config;
 - `destroy-volume` requires VM absence, expected local ZFS volume/origin/GUID,
@@ -1969,7 +2193,7 @@ is `cleanup_pending` with routes disabled:
 
 Unsafe, unreachable, timed-out, or ambiguous work remains pending. Completion
 is written through typed `reconcile --observed ... --apply`. Once every
-required VM, volume, snapshot, and route record is complete, the worker
+required VM, volume, and snapshot record is complete, the worker
 archives and releases the staging resource. A worker restart can finish from
 completed records without repeating destructive work.
 
@@ -1997,7 +2221,7 @@ Production and staging administration uses the registry private IP through a
 mox jump:
 
 ```bash
-ssh -J root@mox1 root@10.213.0.31
+ssh -J root@mox1 root@10.213.0.110
 ```
 
 Use the actual registry IP and an explicit verified guest host key. The
@@ -2026,19 +2250,13 @@ value `/etc/pve/priv/app-ha`. Every persistent JSON record uses
 ├── policy.json
 ├── resources/
 │   ├── prodN.json
-│   └── stageNprodN.json
+│   └── stageKprodN.json
 ├── orchestration/
 │   └── prodN.json
 ├── deferred-cleanup/
 │   └── cleanup-<24-lowercase-hex>.json
 ├── history/
 │   └── <UTC-without-colons>-<resource>-<8-lowercase-hex>.json
-├── ingress/
-│   ├── desired.json
-│   ├── generations/
-│   │   └── <64-lowercase-hex>.json
-│   └── nodes/
-│       └── moxN.json
 ├── .allocator-lock-owner.json             transient while a mutation holds lock
 └── .<destination-name>.<32-hex>.tmp       transient atomic-write sibling
 
@@ -2056,32 +2274,41 @@ exact.
 `record_type: "policy"` contains:
 
 - immutable registry UUID and creation time;
-- network CIDR and `.10/24` gateway;
-- fixed mox, HAProxy, production, staging, and HAProxy-VMID ranges;
-- limits: max hosts 10, production 20, staging 150, and reservation TTL;
+- `network`: `cidr`, `guest_gateway` (`.10/24`), `mox_host_range`, and
+  `vm_slots` (`start`, `max_production`, `max_staging_per_production`);
+- limits: max hosts 10, `max_production` equal to the slots'
+  `max_production`, `max_staging` equal to
+  `max_production * max_staging_per_production`, and reservation TTL;
 - exact production/staging/evictable tags;
 - production and staging compute/storage/replication defaults;
 - the allowed state-transition graph.
 
-Writer: `cluster_registry.py init`, invoked by host setup, writes it only if
-absent. An existing policy is returned and never silently replaced.
+Writers: `cluster_registry.py init` (`--network`, `--guest-gateway`,
+`--mox-ip-start`, `--mox-ip-end`, `--vm-slot-start`, `--max-production`,
+`--max-staging-per-production`, and defaults), invoked by host setup, writes
+it only if absent. An existing policy is returned and never silently
+replaced. `update-slots`, run by `sync_cluster_network.sh`, is the only
+command that changes it: it replaces `vm_slots` and the derived limits, and
+refuses if any registered guest's address or name would move.
 
-Readers: every registry command validates it; production/staging creators,
-route renderer/synchronizer, lifecycle hook, cleanup worker, reconciliation,
-and operators depend on the resulting policy.
+Readers: every registry command validates it (`list --record-type policy`
+prints it); production/staging creators, the tunnel config renderer,
+lifecycle hook, cleanup worker, reconciliation, and operators depend on the
+resulting policy.
 
-Recovery note: changing `cluster.conf` does not migrate an existing policy.
-Treat any mismatch as an explicit schema/policy migration, not a reason to
-delete this file.
+Recovery note: changing `cluster.conf` does not migrate an existing policy by
+itself. Slot settings are pushed deliberately with `sync_cluster_network.sh`;
+treat any other mismatch as an explicit schema/policy migration, not a
+reason to delete this file.
 
-### `resources/prodN.json` and `resources/stageNprodN.json`
+### `resources/prodN.json` and `resources/stageKprodN.json`
 
 Each `record_type: "resource"` has these exact top-level fields:
 
 ```text
 schema_version, record_type, id, allocation_id, request_fingerprint,
 kind, name, index, source, vmid, ip, mac, state, purpose, domains,
-placement, initial_node, owner_node, routes_enabled, spec, proxmox,
+placement, initial_node, owner_node, spec, proxmox,
 created_at, updated_at, revision
 ```
 
@@ -2101,15 +2328,17 @@ the metadata are identical, and the snapshot is deleted only after the last of
 them has lost its clone.
 
 Writers: only registry mutations write them. Production/staging creators call
-allocate/update/snapshot commands; the lifecycle hook disables routes and
-commits cleanup state; reconciliation can mark an expired VM-less reservation
-failed; release/finalization removes the live record after writing history.
+allocate/update/snapshot commands; the lifecycle hook marks evicted staging
+`stopping` and commits cleanup state; reconciliation can mark an expired
+VM-less reservation failed; release/finalization removes the live record
+after writing history.
 
-Readers: all registry listings/invariant checks, both creators, route
-generation, lifecycle hook, cleanup worker, reconciliation, and operators.
+Readers: all registry listings/invariant checks, both creators,
+`tunnel-productions` (and so the tunnel config renderer), lifecycle hook,
+cleanup worker, reconciliation, diagnostics, and operators.
 
-Uniqueness is cluster-wide for name, VMID, IP, MAC, route domain, allocation
-ID, and production purpose. Allocation IDs and request fingerprints make safe
+Uniqueness is cluster-wide for name, VMID, IP, MAC, domain, allocation ID,
+and production purpose. Every IP is the fixed slot its name implies. Allocation IDs and request fingerprints make safe
 retries idempotent.
 
 ### `orchestration/prodN.json`
@@ -2149,7 +2378,6 @@ destroy-vm       target vm:VMID
 destroy-volume   target STORAGE:vm-VMID-disk-N
 delete-snapshot  target vm-VMID@SNAPSHOT
 remove-replication target VMID-JOB
-remove-route     target prodN or stageNprodN
 ```
 
 Writers: staging rollback and the lifecycle hook enqueue through
@@ -2169,43 +2397,6 @@ the live resource. Reader: `list --record-type history`.
 
 History is an audit trail, not an executable rollback or a backup of Proxmox
 VM/storage state.
-
-### `ingress/`
-
-- `ingress/generations/<64-hex>.json`,
-  `record_type: "haproxy-generation"`, stores generation SHA-256, bundle
-  SHA-256, route count, and creation time.
-- `ingress/desired.json`, `record_type: "haproxy-desired"`, stores the desired
-  generation/bundle/count, every configured `mox1..moxN` in order, timestamps,
-  and revision.
-- `ingress/nodes/moxN.json`,
-  `record_type: "haproxy-node-status"`, stores desired/applied generations,
-  `pending`, `staged`, `applied`, or `reject-only`, timestamps, and revision.
-- `ingress/transition.json`, `record_type: "haproxy-transition"`, present only
-  during a compatible rollout. It names the new generation and, per node, the
-  previous generation that node has durably applied and may keep serving
-  until `expires_at` (at most 600 seconds after the rollout first published;
-  retries keep the original deadline). It is written before `desired.json`,
-  is inert unless its generation equals the desired generation, and is
-  removed by `ingress-finalize` once every allowed node applied.
-
-Writer: the quorum-gated route coordinator through `ingress-begin`,
-`ingress-mark`, and `ingress-finalize`. Readers: `ingress-status`, every local route-reconcile timer,
-the ingress service's current-generation preflight, and operators.
-
-Each node retains a timer so the lowest-numbered online node can take over as
-coordinator after failure. A healthy non-coordinator whose local generation is
-already current ensures its ingress unit is active, then returns without
-delegating a duplicate periodic transaction. Coordinator commits likewise
-queue ingress activation on every updated target. Periodic calls wait at most
-20 seconds for the coordinator lock; host setup uses
-`--lock-timeout 240` because a normal two-node reconciliation can take roughly
-45 seconds and must not fail merely because a timer already holds the lock.
-For a new host, its timer is enabled but not started until its fixed HAProxy
-LXC has been created and the first generation has been applied.
-
-The live maps/configuration and four-generation cache are inside each
-HAProxy LXC under `/etc/haproxy`; they are not pmxcfs files.
 
 ### Transient files and cluster-wide lock
 
@@ -2252,17 +2443,11 @@ media, and LUKS headers stay outside pmxcfs.
 ### Retention
 
 - release history keeps the newest 256 records;
-- ingress metadata keeps the newest eight generation records while always
-  retaining the current desired generation;
-- each HAProxy LXC keeps at most four generation directories, protecting
-  desired and active;
 - deferred cleanup has a hard 4096-record limit;
 - at most 512 completed cleanup records are retained, and a completed record
   is pruned only after its resource UUID is no longer active;
 - current resources remain until validated release/finalization;
-- production orchestration remains until its resource is released;
-- desired ingress and one node-status record per configured mox are replaced
-  in place.
+- production orchestration remains until its resource is released.
 
 ### Recovery and reconciliation
 
@@ -2296,21 +2481,22 @@ sudo /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py \
 
 `--live` projects safe local node/QEMU/volume facts from `pvesh`.
 `--observed` can supply typed, secret-free cluster-wide HA, replication,
-snapshot, route, and cleanup facts. Reconciliation does nothing unless
+snapshot, and cleanup facts. Reconciliation does nothing unless
 `--apply` is supplied. Apply can only:
 
 - mark an expired `reserved`/`provisioning` resource failed when no VM exists;
 - mark explicitly reported, known cleanup IDs completed.
 
 It never creates, starts, stops, moves, destroys, adopts, or repairs Proxmox
-resources. After quorum/metadata recovery, validate `list`, `ingress-status`,
-and `reconcile --live`, then rerun route sync and the cleanup worker.
+resources. After quorum/metadata recovery, validate `list`,
+`list --record-type policy`, `tunnel-productions`, and `reconcile --live`,
+then rerun `tunnel_sync.sh --all` and the cleanup worker.
 
 Malformed or missing current records have no generic auto-restore path.
 Freeze mutating workflows, preserve forensic copies, restore only from a
 known-good Proxmox/pmxcfs backup or a verified quorate source, validate every
-schema/invariant, and reconcile live infrastructure before re-enabling
-ingress. Release history alone is insufficient.
+schema/invariant, and reconcile live infrastructure before syncing the tunnel
+config again. Release history alone is insufficient.
 
 ### Standard pmxcfs files touched or read
 
@@ -2331,8 +2517,6 @@ Proxmox-owned pmxcfs records:
   indirectly through `pvecm`/cluster APIs. The project never hand-edits it.
 - `/etc/pve/storage.cfg`: read and, when necessary, updated through `pvesm` to
   ensure local snippet content; never hand-edited.
-- `/etc/pve/nodes/moxN/lxc/<9110+N>.conf`: written/read through `pct` for the
-  fixed HAProxy LXC (`9111` through `9120`).
 - `/etc/pve/nodes/<owner>/qemu-server/<VMID>.conf`: written/read through
   `qm`/`pvesh` for production and staging QEMU guests; ownership path can move
   with production.
@@ -2343,14 +2527,16 @@ Proxmox-owned pmxcfs records:
 - `/etc/pve/ha/rules.cfg`: written/read through `ha-manager rules` for the
   strict production node-affinity rule.
 - `/etc/pve/nodes/moxN/host.fw`: written/read through the Proxmox API for
-  managed VRRP and guest-forward rules.
+  the managed guest-forward rules (`app-ha managed guest network forward from
+  VM slots` and `... from mox hosts`).
 
 Proxmox owns locking, schema, and permissions for those records. Do not edit
 them as app-ha JSON. The scripts set `firewall=1` on guest NICs but do not
 create a complete per-guest firewall policy. The lifecycle snippet under
-`/var/lib/vz/snippets`, host-local `/run` locks/reservations, local systemd
-units, nftables files, Keepalived config, and HAProxy generations are not
-pmxcfs.
+`/var/lib/vz/snippets`, host-local `/run` locks/reservations and status,
+local systemd units, nftables and sysctl files, guest-network settings,
+egress and transfer state under `/var/lib/app-ha`, and the tunnel
+credentials and config under `/etc/cloudflared` are not pmxcfs.
 
 ## Security invariants
 
@@ -2376,25 +2562,32 @@ pmxcfs.
 
 ### Network exposure
 
-- Public application ingress is only TCP 80/443 through each host's fixed
-  HAProxy LXC. Never DNAT Cloudflare directly to production or staging.
+- Public application ingress is only the Cloudflare Tunnel. No mox listens
+  on, DNATs, or forwards any public port to a guest; never add one.
 - Public TCP 22, 8006, and 3128 are explicitly dropped for the host public
   IPv4. Audit all other IPv4/IPv6 listeners and provider firewall rules; the
   generated chain otherwise accepts.
-- Restrict public 80/443 to Cloudflare source ranges where operationally
-  feasible. This is not implemented by the current host script.
-- Keep Proxmox SSH/UI/API, HAProxy administration, QDevice administration,
-  Corosync fallback, and metrics on management paths. Do not expose HAProxy
-  statistics publicly.
-- Do not expose PostgreSQL or application-internal services through HAProxy
-  unless a separate reviewed route explicitly requires it.
+- Keep Proxmox SSH/UI/API, QDevice administration, Corosync fallback, and the
+  replica's metrics endpoint (`127.0.0.1:20241` only) on management paths.
+- Only FQDNs of registered production guests and their staging slots appear
+  in the tunnel config, each mapped to its own slot's port 443. Do not expose
+  PostgreSQL or application-internal services through the tunnel.
+- The tunnel credentials file is readable only by root and the `cloudflared`
+  user; the replica runs unprivileged under a systemd sandbox. Anyone holding
+  the tunnel secret can run a replica that receives a share of the cluster's
+  traffic, so treat `CLOUDFLARE_TUNNEL_SECRET` like the other secrets, and
+  never copy the workstation's `cert.pem` to a mox or into the checkout.
+- `GUEST_GATEWAY_MAC` and `.10` must never appear on the VLAN; the bridge
+  rules on each host's physical private-VLAN NIC are what keep every host's
+  gateway private to its own guests.
 - The shared `/24` is not isolation. Apply Proxmox per-VM and guest firewall
   policy to prevent staging-to-production database/API access, guest-to-host
   management access, and unnecessary east-west traffic. The current scripts
   set NIC firewall flags but do not install this complete policy.
 - Guest egress currently permits every destination/port after source-range
-  validation. Add least-privilege egress controls for mail, webhooks,
-  payments, cloud APIs, metadata endpoints, and other high-risk integrations.
+  validation, through whichever mox's connection is in use. Add
+  least-privilege egress controls for mail, webhooks, payments, cloud APIs,
+  metadata endpoints, and other high-risk integrations.
 
 ### Identity and access
 
@@ -2413,18 +2606,21 @@ pmxcfs.
 
 ### Ingress and application trust
 
-- Use Cloudflare Full (strict) with a valid guest origin certificate.
-- HTTP mode adds forwarding metadata; TLS mode is passthrough. Sanitize and
-  trust `CF-Connecting-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`, and `Host`
-  only at a controlled application boundary.
-- Unknown Host and SNI must remain reject-by-default. Never add a catch-all
-  production fallback for staging names.
-- Keep HAProxy logs sufficient for route/backend/status/timing diagnosis but
-  avoid authorization headers, cookies, request bodies, tokens, and other
-  sensitive content.
+- Give every guest a valid origin certificate for each FQDN it serves; the
+  replica verifies it against `originServerName`. Keep Always Use HTTPS on
+  for every domain.
+- Cloudflare terminates edge TLS and the replica opens a new TLS connection
+  to the guest, so client identity arrives only in headers. Sanitize and
+  trust `CF-Connecting-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`, and
+  `Host` only at a controlled application boundary.
+- Unknown FQDNs must remain `http_status:404` through the catch-all. Never
+  add a catch-all production fallback for staging names.
+- For a web app with an API, keep the `/api/` WAF skip rule first and Bot
+  Fight Mode off, so API calls are never challenged while web pages keep
+  Super Bot Fight Mode. The application must implement its own API
+  protection.
 - An application health endpoint should test critical service readiness
-  without making an optional dependency trigger unnecessary full-origin
-  failover.
+  without making an optional dependency look like a platform failure.
 
 ### Staging data
 
@@ -2443,62 +2639,78 @@ pmxcfs.
 
 Effect:
 
-- its public origin, fixed HAProxy LXC, host-local staging VMs, and possible
-  `.10` ownership disappear;
+- its tunnel replica, its own gateway, and its host-local staging VMs
+  disappear; Cloudflare sends every request to the remaining replicas;
 - Corosync/QDevice decide whether survivors are quorate;
-- guest egress sessions through that host reset;
+- outbound sessions of guests that ran there are lost;
 - Cloudflare and Proxmox HA recover independently;
 - production restarts from the most recent replica after destination staging
-  eviction.
+  eviction, at the same slot address, and egresses through its new host;
+- any host that was using the failed host as its egress fallback probes
+  again and chooses another.
 
 Recovery:
 
 - do not manually start a second copy;
-- verify fencing/quorum, QDevice votes, one VIP owner, HA placement, replica
-  age, staging cleanup queue, MAC/ARP convergence, backend health, and
-  Cloudflare origin state;
-- after restoring the host, let `nopreempt` keep the current healthy gateway
-  unless a controlled move is required.
+- verify fencing/quorum, QDevice votes, HA placement, replica age, staging
+  cleanup queue, MAC/ARP convergence, backend health, the remaining
+  replicas' connections, and each survivor's egress mode;
+- a restored host's replica reconnects and its tunnel-sync timer brings its
+  config up to date; nothing in Cloudflare changes.
 
-### Guest-egress owner failure without production failure
+### A host's internet connection down or transfer cap reached
 
-Effect: production placement and ingress remain unchanged. Existing
-conntrack-dependent outbound sessions normally reset; a surviving quorate
-candidate acquires `.10` and new sessions use its public IP.
+Effect: production placement does not change. The host's replica loses its
+Cloudflare connections and the other replicas carry its guests' traffic over
+the VLAN. After 3 failed checks (about 15 seconds or more), its egress health
+service points table 200 at another mox whose connection works; open
+outbound connections of its guests break and new ones leave through the
+fallback host's public IP. After 5 good checks of its own connection it
+returns. A host that reaches its provider's transfer cap behaves the same
+once the provider cuts it off.
 
-Recovery: verify exactly one `.10` owner, public egress bound to that owner's
-IP, and external allowlists containing the new source.
+Recovery: check `egress_health.py status` and `transfer_counter.py status`
+on the host, the provider's status, and external allowlists (they must
+already list every mox public IP). With every host disconnected, ingress and
+egress are both unavailable. If one host repeatedly carries most of the
+ingress and reaches its cap, see the transfer-cap caveat under
+[Failover](BMAC_SIMPLIFIED_NETWORKING.md#failover).
 
-### HAProxy LXC or one public origin failure
+### Tunnel replica down
 
-Effect: production and `.10` placement need not change. Cloudflare should use
-another healthy origin. A failed local route-current check removes public
-DNAT rather than serving stale state.
+Effect: if `app-ha-cloudflared.service` stops, crashes, or cannot connect on
+one host, Cloudflare uses the other replicas; ingress is unaffected while at
+least one replica is connected. Egress is unaffected. A replica connected
+over QUIC instead of HTTP/2 risks throttling by FiberState's UDP filter.
 
-Recovery: inspect LXC status, active generation marker, `ingress-status`,
-route-sync service, HAProxy validation/logs, and host nftables. Restore quorum
-and rerun the synchronizer; do not bypass the current-generation preflight.
+Recovery: inspect the unit, its journal (`Registered tunnel connection ...
+protocol=http2`), `http://127.0.0.1:20241/ready`, the credentials file's
+presence and mode, and outbound TCP 7844. Reinstall the credentials with
+`sync_cluster_network.sh` if they were lost or the tunnel was recreated.
 
 ### Production application or VM failure
 
-An application process failure may not be a Proxmox HA failure. HAProxy health
-can fail while the VM remains running, and application service supervision
-and alerts must recover it. A stopped/crashed QEMU resource is governed by
-Proxmox HA according to `max_restart=3` and `max_relocate=1`.
+An application process failure may not be a Proxmox HA failure. The
+application can fail while the VM remains running, and application service
+supervision and alerts must recover it. A stopped/crashed QEMU resource is
+governed by Proxmox HA according to `max_restart=3` and `max_relocate=1`.
 
 Never infer HA success from ping alone. Verify the complete
-Cloudflare-to-HAProxy-to-application response and critical dependencies.
+Cloudflare-to-tunnel-to-application response and critical dependencies.
 
 ### Private VLAN failure
 
-Effect: preferred Corosync link 0, migration, ZFS replication, unicast VRRP,
-cross-host HAProxy backends, guest networking, and direct guest
-administration are impaired. Corosync may remain up on Tailscale link 1, but
-that does not restore the data plane.
+Effect: preferred Corosync link 0, migration, ZFS replication, replicas
+reaching guests on other hosts, egress fallback between hosts, guest
+networking, and direct guest administration are impaired. Corosync may remain
+up on Tailscale link 1, but that does not restore the data plane. A replica
+whose host cannot reach a guest's slot returns an error for that request,
+because Cloudflare cannot tell which replicas can reach which guests.
 
 Recovery: stop membership, migration, staging creation, and placement changes.
 Repair Layer 2 and verify carrier/speed, direct neighbors, MTU, ARP/MAC moves,
-replication, VRRP, and cross-host backend flows before resuming.
+replication, cross-host replica-to-guest flows, and that `.10` and
+`GUEST_GATEWAY_MAC` are still absent from the VLAN before resuming.
 
 ### Tailscale failure
 
@@ -2531,13 +2743,15 @@ loses quorum.
 
 ### Quorum loss
 
-pmxcfs can become non-writable, HA authority is unsafe, route synchronization
-fails closed, and Keepalived readiness should withdraw `.10`.
+pmxcfs can become non-writable and HA authority is unsafe. Registry
+mutations, and so production and staging creation and removal, stop. The
+tunnel replicas keep serving their installed config and every host keeps
+providing its gateway, because neither depends on quorum at run time.
 
 Recover quorum through Corosync/QDevice and provider connectivity. Do not
 force expected votes or manually edit replicated state as an ordinary
-runbook. After quorum returns, reconcile the registry, route generation, VIP,
-HA resources, and cleanup.
+runbook. After quorum returns, reconcile the registry, HA resources, and
+cleanup, and confirm `tunnel_sync.sh --check` on every host.
 
 ### Replication lag, failure, or topology drift
 
@@ -2620,18 +2834,21 @@ actions occurred, repair or replace the staging environment, and explicitly
 verify that networking remains blocked. Do not delete the marker merely to
 make an unsafe non-idempotent script rerun.
 
-### Route-generation partial commit
+### Tunnel config drift
 
-Before desired publication, all targets retain the prior desired generation.
-After publication, a target that cannot commit or prove current is disabled
-or `reject-only`, unless it holds an unexpired compatible-rollout allowance
-and provably serves its allowed previous generation; periodic local
-reconciliation retries through the current lowest online coordinator.
+A host that was offline, or failed during `tunnel_sync.sh --all`, while a
+production VM was added or removed keeps its previous config. It may then
+answer a new production VM's FQDNs with 404, or still route a removed VM's
+FQDNs to a now-empty slot, for the requests Cloudflare happens to send it.
+Staging changes never cause drift. Each host's `app-ha-tunnel-sync.timer`
+renders the config from the registry every five minutes and installs it if
+it changed.
 
-Treat a node that changes liveness during target selection or cannot disable
-stale DNAT as an incident. Restore quorum/connectivity, inspect
-`ingress-status`, run route sync, and verify each node's desired/applied
-generation before re-enabling it.
+Recovery: run `tunnel_sync.sh --check` on each host (or
+`show_prod_vm_state.sh`, which reports the coordinator's), then
+`tunnel_sync.sh --all`. If the slot settings or Cloudflare keys themselves
+differ from `cluster.conf`, use `sync_cluster_network.sh --dry-run` and then
+`sync_cluster_network.sh`.
 
 ### pmxcfs registry corruption or stale lock
 
@@ -2643,20 +2860,30 @@ allocator lock or creator lease is active.
 ### Configuration drift
 
 The strict loader rejects unknown/misplaced keys and formula changes.
-Existing registry policy is immutable. If source config, installed
-`cluster.conf`, registry policy, host runtime, or mox files diverge, stop and
-reconcile deliberately. Copying a new file over only one mox can split
-orchestration behavior.
+Existing registry policy changes only through `update-slots`. If source
+config, installed `cluster.conf`, registry policy, guest-network settings,
+host runtime, or mox files diverge, stop and reconcile deliberately:
+`sync_cluster_network.sh --dry-run` shows networking drift per host, and
+`update_cluster_runtime.sh` brings runtime files in line. Copying a new file
+over only one mox can split orchestration behavior.
 
-### Public-firewall or Cloudflare misconfiguration
+### Cloudflare unavailable or misconfigured
 
-Cloudflare can select a reachable HAProxy whose backend is not yet ready; a
-host can also expose an unrelated listener because the generated guard is
-specific rather than default-deny.
+If Cloudflare itself is unavailable, public ingress is unavailable; there is
+no direct path to any guest. Guest egress is unaffected.
 
-Verify Cloudflare source restrictions, monitor Host, Full (strict), wildcard
-coverage, both origin paths, reject behavior for unknown names, and every
-public listener from a non-Tailscale network.
+A domain whose DNS records do not point at this cluster's tunnel, are not
+proxied, or sit in a different Cloudflare account is not served. A guest
+without a valid origin certificate for the requested FQDN fails the
+replica's TLS check. Bot Fight Mode left on for a web app with an API can
+challenge API calls, because no rule can skip it. A host can also expose an
+unrelated listener because the generated guard is specific rather than
+default-deny.
+
+Verify both CNAMEs and their proxy status, Always Use HTTPS, the
+bot-protection settings and `/api/` rule order, the tunnel's status and
+connected replicas in Cloudflare's Zero Trust dashboard, 404 for unknown
+names, and every public listener from a non-Tailscale network.
 
 ## Operator checks and drills
 
@@ -2668,14 +2895,19 @@ scripts/lib/config.sh --check --host mox1 --require-secrets
 ssh root@mox1 \
   /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py list
 ssh root@mox1 \
-  /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py ingress-status
+  /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py list --record-type policy
+ssh root@mox1 \
+  /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py tunnel-productions
 ssh root@mox1 \
   /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py reconcile --live
 ```
 
 Establish that every resource has one unique name/VMID/IP/MAC/domain/purpose,
-that owner/HA/replication matches live placement, and that cleanup does not
-remain pending without an understood reason.
+that every IP is its name's slot, that the policy's `vm_slots` match
+`cluster.conf`, that owner/HA/replication matches live placement, and that
+cleanup does not remain pending without an understood reason.
+`scripts/user_callable/hosts/sync_cluster_network.sh --dry-run` reports any
+host whose networking settings differ from the configuration.
 
 ### Cluster, QDevice, and data plane
 
@@ -2697,36 +2929,51 @@ Check:
 7. all production replication jobs have recent successful syncs and exact
    placement-minus-owner targets.
 
-### VRRP, NAT, and routes
+### Gateway, egress, and tunnel
 
 On every mox:
 
 ```bash
 ip -4 route show default
 ip -4 address show dev vmbr-private
-systemctl is-active keepalived app-ha-guest-egress.service
-keepalived --config-test --use-file=/etc/keepalived/keepalived.conf
+ip -4 address show dev bmacgw0
+ip rule show
+ip -4 route show table 200
+systemctl is-active app-ha-guest-network.service app-ha-egress-health.service \
+  app-ha-cloudflared.service app-ha-transfer-counter.timer app-ha-tunnel-sync.timer
+/usr/local/lib/app-ha-proxmox/lib/guest_network.sh verify
+python3 -I /usr/local/lib/app-ha-proxmox/lib/egress_health.py status
+python3 -I /usr/local/lib/app-ha-proxmox/lib/transfer_counter.py status
+/usr/local/lib/app-ha-proxmox/lib/tunnel_sync.sh --check
+journalctl -u app-ha-cloudflared.service --since -15min | grep 'Registered tunnel connection'
+nft list table bridge app_ha_guest_gateway
 nft list table ip app_ha_guest_egress
-nft list table inet app_ha_haproxy_ingress
 nft list table inet app_ha_host_guard
 ```
 
 Prove:
 
-- exactly one node owns `10.213.0.10`;
-- all other `.11-.20` peers through max 10 are listed and self is absent;
+- every host holds `10.213.0.10/32` and `GUEST_GATEWAY_MAC` on `bmacgw0`,
+  `bmacgw0br` is a port of `vmbr-private`, and neither the address nor the
+  MAC is seen on the VLAN from another host or from a guest on another host;
+- `ip rule iif bmacgw0` selects table 200, whose default route is the host's
+  own public gateway unless egress is deliberately falling back;
 - every host retains its public default route;
-- guest sources `.31-.200` are forwarded/masqueraded through the current
-  owner;
-- each HAProxy LXC defaults to its local fixed mox address;
-- only public 80/443 is DNATed to the local LXC;
-- public 22/3128/8006 is blocked;
-- no address, nftables rule, Keepalived peer, route, or proxy config references
+- guest sources in the VM slot range are forwarded and masqueraded through
+  the host they run on;
+- egress health reports its own connection in use, enough active probe
+  targets, and no unexpected retired ones;
+- the transfer count is plausible and below any configured cap;
+- every replica is active, its recent connections are `protocol=http2` and
+  never `quic`, and its installed config generation matches the registry;
+- no public port is DNATed or forwarded to a guest, and public
+  22/3128/8006 is blocked;
+- no address, nftables rule, route, or tunnel config references
   `10.213.0.3`.
 
-From every HAProxy LXC, validate the exact generation and reach each active
-backend on TCP 80/443. From outside Tailscale, test unknown Host/SNI rejection
-and public management-port closure.
+From each mox, reach every active guest's slot on TCP 443. From outside
+Tailscale, test that each FQDN reaches the right guest, that an unknown name
+under a domain gets 404, and that public management ports are closed.
 
 ### Storage
 
@@ -2747,14 +2994,16 @@ healthy pool, and one non-empty off-host header backup per member.
 
 For each production resource:
 
-- QEMU identity, strict affinity, HA state, owner, route, and replica set match
-  registry;
-- private IP/MAC persist across planned migration;
-- static `.10` gateway and DNS work;
+- QEMU identity, strict affinity, HA state, owner, tunnel input, and replica
+  set match registry;
+- private slot IP/MAC persist across planned migration;
+- static `.10` gateway and DNS work, and outbound traffic leaves through the
+  public IP of the host the VM runs on;
 - root SSH is key-only through ProxyJump;
 - QGA and optional production-startup completion are healthy;
 - Tailscale is absent;
-- both Cloudflare origins reach the application-aware HTTPS health endpoint.
+- the application-aware HTTPS health endpoint answers through Cloudflare
+  for the primary and every alias FQDN.
 
 For each staging resource:
 
@@ -2770,9 +3019,16 @@ For each staging resource:
 
 Before production reliance, perform controlled drills for:
 
-- VRRP takeover, session reset, and `nopreempt` recovery;
-- loss of each Cloudflare origin and one HAProxy process;
-- unknown Host/SNI rejection and route-sync partial failure;
+- taking each host's public interface down from its iDRAC console: ingress
+  continues through the other replicas and that host's guests' egress falls
+  back through another host and returns afterwards; with three hosts, two
+  down at once;
+- stopping one replica, and a live migration's effect on egress;
+- unknown-FQDN 404 and tunnel config drift caught by the sync timer;
+- for a web app with an API, high-rate `/api/` calls never challenged with
+  Super Bot Fight Mode and Under Attack mode on;
+- a probe target blocked by a temporary nftables rule and retired after 5
+  strikes;
 - planned production migration after clearing destination staging;
 - staging start refusal while production is running or reserved;
 - production-start eviction of running staging plus deferred cleanup;
@@ -2784,8 +3040,11 @@ Before production reliance, perform controlled drills for:
 - sanitizer interruption with networking blocked;
 - one degraded storage member and verified header/ESP recovery.
 
-Record measured Cloudflare, quorum, HA, VM boot, application, replication RPO,
-VRRP, and Layer-2 convergence times. Ping alone is insufficient.
+Record measured replica failover, egress fallback and return, quorum, HA, VM
+boot, application, replication RPO, and Layer-2 convergence times. Ping
+alone is insufficient. The networking drills are the manual test plan in
+[Testing](BMAC_SIMPLIFIED_NETWORKING.md#testing), run on the real FiberState
+cluster.
 
 ## Tests
 
@@ -2800,8 +3059,13 @@ bash -n \
   scripts/user_callable/guests/staging/remove_staging_vm.sh \
   scripts/utilities/patch_staging_clone.sh \
   scripts/lib/config.sh \
-  scripts/host_runtime/sync_haproxy_routes.sh \
-  scripts/host_runtime/process_deferred_cleanup.sh
+  scripts/lib/guest_network_settings.sh \
+  scripts/host_runtime/process_deferred_cleanup.sh \
+  scripts/host_runtime/guest_network.sh \
+  scripts/host_runtime/tunnel_sync.sh \
+  scripts/host_runtime/cloudflared_setup.sh \
+  scripts/user_callable/hosts/sync_cluster_network.sh \
+  scripts/user_callable/hosts/update_cluster_runtime.sh
 ```
 
 Run the complete unit suite, every tracked `test_*.py`, in parallel:
@@ -2838,7 +3102,10 @@ Coverage by test helper:
 
 - `scripts/tests/test_add_proxmox_host.py`: QDevice vote/parity parsing, current ISO
   resume, changed boot ID, destructive confirmations, serial storage
-  selection, strict SSH, VRRP peers/priorities, and host safety invariants.
+  selection, strict SSH, the guest-network and tunnel steps following the
+  runtime install, the tunnel secret never appearing in a command line,
+  final verification requiring HTTP/2 tunnel connections, and host safety
+  invariants.
 - `scripts/tests/test_app_ha_guest_role_hook.py`: exact role identity, no destructive
   authority without registry/HA, staging disk/volume/GUID guards, production
   reservations, stopping every staging guest before queuing any destruction,
@@ -2859,14 +3126,27 @@ Coverage by test helper:
 - `scripts/tests/test_shared_libs.py`: layered config provenance/modes/redaction,
   deterministic allocation, uniqueness, leases/phases, state transitions,
   snapshot dependencies, deferred cleanup, pmxcfs-compatible atomic writes
-  and stale-lock handling, route limits, ingress crash recovery/retention,
+  and stale-lock handling, fixed-slot allocation and `update-slots`,
   history/cleanup bounds, and safe live reconciliation.
-- `scripts/tests/test_haproxy_routes.py`: route schema/ranges/uniqueness, deterministic
-  maps/manifests, reject-only empty config, real `haproxy -c` when available,
-  quorum and partial-commit fail-closed behavior, and fixed local ingress.
-- `scripts/tests/test_process_deferred_cleanup.py`: exact VM/volume/snapshot/route
-  cleanup, offline-source deferral, lifecycle-lock scope, failed route sync,
-  GUID protection, first-host no-op, restart finalization, and syntax.
+- `scripts/tests/test_process_deferred_cleanup.py`: exact VM/volume/snapshot
+  cleanup, offline-source deferral, lifecycle-lock scope, GUID protection,
+  first-host no-op, restart finalization, and syntax.
+- `scripts/tests/test_guest_network.py`: the gateway address and MAC never
+  crossing the private-VLAN port, masquerade of every slot and of handed-over
+  traffic, refusal of invalid settings, the shared settings renderer, and
+  the sync operation's help.
+- `scripts/tests/test_egress_health.py`: the probe rotation, only an
+  all-failing pass counting as down, retirement and its minimum, a dead
+  connection never retiring targets, fallback order, falling back after
+  three failed checks and returning after five good ones, replacing a
+  failing fallback, and staying put when no host works.
+- `scripts/tests/test_transfer_counter.py`: combined inbound and outbound
+  counting, reset day above 28, exactly one reset per period, and reboot or
+  counter-reset handling, with a controlled clock and readings.
+- `scripts/tests/test_tunnel_config.py`: the slot formula, every FQDN of a
+  production guest and its staging slots, one guest per FQDN, the HTTP/2
+  pin and final 404, deterministic generations, the credentials file format
+  and mode, and refusal of invalid input.
 - `scripts/tests/test_host_storage.py`: `zpool status` topology, resilver nesting and
   auxiliary sections, removal progress, LUKS and by-id member resolution to
   disk serials, boot/ESP vdev detection, disks outside `rpool`, registered
@@ -2904,7 +3184,9 @@ Coverage by test helper:
 These tests mock destructive Proxmox, ZFS, iDRAC, QDevice, and network
 behavior. They do not replace real media, 10-Gbps Layer-2, LUKS boot,
 Corosync/quorum, migration, replication, HA, Cloudflare, firewall, application
-health, sanitizer, or full-power-loss drills.
+health, sanitizer, or full-power-loss drills. The tunnel, shared gateway, and
+egress fallback are tested by hand on the real FiberState cluster, following
+[Testing](BMAC_SIMPLIFIED_NETWORKING.md#testing).
 
 ## Deliberate boundaries and future scripts
 
@@ -2917,21 +3199,24 @@ and must not be inferred from registry primitives or old design prose:
   production automatically to balance capacity, and a forced removal never re-adds
   placement hosts on its own.
 - **Cluster status report.** A future read-only `GetClusterStatus` workflow
-  will summarize hosts, tags, quorum/QDevice, VRRP owner, HA guests,
+  will summarize hosts, tags, quorum/QDevice, egress modes, HA guests,
   staging guests, IPs, placement, replication health, and pending cleanup.
-- **Cloudflare automation.** No script creates DNS, wildcard records,
-  certificates, load balancers, origins, health monitors, source allowlists,
-  or failover policy.
+- **Cloudflare automation.** BMAC holds no Cloudflare API token. No script
+  creates the tunnel, zones, DNS or wildcard records, certificates, bot
+  protection settings, or WAF rules; the scripts print the steps.
+- **Even spreading of ingress.** Cloudflare picks the nearest connected
+  replica; no script spreads requests or transfer evenly between hosts.
 - **Generic application deployment.** Production creation installs Ubuntu,
   not an application. Real applications use their own deployment tooling.
-  The sample `scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh` only deploys a hello-world
-  NGINX site for platform smoke-testing.
+  The sample `scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh` only deploys an example todo
+  app for platform smoke-testing.
 - **Backups and point-in-time recovery.** ZFS replication and staging
   snapshots are not backup jobs. No script configures off-cluster backups,
   PostgreSQL PITR, restore testing, or retention.
 - **Monitoring and alerting.** No script deploys metrics/log aggregation or
-  alerts for quorum, QDevice, VRRP, HAProxy, Cloudflare, application health,
-  replication lag, pool capacity, or pending cleanup.
+  alerts for quorum, QDevice, egress fallback, transfer caps, tunnel
+  replicas, Cloudflare, application health, replication lag, pool capacity,
+  or pending cleanup.
 - **Complete network isolation.** The code does not create a staging VLAN,
   routed guest subnets, default-deny per-guest firewall rules, or restricted
   guest egress.
@@ -2940,13 +3225,14 @@ and must not be inferred from registry primitives or old design prose:
   network, capacity, quorum, and failure design.
 - **Active/active production or database HA.** There is one production VM per
   resource and one active owner.
-- **Custom failover controllers.** Cloudflare, Keepalived, and Proxmox HA keep
-  separate authority. No script should start VMs from HTTP health or make
-  QDevice/HAProxy a placement controller.
+- **Custom failover controllers.** Cloudflare, each host's egress health
+  service, and Proxmox HA keep separate authority. No script should start
+  VMs from HTTP health or make QDevice or the tunnel a placement controller.
 - **Guest Tailscale or `.3` forwarding.** Neither is a planned extension of
   this architecture. Guest access remains ProxyJump; egress remains `.10`.
-- **More than ten hosts.** `mox1..mox10` and the fixed
-  address/VMID/priority ranges are hard policy limits.
+- **More than ten hosts, ten production VMs, or nine staging slots per
+  production VM.** `mox1..mox10`, the fallback route tables, and the slot
+  formula are hard policy limits.
 
 Any future implementation must add a reviewed workflow, failure model,
 permissions/locking behavior, tests, and updates to this README before it is
@@ -2957,7 +3243,9 @@ treated as operational.
 Authority order is:
 
 1. current executable scripts and checked-in `config/cluster.conf`/`moxN.conf`;
-2. this comprehensive top-level overview;
+2. this comprehensive top-level overview, together with
+   [`BMAC_SIMPLIFIED_NETWORKING.md`](BMAC_SIMPLIFIED_NETWORKING.md) for the
+   networking design (the two must agree);
 3. scoped detail in [`scripts/user_callable/hosts/README.md`](../scripts/user_callable/hosts/README.md),
    [`scripts/user_callable/guests/prod/README.md`](../scripts/user_callable/guests/prod/README.md),
    [`scripts/user_callable/guests/staging/README.md`](../scripts/user_callable/guests/staging/README.md), and
@@ -2966,25 +3254,23 @@ Authority order is:
 Still-valid explanatory material consolidated from the removed legacy
 documents includes:
 
-- the central separation among Cloudflare origin selection, HAProxy
-  hostname-to-IP routing, Layer-2 MAC location, Proxmox HA placement, QDevice
-  quorum, ZFS replication, and Tailscale management;
+- the central separation among Cloudflare replica selection, tunnel
+  hostname-to-slot routing, Layer-2 MAC location, Proxmox HA placement,
+  QDevice quorum, ZFS replication, and Tailscale management;
 - the critical shared-Layer-2 assumption and need to test MAC/ARP relearning
   after VM movement;
-- complete normal and failure traffic paths, asymmetric-return avoidance, and
-  the distinction between ingress and guest egress;
+- complete normal and failure traffic paths and the distinction between
+  ingress and guest egress;
 - application-aware multi-layer health checks and the warning that ping or a
   static proxy response is not an HA proof;
 - independent Cloudflare and Proxmox failover timing and the expected
   temporary backend-unavailable interval;
-- HTTP forwarded-header and TLS-passthrough source-address implications;
+- forwarded-header source-address implications;
 - wildcard staging DNS versus deeper wildcard certificate coverage;
 - least-privilege exposure, staging isolation, observability, alerting, and
   full-host/reverse-failover drill guidance;
-- fixed non-HA HAProxy sizing/placement and QDevice's deliberately narrow
-  non-application role.
+- QDevice's deliberately narrow non-application role.
 
-The former `proxmox_traffic_map.md` and
-`proxmox_haproxy_ha_design.md` have been removed. Their Git history remains
-available, but no current code or operator procedure depends on those
-filenames.
+The former traffic-map and proxy-HA design documents have been removed.
+Their Git history remains available, but no current code or operator
+procedure depends on them.

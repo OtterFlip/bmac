@@ -151,6 +151,33 @@ class QuickStateTest(unittest.TestCase):
         self.assertEqual(summary["problems"], ["this workstation cannot SSH to mox2"])
         self.assertEqual([step["workflow"] for step in steps], ["show_cluster_health"])
 
+    def test_hosts_show_the_transfer_read_over_ssh(self) -> None:
+        healthy = json.loads(json.dumps(HOSTS_REPORT))
+        healthy["nodes"][0].update(status="online", uptime=10)
+        ssh = self.root / "ssh.tsv"
+        ssh.write_text("mox1\tok\nmox2\tfailed\n")
+        (self.root / "transfer-mox1.json").write_text(json.dumps({
+            "interface": "eno1", "period_start": "2026-09-24", "next_reset": "2026-10-24",
+            "reset_day": 24, "total_bytes": 3559796486, "total_gib": 3.315, "limit_gib": 2000,
+            "used_percent": 0.17, "updated_at": "2026-10-22T04:21:04+00:00"}))
+        # An unreachable host's file, if any, is ignored; an old host prints nothing.
+        (self.root / "transfer-mox2.json").write_text(json.dumps({"total_bytes": 1}))
+        args = ("--ssh-file", str(ssh), "--transfer-dir", str(self.root))
+
+        summary, _, _ = self.render_json("hosts", healthy, *args)
+        mox1, mox2 = summary["hosts"]
+        self.assertEqual(mox1["transfer"], {
+            "total_bytes": 3559796486, "limit_gib": 2000, "used_percent": 0.17,
+            "period_start": "2026-09-24", "next_reset": "2026-10-24"})
+        self.assertIsNone(mox2["transfer"])
+        self.assertIn("3.3 GiB of 2000 GiB", self.render_terminal("hosts", healthy, *args))
+
+        (self.root / "transfer-mox1.json").write_text("")
+        summary, _, _ = self.render_json("hosts", healthy, *args)
+        self.assertIsNone(summary["hosts"][0]["transfer"])
+        summary, _, _ = self.render_json("hosts", healthy)
+        self.assertIsNone(summary["hosts"][0]["transfer"])
+
     def test_guests_report_problems_and_suggest_scoped_workflows(self) -> None:
         summary, steps, _ = self.render_json("guests", GUESTS_REPORT)
         prod = summary["production"][0]

@@ -7,7 +7,7 @@
 # contacted and forcefully when it cannot.
 #
 # Graceful removal is for a healthy host that no production VM, replica,
-# staging VM, HA rule, route, or deferred cleanup depends on. The host is
+# staging VM, HA rule, or deferred cleanup depends on. The host is
 # powered off, deleted from corosync and pmxcfs, the QDevice is reconciled so
 # the vote count stays odd, and the host's registry slot is freed for reuse.
 #
@@ -77,7 +77,7 @@ Graceful removal, for an online host that answers SSH from this workstation,
 requires that nothing depends on it: no production placement (move production
 away first with scripts/user_callable/guests/prod/change_prod_vm_owner.sh and
 scripts/user_callable/guests/prod/change_prod_vm_placement.sh), no replica, staging VM, HA rule,
-route, or pending deferred cleanup. At least two hosts must remain. Under the
+or pending deferred cleanup. At least two hosts must remain. Under the
 cluster control-plane lock it removes the QDevice vote, powers the host off,
 deletes it from the cluster, re-adds the QDevice when the remaining member
 count is even, and frees the host's registry slot so a future host can reuse
@@ -202,8 +202,6 @@ import sys
 node = sys.argv[1]
 references = json.loads(sys.argv[2])
 vms, rules, replication = (json.loads(value) for value in sys.argv[3:6])
-index = int(node[3:])
-haproxy_vmid = 9110 + index
 
 
 def values(raw):
@@ -218,12 +216,6 @@ for row in vms:
     if row.get("node") != node:
         continue
     vmid = int(row.get("vmid", 0))
-    if (
-        row.get("type") == "lxc"
-        and vmid == haproxy_vmid
-        and row.get("name") in (None, f"haproxy{index}")
-    ):
-        continue
     print(f"guest {vmid} ({row.get('name', '?')}, {row.get('type', '?')}) is on {node}")
 for rule in rules:
     nodes = {str(part).partition(":")[0] for part in values(rule.get("nodes"))}
@@ -505,7 +497,6 @@ replication = load("replication")
 refusals = []
 by_name = {row["name"]: row for row in resources}
 live = {int(row["vmid"]): row for row in vms if "vmid" in row}
-index = int(dead[3:])
 
 
 def references(row):
@@ -624,15 +615,12 @@ for row in sorted(
         }
     )
 
-allowed_vmid = 9110 + index
 guests = []
 for row in vms:
     if row.get("node") != dead:
         continue
     vmid = int(row.get("vmid", 0))
     registered = any(int(record["vmid"]) == vmid for record in resources)
-    if row.get("type") == "lxc" and vmid == allowed_vmid:
-        continue
     if registered:
         continue
     guests.append(f"{vmid} ({row.get('name', '?')}, {row.get('type', '?')})")
@@ -687,13 +675,17 @@ validate_plan() {
   mapfile -t STAGING_NAMES < <(plan_field names staging)
 }
 
-confirm_cloudflare() {
-  printf '\nCloudflare Load Balancing sends traffic to each host by public IP. Before\n'
-  printf 'removing %s, remove its pool from every load balancer (and its monitor),\n' \
-    "$TARGET_HOST"
-  printf 'after adding pools for any hosts that replace it.\n'
-  hm_prompt_yes "Is ${TARGET_HOST} out of every Cloudflare load balancer?" ||
-    die "Update Cloudflare first; no change was made"
+# The other hosts' replicas keep serving every FQDN, so nothing changes in
+# Cloudflare. Stop this host's replica cleanly before it is powered off.
+retire_tunnel_replica() {
+  CURRENT_PHASE="stopping the Cloudflare Tunnel replica on $TARGET_HOST"
+  log "Stopping $TARGET_HOST's Cloudflare Tunnel replica; the other hosts' replicas keep serving"
+  # shellcheck disable=SC2016 # Evaluated on the target host.
+  mox_ssh "$TARGET_HOST" bash -c '
+systemctl disable --now app-ha-cloudflared.service app-ha-tunnel-sync.timer
+shred -u /etc/cloudflared/bmac-tunnel.json 2>/dev/null || rm -f /etc/cloudflared/bmac-tunnel.json
+' </dev/null ||
+    warn "Could not stop the tunnel replica on $TARGET_HOST; powering it off stops it"
 }
 
 choose_control_replacement() {
@@ -901,9 +893,8 @@ queue_staging_cleanup() {
   read -r -a placement <<<"$(plan_field staging "$name" source_placement)"
   info "Committing destruction of staging $name (state $state, on $node)"
   case "$state" in
-    active) registry_update_staging "$name" --state stopping --routes-disabled ;;
-    ready | stopping | stopped | failed) registry_update_staging "$name" --routes-disabled ;;
-    cleanup_pending) ;;
+    active) registry_update_staging "$name" --state stopping ;;
+    ready | stopping | stopped | failed | cleanup_pending) ;;
     *) die "Unsupported staging state for $name: $state" ;;
   esac
   local reason="forced removal of host ${TARGET_HOST}"
@@ -923,17 +914,8 @@ queue_staging_cleanup() {
         die "Could not queue snapshot cleanup for $name on $member"
     done
   fi
-  local -A route_nodes=()
-  for member in "${MEMBERS[@]}" "${placement[@]}"; do
-    route_nodes["$member"]=1
-  done
-  for member in "${!route_nodes[@]}"; do
-    hm_registry defer-cleanup --resource "$name" --node "$member" \
-      --action remove-route --target "$name" --reason "$reason" >/dev/null ||
-      die "Could not queue route cleanup for $name on $member"
-  done
   [[ "$state" == cleanup_pending ]] ||
-    registry_update_staging "$name" --state cleanup_pending --routes-disabled
+    registry_update_staging "$name" --state cleanup_pending
 }
 
 # Mark every pending cleanup record on the dead host completed. Those actions
@@ -1003,9 +985,6 @@ destroy_dependent_staging() {
   for name in "${STAGING_NAMES[@]}"; do
     queue_staging_cleanup "$name"
   done
-  mox_ssh "$HM_COORDINATOR" "$HM_REMOTE_HAPROXY_SYNC" --lock-timeout 240 \
-    </dev/null >/dev/null ||
-    die "Could not converge HAProxy after disabling staging routes"
   wait_for_staging_release
   info "Dependent staging VMs are destroyed and released"
 }
@@ -1107,13 +1086,6 @@ release_slot() {
   info "The $TARGET_HOST slot is free for a future host"
 }
 
-sync_ingress() {
-  CURRENT_PHASE="synchronizing HAProxy on the remaining members"
-  mox_ssh "$HM_COORDINATOR" "$HM_REMOTE_HAPROXY_SYNC" --lock-timeout 240 \
-    </dev/null >/dev/null ||
-    warn "HAProxy route synchronization failed; run it later on $HM_COORDINATOR: $HM_REMOTE_HAPROXY_SYNC"
-}
-
 # Stop before any change when the remaining members need a QDevice that is
 # not accessible.
 require_qdevice_access_afterward() {
@@ -1126,7 +1098,6 @@ remove_gracefully() {
   validate_graceful_cluster_shape
   require_qdevice_access_afterward
   validate_eligibility
-  confirm_cloudflare
   choose_control_replacement
   show_graceful_plan
   hm_confirm_phrase \
@@ -1141,11 +1112,11 @@ remove_gracefully() {
   validate_eligibility
 
   remove_qdevice_before_change
+  retire_tunnel_replica
   power_off_target
   delete_target
   reconcile_after_removal
   release_slot
-  sync_ingress
   hm_release_control_plane_lock
   hm_archive_host_artifacts "$TARGET_HOST"
 
@@ -1182,7 +1153,6 @@ remove_forcefully() {
   delete_dead_member
   finish_cluster_cleanup
   release_slot
-  sync_ingress
   hm_release_control_plane_lock
   hm_archive_host_artifacts "$TARGET_HOST"
 

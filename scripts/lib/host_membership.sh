@@ -22,7 +22,6 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/qdevice.sh"
 HM_REMOTE_ROOT="/usr/local/lib/app-ha-proxmox"
 HM_REMOTE_REGISTRY="${HM_REMOTE_ROOT}/lib/cluster_registry.py"
 # shellcheck disable=SC2034 # Used by the scripts that source this library.
-HM_REMOTE_HAPROXY_SYNC="${HM_REMOTE_ROOT}/lib/sync_haproxy_routes.sh"
 
 HM_COORDINATOR=""
 HM_LOCK_FILE_FD=""
@@ -479,10 +478,11 @@ hm_print_reinstall_follow_ups() {
   printf '  - On this workstation: ssh-keygen -R %s\n' "$node"
   printf '  - Remove or update config/%s.conf. A future host may reuse the %s slot;\n' "$node" "$node"
   printf '    scripts/user_callable/hosts/add_proxmox_host.sh recommends the lowest free slot.\n'
-  printf '  - In Cloudflare Load Balancing, remove the %s pool and monitor from every\n' "$node"
-  printf '    load balancer if you have not already done so.\n'
+  printf '  - Nothing changes in Cloudflare: the tunnel replicas on the other hosts serve\n'
+  printf '    every FQDN. Never boot %s with its old disks: its replica would rejoin\n' "$node"
+  printf '    the tunnel.\n'
   bmac_ui_next_step "Remove the $node device from the Tailscale admin console (Machines) so a future host in this slot can register the same Tailscale hostname."
   bmac_ui_next_step "On this workstation, forget $node's SSH host key." --command "ssh-keygen -R $node"
   bmac_ui_next_step "Remove or update config/$node.conf. A future host may reuse the $node slot; host setup recommends the lowest free slot."
-  bmac_ui_next_step "In Cloudflare Load Balancing, remove the $node pool and monitor from every load balancer if you have not already done so."
+  bmac_ui_next_step "Never boot $node with its old disks: its Cloudflare Tunnel replica would rejoin the tunnel. Nothing needs to change in Cloudflare."
 }

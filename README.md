@@ -45,7 +45,7 @@ BMAC release [v2.0.0](https://github.com/OtterFlip/bmac/releases/tag/v2.0.0) add
 - 1 ultra-cheap VPS host with a public IP address, such as a $5/month Shared CPU Nanode 1GB VPS at Linode.  This node's sole purpose will be to play the role of a QDevice, to vote in your cluster quorum to break tie votes.  You'll set up this QDevice VPS using [these instructions](docs/QDEVICE_MANUAL_SETUP.md).
 - A developer workstation running a debian-based Linux distro (we made and tested this with x64 Ubuntu) to run BMAC's scripts.  This is required for the host setup scripts, but the prod/staging scripts usually work on macOS too, although macOS support at this time is in-flux so don't count on anything working on macOS, even for tagged releases.
 - A Tailscale account (the free account will work fine), setup like [this](#instructions-for-tailscale-setup).
-- Your app's domain (ex: 'myapp.com'), managed at Cloudflare (not essential, but our guides assume this), setup like [this](#instructions-for-cloudflare-setup).
+- A Cloudflare account, and your app's domain (ex: 'example.com') managed at Cloudflare, setup like [this](#instructions-for-cloudflare-setup). Public web traffic reaches your VMs through a Cloudflare Tunnel (free). A domain whose web app has an `/api/` needs Cloudflare Pro for bot protection that never challenges API calls.
 
 ## BMAC's Stack
 
@@ -53,9 +53,8 @@ BMAC release [v2.0.0](https://github.com/OtterFlip/bmac/releases/tag/v2.0.0) add
 - LUKS
 - ZFS 
 - Corosync
-- HAProxy
-- VRRP+keepalived
-- Cloudflare
+- Cloudflare Tunnel (`cloudflared`)
+- nftables
 - Tailscale
 - Ubuntu Server x64 (default OS for prod and staging guests)
 
@@ -71,99 +70,60 @@ Prepare for Proxmox Host Setup
 - Set the HTTPS download URL and SHA256 hash value of the Proxmox VE x64 installer ISO in `config/cluster.conf` for PROXMOX_ISO_FILE_URL and PROXMOX_ISO_FILE_SHA256. `scripts/user_callable/hosts/add_proxmox_host.sh` downloads it to `config/artifacts/hosts/source-iso/` on your dev workstation, verifies its hash, and after building a host's custom installer ISO asks (default yes) whether to keep it for future host installs.
 - Add your (and another colleague's) SSH public key to the ADMIN_1_PUBLIC_SSH_KEY and ADMIN_2_PUBLIC_SSH_KEY values in `config/cluster.conf`
 - Follow the instructions in `docs/QDEVICE_MANUAL_SETUP.md` to set up your qdevice and add it to your tailscale network. Before doing that you'll need to follow the Tailscale setup steps below to add the appropriate tailscale tags and access policies.
-- Follow the Cloudflare instructions to setup your website's domain for active/passive load-balancing.  This will cost you ~$5/month.
+- Follow the Cloudflare instructions below to create your cluster's tunnel and put its three values in `config/cluster.conf` and `config/secrets.env`. The per-domain steps come later, when you create a production VM.
 
 If you've completed the above steps then you're now ready to setup your Proxmox cluster hosts.  From a Debian-based (such as Ubuntu) workstation, run the `scripts/user_callable/hosts/add_proxmox_host.sh` script and choose to setup `mox1`.  A Debian-based workstation is required for the Proxmox host setup because that script must create a custom Proxmox installer ISO, and the Proxmox project only provides a Debian-based helper tool for this task.  Follow the `scripts/user_callable/hosts/add_proxmox_host.sh` script's instructions.  You  can actually run the same script in another terminal session to setup `mox2` at the same time, however I recommend at the point where the scipt asks you if you have verified that the VLAN (or private network connedtion) is working, that you only let one script at a time proceed past that point rather than letting many run beyond that point concurrently.
 
 After our cluster is configured, you should be able to access the Proxmox admin web UI at:  [https://mox1:8006/](https://mox1:8006/) or [https://mox2:8006/](https://mox2:8006/)
 
-You can now use the `scripts/user_callable/guests/prod/add_prod_vm.sh` script to create your first production VM to host your application, which will deploy a blank/vanilla Ubuntu x64 OS to that VM and setup SSH access, and nothing else.  You can always tear it back down if you're not satisfied with it using `scripts/user_callable/guests/prod/remove_prod_vm.sh`.  If you like, you can also deploy a test "hello world" static webapp to your new production VM using `scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh`.
+You can now use the `scripts/user_callable/guests/prod/add_prod_vm.sh` script to create your first production VM to host your application, which will deploy a blank/vanilla Ubuntu x64 OS to that VM and setup SSH access, and nothing else.  You can always tear it back down if you're not satisfied with it using `scripts/user_callable/guests/prod/remove_prod_vm.sh`.  If you like, you can also deploy an example todo webapp to your new production VM using `scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh`.
 
 After creating a production VM, you can test creation and teardown of a staging VM, based on that production VM, using the `scripts/user_callable/guests/staging/add_staging_vm.sh` and `scripts/user_callable/guests/staging/remove_staging_vm.sh` scripts.
 
 ### Instructions for Cloudflare Setup
 
+Public web traffic reaches your VMs through one Cloudflare Tunnel per cluster. Every Proxmox host runs a replica of the tunnel, which only makes outbound connections to Cloudflare, so no Proxmox host accepts inbound web traffic and no Cloudflare load balancer is needed: when a host loses its internet connection, Cloudflare uses the other hosts' replicas. BMAC generates the map from each FQDN to its VM's address; your Cloudflare account only needs the tunnel and a few DNS records. See [`docs/BMAC_SIMPLIFIED_NETWORKING.md`](docs/BMAC_SIMPLIFIED_NETWORKING.md) for the design.
 
-1. Under Domains | Overview click on your app's domain (such as example.com), then under Domains | DNS, add a new DNS record with these settings:
-    Name: www
-    Type: A
-    IPv4 Address: 192.0.2.1
-    Proxied: Turned On
+**Once per cluster: create the tunnel.** It must be created with the `cloudflared` command-line tool, not in the Cloudflare dashboard (a dashboard-created tunnel ignores BMAC's generated config).
 
+1. Install `cloudflared` on your workstation (Cloudflare's apt repository on Linux, or `brew install cloudflared` on macOS).
+2. Run `cloudflared tunnel login`. A browser opens; sign in and pick any one of your domains (the choice doesn't limit which domains the tunnel serves). This saves `~/.cloudflared/cert.pem`, which is only needed to create tunnels; keep it on your workstation or delete it after the next step, and never copy it into this checkout or onto a host.
+3. Run `cloudflared tunnel create bmac-<cluster name>`. It prints the tunnel ID and writes `~/.cloudflared/<tunnel ID>.json`.
+4. Copy the three values from that JSON file into your configuration: `AccountTag` into `CLOUDFLARE_ACCOUNT_ID` and `TunnelID` into `CLOUDFLARE_TUNNEL_ID` in `config/cluster.conf`, and `TunnelSecret` into `CLOUDFLARE_TUNNEL_SECRET` in `config/secrets.env`. Keep the JSON file somewhere safe outside the checkout, or delete it.
 
-2. Create two Load Balancing monitors, one for the prod pool and one for the staging pool.  Each of these two pools will typically just have the single endpoint - the IP of the proxmox host you assign as the owner of your prod VM, and the IP of the proxmox host that's acting as the standby for your prod VM, respectively. Traffic will be sent to the pool associated with this monitor in your load-balancer.  Within the Proxmox cluster, that traffic will then be directed to the prod VM which must be setup to respond to HTTP /healthz GET requests with 200 (and "ok" response body) for requests to your example.com domain. The sample app deploy script, `deploy_hello_app_to_prod.sh`, will set up NGINX on a prod VM to respond to /healthz GET requests in this fashion. If you're still on the domains page then click "Back to Domains" to see the whole left-side menu and then under "Delivery & performance" | "Load Balancing" use the "Monitors" tab and create one monitor each for mox1 and mox2 (2 monitors total) with these settings (note that if you haven't yet enabled Load Balancing on your account, which costs ~$5/month, you'll need to enable it):
+Host setup installs the replica on every Proxmox host. The tunnel then appears in the Zero Trust dashboard (`one.dash.cloudflare.com`) under Networks → Tunnels, marked as locally managed, with one connector per host. If you run several BMAC clusters, create one tunnel per cluster; an account can hold 1,000 tunnels at no cost. A tunnel only serves domains in its own Cloudflare account.
 
-    ```
-    Name: prod-via-prod-host-http-healthz
-    Type: HTTP
-    Path: /healthz
-    Port: 80
+**Once per production VM's domain** (when the production VM is created; `add_prod_vm.sh` prints these steps with the right values):
 
-    Name: prod-via-stage-host-http-healthz
-    Type: HTTP
-    Path: /healthz
-    Port: 80
-    ```
-
-3. Now under "Load Balancing" on the "Pools" tab create one pool each for mox1 and mox2 (2 pools total) with these settings:
+1. Add the domain to Cloudflare (its nameservers must point at Cloudflare), in the same account as the tunnel.
+2. Under Domains (click your domain) | DNS, add two DNS records, both **proxied**:
 
     ```
-    Pool Name: prod
-    Pool Description: Proxmox prod pool
-    Endpoint Steering: Random
-    Endpoint Name: mox1
-    Endpoint Address: enter the public IP address of your mox1 host here
-    Port: empty
-    Weight: 1
-    Enabled: checked
-    Health Threshold: 1
-    Monitor (select the prod-via-prod-host-http-healthz monitor you already made)
-    Health Check Regions: All Data Centers
-    Health Check Notification: checked, either
-    Notification Email: enter your email address here
-
-    Pool Name: stage
-    Pool Description: Proxmox stage pool
-    Endpoint Steering: Random
-    Endpoint Name: mox2
-    Endpoint Address: enter the public IP address of your mox2 host here
-    Port: empty
-    Weight: 1
-    Enabled: checked
-    Health Threshold: 1
-    Monitor (select the prod-via-stage-host-http-healthz monitor you already made)
-    Health Check Regions: All Data Centers
-    Health Check Notification: checked, either
-    Notification Email: enter your email address here
+    Type: CNAME   Name: @   Target: <tunnel ID>.cfargotunnel.com
+    Type: CNAME   Name: *   Target: <tunnel ID>.cfargotunnel.com
     ```
 
-4. Now back on the "Load Balancing" page on the "Load Balancers" tab you need to create two load balancers, one for the traffic to the prod VM on the primary/prod host, and the other for traffic to possible staging guests on the standby/stage host, for a total of 2 load balancers, with these settings.  PAY VERY CLOSE ATTENTION to the Hostename field and note that for the staging hostname you must use the *.example.com format:
+    The `*` record covers `www.example.com` and every staging FQDN, `stage1prod1.example.com` through `stage9prod1.example.com`. Cloudflare's free certificate covers the domain and one level below it, which includes all of them.
+3. Under SSL/TLS | Edge Certificates, turn on **Always Use HTTPS**, so no host or VM ever needs to accept plain HTTP.
+4. Bot protection:
+    - **Web app without an API:** stay on the free plan and turn on **Bot Fight Mode** (Security | Bots).
+    - **Web app with an API under `/api/`:** subscribe the domain to **Cloudflare Pro**, leave **Bot Fight Mode off**, and turn on **Super Bot Fight Mode**. Then, under Security | WAF | Custom rules, create this rule and place it **first**:
 
-    ```
-    Hostname: example.com
-    proxy (orange checkbox): CHECKED
-    load balancer description: example.com for prod
-    Session Affinity: UNCHECKED
-    Adaptive Routing: UNCHECKED
-    Pools: Add prod pool and then stage pool in that order (this order is CRITICAL)
-    Fallback Pool: mox2
-    Attached Monitors should be set automatically since you already set them for the pools
-    Traffic Steering: Off - this is what you want as this will do active/passive failover for you
-    Custom Rules: none
+        ```
+        Rule name: Never challenge /api/
+        Expression: starts_with(http.request.uri.path, "/api/")
+        Action: Skip
+          - All remaining custom rules
+          - All rate limiting rules
+          - All managed rules
+          - All Super Bot Fight Mode rules
+          - Browser Integrity Check, Security Level, User Agent Blocking,
+            Zone Lockdown, Hotlink Protection
+        ```
 
-    Hostname: *.example.com
-    proxy (orange checkbox): CHECKED
-    load balancer description: *.example.com for staging
-    Session Affinity: UNCHECKED
-    Adaptive Routing: UNCHECKED
-    Pools: Add stage pool and then prod pool in that order (this order is CRITICAL)
-    Fallback Pool: mox1
-    Attached Monitors should be set automatically since you already set them for the pools
-    Traffic Steering: Off - this is what you want as this will do active/passive failover for you
-    Custom Rules: none
-    ```
-
-5. Now Under Domains (click on your domain) | Rules | Overview, use "Create Rule" and choose "Redirect Rule" and in its settings choose these:
+        The free Bot Fight Mode cannot be skipped by any rule and may challenge API calls, which client JavaScript can't handle; Super Bot Fight Mode can be skipped, which is why an app with an API needs Pro. All API traffic, on production and staging VMs, must use paths starting with `/api/`.
+5. If a production VM answers for an alias domain in a different Cloudflare zone, repeat these steps in that zone.
+6. Optionally, under Rules | Overview use "Create Rule" | "Redirect Rule" to send `www` to the bare domain:
 
     ```
     Rule Name: Redirect from http/https www.example.com to https example.com
@@ -175,7 +135,7 @@ After creating a production VM, you can test creation and teardown of a staging 
     Place at: First
     ```
 
-6. Under Domains (click on your domain) | SSL/TLS | Origin Server | Origin Certificates click 'Create a certificate' with these settings:
+7. Under SSL/TLS | Origin Server | Origin Certificates click 'Create a certificate' with these settings. Your application uses it to serve HTTPS inside the VM; the tunnel replicas verify it.
 
     ```
     Private Key type: RSA (2048)
@@ -185,8 +145,6 @@ After creating a production VM, you can test creation and teardown of a staging 
     Save the private key to a .key file in the same dir as the .cer file.  This is the private key.  Never share it.
     Both of these files will be fed to the `scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh` script.
     ```
-
-7. Under Domains (click on your domain) | SSL/TLS | Overview click "Configure" and select "Full (Strict)"
 
 ### Instructions for Tailscale Setup
 
@@ -312,7 +270,7 @@ one reachable host and finish in seconds:
 
 ```bash
 ./scripts/user_callable/diagnostics/list_hosts.sh                    # hosts, quorum, votes, QDevice registration
-./scripts/user_callable/diagnostics/list_guests.sh --kind production # registered VMs with HA, replication, and routes
+./scripts/user_callable/diagnostics/list_guests.sh --kind production # registered VMs with HA, replication, and addresses
 ./scripts/user_callable/diagnostics/list_replication.sh --guest prod1
 ./scripts/user_callable/diagnostics/list_storage.sh --host mox1      # ZFS pools and Proxmox storage
 ./scripts/user_callable/diagnostics/check_qdevice_access.sh          # ssh root@ the QDevice works, even before any host exists
@@ -366,8 +324,11 @@ placement, sizing, purpose, domain, and installer questions:
 
 The workflow allocates the next `prodN`, installs its OS, verifies guest
 identity and SSH, creates replication to every selected placement host,
-configures HA, and publishes its routes. It can safely resume its own
-incomplete allocation after a failure.
+configures HA, and adds its FQDNs (and its staging slots' FQDNs) to every
+host's Cloudflare Tunnel config. It can safely resume its own incomplete
+allocation after a failure. It then prints the Cloudflare DNS and bot
+protection steps for the VM's domain (see
+[Instructions for Cloudflare Setup](#instructions-for-cloudflare-setup)).
 
 To permanently remove a production VM, inspect the exact destruction plan
 first:
@@ -377,8 +338,9 @@ first:
 ./scripts/user_callable/guests/prod/remove_prod_vm.sh prod1
 ```
 
-This removes the VM, its HA and replication configuration, routes, owned
-volumes, and registry allocation. It is intentionally destructive.
+This removes the VM, its HA and replication configuration, owned volumes,
+and registry allocation, and removes its FQDNs from the tunnel config. It is
+intentionally destructive.
 
 ### Growing a Production VM's Disk
 
@@ -434,9 +396,20 @@ certificate described above, run:
 ```
 
 The script prompts for a registered `prodN` and certificate/key paths, checks
-direct SSH, installs or updates NGINX, and configures the production and
-possible staging hostnames. It is an example deployment, not a general BMAC
-application deployer.
+direct SSH, builds the example todo app on your workstation, and installs it on
+the VM as `hello-todo.service`, which starts at boot. The app is one static
+Rust binary that serves HTTPS itself with the origin certificate and keeps up
+to 100 todos in a SQLite file, with a JSON API under `/api/v1/todos`. It is an
+example deployment, not a general BMAC application deployer, and runs on a
+Linux workstation only. Install its build tools once:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+sudo apt install musl-tools
+```
+
+The app's source is in `scripts/user_callable/guests/prod/hello_todo/`; run its
+tests there with `cargo test`.
 
 ### Updating BMAC Runtime Code on Existing Hosts
 
@@ -450,6 +423,27 @@ deploy the validated bundle atomically to every configured online node:
 
 The second command requires `GO`; use `--yes` only in controlled automation.
 This updates BMAC runtime code, not Proxmox packages or host configuration.
+
+### Changing the VM Slots, Guest Gateway, Transfer Caps, or Tunnel
+
+The VM slot settings (`VM_SLOT_START`, `MAX_PROD_VMS`,
+`MAX_STAGING_VMS_PER_PROD`), the shared guest gateway (`GUEST_GATEWAY_IP`,
+`GUEST_GATEWAY_MAC`), the tunnel (`CLOUDFLARE_*`), and each host's optional
+monthly transfer cap (`PROXMOX_HOST_TRANSFER_MONTHLY_*` in `config/moxN.conf`)
+are normally set once, before the first host is installed. If you change
+them later, push them to every host:
+
+```bash
+./scripts/user_callable/hosts/sync_cluster_network.sh --dry-run
+./scripts/user_callable/hosts/sync_cluster_network.sh
+```
+
+The dry run lists what differs on each host. The second command requires
+`GO`; it refuses slot changes that would move a registered VM, then updates
+every host's guest gateway, egress rules, transfer cap, probe targets, tunnel
+credentials, and tunnel config, restarting tunnel replicas one host at a time.
+In the dashboard this is the **Sync cluster with cluster.conf** host
+operation.
 
 ### Adding More Storage: Adding a Mirrored Vdev
 
@@ -545,8 +539,7 @@ Host names are slots `mox1` through `moxMAX_MOX_HOSTS`. The cluster registry
 records which slots are in use, and setup recommends the lowest free slot, so
 a slot freed by removing a host is reused first. Slots need not be
 contiguous: a cluster of `mox1` and `mox3` is valid. Each host must fit the
-host, replication, and HAProxy ranges already configured in
-`config/cluster.conf`.
+host and replication ranges already configured in `config/cluster.conf`.
 
 New hosts join through the control node (`PROXMOX_CONTROL_NODE` in
 `config/cluster.conf`, normally `mox1`). Before a cluster exists, the control
@@ -555,8 +548,8 @@ authoritative control node and setup stops if `config/cluster.conf` disagrees.
 
 1. Copy `config/mox1_dot_conf` or `config/mox2_dot_conf` to the new
    `config/moxN.conf` name (use the slot setup will recommend) and set the new
-   host's disk, NIC, public/private network, iDRAC, capacity, and HAProxy
-   values. This file is used only for initial setup and retries before setup
+   host's disk, NIC, public/private network, iDRAC, capacity, and optional
+   monthly transfer cap values. This file is used only for initial setup and retries before setup
    completes.
 2. Ensure every existing cluster node is online and healthy:
 
@@ -654,17 +647,15 @@ be quorate with every other host online.
 
 A host that is online and answers SSH from this workstation is removed
 gracefully. It is offered only if no registry record references it (no
-production placement, no staging VM, no pending cleanup), it holds no guest
-other than its own HAProxy container, and no HA rule or replication job names
-it. At least two hosts must remain.
+production placement, no staging VM, no pending cleanup), it holds no guest,
+and no HA rule or replication job names it. At least two hosts must remain.
 
-The script asks you to type `REMOVE moxN`. It then removes the QDevice, powers
-the host off, deletes it from the cluster, removes its SSH trust, and adds the
+The script asks you to type `REMOVE moxN`. It then removes the QDevice, stops
+the host's Cloudflare Tunnel replica (the other hosts' replicas keep serving
+every FQDN, so nothing changes in Cloudflare), powers the host off, deletes it from the cluster, removes its SSH trust, and adds the
 QDevice back only when the remaining host count is even, so the vote count
-stays odd. Finally it frees the slot in the registry, refreshes HAProxy
-routes, and archives `config/artifacts/hosts/moxN`. Take the host out of every
-Cloudflare load balancer first; the script asks you to confirm this. If you
-remove the control node, it asks which remaining host becomes the new control
+stays odd. Finally it frees the slot in the registry and archives
+`config/artifacts/hosts/moxN`. If you remove the control node, it asks which remaining host becomes the new control
 node, records it, and offers to update `PROXMOX_CONTROL_NODE` in
 `config/cluster.conf`. Every other workstation must set the same value.
 
@@ -818,4 +809,4 @@ This project was worked on, tested and used privately, with tons of commits, bef
 
 ## Future
 
-We have many more improvements planned for BMAC, including support for integrated CEPH.  For FiberState deployments, BMAC could be improved significantly if FiberState adds Internet ingress/egress capability from the VLAN.  This would drammatically-simplify the BMAC implementation, doing away with the need for HAProxy and VRRP+keepalived for ingress/egress routing, and the complex coordination and syncing these currently require.  More details on low-hanging-fruit changes that FiberState could make are in [`docs/FUTURE.md`](docs/FUTURE.md).
+We have many more improvements planned for BMAC, including support for integrated CEPH.  For FiberState deployments, BMAC could be improved further if FiberState adds Internet ingress/egress capability from the VLAN, which would let guests reach the internet without going through a Proxmox host.  More details on low-hanging-fruit changes that FiberState could make are in [`docs/FUTURE.md`](docs/FUTURE.md).

@@ -39,9 +39,7 @@ class RemoveProductionVmTest(unittest.TestCase):
             "rule_resources != {sid}",
             "DESTROY ${RESOURCE_NAME}",
             "orchestration-acquire",
-            "--routes-disabled",
-            "--lock-timeout 240",
-            "Waiting up to 240 seconds for any current HAProxy route sync",
+            '"$REMOTE_TUNNEL_SYNC" --all',
             "ha-manager set",
             "ha-manager remove",
             "ha-manager rules remove",
@@ -58,9 +56,10 @@ class RemoveProductionVmTest(unittest.TestCase):
             self.assertIn(value, text)
 
         self.assertLess(
-            text.index("--routes-disabled"),
-            text.index('ha-manager set "vm:${VMID}" --state stopped'),
+            text.index('registry_cmd release "$RESOURCE_NAME"'),
+            text.index('"$REMOTE_TUNNEL_SYNC" --all'),
         )
+        self.assertNotIn("routes", text)
         self.assertLess(
             text.index('ha-manager remove "vm:${VMID}"'),
             text.index('qm destroy "$VMID"'),

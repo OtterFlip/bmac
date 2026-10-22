@@ -13,17 +13,18 @@
 # You can also tweak the CPU/RAM/Storage value defaults but they can be overridden
 # so they're not essential. The start-end ranges must fall within your VLAN's subnet.
 #   PRIVATE_SUBNET_CIDR, PROXMOX_PRIVATE_BRIDGE, PROXMOX_MIGRATION_NETWORK
-#   DATACENTER_PRIVATE_VLAN_GATEWAY, GUEST_EGRESS_VIP
-#   MOX_IP_START, MOX_IP_END, MOX_REPLICATION_IP_START, MOX_REPLICATION_IP_END, HAPROXY_IP_START, HAPROXY_IP_END
-#   PRODUCTION_IP_START, PRODUCTION_IP_END, STAGING_IP_START, STAGING_IP_END, PROXMOX_ADMIN_EMAIL
+#   DATACENTER_PRIVATE_VLAN_GATEWAY, GUEST_GATEWAY_IP, GUEST_GATEWAY_MAC
+#   MOX_IP_START, MOX_IP_END, MOX_REPLICATION_IP_START, MOX_REPLICATION_IP_END
+#   VM_SLOT_START, MAX_PROD_VMS, MAX_STAGING_VMS_PER_PROD, PROXMOX_ADMIN_EMAIL
+#   CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_TUNNEL_ID
 #   PROXMOX_ISO_FILE_URL, PROXMOX_ISO_FILE_SHA256, PROD_GUEST_OS_ISO_URL, PROD_GUEST_OS_ISO_SHA256
 #   ADMIN_1_PUBLIC_SSH_KEY, ADMIN_2_PUBLIC_SSH_KEY
 
 # Cluster membership supports mox1 through mox10. The control node below
 # (normally mox1) creates the cluster; later hosts join it. Slots freed by
 # removing or purging a host are reused, lowest number first. The external
-# QDevice contributes quorum only and is never a VRRP router, application
-# proxy, storage node, or guest egress path.
+# QDevice contributes quorum only and is never a Cloudflare Tunnel replica,
+# storage node, or guest egress path.
 PROXMOX_CLUSTER_NAME=MyAppCloud
 PROXMOX_QDEVICE_HOST=qdevice
 
@@ -53,32 +54,36 @@ MAX_MOX_HOSTS=10
 
 # IMPORTANT: Treat this entire private-network and address-allocation block as
 # immutable after the first mox host is installed. Changing this file does not
-# automatically renumber or fully reconcile existing hosts, HAProxy LXCs,
-# guests, Corosync links, Keepalived/nftables rules, /etc/hosts entries, or the
-# persisted app-ha registry policy. A partial change can break cluster quorum,
-# migration, ingress, guest egress, or management access.
+# automatically renumber or fully reconcile existing hosts, guests, Corosync
+# links, shared-gateway/nftables rules, the Cloudflare Tunnel configuration,
+# /etc/hosts entries, or the persisted app-ha registry policy. A partial change
+# can break cluster quorum, migration, ingress, guest egress, or management
+# access. The VM slot keys (VM_SLOT_START, MAX_PROD_VMS,
+# MAX_STAGING_VMS_PER_PROD) are the exception: after editing them, push them
+# to every mox host with the dashboard's "Sync cluster with cluster.conf"
+# operation. Never move a slot that a VM is using.
 #
 # If renumbering is unavoidable, first stop application traffic and take
 # verified backups. Inventory every installed address and the registry policy,
 # then update all hosts and guests as one coordinated maintenance operation.
 # Existing mox bridge addresses, Corosync links, migration/replication network,
-# managed /etc/hosts blocks, VRRP/nftables rules, HAProxy LXC networking,
-# production/staging guest network configuration, and registry state must all
-# agree before traffic resumes. For a small or not-yet-production cluster, a
-# clean reinstall/recreation from the new configuration is safer than manual
-# in-place patching. Do not merely rerun host setup and assume it migrated
+# managed /etc/hosts blocks, shared-gateway/nftables rules, the tunnel
+# configuration, production/staging guest network configuration, and registry
+# state must all agree before traffic resumes. For a small or
+# not-yet-production cluster, a clean reinstall/recreation from the new
+# configuration is safer than manual in-place patching. Do not merely rerun host setup and assume it migrated
 # existing state; verify each subsystem explicitly through a console-capable
 # maintenance path such as iDRAC.
 #
-# Shared private Layer-2 VLAN. Every mox host, fixed HAProxy LXC, production
-# guest, and staging guest has one address on this /24. Each mox host also has
-# exactly one address in the narrower .240/28 transport subnet on the same
-# bridge. Proxmox uses only that narrower CIDR for migration and replication,
-# so the ordinary host address and floating guest-egress VIP never create an
-# ambiguous transport endpoint.
-# WARNING: Make sure that none of the addresses in the ranges of addresses for
-# MOX_IP_START - MOX_IP_END and HAPROXY_IP_START - HAPROXY_IP_END fall within
-# the subnet you specify for PROXMOX_MIGRATION_NETWORK.
+# Shared private Layer-2 VLAN. Every mox host, production guest, and staging
+# guest has one address on this /24. Each mox host also has exactly one
+# address in the narrower .240/28 transport subnet on the same bridge. Proxmox
+# uses only that narrower CIDR for migration and replication, so the ordinary
+# host address and the shared guest gateway never create an ambiguous
+# transport endpoint.
+# WARNING: Make sure that none of the addresses in MOX_IP_START - MOX_IP_END
+# or in the VM slots fall within the subnet you specify for
+# PROXMOX_MIGRATION_NETWORK.
 PRIVATE_SUBNET_CIDR=10.213.0.0/24
 PROXMOX_PRIVATE_BRIDGE=vmbr-private
 PROXMOX_MIGRATION_NETWORK=10.213.0.240/28
@@ -89,24 +94,39 @@ PROXMOX_MIGRATION_NETWORK=10.213.0.240/28
 DATACENTER_PRIVATE_VLAN_GATEWAY=10.213.0.1
 
 # Internet egress:
-# Production and staging guests use 10.213.0.10 as their only default gateway.
-# Keepalived/VRRP assigns this VIP to exactly one mox host at a time. Linux
-# routing and nftables on that host SNAT guest traffic through its own public
-# interface. HAProxy is not involved in guest egress.
-GUEST_EGRESS_VIP=10.213.0.10/24
+# Production and staging guests use GUEST_GATEWAY_IP as their only default
+# gateway. Every mox host provides this same address, with this same MAC
+# address, to the guests running on it; bridge rules on each mox host's
+# private-VLAN port keep the address and MAC off the VLAN, so no other mox
+# host ever sees them. Each mox host SNATs its own guests' traffic through
+# its own public interface, and falls back to another mox host's internet
+# connection when its own is down. Using the same MAC everywhere means a
+# live-migrated guest keeps working without re-learning its gateway.
+# GUEST_GATEWAY_MAC must be a locally administered unicast MAC (second hex
+# digit 2, 6, A, or E) that nothing else on the VLAN uses.
+GUEST_GATEWAY_IP=10.213.0.10
+GUEST_GATEWAY_MAC=02:00:0a:d5:00:0a
 
-# Address allocation. moxN and haproxyN are assigned sequentially from their
-# respective starts. All ranges and singleton roles must be non-overlapping.
+# Address allocation. moxN is assigned sequentially from MOX_IP_START. All
+# ranges and singleton roles must be non-overlapping.
 MOX_IP_START=10.213.0.11
 MOX_IP_END=10.213.0.20
 MOX_REPLICATION_IP_START=10.213.0.241
 MOX_REPLICATION_IP_END=10.213.0.250
-HAPROXY_IP_START=10.213.0.21
-HAPROXY_IP_END=10.213.0.30
-PRODUCTION_IP_START=10.213.0.31
-PRODUCTION_IP_END=10.213.0.50
-STAGING_IP_START=10.213.0.51
-STAGING_IP_END=10.213.0.200
+
+# VM slots. Every production and staging guest has a fixed address, reserved
+# in advance whether or not the guest exists, so creating or removing a
+# staging guest never changes any network or Cloudflare configuration:
+#   prodN       = VM_SLOT_START + 10*(N-1)   (prod1 .110, prod2 .120, ...)
+#   stageKprodN = prodN's address + K        (stage1prod1 .111 ... .119)
+# VM_SLOT_START's last octet must end in 0. MAX_PROD_VMS is 1-10 and
+# MAX_STAGING_VMS_PER_PROD is 1-9. Every mox host's
+# MAX_STAGING_VM_COUNT_ON_THIS_HOST must be no more than
+# MAX_STAGING_VMS_PER_PROD. With the values below the slots are
+# 10.213.0.110-10.213.0.209.
+VM_SLOT_START=10.213.0.110
+MAX_PROD_VMS=10
+MAX_STAGING_VMS_PER_PROD=9
 
 # Generic resource tags used by Proxmox configuration and lifecycle guards.
 PRODUCTION_VM_TAG=app-ha-production
@@ -120,14 +140,17 @@ GUEST_ROLE_HOOK_PATH=local:snippets/app-ha-guest-role-hook.sh
 CLUSTER_STATE_DIR=/etc/pve/priv/app-ha
 
 # Public ingress:
-# Each mox public IP DNATs TCP 80/443 to its own fixed haproxyN LXC. The LXC
-# uses the corresponding fixed moxN private IP as its default gateway so reply
-# traffic returns through the same host's conntrack state. It must not use the
-# floating 10.213.0.10 guest-egress gateway.
-HAPROXY_LXC_ROOTFS_GB=8
-HAPROXY_LXC_MEMORY_MB=18432
-HAPROXY_LXC_CORES=8
-HAPROXY_LXC_STORAGE=local-zfs
+# One Cloudflare Tunnel serves the whole cluster, and every mox host runs a
+# cloudflared replica of it. No mox host accepts inbound web traffic on its
+# public IP. Each replica forwards every FQDN of every production guest and
+# its staging slots to the slot's address over the private VLAN, so any mox
+# host with a working internet connection can carry any guest's traffic.
+# Create the tunnel once with `cloudflared tunnel login` and
+# `cloudflared tunnel create <name>` (see README.md). The account ID and
+# tunnel ID are in the credentials file it writes; the tunnel secret goes in
+# secrets.env as CLOUDFLARE_TUNNEL_SECRET. Replace these example values.
+CLOUDFLARE_ACCOUNT_ID=0123456789abcdef0123456789abcdef
+CLOUDFLARE_TUNNEL_ID=00000000-0000-0000-0000-000000000000
 
 # Defaults for newly-created production VMs. The creator prompts for overrides.
 PROD_VM_CORES=64
@@ -165,7 +188,7 @@ PROD_GUEST_OS_INSTALL_MODE=ubuntu-autoinstall
 PROXMOX_DNS_SERVER=1.1.1.1
 GUEST_DNS_SERVERS=1.1.1.1,1.0.0.1
 
-PROXMOX_ADMIN_EMAIL=admin@myapp.com
+PROXMOX_ADMIN_EMAIL=admin@example.com
 PROXMOX_TIMEZONE=America/Denver
 PROXMOX_COUNTRY=us
 PROXMOX_KEYBOARD=en-us
@@ -179,5 +202,5 @@ GUEST_SSH_USER=root
 
 # Public keys injected into every mox host and automated Ubuntu guest. Guest
 # root SSH is key-only; the root password in secrets.env is console-only.
-ADMIN_1_PUBLIC_SSH_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBhE1+iRU5AP8b2hmfLfAHJQ/BVRAR0n4ddx0DFCnkg4 admin1@myapp.com'
-ADMIN_2_PUBLIC_SSH_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPIdG/s65LGj6TCZMI9gFwrAKAClmhr4871Cgidd9RNR admin2@myapp.com'
+ADMIN_1_PUBLIC_SSH_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBhE1+iRU5AP8b2hmfLfAHJQ/BVRAR0n4ddx0DFCnkg4 admin1@example.com'
+ADMIN_2_PUBLIC_SSH_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPIdG/s65LGj6TCZMI9gFwrAKAClmhr4871Cgidd9RNR admin2@example.com'

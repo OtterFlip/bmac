@@ -4,7 +4,14 @@ secrets.env
 tailscale.jsonc
 config/*.conf
 config/*.cer
+# Cloudflare Tunnel credentials file (written by `cloudflared tunnel create`)
+# and the cloudflared login certificate, if either is copied into the checkout.
+config/cloudflare_tunnel_credentials.json
+cert.pem
 __pycache__/
 artifacts/
 config/artifacts/
 log/*
+
+# Build output of the example todo app (deploy builds go to the artifacts dir)
+scripts/user_callable/guests/prod/hello_todo/target/

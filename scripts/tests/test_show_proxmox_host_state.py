@@ -42,8 +42,12 @@ READ_ONLY_COMMANDS = {
     ("df", "-hT", "-x", "tmpfs", "-x", "devtmpfs"),
     ("ip", "-br", "-4", "address"),
     ("ip", "-4", "route", "show"),
-    ("ip", "-4", "-o", "address", "show"),
+    ("ip", "-4", "route", "show", "table", "200"),
     ("python3", "-", "collect"),
+    ("/usr/local/lib/app-ha-proxmox/lib/guest_network.sh", "verify"),
+    ("python3", "-I", "/usr/local/lib/app-ha-proxmox/lib/egress_health.py", "status"),
+    ("python3", "-I", "/usr/local/lib/app-ha-proxmox/lib/transfer_counter.py", "status"),
+    ("/usr/local/lib/app-ha-proxmox/lib/tunnel_sync.sh", "--check"),
 }
 
 FAKE_SSH = r'''#!/usr/bin/env python3
@@ -96,8 +100,11 @@ elif tuple(words) == ("python3", "-", "collect"):
     if "def collect(" not in payload:
         raise SystemExit("collect was not given scripts/utilities/host_storage.py")
     fixture("storage.json")
-elif tuple(words) == ("ip", "-4", "-o", "address", "show"):
-    print("3: vmbr-private    inet 10.213.0.10/24 scope global secondary vmbr-private")
+elif words[-1:] == ["status"] and words[-2].endswith("/egress_health.py"):
+    print(json.dumps({"mode": os.environ.get("FAKE_EGRESS_MODE", "own"), "own_connection_ok": True}))
+elif words[:2] == ["bash", "-c"] and "127.0.0.1:20241/ready" in words[2]:
+    print('{"status":200,"readyConnections":4}')
+    print("INF Registered tunnel connection connIndex=0 location=den01 protocol=http2")
 elif tuple(words) in allowed:
     print(f"fake output of {' '.join(words)}")
 else:
@@ -127,17 +134,17 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
                     "PRIVATE_SUBNET_CIDR=10.213.0.0/24",
                     "PROXMOX_MIGRATION_NETWORK=10.213.0.240/28",
                     "DATACENTER_PRIVATE_VLAN_GATEWAY=10.213.0.1",
-                    "GUEST_EGRESS_VIP=10.213.0.10/24",
+                    "GUEST_GATEWAY_IP=10.213.0.10",
+                    "GUEST_GATEWAY_MAC=02:00:0a:d5:00:0a",
                     "MOX_IP_START=10.213.0.11",
                     "MOX_IP_END=10.213.0.20",
                     "MOX_REPLICATION_IP_START=10.213.0.241",
                     "MOX_REPLICATION_IP_END=10.213.0.250",
-                    "HAPROXY_IP_START=10.213.0.21",
-                    "HAPROXY_IP_END=10.213.0.30",
-                    "PRODUCTION_IP_START=10.213.0.31",
-                    "PRODUCTION_IP_END=10.213.0.50",
-                    "STAGING_IP_START=10.213.0.51",
-                    "STAGING_IP_END=10.213.0.200",
+                    "VM_SLOT_START=10.213.0.110",
+                    "MAX_PROD_VMS=10",
+                    "MAX_STAGING_VMS_PER_PROD=9",
+                    "CLOUDFLARE_ACCOUNT_ID=0123456789abcdef0123456789abcdef",
+                    "CLOUDFLARE_TUNNEL_ID=00000000-0000-0000-0000-000000000000",
                     "CLUSTER_STATE_DIR=/etc/pve/priv/app-ha",
                     "",
                 )
@@ -167,8 +174,7 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
         )
         self.write_fixture(
             "lxc.json",
-            [{"vmid": 9111, "name": "haproxy1", "status": "running", "cpus": 1,
-              "maxmem": 536870912, "maxdisk": 8589934592}],
+            [],
         )
         self.write_fixture(
             "cluster-vms.json",
@@ -176,7 +182,6 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
                 {"vmid": 100, "name": "prod1", "node": "mox1", "type": "qemu"},
                 {"vmid": 101, "name": "prod2", "node": "mox2", "type": "qemu"},
                 {"vmid": 200, "name": "stage1prod2", "node": "mox1", "type": "qemu"},
-                {"vmid": 9111, "name": "haproxy1", "node": "mox1", "type": "lxc"},
             ],
         )
         self.write_fixture(
@@ -276,16 +281,22 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
     def test_healthy_host_report_covers_guests_and_live_storage(self) -> None:
         output = self.run_script("mox1", expected=0).stdout
         self.assertIn("DISK INVENTORY FOR mox1", output)
-        self.assertIn("mox1 currently holds the guest egress VIP 10.213.0.10/24", output)
+        self.assertIn("[CHECK] Shared guest gateway, egress NAT, and routing", output)
+        self.assertIn("[CHECK] Tunnel replica connections (must be http2, never quic)", output)
+        self.assertNotIn("guest egress mode is", output)
         self.assertIn("[PASS] No failed systemd units.", output)
         self.assertRegex(output, r"100\s+prod1\s+qemu\s+running\s+production\s+active\s+started")
-        self.assertRegex(output, r"9111\s+haproxy1\s+lxc\s+running\s+haproxy ingress")
         self.assertRegex(output, r"101-0\s+prod2 \(101\)\s+mox2")
         self.assertIn("boot/ESP (never removable)", output)
         self.assertIn("prod1 (here)", output)
         self.assertRegex(output, r"mirror-2\s+ONLINE\s+ONLINE\s+/dev/nvme5n1\s+S5EXTRA4")
         self.assertIn("[OK] mox1 has no attention items.", output)
         self.assertIn("[PASS] pve-ha-lrm.service is active.", output)
+
+    def test_egress_falling_back_needs_attention(self) -> None:
+        self.environment["FAKE_EGRESS_MODE"] = "fallback"
+        output = self.run_script("mox1", expected=1).stdout
+        self.assertIn("[ATTENTION] mox1 guest egress mode is fallback", output)
 
     def test_a_stopped_required_service_needs_attention(self) -> None:
         # Stopped cleanly, so it is not a failed unit either.
@@ -307,7 +318,9 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
                 self.assertEqual(words[3], "list", words)
             elif words[:2] == ["bash", "-c"]:
                 self.assertTrue(
-                    words[2].startswith("ls -l") or "cat /etc/crypttab" in words[2],
+                    words[2].startswith("ls -l")
+                    or "cat /etc/crypttab" in words[2]
+                    or words[2].startswith("curl -fsS --max-time 3 http://127.0.0.1:20241/ready"),
                     words,
                 )
             else:
@@ -316,7 +329,7 @@ class ShowProxmoxHostStateTest(unittest.TestCase):
     def test_attention_items_set_exit_status(self) -> None:
         self.write_storage(storage_fixtures.luks_layout())
         self.write_host_conf([("S0BOOTA", "S1BOOTB"), ("S2EXTRA1", "S2GONE")])
-        self.environment["FAKE_FAILED_UNITS"] = "keepalived.service loaded failed failed\n"
+        self.environment["FAKE_FAILED_UNITS"] = "app-ha-cloudflared.service loaded failed failed\n"
         output = self.run_script("mox1", expected=1).stdout
         self.assertIn("[ATTENTION] Failed systemd units:", output)
         self.assertIn("a top-level vdev removal is in progress", output)

@@ -19,7 +19,7 @@ source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
 CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
 REMOTE_INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_INSTALL_ROOT}/lib/cluster_registry.py"
-REMOTE_HAPROXY_SYNC="${REMOTE_INSTALL_ROOT}/lib/sync_haproxy_routes.sh"
+REMOTE_TUNNEL_SYNC="${REMOTE_INSTALL_ROOT}/lib/tunnel_sync.sh"
 REMOTE_ISO_PREPARER="${REMOTE_INSTALL_ROOT}/guests/prod/prepare_prod_iso.sh"
 REMOTE_ISO_CACHE_ROOT="/var/lib/app-ha-proxmox/iso-cache"
 
@@ -598,8 +598,8 @@ load_and_validate_config() {
     die "Could not load cluster.conf and secrets.env"
 
   local required=(
-    PROXMOX_CLUSTER_NAME MAX_MOX_HOSTS PRIVATE_SUBNET_CIDR GUEST_EGRESS_VIP
-    PRODUCTION_IP_START PRODUCTION_IP_END
+    PROXMOX_CLUSTER_NAME MAX_MOX_HOSTS PRIVATE_SUBNET_CIDR GUEST_GATEWAY_IP
+    VM_SLOT_START MAX_PROD_VMS MAX_STAGING_VMS_PER_PROD CLOUDFLARE_TUNNEL_ID
     PROD_GUEST_OS_ISO_URL PROD_GUEST_OS_ISO_SHA256
     ADMIN_1_PUBLIC_SSH_KEY ADMIN_2_PUBLIC_SSH_KEY
     PROD_GUEST_VM_ROOT_PASSWORD PRODUCTION_VM_TAG PURPOSE_TAG_PREFIX
@@ -630,7 +630,7 @@ load_and_validate_config() {
   SOURCE_ISO_CACHE_PATH="${REMOTE_ISO_CACHE_ROOT}/${PROD_GUEST_OS_ISO_SHA256,,}.iso"
   SOURCE_ISO_SHA256_PATH="${SOURCE_ISO_CACHE_PATH}.sha256"
 
-  GUEST_GATEWAY="${GUEST_EGRESS_VIP%/*}"
+  GUEST_GATEWAY="$GUEST_GATEWAY_IP"
   split_dns_servers "${GUEST_DNS_SERVERS:-${PROXMOX_DNS_SERVER:-}}"
 
   DEFAULT_REPLICATION_MINUTES="${PROD_VM_REPLICATION_INTERVAL##*/}"
@@ -690,8 +690,8 @@ select_coordinator_and_nodes() {
 
   node_exec "$COORDINATOR" test -x "$REMOTE_REGISTRY" ||
     die "Installed cluster registry is unavailable on $COORDINATOR"
-  node_exec "$COORDINATOR" test -x "$REMOTE_HAPROXY_SYNC" ||
-    die "Installed HAProxy sync is unavailable on $COORDINATOR"
+  node_exec "$COORDINATOR" test -x "$REMOTE_TUNNEL_SYNC" ||
+    die "Installed tunnel sync is unavailable on $COORDINATOR"
   node_exec "$COORDINATOR" bash -c \
     'for command in pvesh qm pvesr ha-manager python3; do command -v "$command" >/dev/null; done' ||
     die "Coordinator lacks required Proxmox commands"
@@ -797,14 +797,13 @@ values = [
     row["proxmox"]["volume_id"] or "",
     ",".join(row["proxmox"]["replication_targets"]),
     ",".join(row["proxmox"]["ha_nodes"]),
-    "1" if row["routes_enabled"] else "0",
     row["spec"].get("disk_bytes", row["spec"]["disk_gib"] * 2**30),
 ]
 for value in values:
     sys.stdout.buffer.write(str(value).encode("utf-8") + b"\0")
 PY
   )
-  ((${#fields[@]} == 23)) || die "Could not parse registry resource"
+  ((${#fields[@]} == 22)) || die "Could not parse registry resource"
 
   RESOURCE_NAME="${fields[0]}"
   VMID="${fields[1]}"
@@ -833,8 +832,7 @@ PY
   REGISTERED_ROOT_VOLUME="${fields[18]}"
   REGISTRY_REPLICATION_CSV="${fields[19]}"
   REGISTRY_HA_CSV="${fields[20]}"
-  ROUTES_ENABLED="${fields[21]}"
-  VM_DISK_BYTES="${fields[22]}"
+  VM_DISK_BYTES="${fields[21]}"
 }
 
 # extend_prod_vm_disk.sh records an exact grown size; otherwise the root disk
@@ -1220,7 +1218,7 @@ used = {
     for row in [*live, *registered]
     if str(row.get("vmid", "")).isdigit()
 }
-while value in used or 9111 <= value <= 9120:
+while value in used:
     value += 1
     if value > 999_999_999:
         raise SystemExit("VMID range is exhausted")
@@ -1234,7 +1232,7 @@ PY
       info "Placement: ${PLACEMENT_NODES[*]}; initial: $INITIAL_NODE"
       info "Purpose: $PURPOSE_SLUG"
       info "Domains: $PRIMARY_DOMAIN${ALIAS_DOMAINS[*]:+, ${ALIAS_DOMAINS[*]}}"
-      info "Default staging names: stageN${RESOURCE_NAME:-prodN}.${PRIMARY_DOMAIN}"
+      info "Staging FQDNs: stage1${RESOURCE_NAME:-prodN}.${PRIMARY_DOMAIN} through stage${MAX_STAGING_VMS_PER_PROD}${RESOURCE_NAME:-prodN}.${PRIMARY_DOMAIN}"
       info "CPU/RAM/disk: ${VM_CORES} cores / ${VM_MEMORY_GIB} GiB / ${VM_DISK_GIB} GiB"
       info "Allocation: $DISK_ALLOCATION; replication: */$REPLICATION_MINUTES"
       info "Guest OS install mode: $PROD_GUEST_OS_INSTALL_MODE"
@@ -1378,16 +1376,6 @@ set_install_phase() {
     die "Could not durably advance install phase to $phase"
   parse_orchestration_metadata "$result" ||
     die "Could not parse updated install phase"
-}
-
-public_ip_for_node() {
-  local node="$1"
-  (
-    # Isolate config.sh's global arrays and load no secret layer.
-    source "$CONFIG_LIB"
-    load_proxmox_config --host "$node" --no-secrets >/dev/null
-    printf '%s\n' "$PROXMOX_IP"
-  )
 }
 
 preflight_placement() {
@@ -1555,8 +1543,7 @@ write_iso_request() {
       "$RESOURCE_NAME" \
       "${PROD_PRIVATE_IP}/24" \
       "$GUEST_GATEWAY" \
-      "$PRODUCTION_IP_START" \
-      "$PRODUCTION_IP_END" \
+      "$VM_SLOT_START" \
       "$VM_MAC" \
       "$ROOT_PASSWORD_HASH" \
       "$ADMIN_1_PUBLIC_SSH_KEY" \
@@ -1571,20 +1558,19 @@ parts = sys.stdin.buffer.read().split(b"\0")
 if parts[-1] != b"":
     raise SystemExit("truncated autoinstall request")
 parts = [part.decode("utf-8") for part in parts[:-1]]
-count = int(parts[10])
-if len(parts) != 11 + count:
+count = int(parts[9])
+if len(parts) != 10 + count:
     raise SystemExit("invalid DNS value count")
 request = {
     "hostname": parts[0],
     "address": parts[1],
     "gateway": parts[2],
-    "production_ip_start": parts[3],
-    "production_ip_end": parts[4],
-    "mac": parts[5],
-    "root_password_hash": parts[6],
-    "authorized_keys": parts[7:9],
-    "startup_script": parts[9] or None,
-    "nameservers": parts[11:],
+    "vm_slot_start": parts[3],
+    "mac": parts[4],
+    "root_password_hash": parts[5],
+    "authorized_keys": parts[6:8],
+    "startup_script": parts[8] or None,
+    "nameservers": parts[10:],
 }
 json.dump(request, sys.stdout, sort_keys=True)
 sys.stdout.write("\n")
@@ -1987,8 +1973,7 @@ validate_or_complete_existing_disk_allocation() {
     -z "$REGISTERED_OWNER_NODE" &&
     -z "$REGISTERED_ROOT_VOLUME" &&
     -z "$REGISTRY_REPLICATION_CSV" &&
-    -z "$REGISTRY_HA_CSV" &&
-    "$ROUTES_ENABLED" == 0 ]]; then
+    -z "$REGISTRY_HA_CSV" ]]; then
     info "Completing disk allocation policy for the preserved unstarted VM"
     apply_disk_allocation
   else
@@ -2108,8 +2093,7 @@ install_or_resume_os() {
     [[ "$INSTALL_PHASE" == unstarted || "$INSTALL_PHASE" == unknown ]] ||
       die "Missing VM has durable install phase $INSTALL_PHASE; refusing recreation"
     [[ -z "$REGISTERED_OWNER_NODE" && -z "$REGISTERED_ROOT_VOLUME" &&
-      -z "$REGISTRY_REPLICATION_CSV" && -z "$REGISTRY_HA_CSV" &&
-      "$ROUTES_ENABLED" == 0 ]] ||
+      -z "$REGISTRY_REPLICATION_CSV" && -z "$REGISTRY_HA_CSV" ]] ||
       die "Reserved missing VM already has Proxmox metadata; refusing recreation"
     local legacy_missing_confirmation=""
     if [[ "$INSTALL_PHASE" == unknown ]]; then
@@ -3109,8 +3093,8 @@ PY
   verify_effective_replication_targets
 }
 
-register_routes_and_finalize() {
-  CURRENT_PHASE="registering ingress and finalizing guest"
+register_ingress_and_finalize() {
+  CURRENT_PHASE="publishing the tunnel routes and finalizing guest"
   local placement_csv targets_csv
   placement_csv="$(IFS=,; printf '%s' "${PLACEMENT_NODES[*]}")"
   targets_csv="$(IFS=,; printf '%s' "${REPLICATION_TARGETS[*]}")"
@@ -3122,30 +3106,27 @@ register_routes_and_finalize() {
         --owner-node "$OWNER_NODE" \
         --volume-id "$ROOT_VOLUME" \
         --replication-targets "$targets_csv" \
-        --ha-nodes "$placement_csv" \
-        --routes-enabled
+        --ha-nodes "$placement_csv"
       ;;
     ready | active)
       registry_update \
         --owner-node "$OWNER_NODE" \
         --volume-id "$ROOT_VOLUME" \
         --replication-targets "$targets_csv" \
-        --ha-nodes "$placement_csv" \
-        --routes-enabled
+        --ha-nodes "$placement_csv"
       ;;
     *)
       die "Cannot finalize production guest from state $RESOURCE_STATE"
       ;;
   esac
 
-  # Publish the requested Host/SNI mapping even before an application is
-  # deployed. HAProxy will correctly report the backend unavailable meanwhile.
-  info "Waiting up to 240 seconds for any current HAProxy route sync to finish, then converging production ingress."
-  mox_ssh "$COORDINATOR" "$REMOTE_HAPROXY_SYNC" \
-    --lock-timeout 240 </dev/null
+  # Map this guest's FQDNs and all of its staging slots' FQDNs in every
+  # host's tunnel replica, even before an application is deployed; Cloudflare
+  # shows an error page until something answers on the guest's port 443.
+  info "Updating every host's Cloudflare Tunnel config with ${RESOURCE_NAME}'s FQDNs"
+  mox_ssh "$COORDINATOR" "$REMOTE_TUNNEL_SYNC" --all </dev/null ||
+    die "Could not update the Cloudflare Tunnel config on every host"
   refresh_resource
-  [[ "$ROUTES_ENABLED" == 1 ]] ||
-    die "Production guest ingress mapping was not enabled"
   if [[ "$RESOURCE_STATE" == ready ]]; then
     registry_update --state active --owner-node "$OWNER_NODE"
   elif [[ "$RESOURCE_STATE" != active ]]; then
@@ -3411,7 +3392,7 @@ print_completion() {
   info "Private IP: ${PROD_PRIVATE_IP}/24 via $GUEST_GATEWAY"
   info "Primary FQDN: $PRIMARY_DOMAIN"
   info "Aliases: ${ALIAS_DOMAINS[*]:-none}"
-  info "Default staging names: stageN${RESOURCE_NAME:-prodN}.${PRIMARY_DOMAIN}"
+  info "Staging FQDNs: stage1${RESOURCE_NAME}.${PRIMARY_DOMAIN} through stage${MAX_STAGING_VMS_PER_PROD}${RESOURCE_NAME}.${PRIMARY_DOMAIN}"
   info "HA placement: ${PLACEMENT_NODES[*]}"
   info "Preferred startup node: $INITIAL_NODE"
   info "Root volume: $ROOT_VOLUME ($DISK_ALLOCATION)"
@@ -3441,49 +3422,41 @@ print_completion() {
   else
     warn "The source ISO cache was removed before completion and is no longer reusable"
   fi
-  warn "HAProxy ingress is enabled, but the backend may be unavailable until application deployment and health checks complete"
+  warn "The tunnel now routes ${PRIMARY_DOMAIN}, but Cloudflare shows an error page until an application answers on ${PROD_PRIVATE_IP}:443"
 
-  printf '\nPublic origin IPs (preferred node first):\n'
-  local node public_ip
-  local -a ordered_nodes=("$INITIAL_NODE")
-  for node in "${PLACEMENT_NODES[@]}"; do
-    [[ "$node" == "$INITIAL_NODE" ]] || ordered_nodes+=("$node")
+  local zone domain
+  local -a zones=("$PRIMARY_DOMAIN")
+  for domain in "${ALIAS_DOMAINS[@]}"; do
+    [[ -n "$domain" ]] || continue
+    # An alias one level below the primary domain is covered by its * record.
+    [[ "$domain" =~ ^[^.]+[.]${PRIMARY_DOMAIN//./[.]}$ ]] || zones+=("$domain")
   done
-  for node in "${ordered_nodes[@]}"; do
-    public_ip="$(public_ip_for_node "$node")" ||
-      die "Could not load the public IP contract for $node"
-    if [[ "$node" == "$INITIAL_NODE" ]]; then
-      printf '  %-8s %s  (initial/preferred)\n' "$node" "$public_ip"
-    else
-      printf '  %-8s %s\n' "$node" "$public_ip"
-    fi
-  done
-
   cat <<EOF
 
-Ingress and DNS guidance:
-  HAProxy Host/SNI mappings now include ${PRIMARY_DOMAIN}${ALIAS_DOMAINS[*]:+ and ${ALIAS_DOMAINS[*]}}.
-  The backend can return unavailable until an application is deployed.
-  Reserve stageN${RESOURCE_NAME}.${PRIMARY_DOMAIN} names for staging guests
-  derived from ${RESOURCE_NAME}; for example stage1${RESOURCE_NAME}.${PRIMARY_DOMAIN}.
+Cloudflare setup for ${RESOURCE_NAME} (once; see README.md, "Instructions for Cloudflare Setup"):
+EOF
+  for zone in "${zones[@]}"; do
+    cat <<EOF
+  In the Cloudflare zone for ${zone}, add two proxied DNS records:
+    CNAME  @  ${CLOUDFLARE_TUNNEL_ID}.cfargotunnel.com
+    CNAME  *  ${CLOUDFLARE_TUNNEL_ID}.cfargotunnel.com
+EOF
+  done
+  cat <<EOF
+  Turn on Always Use HTTPS. For bot protection: if the web app has an /api/
+  path, use Cloudflare Pro with Super Bot Fight Mode on, Bot Fight Mode off,
+  and the /api/ skip rule first; otherwise turn on the free Bot Fight Mode.
 
-External load balancer/DNS work:
-  1. Create/confirm one origin for each public IP above on TCP 443 (and TCP 80
-     while ACME HTTP-01 is needed).
-  2. Use ${PRIMARY_DOMAIN} as the monitor Host header and keep Full (strict)
-     origin TLS once the guest certificate is installed.
-  3. Point ${PRIMARY_DOMAIN}${ALIAS_DOMAINS[*]:+ and aliases ${ALIAS_DOMAINS[*]}} at that pool.
-  4. Confirm both origins traverse their local HAProxy LXC and reach
-     ${PROD_PRIVATE_IP}; Cloudflare configuration is intentionally not changed
-     by this script.
+FQDNs routed to ${RESOURCE_NAME} (${PROD_PRIVATE_IP}): ${PRIMARY_DOMAIN}${ALIAS_DOMAINS[*]:+ ${ALIAS_DOMAINS[*]}}
+Staging FQDNs, each with its own fixed slot: stage1${RESOURCE_NAME}.${PRIMARY_DOMAIN} through stage${MAX_STAGING_VMS_PER_PROD}${RESOURCE_NAME}.${PRIMARY_DOMAIN}
 EOF
   setup_workstation_jump_ssh
   bmac_ui_step_done
   bmac_ui_result name "$RESOURCE_NAME" vmid "$VMID" ip "$PROD_PRIVATE_IP" \
     primary_domain "$PRIMARY_DOMAIN" placement "${PLACEMENT_NODES[*]}" \
     power_state "$VM_LIVE_STATUS"
-  bmac_ui_next_step "In your external load balancer, create or confirm an origin on TCP 443 for each placement node's public IP, with ${PRIMARY_DOMAIN} as the monitor Host header."
-  bmac_ui_next_step "Point ${PRIMARY_DOMAIN}${ALIAS_DOMAINS[*]:+ and ${ALIAS_DOMAINS[*]}} at that pool."
+  bmac_ui_next_step "In Cloudflare, add proxied CNAME records @ and * pointing to ${CLOUDFLARE_TUNNEL_ID}.cfargotunnel.com in the zone of ${PRIMARY_DOMAIN}${ALIAS_DOMAINS[*]:+ (and of any alias in another zone)}, and turn on Always Use HTTPS."
+  bmac_ui_next_step "Set up bot protection for ${PRIMARY_DOMAIN}: Bot Fight Mode, or for a web app with an /api/ path, Cloudflare Pro with Super Bot Fight Mode and the /api/ skip rule (see README.md)."
   bmac_ui_next_step "Deploy the hello app (or your application) to $RESOURCE_NAME." \
     --workflow deploy_hello_app_to_prod
   bmac_ui_next_step "Check $RESOURCE_NAME's HA and replication state." \
@@ -3528,7 +3501,7 @@ main() {
   fi
   ensure_replication_jobs
   ensure_ha_resource
-  register_routes_and_finalize
+  register_ingress_and_finalize
   print_completion
 }
 

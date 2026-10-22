@@ -38,8 +38,7 @@ REQUEST_KEYS = {
     "hostname",
     "address",
     "gateway",
-    "production_ip_start",
-    "production_ip_end",
+    "vm_slot_start",
     "nameservers",
     "mac",
     "root_password_hash",
@@ -112,25 +111,15 @@ def validate_request(raw: Any) -> dict[str, Any]:
     if not isinstance(gateway, ipaddress.IPv4Address) or gateway not in address.network:
         raise BuildError("gateway must be IPv4 in the guest /24")
     try:
-        production_start = ipaddress.ip_address(raw["production_ip_start"])
-        production_end = ipaddress.ip_address(raw["production_ip_end"])
+        slot_start = ipaddress.ip_address(raw["vm_slot_start"])
     except (TypeError, ValueError) as exc:
-        raise BuildError(f"invalid production address range: {exc}") from exc
-    if (
-        not isinstance(production_start, ipaddress.IPv4Address)
-        or not isinstance(production_end, ipaddress.IPv4Address)
-        or production_start not in address.network
-        or production_end not in address.network
-        or int(production_start) > int(production_end)
-    ):
-        raise BuildError("production address range must be ascending within the guest /24")
-    host_octet = int(address.ip) - int(address.network.network_address)
-    production_start_octet = int(production_start) - int(address.network.network_address)
-    production_end_octet = int(production_end) - int(address.network.network_address)
-    if not production_start_octet <= host_octet <= production_end_octet:
-        raise BuildError("production guest address is outside its configured range")
-    if host_octet != production_start_octet + int(hostname.removeprefix("prod")) - 1:
-        raise BuildError("production hostname and IP do not follow the registry formula")
+        raise BuildError(f"invalid VM slot start: {exc}") from exc
+    if not isinstance(slot_start, ipaddress.IPv4Address) or slot_start not in address.network:
+        raise BuildError("the VM slot start must be within the guest /24")
+    # prodN's fixed slot is VM_SLOT_START + 10*(N-1).
+    expected = slot_start + 10 * (int(hostname.removeprefix("prod")) - 1)
+    if address.ip != expected:
+        raise BuildError("production hostname and IP do not follow the VM slot formula")
 
     mac = raw["mac"]
     if not isinstance(mac, str) or not MAC_RE.fullmatch(mac):
@@ -192,8 +181,7 @@ def validate_request(raw: Any) -> dict[str, Any]:
         "hostname": hostname,
         "address": str(address),
         "gateway": str(gateway),
-        "production_ip_start": str(production_start),
-        "production_ip_end": str(production_end),
+        "vm_slot_start": str(slot_start),
         "nameservers": normalized_nameservers,
         "mac": mac,
         "root_password_hash": root_password_hash,

@@ -90,7 +90,6 @@ export function ProductionPage() {
                   ) : (
                     <span className="text-fg-subtle">—</span>
                   )}
-                  {vm.routes > 0 && <div className="text-[11px] text-fg-subtle">{vm.routes} route{vm.routes === 1 ? "" : "s"}{vm.routes_enabled ? "" : " (disabled)"}</div>}
                 </td>
                 <td className="whitespace-nowrap text-[12px] text-fg-muted tabular-nums">
                   {vm.cores ?? "?"} vCPU · {vm.memory_mb ? `${Math.round(vm.memory_mb / 1024)} GiB` : "?"} · {vm.disk_bytes ? Number((vm.disk_bytes / 2 ** 30).toFixed(3)) : vm.disk_gib ?? "?"} GiB
@@ -152,7 +151,7 @@ export function ProductionPage() {
         </Card>
 
         <h2 className="mb-2.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-fg-subtle">Production operations</h2>
-        <WorkflowTiles ids={["add_prod_vm", "change_prod_vm_owner", "change_prod_vm_placement", "extend_prod_vm_disk", "setup_jump_ssh_access", "deploy_hello_app_to_prod", "show_prod_vm_state", "remove_prod_vm"]} />
+        <WorkflowTiles ids={["add_prod_vm", "change_prod_vm_owner", "change_prod_vm_placement", "extend_prod_vm_disk", "setup_jump_ssh_access", "deploy_hello_app_to_prod", "show_prod_vm_state", "list_slots", "remove_prod_vm"]} />
       </PageBody>
     </>
   );

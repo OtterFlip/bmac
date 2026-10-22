@@ -17,8 +17,8 @@ scripts/user_callable/guests/staging/add_staging_vm.sh \
   --sanitizer /absolute/path/to/local-staging-sanitizer.sh
 ```
 
-Run the runtime updater first whenever this checkout's registry, HAProxy
-renderer or route synchronizer, or lifecycle hook differs from the copies
+Run the runtime updater first whenever this checkout's registry, tunnel
+config renderer or synchronizer, or lifecycle hook differs from the copies
 installed on the mox nodes. Existing VMs are not restarted and do not need hook reattachment.
 
 The optional sanitizer must be a regular, non-symlink Bash file no larger
@@ -87,21 +87,25 @@ owner.
 
 The registry atomically reserves:
 
-- the lowest unused `stageNprodN` stage number in
-  `1..MAX_STAGING_VM_COUNT_ON_THIS_HOST`;
-- the next free address from `.51-.200`;
+- the lowest unused `stageKprodN` stage number `K` for that source in
+  `1..MAX_STAGING_VMS_PER_PROD`;
+- that slot's fixed address, `prodN`'s slot plus `K` (for example,
+  `10.213.0.111` for `stage1prod1` when `VM_SLOT_START=10.213.0.110`);
 - a live-checked free Proxmox VMID;
 - a deterministic locally-administered MAC;
-- `stageNprodN.<source-primary-domain>` by default (for example,
-  `stage1prod1.example.com`), or the exact optional
-  override entered by the operator.
+- the FQDN `stageKprodN.<source-primary-domain>` (for example,
+  `stage1prod1.example.com`). It cannot be overridden.
+
+Every staging slot's FQDN is already mapped to its address in every host's
+Cloudflare Tunnel config when the production source is created, so creating
+a staging VM changes no network state: no tunnel, DNS, Cloudflare, or nftables
+change and no wait on other hosts.
 
 Before allocation, the creator loads
 `MAX_STAGING_VM_COUNT_ON_THIS_HOST` from the selected standby's `moxN.conf`.
 It refuses a full host, and passes the same limit into the registry's locked
 allocation so concurrent creators cannot exceed the per-host cap. The registry
-also restricts `N` to that range and chooses it itself; no caller can request a
-specific stage number.
+chooses `K` itself; no caller can request a specific stage number.
 
 The operator is asked whether `net0` should start with Proxmox
 `link_down=1`. The default is **network enabled**. If no sanitizer was
@@ -120,7 +124,7 @@ networking and is the intended place for application-specific changes such as
 rewriting NGINX domains. It must be idempotent because a crash can cause a
 retry. The operator also chooses whether the NIC begins link-down. Final output
 always reports that network choice, status, `lan0`, the exact FQDN, and the
-`.51-.200/24` private IP.
+slot's `/24` private IP.
 
 ## Snapshot, replication, and clone ordering
 
@@ -160,7 +164,7 @@ verified snapshot metadata from the other guest onto the fresh reservation. It
 refuses when every guest already using the snapshot is `cleanup_pending` or
 `failed`, because that snapshot may already be being deleted. The script then
 proves again that every snapshotted volume has its recorded ZFS GUID on every
-placement node, and the remaining steps (clone, patch, attach, route, start)
+placement node, and the remaining steps (clone, patch, attach, start)
 are unchanged. A failed creation that had attached to a shared snapshot never
 deletes it; it only releases its own reference.
 
@@ -231,12 +235,12 @@ regenerated Ed25519 key, then installs and validates the strict workstation
 alias automatically. Other workstations, or a stale alias whose jump host left
 the cluster, use `scripts/user_callable/guests/setup_jump_ssh_access.sh` instead.
 
-## Route and start behavior
+## Start behavior
 
-The exact staging domain is enabled in the registry and the installed
-transactional HAProxy synchronizer runs across online mox hosts. If the
+There is no route to enable: the FQDN already reaches the slot through the
+tunnel and works as soon as the guest's web server answers on 443. If the
 operator declined automatic start during request collection, the result is a
-fully registered, routed, stopped VM. If production moved onto the staging
+fully registered, stopped VM. If production moved onto the staging
 node, or if the lifecycle hook rejects admission, staging remains stopped.
 
 The first boot regenerates machine identity and SSH host keys. An injected
@@ -256,10 +260,13 @@ scripts/user_callable/guests/staging/remove_staging_vm.sh
 Destruction requires every source production placement node online. It
 validates the exact staging name, VMID, tags, fixed node, VM disks, linked
 clone origin, one source-owned snapshot identity, and that snapshot's
-registered GUID on every placement node. It then disables the exact route,
-stops and destroys the staging VM and clone, deletes only that one named
-snapshot, triggers production replication, verifies that copies of the same
-snapshot disappear everywhere, and releases the registry allocation. It
+registered GUID on every placement node. It then marks an `active` guest
+`stopping` and queues only `destroy-vm`, `destroy-volume`, and per-node
+`delete-snapshot` cleanup; the workers stop and destroy the staging VM and
+clone, delete only that one named snapshot, trigger production replication,
+verify that copies of the same snapshot disappear everywhere, and release the
+registry allocation. The slot's address and FQDN stay reserved for the next
+staging VM, so no network state changes. It
 does not delete any other production snapshot or stop the production VM.
 Staging shutdown is always a force-stop (`qm stop --skiplock`), including
 operator destruction, creation rollback, and production-start eviction; it
@@ -267,14 +274,15 @@ does not wait for a graceful guest shutdown.
 
 ## Failure behavior
 
-Before the offline patch gate and route transaction commit, traps attempt to:
+Until the patched disk is attached and the guest is registered as stopped,
+traps attempt to:
 
 1. stop and destroy the newly-created QEMU VM;
 2. destroy the local linked clone;
 3. delete the named Proxmox production snapshot;
 4. trigger every production replication job to propagate snapshot deletion;
-5. clear/release the staging registry allocation; and
-6. resynchronize HAProxy if a route may have been installed.
+   and
+5. clear/release the staging registry allocation.
 
 If destructive cleanup cannot be proven, the failed registry record is
 retained in `cleanup_pending` rather than discarding the dependency metadata;

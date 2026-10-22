@@ -54,17 +54,17 @@ class GuestRoleHookTest(unittest.TestCase):
                     "PRIVATE_SUBNET_CIDR=10.213.0.0/24",
                     "PROXMOX_MIGRATION_NETWORK=10.213.0.240/28",
                     "DATACENTER_PRIVATE_VLAN_GATEWAY=10.213.0.1",
-                    "GUEST_EGRESS_VIP=10.213.0.10/24",
+                    "GUEST_GATEWAY_IP=10.213.0.10",
+                    "GUEST_GATEWAY_MAC=02:00:0a:d5:00:0a",
                     "MOX_IP_START=10.213.0.11",
                     "MOX_IP_END=10.213.0.20",
                     "MOX_REPLICATION_IP_START=10.213.0.241",
                     "MOX_REPLICATION_IP_END=10.213.0.250",
-                    "HAPROXY_IP_START=10.213.0.21",
-                    "HAPROXY_IP_END=10.213.0.30",
-                    "PRODUCTION_IP_START=10.213.0.31",
-                    "PRODUCTION_IP_END=10.213.0.50",
-                    "STAGING_IP_START=10.213.0.51",
-                    "STAGING_IP_END=10.213.0.200",
+                    "VM_SLOT_START=10.213.0.110",
+                    "MAX_PROD_VMS=10",
+                    "MAX_STAGING_VMS_PER_PROD=9",
+                    "CLOUDFLARE_ACCOUNT_ID=0123456789abcdef0123456789abcdef",
+                    "CLOUDFLARE_TUNNEL_ID=00000000-0000-0000-0000-000000000000",
                     "PRODUCTION_VM_TAG=custom-production",
                     "STAGING_VM_TAG=custom-staging",
                     "EVICTABLE_VM_TAG=custom-evictable",
@@ -97,15 +97,6 @@ os.execv({str(REGISTRY)!r}, [{str(REGISTRY)!r}, *sys.argv[1:]])
         self.worker = self.install_lib / CLEANUP_WORKER.name
         shutil.copy2(CLEANUP_WORKER, self.worker)
         self.worker.chmod(0o755)
-        route_sync = self.install_lib / "sync_haproxy_routes.sh"
-        route_sync.write_text(
-            "#!/usr/bin/env bash\n"
-            "exec python3 -c 'import json,os; "
-            'open(os.environ["FAKE_ACTIONS"], "a").write('
-            'json.dumps(["haproxy-sync"]) + "\\n")\'\n',
-            encoding="utf-8",
-        )
-        route_sync.chmod(0o755)
 
         self.actions = self.root / "actions.jsonl"
         self.actions.write_text("", encoding="utf-8")
@@ -298,23 +289,17 @@ else:
             "--network",
             "10.213.0.0/24",
             "--guest-gateway",
-            "10.213.0.10/24",
+            "10.213.0.10",
             "--mox-ip-start",
             "10.213.0.11",
             "--mox-ip-end",
             "10.213.0.20",
-            "--haproxy-ip-start",
-            "10.213.0.21",
-            "--haproxy-ip-end",
-            "10.213.0.30",
-            "--production-ip-start",
-            "10.213.0.31",
-            "--production-ip-end",
-            "10.213.0.50",
-            "--staging-ip-start",
-            "10.213.0.51",
-            "--staging-ip-end",
-            "10.213.0.200",
+            "--vm-slot-start",
+            "10.213.0.110",
+            "--max-production",
+            "10",
+            "--max-staging-per-production",
+            "9",
         )
         self.registry(
             "allocate-prod",
@@ -323,7 +308,7 @@ else:
             "--purpose",
             "myapp",
             "--primary-domain",
-            "myapp.com",
+            "example.com",
             "--placement",
             "mox1,mox2",
             "--initial-node",
@@ -519,7 +504,6 @@ else:
             name,
             "--state",
             "stopped",
-            "--routes-enabled",
         )
         self.registry("update", name, "--state", "ready")
         self.registry("update", name, "--state", "active")
@@ -688,16 +672,16 @@ else:
             return next(index for index, row in enumerate(rows) if predicate(row))
 
         stop_index = first_index(lambda row: row[:2] == ["qm", "stop"])
-        route_index = first_index(
+        stopping_index = first_index(
             lambda row: row[0] == "registry"
             and "update" in row
-            and "--routes-disabled" in row
+            and "stopping" in row
         )
         defer_index = first_index(
             lambda row: row[0] == "registry" and "defer-cleanup" in row
         )
-        self.assertLess(stop_index, route_index)
-        self.assertLess(route_index, defer_index)
+        self.assertLess(stop_index, stopping_index)
+        self.assertLess(stopping_index, defer_index)
         self.assertFalse(
             any(row[:2] in (["qm", "destroy"], ["zfs", "destroy"]) for row in rows),
             "pre-start must not destroy staging; that waits for post-start",
@@ -709,7 +693,6 @@ else:
         self.assertIn("rpool/data/vm-200-disk-0", state["zfs"])
         stage = self.registry("get", "stage1prod1")
         self.assertEqual(stage["state"], "cleanup_pending")
-        self.assertFalse(stage["routes_enabled"])
         self.assertEqual(stage["owner_node"], "mox1")
         self.assertEqual(stage["proxmox"]["volume_id"], "local-zfs:vm-200-disk-0")
         cleanup = self.registry("list", "--record-type", "cleanup")
@@ -732,10 +715,6 @@ else:
             if row["action"] == "delete-snapshot"
         }
         self.assertEqual(pending_nodes, {"mox1", "mox2"})
-        route_nodes = {
-            row["node"] for row in cleanup if row["action"] == "remove-route"
-        }
-        self.assertEqual(route_nodes, {"mox1", "mox2"})
         self.assertTrue((self.reservation_dir / "100.reservation").exists())
 
         # A timer-driven worker run before post-start leaves the guest alone.
@@ -787,7 +766,7 @@ else:
             index
             for index, row in enumerate(rows)
             if row[0] == "registry"
-            and ("defer-cleanup" in row or "--routes-disabled" in row)
+            and ("defer-cleanup" in row or "stopping" in row)
         )
         self.assertLess(max(stops), first_queue_step)
         state = self.read_fake_state()

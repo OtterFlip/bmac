@@ -81,7 +81,7 @@ class JsonFormTest(unittest.TestCase):
         self.assertIn("amount", retry["validation_error"]["field_errors"])
         self.assertEqual(run.of("result")[-1]["data"]["increase"], str(int(2.5 * GIB)))
 
-    def test_staging_options_validate_domain_and_sanitizer(self) -> None:
+    def test_staging_options_validate_cores_and_sanitizer(self) -> None:
         bad_sanitizer = self.root / "startup.sh"
         bad_sanitizer.write_text("#!/bin/sh\ntrue\n")
         argv = self.harness(
@@ -100,7 +100,7 @@ class JsonFormTest(unittest.TestCase):
             collect_options_json
             bmac_ui_result cores "$STAGING_VM_CORES" memory "$requested_memory_gib" \\
               start "$START_AFTER_CREATION" jump "$SETUP_WORKSTATION_JUMP_SSH" \\
-              domain "$DOMAIN_OVERRIDE" link_down "$NETWORK_LINK_DOWN" \\
+              link_down "$NETWORK_LINK_DOWN" \\
               sanitizer "$SANITIZER_FILE"
             """,
         )
@@ -109,7 +109,6 @@ class JsonFormTest(unittest.TestCase):
             "memory_gib": 8,
             "start_after_creation": False,
             "setup_jump_ssh": True,
-            "domain_override": "https://bad/",
             "link_down": True,
             "sanitizer": str(bad_sanitizer),
         }
@@ -121,11 +120,13 @@ class JsonFormTest(unittest.TestCase):
 
         def fixed(request):
             seen.append(request)
-            return {"values": {**answers, "cores": 3, "domain_override": "Stage.Example.COM.", "sanitizer": ""}}
+            return {"values": {**answers, "cores": 3, "sanitizer": ""}}
 
         run = self.run_form(argv, first, fixed)
         errors = seen[1]["validation_error"]["field_errors"]
-        self.assertEqual(set(errors), {"cores", "domain_override", "sanitizer"})
+        self.assertEqual(set(errors), {"cores", "sanitizer"})
+        fields = {field["id"] for field in seen[0]["fields"]} if "fields" in seen[0] else set()
+        self.assertNotIn("domain_override", fields)
         self.assertIn("Bash shebang", errors["sanitizer"])
         self.assertEqual(
             run.of("result")[-1]["data"],
@@ -134,7 +135,6 @@ class JsonFormTest(unittest.TestCase):
                 "memory": "8",
                 "start": "false",
                 "jump": "true",
-                "domain": "stage.example.com",
                 "link_down": "true",
                 "sanitizer": "",
             },
@@ -174,7 +174,6 @@ class JsonFormTest(unittest.TestCase):
                     "memory_gib": 16,
                     "start_after_creation": True,
                     "setup_jump_ssh": True,
-                    "domain_override": "stage.example.com",
                     "link_down": True,
                     "sanitizer": "",
                 }

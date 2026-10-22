@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Fast, read-only list of registered production and staging VMs with their
-# live state, HA, replication, and routes, read through one reachable member.
+# live state, HA, replication, and addresses, read through one reachable member.
 # For a deep check of one production VM use show_prod_vm_state.sh.
 
 set -u
@@ -34,8 +34,8 @@ usage() {
 Usage: scripts/user_callable/diagnostics/list_guests.sh [--kind production|staging] [--json]
 
 Quickly list every registered guest: production VMs with their registry
-state, live state and node, placement, HA state, replication health, routes,
-and domain; staging VMs with their source, node, address, and URL; and any
+state, live state and node, placement, HA state, replication health,
+address, and domain; staging VMs with their source, node, address, and URL; and any
 QEMU VM the registry does not know about.
 
   --kind KIND  Show only production or only staging VMs.

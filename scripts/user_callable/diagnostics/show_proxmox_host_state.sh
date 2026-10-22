@@ -176,8 +176,10 @@ run "HA manager status" on_host ha-manager status
 # each unit on its own.
 printf '\n[CHECK] Core and app-ha unit states\n'
 for unit in pve-cluster.service corosync.service pve-ha-lrm.service \
-  pve-ha-crm.service keepalived.service app-ha-deferred-cleanup.timer \
-  app-ha-haproxy-route-sync.timer; do
+  pve-ha-crm.service app-ha-deferred-cleanup.timer \
+  app-ha-guest-network.service app-ha-egress-health.service \
+  app-ha-transfer-counter.timer app-ha-cloudflared.service \
+  app-ha-tunnel-sync.timer; do
   unit_state="$(on_host systemctl is-active "$unit" 2>/dev/null)" || true
   if [[ "$unit_state" == active ]]; then
     printf '  [PASS] %s is active.\n' "$unit"
@@ -197,15 +199,40 @@ else
 fi
 
 section "Network" \
-  "show the private bridge, the shared guest egress VIP, and Tailscale admin access."
+  "show the private bridge, the shared guest gateway, egress fallback, transfer, the tunnel replica, and Tailscale admin access."
 run "IPv4 addresses" on_host ip -br -4 address
 run "IPv4 routes" on_host ip -4 route show
+run "Guest egress route (table 200)" on_host ip -4 route show table 200
 run "Tailscale IPv4 address" on_host tailscale ip -4
-if on_host ip -4 -o address show 2>/dev/null |
-  awk -v vip="$GUEST_EGRESS_VIP" '$4 == vip { found=1 } END { exit !found }'; then
-  printf '\n  %s currently holds the guest egress VIP %s.\n' "$HOST" "$GUEST_EGRESS_VIP"
-else
-  printf '\n  %s does not currently hold the guest egress VIP %s.\n' "$HOST" "$GUEST_EGRESS_VIP"
+run "Shared guest gateway, egress NAT, and routing" \
+  on_host /usr/local/lib/app-ha-proxmox/lib/guest_network.sh verify
+on_host /usr/local/lib/app-ha-proxmox/lib/guest_network.sh verify >/dev/null 2>&1 ||
+  ATTENTION=1
+run "Egress health (own connection, fallback host, retired probe targets)" \
+  on_host python3 -I /usr/local/lib/app-ha-proxmox/lib/egress_health.py status
+egress_mode="$(
+  on_host python3 -I /usr/local/lib/app-ha-proxmox/lib/egress_health.py status 2>/dev/null |
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("mode", "unknown"))' 2>/dev/null
+)" || egress_mode=unknown
+if [[ "$egress_mode" != own ]]; then
+  printf '\n  [ATTENTION] %s guest egress mode is %s (own internet connection not in use).\n' \
+    "$HOST" "$egress_mode"
+  ATTENTION=1
+fi
+run "Monthly public-interface transfer (inbound + outbound)" \
+  on_host python3 -I /usr/local/lib/app-ha-proxmox/lib/transfer_counter.py status
+run "Tunnel config matches the registry" \
+  on_host /usr/local/lib/app-ha-proxmox/lib/tunnel_sync.sh --check
+on_host /usr/local/lib/app-ha-proxmox/lib/tunnel_sync.sh --check >/dev/null 2>&1 ||
+  ATTENTION=1
+# shellcheck disable=SC2016 # Evaluated on the host.
+tunnel_connections='curl -fsS --max-time 3 http://127.0.0.1:20241/ready && echo && journalctl -u app-ha-cloudflared.service --since -1h --no-pager | grep -E "Registered tunnel connection" | tail -n 4'
+run "Tunnel replica connections (must be http2, never quic)" \
+  on_host bash -c "$tunnel_connections"
+tunnel_log="$(on_host bash -c "$tunnel_connections" 2>/dev/null)" || tunnel_log=""
+if [[ "$tunnel_log" != *protocol=http2* || "$tunnel_log" == *protocol=quic* ]]; then
+  printf '\n  [ATTENTION] %s has no recent HTTP/2 tunnel connections, or uses QUIC.\n' "$HOST"
+  ATTENTION=1
 fi
 
 section "Guests on this host and replicas stored here" \
@@ -272,8 +299,6 @@ for kind, row in sorted(guests, key=lambda item: int(item[1]["vmid"])):
     record = registry.get(vmid)
     if record is not None:
         role, state = record["kind"], record["state"]
-    elif kind == "lxc" and str(row.get("name", "")).startswith("haproxy"):
-        role, state = "haproxy ingress", "-"
     else:
         role, state = "unregistered", "-"
     sid = f"{'vm' if kind == 'qemu' else 'ct'}:{vmid}"

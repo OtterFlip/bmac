@@ -3,9 +3,9 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Safely update the shared app-ha registry, HAProxy renderer and route
-# synchronizer, deferred cleanup worker, and QEMU lifecycle hook on every
-# configured Proxmox node.
+# Safely update the shared app-ha runtime (registry, deferred cleanup worker,
+# QEMU lifecycle hook, guest networking, egress health, transfer counter, and
+# Cloudflare Tunnel tools) on every configured Proxmox node.
 
 set -Eeuo pipefail
 set +x
@@ -16,17 +16,17 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
 # shellcheck source=../../lib/ui_protocol.sh
 source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
 CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
-REGISTRY_SOURCE="${REPO_ROOT}/scripts/host_runtime/cluster_registry.py"
-RENDERER_SOURCE="${REPO_ROOT}/scripts/host_runtime/haproxy_routes.py"
-ROUTE_SYNC_SOURCE="${REPO_ROOT}/scripts/host_runtime/sync_haproxy_routes.sh"
-CLEANUP_SOURCE="${REPO_ROOT}/scripts/host_runtime/process_deferred_cleanup.sh"
-HOOK_SOURCE="${REPO_ROOT}/scripts/host_runtime/app-ha-guest-role-hook.sh"
+RUNTIME_SOURCE_DIR="${REPO_ROOT}/scripts/host_runtime"
+HOOK_NAME=app-ha-guest-role-hook.sh
+# Every file this updater manages in ${INSTALL_ROOT}/lib.
+RUNTIME_FILES=(
+  cluster_registry.py process_deferred_cleanup.sh "$HOOK_NAME"
+  guest_network.sh egress_health.py egress_probe_targets.txt transfer_counter.py
+  tunnel_config.py tunnel_sync.sh cloudflared_setup.sh
+)
 INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${INSTALL_ROOT}/lib/cluster_registry.py"
-REMOTE_RENDERER="${INSTALL_ROOT}/lib/haproxy_routes.py"
-REMOTE_CLEANUP="${INSTALL_ROOT}/lib/process_deferred_cleanup.sh"
-REMOTE_HOOK="${INSTALL_ROOT}/lib/app-ha-guest-role-hook.sh"
-REMOTE_ROUTE_SYNC="${INSTALL_ROOT}/lib/sync_haproxy_routes.sh"
+REMOTE_TUNNEL_SYNC="${INSTALL_ROOT}/lib/tunnel_sync.sh"
 REMOTE_SNIPPET=""
 
 DRY_RUN=false
@@ -64,15 +64,22 @@ Usage: update_cluster_runtime.sh [--dry-run] [--yes]
 
 Update these runtime files on every configured, online Proxmox node:
   /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py
-  /usr/local/lib/app-ha-proxmox/lib/haproxy_routes.py
-  /usr/local/lib/app-ha-proxmox/lib/sync_haproxy_routes.sh
   /usr/local/lib/app-ha-proxmox/lib/process_deferred_cleanup.sh
   /usr/local/lib/app-ha-proxmox/lib/app-ha-guest-role-hook.sh
+  /usr/local/lib/app-ha-proxmox/lib/guest_network.sh
+  /usr/local/lib/app-ha-proxmox/lib/egress_health.py
+  /usr/local/lib/app-ha-proxmox/lib/egress_probe_targets.txt
+  /usr/local/lib/app-ha-proxmox/lib/transfer_counter.py
+  /usr/local/lib/app-ha-proxmox/lib/tunnel_config.py
+  /usr/local/lib/app-ha-proxmox/lib/tunnel_sync.sh
+  /usr/local/lib/app-ha-proxmox/lib/cloudflared_setup.sh
   local:snippets/app-ha-guest-role-hook.sh
 
 The script stages and validates the complete bundle on every node before
 making changes. Installs are atomic, old files are retained until cluster-wide
-verification and route synchronization succeed, and failures trigger rollback.
+verification and the tunnel config update succeed, and failures trigger
+rollback. It does not change cluster.conf or any host's network settings; use
+sync_cluster_network.sh for that.
 
 Options:
   --dry-run  Validate local files and cluster reachability; show hash drift
@@ -123,21 +130,21 @@ load_config() {
   require_var GUEST_ROLE_HOOK_PATH
   [[ "$GUEST_ROLE_HOOK_PATH" =~ ^[A-Za-z0-9._-]+:snippets/[A-Za-z0-9._-]+[.]sh$ ]] ||
     die "GUEST_ROLE_HOOK_PATH must be a safe Proxmox snippets volume"
-  [[ "$(basename -- "$GUEST_ROLE_HOOK_PATH")" == "app-ha-guest-role-hook.sh" ]] ||
-    die "This updater only manages app-ha-guest-role-hook.sh"
+  [[ "$(basename -- "$GUEST_ROLE_HOOK_PATH")" == "$HOOK_NAME" ]] ||
+    die "This updater only manages $HOOK_NAME"
   REMOTE_SNIPPET="/var/lib/vz/snippets/$(basename -- "$GUEST_ROLE_HOOK_PATH")"
 }
 
 validate_local_bundle() {
-  local source
-  for source in \
-    "$REGISTRY_SOURCE" "$RENDERER_SOURCE" "$ROUTE_SYNC_SOURCE" \
-    "$CLEANUP_SOURCE" "$HOOK_SOURCE"; do
+  local name source
+  for name in "${RUNTIME_FILES[@]}"; do
+    source="${RUNTIME_SOURCE_DIR}/${name}"
     require_source "$source"
+    case "$name" in
+      *.sh) bash -n "$source" ;;
+      *.py) PYTHONDONTWRITEBYTECODE=1 python3 "$source" --help >/dev/null ;;
+    esac
   done
-  bash -n "$ROUTE_SYNC_SOURCE" "$CLEANUP_SOURCE" "$HOOK_SOURCE"
-  PYTHONDONTWRITEBYTECODE=1 python3 "$REGISTRY_SOURCE" --help >/dev/null
-  PYTHONDONTWRITEBYTECODE=1 python3 "$RENDERER_SOURCE" --help >/dev/null
 }
 
 discover_cluster() {
@@ -196,37 +203,33 @@ remote_hash() {
     awk 'NF == 2 && $1 ~ /^[0-9a-f]{64}$/ {print $1}'
 }
 
+# NAME=HASH words for every managed file, as the staging check expects them.
+expected_hashes() {
+  local name
+  for name in "${RUNTIME_FILES[@]}"; do
+    printf '%s=%s\n' "$name" "$(local_hash "${RUNTIME_SOURCE_DIR}/${name}")"
+  done
+}
+
 show_hash_status() {
-  local registry_hash renderer_hash route_sync_hash cleanup_hash hook_hash
-  local node actual state
-  registry_hash="$(local_hash "$REGISTRY_SOURCE")"
-  renderer_hash="$(local_hash "$RENDERER_SOURCE")"
-  route_sync_hash="$(local_hash "$ROUTE_SYNC_SOURCE")"
-  cleanup_hash="$(local_hash "$CLEANUP_SOURCE")"
-  hook_hash="$(local_hash "$HOOK_SOURCE")"
-  printf '\n%-8s %-12s %-12s %-12s %-12s %-12s %-12s\n' \
-    "Node" "Registry" "Renderer" "Route sync" "Cleanup" "Hook library" \
-    "Hook snippet"
+  local node name actual
+  local -a outdated
+  printf '\n%-8s %s\n' "Node" "Files to update"
   for node in "${CLUSTER_NODES[@]}"; do
-    printf '%-8s' "$node"
-    actual="$(remote_hash "$node" "$REMOTE_REGISTRY" 2>/dev/null || true)"
-    [[ "$actual" == "$registry_hash" ]] && state=current || state=update
-    printf ' %-12s' "$state"
-    actual="$(remote_hash "$node" "$REMOTE_RENDERER" 2>/dev/null || true)"
-    [[ "$actual" == "$renderer_hash" ]] && state=current || state=update
-    printf ' %-12s' "$state"
-    actual="$(remote_hash "$node" "$REMOTE_ROUTE_SYNC" 2>/dev/null || true)"
-    [[ "$actual" == "$route_sync_hash" ]] && state=current || state=update
-    printf ' %-12s' "$state"
-    actual="$(remote_hash "$node" "$REMOTE_CLEANUP" 2>/dev/null || true)"
-    [[ "$actual" == "$cleanup_hash" ]] && state=current || state=update
-    printf ' %-12s' "$state"
-    actual="$(remote_hash "$node" "$REMOTE_HOOK" 2>/dev/null || true)"
-    [[ "$actual" == "$hook_hash" ]] && state=current || state=update
-    printf ' %-12s' "$state"
+    outdated=()
+    for name in "${RUNTIME_FILES[@]}"; do
+      actual="$(remote_hash "$node" "${INSTALL_ROOT}/lib/${name}" 2>/dev/null || true)"
+      [[ "$actual" == "$(local_hash "${RUNTIME_SOURCE_DIR}/${name}")" ]] ||
+        outdated+=("$name")
+    done
     actual="$(remote_hash "$node" "$REMOTE_SNIPPET" 2>/dev/null || true)"
-    [[ "$actual" == "$hook_hash" ]] && state=current || state=update
-    printf ' %-12s\n' "$state"
+    [[ "$actual" == "$(local_hash "${RUNTIME_SOURCE_DIR}/${HOOK_NAME}")" ]] ||
+      outdated+=("hook snippet")
+    if ((${#outdated[@]})); then
+      printf '%-8s %s\n' "$node" "${outdated[*]}"
+    else
+      printf '%-8s %s\n' "$node" "current"
+    fi
   done
 }
 
@@ -239,45 +242,32 @@ copy_to_node() {
 }
 
 stage_node() {
-  local node="$1"
+  local node="$1" name
+  local -a hashes
   mox_ssh "$node" install -d -m 0700 "$REMOTE_STAGE"
   STAGED_NODES+=("$node")
-  copy_to_node "$node" "$REGISTRY_SOURCE" "${REMOTE_STAGE}/cluster_registry.py"
-  copy_to_node "$node" "$RENDERER_SOURCE" "${REMOTE_STAGE}/haproxy_routes.py"
-  copy_to_node "$node" "$ROUTE_SYNC_SOURCE" \
-    "${REMOTE_STAGE}/sync_haproxy_routes.sh"
-  copy_to_node "$node" "$CLEANUP_SOURCE" \
-    "${REMOTE_STAGE}/process_deferred_cleanup.sh"
-  copy_to_node "$node" "$HOOK_SOURCE" \
-    "${REMOTE_STAGE}/app-ha-guest-role-hook.sh"
+  for name in "${RUNTIME_FILES[@]}"; do
+    copy_to_node "$node" "${RUNTIME_SOURCE_DIR}/${name}" "${REMOTE_STAGE}/${name}"
+  done
+  mapfile -t hashes < <(expected_hashes)
   # shellcheck disable=SC2016 # This script is evaluated by remote Bash.
   mox_ssh "$node" bash -c '
 set -Eeuo pipefail
-stage="$1"; registry_hash="$2"; renderer_hash="$3"
-cleanup_hash="$4"; hook_hash="$5"; route_sync_hash="$6"
+stage="$1"; shift
 [[ -d "$stage" && ! -L "$stage" ]]
 chmod 0700 "$stage"
-chmod 0755 \
-  "$stage/cluster_registry.py" \
-  "$stage/haproxy_routes.py" \
-  "$stage/sync_haproxy_routes.sh" \
-  "$stage/process_deferred_cleanup.sh" \
-  "$stage/app-ha-guest-role-hook.sh"
-[[ "$(sha256sum "$stage/cluster_registry.py" | awk "{print \$1}")" == "$registry_hash" ]]
-[[ "$(sha256sum "$stage/haproxy_routes.py" | awk "{print \$1}")" == "$renderer_hash" ]]
-[[ "$(sha256sum "$stage/sync_haproxy_routes.sh" | awk "{print \$1}")" == "$route_sync_hash" ]]
-[[ "$(sha256sum "$stage/process_deferred_cleanup.sh" | awk "{print \$1}")" == "$cleanup_hash" ]]
-[[ "$(sha256sum "$stage/app-ha-guest-role-hook.sh" | awk "{print \$1}")" == "$hook_hash" ]]
-bash -n "$stage/sync_haproxy_routes.sh" "$stage/process_deferred_cleanup.sh" \
-  "$stage/app-ha-guest-role-hook.sh"
-PYTHONDONTWRITEBYTECODE=1 python3 "$stage/cluster_registry.py" --help >/dev/null
-PYTHONDONTWRITEBYTECODE=1 python3 "$stage/haproxy_routes.py" --help >/dev/null
-' bash "$REMOTE_STAGE" \
-    "$(local_hash "$REGISTRY_SOURCE")" \
-    "$(local_hash "$RENDERER_SOURCE")" \
-    "$(local_hash "$CLEANUP_SOURCE")" \
-    "$(local_hash "$HOOK_SOURCE")" \
-    "$(local_hash "$ROUTE_SYNC_SOURCE")"
+for entry in "$@"; do
+  name="${entry%%=*}"; expected="${entry#*=}"
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ && -f "$stage/$name" && ! -L "$stage/$name" ]]
+  [[ "$(sha256sum "$stage/$name" | awk "{print \$1}")" == "$expected" ]]
+  case "$name" in
+    *.txt) chmod 0644 "$stage/$name" ;;
+    *.sh) chmod 0755 "$stage/$name"; bash -n "$stage/$name" ;;
+    *.py) chmod 0755 "$stage/$name"
+      PYTHONDONTWRITEBYTECODE=1 python3 "$stage/$name" --help >/dev/null ;;
+  esac
+done
+' bash "$REMOTE_STAGE" "${hashes[@]}"
 }
 
 commit_node() {
@@ -286,35 +276,31 @@ commit_node() {
   # shellcheck disable=SC2016 # This script is evaluated by remote Bash.
   if mox_ssh "$node" bash -c '
 set -Eeuo pipefail
-stage="$1"; install_root="$2"; snippet="$3"
-registry="${install_root}/lib/cluster_registry.py"
-renderer="${install_root}/lib/haproxy_routes.py"
-route_sync="${install_root}/lib/sync_haproxy_routes.sh"
-cleanup="${install_root}/lib/process_deferred_cleanup.sh"
-hook="${install_root}/lib/app-ha-guest-role-hook.sh"
-for path in "$registry" "$renderer" "$route_sync" "$cleanup" "$hook" "$snippet"; do
-  [[ -f "$path" && ! -L "$path" ]]
+stage="$1"; install_root="$2"; snippet="$3"; hook_name="$4"; shift 4
+[[ -f "$snippet" && ! -L "$snippet" ]]
+# Keep every current file (or note that it was absent) for rollback.
+for name in "$@"; do
+  installed="${install_root}/lib/${name}"
+  if [[ -e "$installed" ]]; then
+    [[ -f "$installed" && ! -L "$installed" ]]
+    install -m "$(stat -c %a "$installed")" "$installed" "$stage/${name}.old"
+  else
+    : >"$stage/${name}.absent"
+  fi
 done
-install -m 0755 "$registry" "$stage/cluster_registry.py.old"
-install -m 0755 "$renderer" "$stage/haproxy_routes.py.old"
-install -m 0755 "$route_sync" "$stage/sync_haproxy_routes.sh.old"
-install -m 0755 "$cleanup" "$stage/process_deferred_cleanup.sh.old"
-install -m 0755 "$hook" "$stage/app-ha-guest-role-hook.sh.old"
-install -m 0755 "$snippet" "$stage/app-ha-guest-role-hook.snippet.old"
+install -m 0755 "$snippet" "$stage/${hook_name}.snippet.old"
 : >"$stage/committed"
-install -m 0755 "$stage/cluster_registry.py" "${registry}.new"
-install -m 0755 "$stage/haproxy_routes.py" "${renderer}.new"
-install -m 0755 "$stage/sync_haproxy_routes.sh" "${route_sync}.new"
-install -m 0755 "$stage/process_deferred_cleanup.sh" "${cleanup}.new"
-install -m 0755 "$stage/app-ha-guest-role-hook.sh" "${hook}.new"
-install -m 0755 "$stage/app-ha-guest-role-hook.sh" "${snippet}.new"
-mv -f "${registry}.new" "$registry"
-mv -f "${renderer}.new" "$renderer"
-mv -f "${route_sync}.new" "$route_sync"
-mv -f "${cleanup}.new" "$cleanup"
-mv -f "${hook}.new" "$hook"
+for name in "$@"; do
+  installed="${install_root}/lib/${name}"
+  install -m "$(stat -c %a "$stage/$name")" "$stage/$name" "${installed}.new"
+  mv -f "${installed}.new" "$installed"
+done
+install -m 0755 "$stage/$hook_name" "${snippet}.new"
 mv -f "${snippet}.new" "$snippet"
-' bash "$REMOTE_STAGE" "$INSTALL_ROOT" "$REMOTE_SNIPPET"; then
+# The egress health service runs from the installed file.
+systemctl try-restart app-ha-egress-health.service
+' bash "$REMOTE_STAGE" "$INSTALL_ROOT" "$REMOTE_SNIPPET" "$HOOK_NAME" \
+    "${RUNTIME_FILES[@]}"; then
     return 0
   fi
   if mox_ssh "$node" test ! -f "${REMOTE_STAGE}/committed" \
@@ -329,55 +315,40 @@ rollback_node() {
   # shellcheck disable=SC2016 # This script is evaluated by remote Bash.
   mox_ssh "$node" bash -c '
 set -Eeuo pipefail
-stage="$1"; install_root="$2"; snippet="$3"
-registry="${install_root}/lib/cluster_registry.py"
-renderer="${install_root}/lib/haproxy_routes.py"
-route_sync="${install_root}/lib/sync_haproxy_routes.sh"
-cleanup="${install_root}/lib/process_deferred_cleanup.sh"
-hook="${install_root}/lib/app-ha-guest-role-hook.sh"
+stage="$1"; install_root="$2"; snippet="$3"; hook_name="$4"; shift 4
 [[ -f "$stage/committed" ]]
-install -m 0755 "$stage/cluster_registry.py.old" "${registry}.rollback"
-install -m 0755 "$stage/haproxy_routes.py.old" "${renderer}.rollback"
-install -m 0755 "$stage/sync_haproxy_routes.sh.old" "${route_sync}.rollback"
-install -m 0755 "$stage/process_deferred_cleanup.sh.old" "${cleanup}.rollback"
-install -m 0755 "$stage/app-ha-guest-role-hook.sh.old" "${hook}.rollback"
-install -m 0755 \
-  "$stage/app-ha-guest-role-hook.snippet.old" "${snippet}.rollback"
-mv -f "${registry}.rollback" "$registry"
-mv -f "${renderer}.rollback" "$renderer"
-mv -f "${route_sync}.rollback" "$route_sync"
-mv -f "${cleanup}.rollback" "$cleanup"
-mv -f "${hook}.rollback" "$hook"
+for name in "$@"; do
+  installed="${install_root}/lib/${name}"
+  if [[ -f "$stage/${name}.absent" ]]; then
+    rm -f "$installed"
+  else
+    install -m "$(stat -c %a "$stage/${name}.old")" "$stage/${name}.old" "${installed}.rollback"
+    mv -f "${installed}.rollback" "$installed"
+  fi
+done
+install -m 0755 "$stage/${hook_name}.snippet.old" "${snippet}.rollback"
 mv -f "${snippet}.rollback" "$snippet"
+systemctl try-restart app-ha-egress-health.service
 rm -f "$stage/committed"
-' bash "$REMOTE_STAGE" "$INSTALL_ROOT" "$REMOTE_SNIPPET"
+' bash "$REMOTE_STAGE" "$INSTALL_ROOT" "$REMOTE_SNIPPET" "$HOOK_NAME" \
+    "${RUNTIME_FILES[@]}"
 }
 
 verify_node() {
-  local node="$1" expected_registry expected_renderer expected_route_sync
-  local expected_cleanup expected_hook
-  expected_registry="$(local_hash "$REGISTRY_SOURCE")"
-  expected_renderer="$(local_hash "$RENDERER_SOURCE")"
-  expected_route_sync="$(local_hash "$ROUTE_SYNC_SOURCE")"
-  expected_cleanup="$(local_hash "$CLEANUP_SOURCE")"
-  expected_hook="$(local_hash "$HOOK_SOURCE")"
-  [[ "$(remote_hash "$node" "$REMOTE_REGISTRY")" == "$expected_registry" ]] ||
-    die "$node registry hash differs after installation"
-  [[ "$(remote_hash "$node" "$REMOTE_RENDERER")" == "$expected_renderer" ]] ||
-    die "$node renderer hash differs after installation"
-  [[ "$(remote_hash "$node" "$REMOTE_ROUTE_SYNC")" == "$expected_route_sync" ]] ||
-    die "$node route synchronizer hash differs after installation"
-  [[ "$(remote_hash "$node" "$REMOTE_CLEANUP")" == "$expected_cleanup" ]] ||
-    die "$node cleanup worker hash differs after installation"
-  [[ "$(remote_hash "$node" "$REMOTE_HOOK")" == "$expected_hook" ]] ||
-    die "$node hook library hash differs after installation"
-  [[ "$(remote_hash "$node" "$REMOTE_SNIPPET")" == "$expected_hook" ]] ||
+  local node="$1" name
+  for name in "${RUNTIME_FILES[@]}"; do
+    [[ "$(remote_hash "$node" "${INSTALL_ROOT}/lib/${name}")" == \
+      "$(local_hash "${RUNTIME_SOURCE_DIR}/${name}")" ]] ||
+      die "$node: ${name} hash differs after installation"
+  done
+  [[ "$(remote_hash "$node" "$REMOTE_SNIPPET")" == \
+    "$(local_hash "${RUNTIME_SOURCE_DIR}/${HOOK_NAME}")" ]] ||
     die "$node hook snippet hash differs after installation"
-  mox_ssh "$node" bash -n "$REMOTE_ROUTE_SYNC" "$REMOTE_CLEANUP" "$REMOTE_HOOK" \
-    "$REMOTE_SNIPPET"
+  mox_ssh "$node" bash -n "$REMOTE_SNIPPET"
   mox_ssh "$node" "$REMOTE_REGISTRY" \
     --state-dir "$CLUSTER_STATE_DIR" list --record-type resources >/dev/null
-  mox_ssh "$node" "$REMOTE_RENDERER" --help >/dev/null
+  mox_ssh "$node" "$REMOTE_TUNNEL_SYNC" --check >/dev/null ||
+    die "$node's tunnel config differs from the registry after the update"
 }
 
 cleanup_remote_stages() {
@@ -402,9 +373,8 @@ rollback_committed_nodes() {
     fi
   done
   if [[ "$failed" == false ]] &&
-    ! mox_ssh "$COORDINATOR" "$REMOTE_ROUTE_SYNC" --lock-timeout 240 \
-      </dev/null; then
-    warn "Prior files were restored, but HAProxy route resynchronization failed"
+    ! mox_ssh "$COORDINATOR" "$REMOTE_TUNNEL_SYNC" --all </dev/null; then
+    warn "Prior files were restored, but the tunnel config could not be resynchronized"
     failed=true
   fi
   [[ "$failed" == false ]]
@@ -491,8 +461,8 @@ main() {
     info "Installed runtime on $node"
   done
 
-  log "Synchronizing registry-backed HAProxy routes"
-  mox_ssh "$COORDINATOR" "$REMOTE_ROUTE_SYNC" --lock-timeout 240 </dev/null
+  log "Bringing every host's Cloudflare Tunnel config up to date"
+  mox_ssh "$COORDINATOR" "$REMOTE_TUNNEL_SYNC" --all </dev/null
 
   log "Verifying the installed runtime on every node"
   for node in "${CLUSTER_NODES[@]}"; do

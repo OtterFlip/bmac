@@ -51,6 +51,11 @@ const emptySource = (): SourceEntry<never> => ({
   nextSteps: [],
 });
 
+/** A failed read clears the old data: showing it would pass stale state off as current. */
+function failedSource(entry: SourceEntry<unknown>, error: string): SourceEntry<never> {
+  return { ...entry, data: null, updatedAt: null, status: "error", error };
+}
+
 export interface PreflightState {
   checks: PreflightCheck[] | null;
   loading: boolean;
@@ -199,25 +204,8 @@ export const useStore = create<State>((set, get) => ({
       for (const r of active) void get().loadRun(r.run_id);
       const latestActive = active[active.length - 1];
       if (latestActive) set({ consoleRunId: latestActive.run_id });
-      // Seed each state source from its last successful run.
-      for (const id of SOURCE_IDS) {
-        const last = history.find((r) => r.workflow_id === id && r.status === "succeeded" && r.result);
-        if (last) {
-          set((s) => ({
-            sources: {
-              ...s.sources,
-              [id]: {
-                ...s.sources[id],
-                data: last.result as never,
-                updatedAt: Date.parse(last.ended_at ?? last.started_at),
-                status: "ok",
-                runId: last.run_id,
-                nextSteps: last.next_steps,
-              },
-            },
-          }));
-        }
-      }
+      // Cluster views start empty and are read live; past runs' results are
+      // never shown as current state.
     } catch (error) {
       set({ bootError: errorMessage(error), ready: true });
     }
@@ -334,7 +322,7 @@ export const useStore = create<State>((set, get) => ({
     const workflow = get().workflows[id];
     if (!workflow?.available) {
       set((s) => ({
-        sources: { ...s.sources, [id]: { ...s.sources[id], status: "error", error: workflow?.unavailable_reason ?? "Unavailable." } },
+        sources: { ...s.sources, [id]: failedSource(s.sources[id], workflow?.unavailable_reason ?? "Unavailable.") },
       }));
       return;
     }
@@ -348,7 +336,7 @@ export const useStore = create<State>((set, get) => ({
       }));
       onRecord(record);
     } catch (error) {
-      set((s) => ({ sources: { ...s.sources, [id]: { ...s.sources[id], status: "error", error: errorMessage(error) } } }));
+      set((s) => ({ sources: { ...s.sources, [id]: failedSource(s.sources[id], errorMessage(error)) } }));
     }
   },
 
@@ -384,19 +372,10 @@ function onRecord(record: RunRecord) {
     useStore.setState((s) => {
       const prev = s.sources[source];
       const ok = record.result !== null && record.result !== undefined;
-      return {
-        sources: {
-          ...s.sources,
-          [source]: {
-            ...prev,
-            data: ok ? (record.result as never) : prev.data,
-            updatedAt: ok ? Date.now() : prev.updatedAt,
-            status: ok ? "ok" : "error",
-            error: ok ? null : record.message ?? record.errors[0] ?? `The script finished as ${record.status}.`,
-            nextSteps: record.next_steps,
-          },
-        },
-      };
+      const next = ok
+        ? { ...prev, data: record.result as never, updatedAt: Date.now(), status: "ok" as const, error: null }
+        : failedSource(prev, record.message ?? record.errors[0] ?? `The script finished as ${record.status}.`);
+      return { sources: { ...s.sources, [source]: { ...next, nextSteps: record.next_steps } } };
     });
     if (background) return;
   }

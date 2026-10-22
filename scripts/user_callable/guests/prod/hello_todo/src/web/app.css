@@ -1,0 +1,84 @@
+/* Copyright (c) 2026 BEENTHERE VENTURES, INC. */
+/* SPDX-License-Identifier: GPL-3.0-only */
+
+:root {
+  color-scheme: light dark;
+  --accent: #2563eb;
+  --muted: #6b7280;
+  --line: #d1d5db;
+}
+
+body {
+  font: 16px/1.5 system-ui, sans-serif;
+  margin: 0;
+  padding: 2rem 1rem;
+}
+
+main {
+  max-width: 36rem;
+  margin: 0 auto;
+}
+
+h1 {
+  margin: 0 0 0.25rem;
+}
+
+.meta {
+  color: var(--muted);
+  margin: 0 0 1rem;
+}
+
+form {
+  display: flex;
+  gap: 0.5rem;
+}
+
+input[name="title"] {
+  flex: 1;
+  padding: 0.5rem;
+  font: inherit;
+}
+
+button {
+  font: inherit;
+  padding: 0.5rem 1rem;
+  border: 0;
+  border-radius: 0.25rem;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+}
+
+#error {
+  color: #dc2626;
+}
+
+ul {
+  list-style: none;
+  padding: 0;
+}
+
+li {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+li .title {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+li.done .title {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+button.remove {
+  background: transparent;
+  color: var(--muted);
+  padding: 0 0.5rem;
+  font-size: 1.25rem;
+}

@@ -24,16 +24,23 @@ class UpdateClusterRuntimeTests(unittest.TestCase):
 
     def test_bundle_contains_every_runtime_name_and_install_target(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")
-        for value in (
-            "lib/cluster_registry.py",
-            "lib/haproxy_routes.py",
-            "lib/process_deferred_cleanup.sh",
+        runtime = SCRIPT.parent.parent.parent / "host_runtime"
+        for name in (
+            "cluster_registry.py",
+            "process_deferred_cleanup.sh",
             "app-ha-guest-role-hook.sh",
-            "/usr/local/lib/app-ha-proxmox",
-            "GUEST_ROLE_HOOK_PATH",
-            "sync_haproxy_routes.sh",
+            "guest_network.sh",
+            "egress_health.py",
+            "egress_probe_targets.txt",
+            "transfer_counter.py",
+            "tunnel_config.py",
+            "tunnel_sync.sh",
+            "cloudflared_setup.sh",
         ):
-            self.assertIn(value, text)
+            self.assertIn(f"/usr/local/lib/app-ha-proxmox/lib/{name}", text)
+            self.assertTrue((runtime / name).is_file(), name)
+        self.assertIn("GUEST_ROLE_HOOK_PATH", text)
+        self.assertNotIn("haproxy", text.lower())
 
     def test_cluster_wide_safety_order_and_rollback_are_explicit(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")
@@ -44,23 +51,22 @@ class UpdateClusterRuntimeTests(unittest.TestCase):
         )
         self.assertLess(
             main.index('commit_node "$node"'),
-            main.index('"$REMOTE_ROUTE_SYNC" --lock-timeout 240'),
+            main.index('"$REMOTE_TUNNEL_SYNC" --all'),
         )
         self.assertLess(
-            main.index('"$REMOTE_ROUTE_SYNC" --lock-timeout 240'),
+            main.index('"$REMOTE_TUNNEL_SYNC" --all'),
             main.index('verify_node "$node"'),
         )
         self.assertIn("rollback_committed_nodes", text)
         self.assertIn('row.get("status") != "online"', text)
         self.assertIn('mox_is_reachable "$node"', text)
-        self.assertIn('mv -f "${registry}.new" "$registry"', text)
-        self.assertIn('mv -f "${registry}.rollback" "$registry"', text)
-        self.assertIn('mv -f "${cleanup}.new" "$cleanup"', text)
-        self.assertIn('mv -f "${cleanup}.rollback" "$cleanup"', text)
-        self.assertIn('mv -f "${route_sync}.new" "$route_sync"', text)
-        self.assertIn('mv -f "${route_sync}.rollback" "$route_sync"', text)
-        self.assertIn('"$REMOTE_ROUTE_SYNC")" == "$expected_route_sync"', text)
-
+        # Installs and rollbacks are atomic renames, and a file that did not
+        # exist before the update is removed again on rollback.
+        self.assertIn('mv -f "${installed}.new" "$installed"', text)
+        self.assertIn('mv -f "${installed}.rollback" "$installed"', text)
+        self.assertIn('if [[ -f "$stage/${name}.absent" ]]; then', text)
+        self.assertIn("systemctl try-restart app-ha-egress-health.service", text)
+        self.assertIn('"$REMOTE_TUNNEL_SYNC" --check', text)
 
 if __name__ == "__main__":
     unittest.main()

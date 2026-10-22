@@ -5,7 +5,7 @@
 # for the primary NIC which has your public IP and gateway, and your
 # secondary NIC which is used for private communication within the cluster.
 # Compare this file with mox1_dot_conf to get a feel for how the other
-# values such as the HAPROXY_* values should be set for each proxmos host.
+# values such as PROXMOX_SECONDARY_IP should be set for each proxmox host.
 # The resulting moxN.conf is input only for add_proxmox_host.sh's initial
 # execution and retries after an incomplete setup. After setup succeeds, the
 # host itself is authoritative; later scripts neither read nor update this file.
@@ -68,21 +68,21 @@ PROXMOX_PUBLIC_MAC=CC:DD:EE:FF:AA:BB
 PROXMOX_SECONDARY_MAC=DD:EE:FF:AA:BB:CC
 PROXMOX_SECONDARY_IP=10.213.0.12/24
 
-# Ingress: this host's public TCP 80/443 is DNATed to fixed local haproxy2 at
-# .22. Its gateway MUST be mox2's fixed .12 so replies traverse this host's
-# conntrack state. It must not use floating guest-egress VIP .10.
-# Egress: production/staging guests use .10; Keepalived may make mox2 the
-# current router and nftables then SNATs those guests through PROXMOX_IP.
-HAPROXY_LXC_VMID=9112
-HAPROXY_LXC_HOSTNAME=haproxy2
-HAPROXY_LXC_IP=10.213.0.22/24
-HAPROXY_LXC_GATEWAY=10.213.0.12
-VRRP_PRIORITY=198
+# Optional monthly inbound+outbound traffic cap (in GiB) on this host's
+# public interface, as set by your provider. The host always counts the bytes
+# it sends and receives there; with a cap set, the dashboard also shows usage
+# against it. Leave both lines commented out if your provider has no cap.
+#PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB=301748
+# Optional numeric day of the month on which the provider resets the cap
+# (1-28; a larger value is treated as 28; default 1). The host resets its
+# counter once on that day and remembers that it did, across restarts.
+#PROXMOX_HOST_TRANSFER_MONTHLY_RESET_DAY=24
 
 # Specifies how many staging VMs can be created on this host
 # When this value is set it should factor in the host's available RAM
 # and the amount of RAM which each staging host will consume which
 # is specified by STAGING_VM_MEMORY_GIB in cluster.conf
+# It must be no more than MAX_STAGING_VMS_PER_PROD in cluster.conf.
 MAX_STAGING_VM_COUNT_ON_THIS_HOST=5
 
 # Specifies how many prod VMs can be created on this host

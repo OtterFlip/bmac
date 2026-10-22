@@ -399,7 +399,6 @@ json.dump(
         "resource_id": stage["id"],
         "revision": stage["revision"],
         "state": stage["state"],
-        "routes_enabled": stage["routes_enabled"],
         "name": stage["name"],
         "vmid": stage["vmid"],
         "volume": volume,
@@ -487,7 +486,9 @@ refresh_candidate_validation() {
   validate_staging_candidate "$vmid"
 }
 
-disable_staging_route() {
+# A registry state of active becomes stopping, the step before
+# cleanup_pending; other states move straight to cleanup_pending.
+mark_staging_stopping() {
   local vmid="$1" metadata
   metadata="${WORK_DIR}/candidate-${vmid}.json"
   local -a fields=()
@@ -500,14 +501,11 @@ for value in (row["name"], row["revision"], row["state"]):
     sys.stdout.buffer.write(str(value).encode() + b"\0")
 PY
   )
-  ((${#fields[@]} == 3)) || die "could not parse registry route identity"
+  ((${#fields[@]} == 3)) || die "could not parse registry identity"
   local name="${fields[0]}" revision="${fields[1]}" state="${fields[2]}"
-  local -a args=(
-    update "$name" --expected-revision "$revision" --routes-disabled
-  )
-  [[ "$state" != active ]] || args+=(--state stopping)
-  registry "${args[@]}" >/dev/null ||
-    die "could not disable the registry route for $name"
+  [[ "$state" == active ]] || return 0
+  registry update "$name" --expected-revision "$revision" --state stopping >/dev/null ||
+    die "could not mark $name as stopping"
 }
 
 queue_cleanup_plan() {
@@ -574,16 +572,6 @@ PY
       >/dev/null ||
       die "could not queue snapshot cleanup for $name on $node"
   done
-  for node in "${configured_nodes[@]}"; do
-    registry defer-cleanup \
-      --resource "$name" \
-      --node "$node" \
-      --action remove-route \
-      --target "$name" \
-      --reason "production start disabled the evicted staging route" \
-      >/dev/null ||
-      die "could not queue HAProxy route cleanup for $name on $node"
-  done
 
   local current_file="${WORK_DIR}/candidate-${vmid}.current.json"
   registry get "$name" >"$current_file" ||
@@ -602,15 +590,11 @@ PY
   )
   ((${#current[@]} == 2)) ||
     die "registry identity changed before cleanup commit"
-  local -a update_args=(
-    update "$name"
-    --expected-revision "${current[0]}"
-    --routes-disabled
-  )
-  [[ "${current[1]}" == cleanup_pending ]] ||
-    update_args+=(--state cleanup_pending)
-  registry "${update_args[@]}" >/dev/null ||
-    die "could not commit cleanup_pending for $name"
+  if [[ "${current[1]}" != cleanup_pending ]]; then
+    registry update "$name" --expected-revision "${current[0]}" \
+      --state cleanup_pending >/dev/null ||
+      die "could not commit cleanup_pending for $name"
+  fi
   log "committed durable cleanup plan for $name"
 }
 
@@ -714,9 +698,9 @@ queue_staging_eviction() {
   vm_is_ha "$vmid" || ha_status=$?
   [[ "$ha_status" == 1 ]] ||
     die "staging VM $vmid became HA-managed or HA state is unavailable"
-  disable_staging_route "$vmid"
+  mark_staging_stopping "$vmid"
 
-  # Route state changed in pmxcfs; validate live QEMU, HA, registry identity,
+  # Registry state changed in pmxcfs; validate live QEMU, HA, registry identity,
   # volume, origin, and snapshot GUID once more before the commit.
   refresh_candidate_validation "$vmid"
   queue_cleanup_plan "$vmid"

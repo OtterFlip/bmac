@@ -329,7 +329,6 @@ export function createMockBackend(): Backend {
       dry_run: r.dry_run,
       items: destructive
         ? [
-            { kind: "remove", target: "HAProxy routes", description: `Unpublish ${target}'s 2 routes` },
             { kind: "remove", target: "HA resource vm:101", description: "Remove the HA resource and its node-affinity rule" },
             { kind: "remove", target: "replication 101-0, 101-1", description: "Remove both jobs and their target copies on mox1 and mox2" },
             { kind: "remove", target: "VM 101", description: "Destroy the VM and its volumes on mox3" },
@@ -353,7 +352,7 @@ export function createMockBackend(): Backend {
       request_id: "req-3-confirm",
       title: destructive ? `Permanently destroy ${target}?` : `${workflow.title}?`,
       message: destructive
-        ? `This removes ${target}, its replicas, HA configuration, routes, and registry allocation. It cannot be undone.`
+        ? `This removes ${target}, its replicas, HA configuration, and registry allocation. It cannot be undone.`
         : "The script is ready to apply this plan.",
       severity: destructive ? "destructive" : "normal",
       confirm_label: destructive ? `Destroy ${target}` : "Apply",
