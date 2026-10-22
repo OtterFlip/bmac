@@ -214,6 +214,30 @@
       ]
     },
     {
+      "id": "reconcile_prod_vm_owner",
+      "title": "Record where production VMs run",
+      "summary": "After a failover, record each production VM's current host as its owner. Moves nothing.",
+      "description": "Compares the registry owner and replication targets of every active production VM with where Proxmox runs it and replicates it, and (without dry run) records the live values in the registry. Use it when the dashboard reports that a production VM runs on a different host than its registry owner. No VM is moved, stopped, or restarted, and a VM with a move or resize in progress is left alone.",
+      "category": "production",
+      "script": "scripts/user_callable/guests/prod/reconcile_prod_vm_owner.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "supports_dry_run": true,
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "params": [
+        {
+          "id": "dry_run",
+          "label": "Dry run (show differences only)",
+          "type": "flag",
+          "flag": "--dry-run",
+          "default": true
+        }
+      ]
+    },
+    {
       "id": "change_prod_vm_owner",
       "title": "Move production VM",
       "summary": "Relocate a production VM to another of its placement hosts.",

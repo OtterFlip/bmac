@@ -207,6 +207,15 @@ class QuickStateTest(unittest.TestCase):
         self.assertEqual(filtered["production"], [])
         self.assertNotIn("PRODUCTION VMS", self.render_terminal("guests", GUESTS_REPORT, "--kind-filter", "staging"))
 
+    def test_failed_over_production_links_to_recording_its_owner(self) -> None:
+        moved = json.loads(json.dumps(GUESTS_REPORT))
+        moved["live"][0].update(status="running", node="mox2")
+        moved["ha_status"][0].update(state="started", node="mox2")
+        moved["replication"] = []
+        summary, steps, _ = self.render_json("guests", moved)
+        self.assertIn("prod1 runs on mox2 but the registry owner is mox1", summary["problems"])
+        self.assertIn(("reconcile_prod_vm_owner", {}), [(step["workflow"], step["args"]) for step in steps])
+
     def test_staging_rows_surface_their_snapshot_and_who_shares_it(self) -> None:
         shared = "stg-base-stage1prod1-261010T040000Z"
         report = json.loads(json.dumps(GUESTS_REPORT))

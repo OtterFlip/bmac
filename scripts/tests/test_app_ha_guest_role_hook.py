@@ -752,6 +752,47 @@ else:
         )
         self.assertLess(config_index, zvol_index)
 
+    def test_post_start_records_the_failover_owner(self) -> None:
+        # prod1 is registered on mox2 and HA restarts it on mox1.
+        self.registry("update", "prod1", "--state", "active")
+        self.run_hook(100, "pre-start")
+        self.assertEqual(self.registry("get", "prod1")["owner_node"], "mox2")
+        completed = self.run_hook(100, "post-start")
+        record = self.registry("get", "prod1")
+        self.assertEqual(
+            (record["owner_node"], record["proxmox"]["replication_targets"]),
+            ("mox1", ["mox2"]),
+        )
+        self.assertIn("recorded mox1 as the owner of prod1", completed.stderr)
+        rows = self.action_rows()
+        trigger = next(
+            index for index, row in enumerate(rows) if row[:2] == ["systemctl", "start"]
+        )
+        record_index = next(
+            index for index, row in enumerate(rows) if "record-owner" in row
+        )
+        self.assertLess(trigger, record_index)
+
+        # A start this hook did not reserve (no pre-start here) records nothing.
+        self.actions.write_text("", encoding="utf-8")
+        self.run_hook(100, "post-start")
+        self.assertFalse(any("record-owner" in row for row in self.action_rows()))
+
+    def test_post_start_owner_errors_never_fail_the_hook(self) -> None:
+        self.registry("update", "prod1", "--state", "active")
+        (self.reservation_dir / "100.reservation").write_text(
+            "vmid=100\nname=prod1\nnode=mox3\ncreated_epoch=1\n", encoding="utf-8"
+        )
+        environment = dict(self.environment, APP_HA_LOCAL_NODE="mox3")
+        completed = subprocess.run(
+            [str(HOOK), "100", "post-start"], env=environment, text=True,
+            capture_output=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("could not record mox3 as the owner of prod1", completed.stderr)
+        self.assertFalse((self.reservation_dir / "100.reservation").exists())
+        self.assertEqual(self.registry("get", "prod1")["owner_node"], "mox2")
+
     def test_every_staging_guest_is_off_before_any_is_queued(self) -> None:
         self.add_registered_staging(1)
         self.add_registered_staging(2)

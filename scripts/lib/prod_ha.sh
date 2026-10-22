@@ -589,18 +589,25 @@ prod_show_live_state() {
 }
 
 # Update a stale registry owner from live HA state, as extend_prod_vm_disk.sh
-# does.
+# does. After a failover Proxmox has already turned the replication jobs
+# around, so the registry's targets are rewritten from the live jobs too.
 prod_reconcile_registry_owner() {
   [[ "$REGISTRY_OWNER" != "$OWNER_NODE" ]] || return 0
   CURRENT_PHASE="updating the stale production registry owner"
-  local updated
+  local updated job
+  local -a targets=()
+  for job in "${REPLICATION_JOBS[@]}"; do
+    targets+=("${REPLICATION_TARGET[$job]}")
+  done
   updated="$(registry_cmd update "$RESOURCE_NAME" \
     --expected-revision "$RESOURCE_REVISION" \
-    --owner-node "$OWNER_NODE")" ||
+    --owner-node "$OWNER_NODE" \
+    --replication-targets "$(join_csv "${targets[@]}")")" ||
     die "Could not update the registry owner of $RESOURCE_NAME to $OWNER_NODE"
   RESOURCE_REVISION="$(json_revision "$updated")"
-  info "Registry owner of $RESOURCE_NAME updated from ${REGISTRY_OWNER:-unknown} to $OWNER_NODE"
+  info "Registry owner of $RESOURCE_NAME updated from ${REGISTRY_OWNER:-unknown} to $OWNER_NODE (replication targets: ${targets[*]:-none})"
   REGISTRY_OWNER="$OWNER_NODE"
+  REGISTRY_TARGETS=("${targets[@]}")
 }
 
 registry_update_resource() {

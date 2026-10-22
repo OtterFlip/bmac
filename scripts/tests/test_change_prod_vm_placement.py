@@ -227,6 +227,25 @@ class PlacementTest(unittest.TestCase):
         )
         self.assertIn("registry --replication-targets mox2", stale.stdout)
 
+    def test_stale_owner_correction_records_the_live_replication_targets(self) -> None:
+        # After a failover prod1 runs on mox2 and Proxmox replicates it to mox1.
+        completed = self.owner(
+            """
+            registry_cmd() { printf 'registry_cmd %s\n' "$*" >>"$CALLS"; printf '{"revision": 9}\n'; }
+            OWNER_NODE=mox2
+            REPLICATION_TARGET[100-0]=mox1
+            RESOURCE_REVISION=4
+            prod_reconcile_registry_owner
+            printf 'owner=%s targets=%s revision=%s\n' "$REGISTRY_OWNER" "${REGISTRY_TARGETS[*]}" "$RESOURCE_REVISION"
+            cat "$CALLS"
+            """
+        )
+        self.assertIn(
+            "registry_cmd update prod1 --expected-revision 4 --owner-node mox2 --replication-targets mox1",
+            completed.stdout,
+        )
+        self.assertIn("owner=mox2 targets=mox1 revision=9", completed.stdout)
+
     def test_owner_records_new_owner_and_reversed_targets(self) -> None:
         completed = self.owner(
             """

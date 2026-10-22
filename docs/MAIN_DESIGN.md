@@ -1139,6 +1139,11 @@ scripts/user_callable/hosts/inventory_disks.sh --host moxN
    placement host with `ha-manager relocate` after checking that HA,
    replication, and the registry agree. It then verifies the reversed
    replication and records the new owner.
+   `scripts/user_callable/guests/prod/reconcile_prod_vm_owner.sh` records,
+   without moving anything, where every active production VM runs and the
+   replication targets Proxmox uses for it. The guest hook normally does this
+   after a failover; the script covers a failover that happened before the
+   hook did so, or one whose update was skipped.
 13. `scripts/user_callable/hosts/remove_proxmox_host.sh` — remove one host, gracefully when it is
    an online member that answers SSH, and forcefully when it cannot be
    contacted. Either way it chooses a new control node if needed and frees
@@ -2125,7 +2130,14 @@ Before a staging start, the hook:
 - permits only registry state `ready` or `stopped`.
 
 `post-start` and `post-stop` remove the matching production reservation.
-`post-start` also triggers deferred cleanup without blocking the VM.
+`post-start` also triggers deferred cleanup without blocking the VM. Then, for
+a production start this hook reserved, it records the local node as the VM's
+registry owner, with the other placement hosts as replication targets
+(`cluster_registry.py record-owner`). Because HA uses `failback=0`, a VM that
+failed over stays on its new host, and this keeps the registry in step with
+it. The registry skips the update while the VM is not `active` or while a
+workflow holds its orchestration lease (that workflow records the owner
+itself); a failure is only logged and never affects the running VM.
 
 ### Full host-failure sequence
 

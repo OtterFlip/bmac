@@ -151,7 +151,7 @@ export function ProductionPage() {
         </Card>
 
         <h2 className="mb-2.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-fg-subtle">Production operations</h2>
-        <WorkflowTiles ids={["add_prod_vm", "change_prod_vm_owner", "change_prod_vm_placement", "extend_prod_vm_disk", "setup_jump_ssh_access", "deploy_hello_app_to_prod", "show_prod_vm_state", "list_slots", "remove_prod_vm"]} />
+        <WorkflowTiles ids={["add_prod_vm", "change_prod_vm_owner", "reconcile_prod_vm_owner", "change_prod_vm_placement", "extend_prod_vm_disk", "setup_jump_ssh_access", "deploy_hello_app_to_prod", "show_prod_vm_state", "list_slots", "remove_prod_vm"]} />
       </PageBody>
     </>
   );

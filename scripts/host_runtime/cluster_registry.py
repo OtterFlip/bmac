@@ -2560,6 +2560,63 @@ def command_update(registry: Registry, args: argparse.Namespace) -> Any:
         return updated
 
 
+def command_record_owner(registry: Registry, args: argparse.Namespace) -> Any:
+    """Record the node an active production VM actually runs on.
+
+    HA keeps a failed-over VM where it restarted (failback is off), so the
+    owner and replication targets are rewritten to match. Does nothing while
+    an orchestration lease is held: the lease holder records ownership itself.
+    """
+
+    policy = registry.policy()
+    node = validate_nodes([args.node], policy)[0]
+    with registry.lock():
+        resources = registry.resources()
+        current = next((record for record in resources if record["name"] == args.name), None)
+        if current is None:
+            raise RegistryError(f"resource does not exist: {args.name}")
+        if current["kind"] != "production":
+            raise RegistryError("only production owners may be recorded")
+        result = {"resource": current["name"], "owner_node": current["owner_node"], "changed": False}
+        if current["state"] != "active":
+            return {**result, "reason": f"state-{current['state']}"}
+        if node not in current["placement"]:
+            raise RegistryError(f"{node} is outside the placement of {current['name']}")
+        orchestration = registry.orchestration_path(current["name"])
+        if orchestration.exists():
+            record = read_json_file(orchestration, "orchestration record")
+            validate_orchestration_record(record)
+            lease = record["lease"]
+            if lease is not None and parse_timestamp(lease["expires_at"]) > dt.datetime.now(dt.timezone.utc):
+                return {**result, "reason": f"lease-held-by-{lease['owner']}"}
+        if args.replication_targets is None:
+            targets = [other for other in current["placement"] if other != node]
+        else:
+            targets = validate_nodes(flatten_nodes(args.replication_targets), policy, allow_empty=True)
+            if node in targets or any(other not in current["placement"] for other in targets):
+                raise RegistryError("replication targets must be placement nodes other than the owner")
+        if current["owner_node"] == node and current["proxmox"]["replication_targets"] == targets:
+            return {**result, "reason": "already-recorded"}
+        updated = copy.deepcopy(current)
+        updated["owner_node"] = node
+        updated["proxmox"]["replication_targets"] = targets
+        updated["updated_at"] = utc_now()
+        updated["revision"] += 1
+        validate_resource(updated, policy)
+        validate_registry_invariants(
+            [updated if record["name"] == updated["name"] else record for record in resources]
+        )
+        atomic_write_json(registry.resource_path(updated["name"]), updated)
+        return {
+            "resource": updated["name"],
+            "owner_node": node,
+            "previous_owner_node": current["owner_node"],
+            "replication_targets": targets,
+            "changed": True,
+            "revision": updated["revision"],
+        }
+
+
 def _orchestration_resource(
     registry: Registry, name: str
 ) -> tuple[dict[str, Any], Path]:
@@ -4227,6 +4284,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="grow the exact registered production root disk size (whole MiB)",
     )
     update.set_defaults(handler=command_update)
+
+    record_owner = subparsers.add_parser(
+        "record-owner",
+        help="record the node an active production VM runs on (skipped while leased)",
+    )
+    record_owner.add_argument("name")
+    record_owner.add_argument("--node", required=True)
+    record_owner.add_argument(
+        "--replication-targets",
+        action="append",
+        help="observed targets; default: placement minus --node",
+    )
+    record_owner.set_defaults(handler=command_record_owner)
 
     orchestration_get = subparsers.add_parser(
         "orchestration-get",

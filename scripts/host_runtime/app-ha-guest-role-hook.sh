@@ -797,6 +797,39 @@ classify_role() {
   return 1
 }
 
+# After an HA failover the VM stays where it restarted (failback is off), so
+# record this node as its owner. Runs only after production is up, never
+# fails the hook, and is skipped by the registry while a workflow holds the
+# VM's orchestration lease or the VM is not yet active.
+record_production_owner() {
+  local name="$1" result
+  (
+    set +e
+    source "$CONFIG_LIB" &&
+      load_proxmox_config --no-secrets >/dev/null &&
+      require_vars CLUSTER_STATE_DIR >/dev/null || exit 1
+    result="$(timeout 30 "$REGISTRY" --state-dir "$CLUSTER_STATE_DIR" \
+      record-owner "$name" --node "$LOCAL_NODE" 2>&1)" || {
+      log "could not record $LOCAL_NODE as the owner of $name: ${result:-registry error}"
+      exit 0
+    }
+    if [[ "$result" == *'"changed": true'* ]]; then
+      log "recorded $LOCAL_NODE as the owner of $name"
+    fi
+  ) || log "could not load the cluster configuration to record the owner of $name"
+}
+
+# The name in this VM's production-start reservation, if pre-start wrote one
+# on this node.
+reserved_production_name() {
+  local name node
+  [[ -f "$RESERVATION_FILE" ]] && validate_reservation_file "$RESERVATION_FILE" || return 1
+  name="$(sed -n 's/^name=//p' "$RESERVATION_FILE")"
+  node="$(sed -n 's/^node=//p' "$RESERVATION_FILE")"
+  is_production_name "$name" && [[ "$node" == "$LOCAL_NODE" ]] || return 1
+  printf '%s\n' "$name"
+}
+
 trigger_deferred_cleanup() {
   systemctl start --no-block "$DEFERRED_CLEANUP_SERVICE" >/dev/null 2>&1 ||
     log "deferred-cleanup service could not be queued; the timer will retry"
@@ -814,8 +847,11 @@ main() {
   # pre-stop hook that tried to reacquire that lock would deadlock the stop.
   case "$PHASE" in
     post-start)
+      local started_production=""
+      started_production="$(reserved_production_name 2>/dev/null)" || started_production=""
       rm -f -- "$RESERVATION_FILE"
       trigger_deferred_cleanup
+      [[ -z "$started_production" ]] || record_production_owner "$started_production"
       return 0
       ;;
     post-stop)

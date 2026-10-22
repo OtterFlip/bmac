@@ -551,6 +551,51 @@ class RegistryCliTest(unittest.TestCase):
             "stage1prod1.example.com",
         )
 
+    def test_record_owner_follows_a_failover_and_respects_leases(self) -> None:
+        self.allocate_prod()
+        reserved, _ = self.run_registry("record-owner", "prod1", "--node", "mox2")
+        self.assertEqual((reserved["changed"], reserved["reason"]), (False, "state-reserved"))
+        self.run_registry("update", "prod1", "--state", "provisioning", "--owner-node", "mox1",
+                          "--volume-id", "local-zfs:vm-100-disk-0")
+        self.run_registry("update", "prod1", "--state", "stopped", "--ha-nodes", "mox1,mox2",
+                          "--replication-targets", "mox2")
+        skipped, _ = self.run_registry("record-owner", "prod1", "--node", "mox2")
+        self.assertEqual((skipped["changed"], skipped["reason"]), (False, "state-stopped"))
+        active, _ = self.run_registry("update", "prod1", "--state", "active")
+
+        # A failover to mox2: owner and targets follow, and the revision moves.
+        moved, _ = self.run_registry("record-owner", "prod1", "--node", "mox2")
+        self.assertTrue(moved["changed"])
+        self.assertEqual((moved["previous_owner_node"], moved["replication_targets"]), ("mox1", ["mox1"]))
+        record, _ = self.run_registry("get", "prod1")
+        self.assertEqual((record["owner_node"], record["proxmox"]["replication_targets"]), ("mox2", ["mox1"]))
+        self.assertEqual(record["revision"], active["revision"] + 1)
+        again, _ = self.run_registry("record-owner", "prod1", "--node", "mox2")
+        self.assertEqual((again["changed"], again["reason"]), (False, "already-recorded"))
+
+        # Observed targets are recorded as given, but never the owner itself.
+        observed, _ = self.run_registry("record-owner", "prod1", "--node", "mox2",
+                                        "--replication-targets", "")
+        self.assertEqual(observed["replication_targets"], [])
+        self.run_registry("record-owner", "prod1", "--node", "mox2",
+                          "--replication-targets", "mox2", expected=1)
+        self.run_registry("record-owner", "prod1", "--node", "mox3", expected=1)
+
+        # While a workflow holds the lease, the workflow records ownership.
+        self.run_registry(
+            "orchestration-acquire", "prod1", "--nonce", "a" * 32, "--owner", "change-owner",
+            "--ttl-seconds", "600", "--initial-install-phase", "unknown",
+            "--final-network-enabled", "yes", "--source-iso-sha256", "d" * 64,
+            "--install-mode", "ubuntu-autoinstall",
+        )
+        leased, _ = self.run_registry("record-owner", "prod1", "--node", "mox1")
+        self.assertEqual((leased["changed"], leased["reason"]), (False, "lease-held-by-change-owner"))
+        record, _ = self.run_registry("get", "prod1")
+        self.assertEqual(record["owner_node"], "mox2")
+        self.run_registry("orchestration-release", "prod1", "--nonce", "a" * 32)
+        back, _ = self.run_registry("record-owner", "prod1", "--node", "mox1")
+        self.assertEqual((back["owner_node"], back["replication_targets"]), ("mox1", ["mox2"]))
+
     def test_production_orchestration_lease_and_install_sentinel(self) -> None:
         allocation = self.allocate_prod()
         resource = allocation["resource"]

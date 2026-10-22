@@ -699,6 +699,12 @@ def render_guests(report, args, ui):
             steps.append((True, f"Inspect {row['name']} across HA, replication, routing, and SSH.",
                           f"scripts/user_callable/diagnostics/show_prod_vm_state.sh {row['name']}",
                           "show_prod_vm_state", {"resource": row["name"]}))
+    moved = [row["name"] for row in production
+             if row["owner_node"] and row["node"] and row["owner_node"] != row["node"]]
+    if moved:
+        steps.append((True, f"Record where {', '.join(moved)} now run{'s' if len(moved) == 1 else ''} (moves nothing).",
+                      "scripts/user_callable/guests/prod/reconcile_prod_vm_owner.sh",
+                      "reconcile_prod_vm_owner", {}))
     for row in staging:
         if row["registry_state"] in ("cleanup_pending", "failed"):
             steps.append((True, f"Finish removing {row['name']}.",

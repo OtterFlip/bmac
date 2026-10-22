@@ -613,6 +613,12 @@ from `mox1`/`mox2` to `mox3`/`mox4`:
    checks that replication now runs from the new owner, and records the new
    owner in the registry. Staging VMs on the new owner are stopped and
    destroyed when the production VM starts there, and the script warns first.
+
+   After an HA failover the VM stays on the host it restarted on, and the
+   guest hook records that host as its owner. If the dashboard still reports
+   that a production VM runs on a different host than its registry owner,
+   `./scripts/user_callable/guests/prod/reconcile_prod_vm_owner.sh` records
+   where it runs without moving it.
 4. Remove the old hosts from the placement by running
    `change_prod_vm_placement.sh` again and answering `r`. It never removes the
    live owner and keeps at least two placement hosts. HA stops using a host

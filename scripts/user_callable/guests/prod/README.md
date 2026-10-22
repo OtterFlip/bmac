@@ -399,13 +399,38 @@ compares it with the HA rule, the replication jobs, and the registry
 finish adding or removing the hosts involved. An HA rule that allows a host
 outside the registry placement is never guessed at; correct it manually.
 
+## After a failover: recording the owner
+
+HA restarts a production VM on another placement host when its host fails,
+and with `failback=0` the VM stays there when the old host returns. Proxmox
+turns the replication jobs around on its own. The guest hook then records the
+new host as the registry owner once the VM is running, so nothing else is
+needed.
+
+If the dashboard still reports `prodN runs on moxB but the registry owner is
+moxA` (for example, the failover happened on older runtime code, or a
+workflow held the VM's lease at the time), record the live state without
+moving anything:
+
+```bash
+./scripts/user_callable/guests/prod/reconcile_prod_vm_owner.sh --dry-run
+./scripts/user_callable/guests/prod/reconcile_prod_vm_owner.sh
+```
+
+It shows each active production VM's registry owner and targets beside where
+it runs and replicates, then records the live values for the ones that differ.
+A VM that is not running, whose replication jobs do not fit its placement, or
+whose lease is held is left alone and listed with the reason. To move the VM
+back to its old host instead, use `change_prod_vm_owner.sh`.
+
 ## Changing the owner
 
 `change_prod_vm_owner.sh` moves one production VM to another of its placement
 hosts. It is equivalent to `ha-manager relocate vm:<vmid> <node>`, with
 checks around it:
 
-1. It reads the live HA owner and refreshes a stale registry owner.
+1. It reads the live HA owner and refreshes a stale registry owner and its
+   replication targets.
 2. It refuses a VM with staging VMs derived from it. It also refuses unless
    the HA rule equals the placement, the replication targets equal the
    placement minus the owner, every placement host is online, and every
@@ -466,10 +491,12 @@ absence of destructive rollback commands.
 
 ```bash
 bash -n scripts/user_callable/guests/prod/add_prod_vm.sh scripts/user_callable/guests/prod/extend_prod_vm_disk.sh \
-  scripts/user_callable/guests/prod/change_prod_vm_placement.sh scripts/user_callable/guests/prod/change_prod_vm_owner.sh
+  scripts/user_callable/guests/prod/change_prod_vm_placement.sh scripts/user_callable/guests/prod/change_prod_vm_owner.sh \
+  scripts/user_callable/guests/prod/reconcile_prod_vm_owner.sh
 
 dev/run_tests.py scripts/tests/test_add_prod_vm.py scripts/tests/test_change_prod_vm_placement.py \
-  scripts/tests/test_extend_prod_vm_disk.py scripts/tests/test_remove_prod_vm.py
+  scripts/tests/test_extend_prod_vm_disk.py scripts/tests/test_remove_prod_vm.py \
+  scripts/tests/test_reconcile_prod_vm_owner.py
 ```
 
 `dev/run_tests.py` runs the tests in parallel; with no arguments it runs the

@@ -814,10 +814,15 @@ reconcile_registry_owner() {
     return 0
   fi
   CURRENT_PHASE="updating the stale production registry owner"
-  local updated
+  # Proxmox turned the replication jobs around with the failover; record them.
+  local updated job targets=""
+  for job in "${REPLICATION_JOBS[@]}"; do
+    targets+="${targets:+,}${REPLICATION_TARGET[$job]}"
+  done
   updated="$(registry_cmd update "$RESOURCE_NAME" \
     --expected-revision "$RESOURCE_REVISION" \
-    --owner-node "$OWNER_NODE")" ||
+    --owner-node "$OWNER_NODE" \
+    --replication-targets "$targets")" ||
     die "Could not update the registry owner of $RESOURCE_NAME to $OWNER_NODE"
   RESOURCE_REVISION="$(
     python3 -c 'import json,sys; print(json.loads(sys.argv[1])["revision"])' \
