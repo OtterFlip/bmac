@@ -976,6 +976,22 @@ Flags:            Quorate Qdevice
             extra.index('remote_script "$helper"'),
         )
 
+    def test_setup_erases_preexisting_luks_before_adding_an_unencrypted_extra_mirror(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        raw = source[source.index("configure_raw_extra_mirror() {") : source.index("configure_extra_mirrors() {")]
+        # clear-add refuses LUKS disks, so a leftover encrypted install must be
+        # released (after its own consent) before clear-add runs.
+        luks_branch = raw[
+            raw.index("if awk -F '\\t' '$4 == \"luks\"") :
+            raw.index("  else\n", raw.index("if awk -F '\\t' '$4 == \"luks\""))
+        ]
+        self.assertIn('"ERASE AND ADD UNENCRYPTED EXTRA MIRROR ${pair}"', luks_branch)
+        self.assertIn('release-disks "$serial_1" "$serial_2"', luks_branch)
+        self.assertIn("Nothing on either disk will be reused", luks_branch)
+        self.assertIn("still contains LUKS after it was erased", luks_branch)
+        self.assertLess(raw.index("install_rpool_mirror_tool"), raw.index('"$RPOOL_MIRROR_TOOL" check-new'))
+        self.assertLess(raw.index('release-disks "$serial_1" "$serial_2"'), raw.index('"$RPOOL_MIRROR_TOOL" clear-add'))
+
     def test_boot_member_luks_uses_the_shared_rpool_mirror_tool(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         # The same member LUKS code serves scripts/user_callable/hosts/add_replacement_disk.sh.

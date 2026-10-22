@@ -2971,10 +2971,28 @@ REMOTE
   has_state "$state" &&
     fail "Recorded unencrypted extra mirror $pair is no longer present in rpool"
 
-  confirm_exact \
-    "Erase both serial-selected disks for extra mirror $pair, give each one partition, and add the partitions as one unencrypted top-level rpool mirror vdev. These disks receive no ESP. A later top-level vdev removal is possible (scripts/user_callable/hosts/decommission_disks.sh) but evacuates its data first." \
-    "ADD UNENCRYPTED EXTRA MIRROR ${pair}"
   install_rpool_mirror_tool
+  local luks_probe
+  luks_probe="$(remote "$RPOOL_MIRROR_TOOL" check-new "${size_args[@]}" \
+    "$serial_1" "$serial_2")" ||
+    fail "The configured disks for extra mirror $pair are not safe to format"
+  if awk -F '\t' '$4 == "luks" { found=1 } END { exit !found }' <<<"$luks_probe"; then
+    confirm_exact \
+      "At least one serial-selected disk for extra mirror $pair already contains LUKS, likely from an earlier installation. Erase all metadata from both disks, including LUKS key slots, ZFS labels, filesystem signatures, and partition tables, give each one partition, and add the partitions as one unencrypted top-level rpool mirror vdev. Nothing on either disk will be reused, and their former contents will become unrecoverable. These disks receive no ESP. A later top-level vdev removal is possible (scripts/user_callable/hosts/decommission_disks.sh) but evacuates its data first." \
+      "ERASE AND ADD UNENCRYPTED EXTRA MIRROR ${pair}"
+    remote "$RPOOL_MIRROR_TOOL" release-disks "$serial_1" "$serial_2" ||
+      fail "Could not erase the existing structures from extra mirror $pair"
+    luks_probe="$(remote "$RPOOL_MIRROR_TOOL" check-new "${size_args[@]}" \
+      "$serial_1" "$serial_2")" ||
+      fail "The configured disks for extra mirror $pair are not safe to format after erasing them"
+    if awk -F '\t' '$4 == "luks" { found=1 } END { exit !found }' <<<"$luks_probe"; then
+      fail "At least one disk for extra mirror $pair still contains LUKS after it was erased"
+    fi
+  else
+    confirm_exact \
+      "Erase both serial-selected disks for extra mirror $pair, give each one partition, and add the partitions as one unencrypted top-level rpool mirror vdev. These disks receive no ESP. A later top-level vdev removal is possible (scripts/user_callable/hosts/decommission_disks.sh) but evacuates its data first." \
+      "ADD UNENCRYPTED EXTRA MIRROR ${pair}"
+  fi
   remote "$RPOOL_MIRROR_TOOL" clear-add "${size_args[@]}" "$serial_1" "$serial_2" ||
     fail "Could not add unencrypted extra mirror $pair to rpool"
   write_state "$state"
