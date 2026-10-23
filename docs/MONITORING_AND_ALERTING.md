@@ -10,7 +10,53 @@ for where the implementation differs from this design). The operator-facing
 guide is the README's "Monitoring and Alerts" section; `docs/MAIN_DESIGN.md`
 ("Monitoring and alerting") records the built behavior.
 
-### Implementation notes
+## What monitoring watches
+
+Every Proxmox host, the QDevice, and every production VM runs a monitor
+agent bound to its own Healthchecks.io check. Alerts arrive by email (and
+optionally as Pushover notifications). Staging VMs are never monitored.
+
+- **A node goes silent:** a host, the QDevice, or a production VM stops
+  working or loses its internet connection (a missed heartbeat; alerts after
+  about 4 minutes).
+- **Cluster networking:** the private VLAN link (corosync link0) or the
+  Tailscale link (corosync link1) between hosts is down, both links to the
+  same host are down (high priority), or a host is missing from corosync.
+- **Quorum:** the cluster is not quorate, votes are missing, or the QDevice's
+  tie-breaking vote is lost while the cluster depends on it.
+- **The QDevice's view:** it can't reach a host over Tailscale (ICMP), or
+  corosync-qnetd is down or a host isn't connected to it.
+- **App reachability:** the QDevice requests each production app's health
+  URL through Cloudflare every minute; it alerts on a failure, the wrong
+  status or body, or a Cloudflare challenge.
+- **Tunnel:** a host's Cloudflare Tunnel replica isn't ready. Cloudflare's own
+  tunnel-health email covers a total tunnel outage.
+- **Disks and storage on hosts:**
+  - a ZFS pool is degraded or faulted;
+  - a pool has less than 10% free (high priority below 5%);
+  - SMART health has failed;
+  - an NVMe critical warning is set;
+  - NVMe spare capacity is at or near its threshold;
+  - NVMe wear is at or above 90% of rated endurance;
+  - NVMe media errors, or ATA reallocated, pending, or uncorrectable sectors,
+    are rising;
+  - a drive can't be read.
+- **Proxmox's own email:** alert mail has been stuck in a host's Postfix queue
+  for over an hour.
+- **Inside production VMs:** a watched systemd service isn't running, a
+  filesystem has less than 10% free, or a watched certificate expires within
+  14 days (high priority within 3 days, or expired) or can't be read.
+- **How alerts behave:**
+  - each email lists what's new, what's resolved, and what's still open;
+  - network checks must fail several times in a row before they alert, while
+    disk and certificate problems alert on first detection;
+  - open problems are re-sent every 6 hours;
+  - every alert is tagged high (p1) or normal (p2) priority, for routing.
+
+Proxmox's own SMART, ZFS, fencing, and replication emails still arrive
+separately, as an independent second path.
+
+## Implementation notes
 
 The implementation follows this design except for these deliberate
 differences:
@@ -61,6 +107,9 @@ to add or change, the tests to write, and how to roll the result out to an
 already-deployed cluster without rebuilding it.
 
 ## Contents
+
+- [What monitoring watches](#what-monitoring-watches)
+- [Implementation notes](#implementation-notes)
 
 1. [Instructions for the implementer](#1-instructions-for-the-implementer)
 2. [Goals and non-goals](#2-goals-and-non-goals)
