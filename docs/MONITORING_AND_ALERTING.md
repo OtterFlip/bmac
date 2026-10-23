@@ -291,8 +291,11 @@ Problem keys are stable strings so state can be diffed between cycles:
 | `postfix-queue` | host | mail older than the limit waiting in the queue |
 | `zfs:<pool>` | host | `zpool status -x` reports a problem |
 | `capacity:<pool>` | host | pool free space below threshold |
-| `smart:<disk-id>` | host | SMART health failed or a watched counter rose |
-| `smart-read:<disk-id>` | host | `smartctl` failed or timed out on a disk |
+| `smart:<serial>` | host | SMART health failed or a watched counter rose |
+| `nvme-warning:<serial>` | host | NVMe `critical_warning` non-zero |
+| `nvme-spare:<serial>` | host | NVMe available spare at or near its threshold |
+| `nvme-wear:<serial>` | host | NVMe `percentage_used` at or above the warning level |
+| `smart-read:<serial>` | host | `smartctl` failed or timed out on a disk |
 | `tailscale:<host>` | qdevice | ICMP over Tailscale to a host fails |
 | `qnetd:<host>` | qdevice | host not connected to qnetd while the QDevice is registered |
 | `ingress:<fqdn>` | qdevice | probe failed |
@@ -302,8 +305,8 @@ Problem keys are stable strings so state can be diffed between cycles:
 | `cert:<path>` | guest | certificate expires soon, has expired, or cannot be read |
 | `agent:<check>` | any | a check itself crashed (exception) |
 
-`<disk-id>` is the `/dev/disk/by-id/` name (serial-based) when available, so the
-key survives device renumbering.
+`<serial>` is the drive serial number from `smartctl -j` output, so the key
+survives device renumbering and identifies the physical drive to replace.
 
 ### Delivery reliability
 
@@ -343,7 +346,12 @@ timeout and runs in a way that one hung command cannot stop the heartbeat
 | ZFS health | slow | `zpool status -x` per pool, plus `zpool status -P -p` for detail | anything but "is healthy" | p1 |
 | Pool capacity | slow | `zfs list -H -p -o used,available <pool>` for every pool from `zpool list -H -o name` | free fraction below `MONITOR_POOL_MIN_FREE_PERCENT` (10); clears above `MONITOR_POOL_CLEAR_FREE_PERCENT` (12) | p2; p1 below 5% |
 | SMART health | slow | `smartctl -j -H -A <disk>` for each whole disk (same selection rule as `show_cluster_health.sh`: `lsblk` type disk, excluding zd/rbd/nbd/zram/ram) | `smart_status.passed` is false | p1 |
-| SMART counters | slow | same JSON | an increase since the stored baseline in ATA attributes 5 (Reallocated_Sector_Ct), 197 (Current_Pending_Sector), 198 (Offline_Uncorrectable), or NVMe `critical_warning` non-zero, `media_errors` increased | p2 (critical_warning: p1) |
+| NVMe critical warning | slow | same JSON, `nvme_smart_health_information_log.critical_warning` | non-zero; decode the bits into the message (bit 0 available spare below threshold, bit 1 temperature out of range, bit 2 reliability degraded, bit 3 read-only mode, bit 4 volatile memory backup failed) | p1 |
+| NVMe spare capacity | slow | same JSON, `available_spare` and `available_spare_threshold` (both percentages) | `available_spare` is at or below `available_spare_threshold` | p1 |
+| NVMe spare capacity early warning | slow | same | `available_spare` is at or below `available_spare_threshold + 10` (but still above the threshold) | p2 |
+| NVMe wear | slow | same JSON, `percentage_used` (may exceed 100) | `percentage_used` is at or above `MONITOR_NVME_WEAR_WARN_PERCENT` (default 90); escalates to p1 at 100 or more | p2; p1 at 100+ |
+| NVMe media errors | slow | same JSON, `media_errors` | increased since the stored baseline | p2 |
+| ATA SMART counters | slow | same JSON, `ata_smart_attributes.table` | raw value increased since the stored baseline for attribute 5 (Reallocated_Sector_Ct), 197 (Current_Pending_Sector), or 198 (Offline_Uncorrectable) | p2 |
 | SMART readability | slow | same | `smartctl` exits with an error bit that means it could not read the disk, or times out (30s) | p2 |
 
 Notes:
@@ -361,6 +369,29 @@ Notes:
   rises is reported once (NEW), stays ONGOING until the operator resets the
   baseline (`show_monitoring_state.sh --reset-smart-baseline <host>:<disk>`,
   or automatically when the disk serial disappears after replacement).
+- The operator's hosts use NVMe drives only (confirmed on mox1: two Intel
+  SSDPE2KX020T7/T8 2 TB drives; smartd reports "Monitoring 0 ATA/SATA, 0
+  SCSI/SAS and 2 NVMe devices"). The NVMe rows above are therefore the ones
+  that matter in practice; the ATA rows exist for other BMAC users and must be
+  covered by tests too. These drives do not support NVMe self-tests, so the
+  agent never schedules or reads self-test results.
+- Identify each disk by the `serial_number` in `smartctl -j` output (with the
+  model as context in messages), not by device name. Problem keys are
+  `smart:<serial>`, `nvme-warning:<serial>`, `nvme-spare:<serial>`,
+  `nvme-wear:<serial>`, and `smart-read:<serial>`. `lsblk` lists NVMe namespaces as `/dev/nvme0n1`;
+  `smartctl` accepts the namespace or the controller (`/dev/nvme0`), but must
+  query each physical drive exactly once (deduplicate by serial).
+- `percentage_used` is the drive's own estimate of how much of its rated
+  endurance has been consumed. It can pass 100; the drive keeps working, but
+  should be replaced on a planned schedule. Include the current value, the
+  `data_units_written` converted to TB (1 data unit = 512,000 bytes), and the
+  `power_on_hours` in the message so the operator can judge urgency.
+- Do not alert on `num_err_log_entries`. Several drive models increment it for
+  benign events (for example, unsupported admin commands issued by tools),
+  which would cause false alerts.
+- The wear and spare checks do not need a baseline. They are threshold checks
+  evaluated on every slow run, so a newly added drive that is already worn is
+  reported on the agent's first run.
 
 ### 6.2 QDevice (`role: qdevice`)
 
@@ -465,7 +496,7 @@ they cover the dead-man case; enable them in the Healthchecks account settings.
   - `test-pulse [--priority p1|p2]` – send one clearly labelled test pulse
     (`NEW [p2] test:alert  test alert requested from the workstation`), then
     clear it. Used by `send_test_alert.sh`.
-  - `reset-smart-baseline <disk-id>`.
+  - `reset-smart-baseline <serial>`.
   - `validate-config` – load and validate the config, exit non-zero on error.
 - Options: `--config PATH` (default `/etc/app-ha-monitor/config.json`),
   `--state-dir PATH` (default `/var/lib/app-ha-monitor`), `--dry-run-send`
@@ -505,7 +536,7 @@ they cover the dead-man case; enable them in the Healthchecks account settings.
     }
   },
   "debounce": {"link0:mox2": {"fails": 3, "passes": 0}},
-  "smart_baselines": {"ata-XYZ": {"5": 0, "197": 0, "198": 0}},
+  "smart_baselines": {"PHLJ9252002S2P0BGN": {"media_errors": 0}, "ATA-SERIAL": {"5": 0, "197": 0, "198": 0}},
   "outbox": [],
   "pending_clear": false,
   "pulse_times": ["2026-10-23T14:02:11Z"],
@@ -592,6 +623,7 @@ The deploy step checks for missing tools and installs them with the existing
 | `MONITOR_REMINDER_HOURS` | `6` | integer 1-168 |
 | `MONITOR_POSTFIX_QUEUE_MAX_AGE_MINUTES` | `60` | integer 10-1440 |
 | `MONITOR_CERT_WARN_DAYS` | `14` | integer 1-90 |
+| `MONITOR_NVME_WEAR_WARN_PERCENT` | `90` | integer 50-100 |
 | `MONITOR_PROBE_DEFAULT_PATH` | `/api/v1/healthz` | absolute path starting with `/` |
 | `MONITOR_PROBE_DEFAULT_STATUS` | `200` | integer 100-599 |
 
@@ -683,7 +715,7 @@ It contains this node's ping URL and is therefore secret.
     "fast_fail": 3, "service_fail": 2,
     "pool_min_free_percent": 10, "pool_clear_free_percent": 12,
     "postfix_queue_max_age_minutes": 60, "cert_warn_days": 14,
-    "reminder_hours": 6
+    "nvme_wear_warn_percent": 90, "reminder_hours": 6
   },
   "host": {
     "expected_peers": ["mox2", "mox3"],
@@ -922,7 +954,7 @@ Location: `scripts/user_callable/diagnostics/show_monitoring_state.sh`.
   `app_ha_monitor.py status --json` over SSH).
 - Lists obsolete checks tagged for this cluster and checks over budget.
 - Shows the check budget: used / `MONITOR_MAX_CHECKS`.
-- Supports `--reset-smart-baseline <host>:<disk-id>` (the one mutating
+- Supports `--reset-smart-baseline <host>:<serial>` (the one mutating
   option; confirm first).
 - Next steps for every problem found.
 
@@ -1060,6 +1092,10 @@ Proxmox delivers its own alert email directly to the recipient's mail server
 (Postfix with no relay), without SPF or DKIM for your domain. With Google
 Workspace recipients:
 
+Proxmox's emails arrive from `root@<host>.pve.internal`. Because that domain
+is not public, they can never pass SPF or DKIM; Gmail shows them with an
+unverified-sender icon. They are accepted today, but nothing guarantees that.
+
 1. Admin console → Apps → Google Workspace → Gmail → Spam, Phishing and
    Malware → **Email allowlist**: add each Proxmox host's public IPv4. Mail
    from these IPs will not be put in spam, though Gmail may still show a
@@ -1084,6 +1120,17 @@ DEVICESCAN -d removable -n standby -m root -M exec /usr/share/smartmontools/smar
 Run `systemctl restart smartmontools`; one test email per monitored disk
 should arrive. `journalctl -u smartmontools --since '-2 min'` lists the disks
 smartd picked up. Remove ` -M test` and restart again afterwards.
+
+The operator ran this test on mox1 on 2026-10-22: smartd listed both NVMe
+drives, sent one test email per drive (subject "SMART error (EmailTest)
+detected on host: mox1"), Postfix delivered both to Google (`status=sent`),
+and both arrived in the Workspace inbox. Gmail marked them "External" and
+showed an unverified-sender icon, because the envelope sender is
+`root@mox1.pve.internal`, a non-public domain that cannot pass SPF or DKIM.
+Postfix also first tried Google over IPv6, which the hosts do not have
+("Network is unreachable"), then succeeded over IPv4. Setting
+`postconf -e 'inet_protocols = ipv4'` on each host avoids that retry; it is
+optional and not part of this implementation.
 
 ## 16. Interpreting alerts
 
@@ -1138,8 +1185,12 @@ Write tests in `scripts/tests/` following existing patterns
   `corosync-cfgtool -n` (all links up; link0 down; link1 down; both down;
   peer missing), quorum output (quorate, not quorate, with and without
   QDevice), `corosync-qnetd-tool -l`, `zpool status -x` (healthy, degraded),
-  `zfs list` capacity, `smartctl -j` (passed, failed, counter increase, NVMe
-  critical warning, read error), `postqueue -j` (empty, old message),
+  `zfs list` capacity, `smartctl -j` (ATA: passed, failed, attribute 5/197/198
+  increase; NVMe: passed, each `critical_warning` bit decoded, spare at
+  threshold, spare within 10 points of threshold, `percentage_used` at 89, 90,
+  and 100+, `media_errors` increase, the same drive seen as both
+  `/dev/nvme0` and `/dev/nvme0n1` deduplicated by serial; read error and
+  timeout), `postqueue -j` (empty, old message),
   `tailscale status --json`, cloudflared `/ready`, `df -P`, `openssl x509
   -enddate`.
 - Debounce: fast check fails twice then passes (no problem); fails three times
@@ -1204,7 +1255,7 @@ the operator does not want published; anonymize fixtures.
 | V6 | `corosync-qnetd-tool -l` format | only on a registered QDevice; use upstream examples until available |
 | V7 | cloudflared readiness endpoint | `ssh mox1 'curl -s -i http://127.0.0.1:20241/ready'` |
 | V8 | `postqueue -j` output | `ssh mox1 'postqueue -j | head'` (empty is normal) |
-| V9 | `smartctl -j -H -A` JSON per disk type | `ssh mox1 'smartctl --scan; for d in $(smartctl --scan | cut -d" " -f1); do smartctl -j -H -A $d; done'` |
+| V9 | `smartctl -j -H -A` JSON for the hosts' NVMe drives (field names `nvme_smart_health_information_log.critical_warning`, `available_spare`, `available_spare_threshold`, `percentage_used`, `media_errors`, `serial_number`) | `ssh mox1 'smartctl --scan; for d in $(smartctl --scan | cut -d" " -f1); do smartctl -j -H -A $d; done'`; for ATA fixtures use smartmontools' documentation examples, since the operator's hosts have no ATA drives |
 | V10 | `tailscale status --json` fields `HostName`, `DNSName`, `Online`, `LastSeen`, `TailscaleIPs` | `ssh qdevice 'tailscale status --json'` |
 | V11 | ICMP over Tailscale from the QDevice works with the new rule | `ssh qdevice 'ping -c 2 <mox1 tailscale ip>'` |
 | V12 | Cloudflare challenge response header (`cf-mitigated: challenge`) | Cloudflare docs; or probe a non-API path from the QDevice |
@@ -1308,6 +1359,7 @@ The work is done when:
 | Trailing plain heartbeat after every clear | The most recent ping must never carry a token, in case Healthchecks includes it in a later dead-man email. |
 | Debounce only frequent connectivity checks | Network checks blip; SMART, ZFS, capacity, and certificate problems must be reported on first detection. |
 | Capacity hysteresis 10% / 12% | Avoids repeated pulses for a pool sitting near the threshold. |
+| NVMe wear and spare-capacity checks | The hosts use NVMe drives only; smartd's defaults report health failures but not gradual wear, so BMAC warns at 90% rated endurance used and as spare capacity approaches the drive's own threshold, giving time to plan replacements. |
 | Host disk checks duplicate smartd/ZED | Proxmox's Postfix direct delivery may be blocked or queued; BMAC's path is independent. |
 | Probe settings in the registry; services and certificates on the VM | Probes are rendered into the QDevice config from cluster state; services describe the VM's own software and are edited in place. |
 | Staging guard by hostname prefix in the agent | Staging clones inherit everything; every staging hostname starts with `stage`; no clone patching needed. |
