@@ -61,7 +61,14 @@ Read these before writing code.
   actions, next steps on completion.
 - **Python on nodes is stdlib-only.** The agent runs on Proxmox hosts (Debian),
   the QDevice (Ubuntu), and production VMs (Ubuntu). Use `urllib.request`,
-  `json`, `subprocess`, `ssl`, `socket`; no third-party packages.
+  `json`, `subprocess`, `ssl`, `socket`; no third-party packages. The QDevice
+  and prod1 ran Python 3.14.4 (Ubuntu 26.04.1) and the Proxmox hosts Python
+  3.13.5 (Debian) when captured, on a test cluster that had not been
+  upgraded. These versions will change with `apt upgrade` and OS releases, so
+  never depend on an exact version: target Python 3.11 as the minimum (avoid
+  newer language features and standard-library APIs), and have
+  `validate-config` and the deploy step fail clearly if a node's `python3` is
+  older than 3.11.
 - **Reuse, don't duplicate, parsing logic.** `show_cluster_health.sh` already
   parses `corosync-cfgtool -n` link status, `zpool status -x`, rpool free space
   (`RPOOL_MIN_FREE_FRACTION = 0.10`), and `smartctl -H`. Move the shared parsing
@@ -232,9 +239,12 @@ POST <ping_url>           body: heartbeat body (no tokens)
 ```
 
 The trailing plain heartbeat makes sure the most recent ping never carries a
-token. If Healthchecks includes the last ping's body in a later dead-man "DOWN"
-email, that email must not contain `bmacclear` (which would make the clear
-filter delete it). Gmail filters also use the subject as a second guard (see
+token. This matters because Healthchecks' dead-man DOWN email includes the
+**last** ping's body (confirmed: after a `/fail`, a clear, and a plain
+heartbeat, the dead-man email showed only `plain heartbeat` under "Last Ping
+Body", and no earlier bodies). Without the trailing heartbeat, a node that
+died right after a pulse would produce a DOWN email containing `bmacclear`.
+Gmail filters also use the subject as a second guard (see
 [§15.4](#154-gmail-filters)).
 
 Routine heartbeat (every 60 seconds):
@@ -311,9 +321,8 @@ Problem keys are stable strings so state can be diffed between cycles:
 | `nvme-wear:<serial>` | host | NVMe `percentage_used` at or above the warning level |
 | `smart-read:<serial>` | host | `smartctl` failed or timed out on a disk |
 | `tailscale:<host>` | qdevice | ICMP over Tailscale to a host fails |
-| `tailscale-control:<host>` | qdevice | host not connected to Tailscale's coordination server for 10 minutes |
-| `qnetd-stale` | qdevice | qnetd still has clients for this cluster although no QDevice is registered |
 | `qnetd:<host>` | qdevice | host not connected to qnetd while the QDevice is registered |
+| `qnetd:service` | qdevice | `corosync-qnetd` is not running, or `corosync-qnetd-tool -l` fails, while the QDevice is registered |
 | `ingress:<fqdn>` | qdevice | probe failed |
 | `ingress-challenged:<fqdn>` | qdevice | Cloudflare returned a challenge instead of the app |
 | `service:<unit>` | guest | monitored unit not active |
@@ -356,10 +365,10 @@ timeout and runs in a way that one hung command cannot stop the heartbeat
 |---|---|---|---|---|
 | Corosync links to each expected peer | fast | `corosync-cfgtool -n` (reuse `parse_links` from `show_cluster_health.sh`) | link0 (VLAN) or link1 (Tailscale) not connected, or an expected peer is not listed | p2 per link; p1 if both links to the same peer are down |
 | Quorum | fast | `corosync-quorumtool -s` (it lists members by name; `pvecm status` lists them by IP) | the `Quorate:` line is not `Yes` | p1 |
-| Missing votes | fast | same output | `Total votes` is less than `Expected votes` | p2 (the link checks usually explain which member) |
-| QDevice vote | fast | same output | only when the cluster has a registered QDevice: no `Qdevice` member line in "Membership information" (verify the exact line when a QDevice is registered, item C12; the captured 3-host output has none) | p1 |
-| Own tunnel replica | fast | GET `http://127.0.0.1:20241/ready` (confirmed: HTTP 200 with JSON `{"status":200,"readyConnections":4,"connectorId":"..."}`) | not HTTP 200, or `readyConnections` is 0 | p2 |
-| Postfix queue | fast (cheap) | `postqueue -j` | any message older than `MONITOR_POSTFIX_QUEUE_MAX_AGE_MINUTES` (default 60); include oldest age, recipient domain, and delay reason | p2 |
+| Missing votes | fast | same output | `Total votes` is less than `Expected votes`, and the shortfall is not explained by the QDevice vote check below | p2 (the link checks usually explain which member) |
+| QDevice vote | fast | same output, "Membership information" (see the three captured shapes in [§19.1](#191-confirmed-shapes)); detail from `corosync-qdevice-tool -s` | only when the cluster has a registered QDevice: the `Qdevice` member line is missing, or its votes column is `0` (shown as `0  0  Qdevice (votes 1)` when qnetd is unreachable), or a host's Qdevice column contains `NV` (not voting) instead of `V`. Include the `State:` line from `corosync-qdevice-tool -s` in the message (`Connected` when healthy, `Connect failed` when qnetd is unreachable). Do **not** use the `Flags:` line: it still says `Quorate Qdevice` while the vote is lost | p1 |
+| Own tunnel replica | fast | GET `http://127.0.0.1:20241/ready` (confirmed: HTTP 200 with JSON `{"status":200,"readyConnections":4,"connectorId":"..."}`; connection refused, curl exit 7, while `app-ha-cloudflared.service` is stopped) | connection refused, not HTTP 200, or `readyConnections` is 0. Ignore `connectorId`; it changes on every restart | p2 |
+| Postfix queue | fast (cheap) | `postqueue -j` (one JSON object per line; empty output when the queue is empty; shape confirmed in [§19.1](#191-confirmed-shapes)) | any message whose `arrival_time` (Unix seconds) is older than `MONITOR_POSTFIX_QUEUE_MAX_AGE_MINUTES` (default 60); the message gives the count, the oldest age, the `queue_name`, the recipient **domain** only, and the first recipient's `delay_reason` | p2 |
 | ZFS health | slow | `zpool status -x` per pool, plus `zpool status -P -p` for detail | anything but "is healthy" | p1 |
 | Pool capacity | slow | `zfs list -H -p -o used,available <pool>` for every pool from `zpool list -H -o name` | free fraction below `MONITOR_POOL_MIN_FREE_PERCENT` (10); clears above `MONITOR_POOL_CLEAR_FREE_PERCENT` (12) | p2; p1 below 5% |
 | SMART health | slow | list drives with `smartctl --scan` (or `smartctl --scan -j`), then `smartctl -j -i -H -A <device>` for each; `-i` is required because `-H -A` alone does not return `serial_number` or `model_name` (confirmed) | `smart_status.passed` is false | p1 |
@@ -420,11 +429,9 @@ Notes:
 | Check | Speed | How | Problem when | Priority |
 |---|---|---|---|---|
 | Tailscale reachability of each host | fast | from `tailscale status --json`, take the `Peer` entries whose `Tags` contain `tag:proxmox-host` and whose `HostName` equals the host's `TAILSCALE_HOSTNAME`; use the IPv4 address in `TailscaleIPs`; then `ping -c 1 -W 3 <ip>` (confirmed working with the ICMP rule) | ping fails, or the expected host is not among the peers | p2; p1 if every host fails at once (QDevice-side Tailscale problem or whole-site outage) |
-| Tailscale control-plane status of each host | fast | same JSON: the peer's `Online` and `LastSeen` | `Online` is `false` for 20 consecutive fast cycles (10 minutes) | p2, key `tailscale-control:<host>`; never escalates on its own |
-| qnetd connections | fast | `corosync-qnetd-tool -l` (format confirmed; see [§19](#19-facts-to-verify-before-or-during-implementation)) | only when the QDevice is registered for the cluster: under `Cluster "<PROXMOX_CLUSTER_NAME>":`, an expected host's node ID has no `Node ID N:` block, or its `Vote:` line does not end in `(ACK)` | p1 if the QDevice vote is currently needed (even host count), else p2 |
-| Stale qnetd clients | fast | same output | the QDevice is **not** registered for the cluster, but `corosync-qnetd-tool -l` still lists the cluster with connected nodes | p2, key `qnetd-stale`; the message names the node IDs and client addresses |
+| qnetd connections | fast | `corosync-qnetd-tool -l` (format confirmed; see [§19](#19-facts-to-verify-before-or-during-implementation)) | only when the QDevice is registered for the cluster: under `Cluster "<PROXMOX_CLUSTER_NAME>":`, an expected host's node ID has no `Node ID N:` block, or its `Vote:` line does not end in `(ACK)`; if the tool itself fails or `corosync-qnetd.service` is not active, report `qnetd:service` instead of per-host problems (confirmed shape: with qnetd stopped, `systemctl is-active corosync-qnetd` prints `inactive`, and the tool prints "Can't connect to qnetd socket (is QNetd running?): No such file or directory" and exits 3) | p1 if the QDevice vote is currently needed (even host count), else p2 |
 | Ingress probes | fast (every 60s, not 30s) | for each probe in config: HTTPS GET `https://<fqdn><path>`, timeout 10s, no redirects followed, header `User-Agent: bmac-monitor/<version>`, `Cache-Control: no-cache` | status differs from expected, or the optional expected text is not in the body, or connection/TLS error | p1 |
-| Challenge detection | with probes | response has header `cf-mitigated: challenge` (verify with item C5) | the probe was challenged, so the result is inconclusive | p2, key `ingress-challenged:<fqdn>` |
+| Challenge detection | with probes | response has header `cf-mitigated: challenge` (from Cloudflare's documentation; no challenge was observed in testing, see [§19.1](#191-confirmed-shapes)) | the probe was challenged, so the result is inconclusive | p2, key `ingress-challenged:<fqdn>` |
 | Own disk | slow | `df -P` on real filesystems | below 10% free (clears above 12%) | p2 |
 
 Notes from the captured output:
@@ -432,18 +439,19 @@ Notes from the captured output:
 - The QDevice's `Peer` list also contains people's devices (workstations,
   laptops). Filter by tag and host name; never treat a missing non-host peer
   as a problem.
+- Which hosts to probe comes from BMAC's membership (the agent config), never
+  from the Tailscale peer list. A machine that was removed from the cluster but
+  is still in the tailnet (the capture shows one, mox3, which the operator had
+  removed from the cluster but not yet from Tailscale) must be ignored.
 - `Online` reflects whether a peer is connected to Tailscale's coordination
-  server, not whether traffic flows. In the capture, mox3 showed `Online:
-  false` (last seen five minutes earlier) while `corosync-cfgtool -n` on mox1
-  showed link1 to mox3's Tailscale address connected. So `Online: false` alone
-  is not an outage. It does mean that host will not receive policy or key
-  changes and new peers may not reach it, which is why it gets its own p2
-  check with a long debounce.
+  server. Include it, and `LastSeen` when not the zero value, in the message of
+  a failed ping as context; it is not a check of its own, because the ICMP
+  ping is what shows whether traffic flows.
 - `LastSeen` is `0001-01-01T00:00:00Z` while a peer is online; treat that value
   as "not applicable".
-- In the capture, the QDevice had never exchanged traffic with mox3
-  (`LastHandshake` zero, `InEngine: false`). The first ICMP probe establishes
-  the path; allow the first probe a longer timeout (10s).
+- A peer the QDevice has not exchanged traffic with yet has `LastHandshake`
+  zero and `InEngine: false`. The first ICMP probe establishes the path; allow
+  the first probe after agent start a longer timeout (10s).
 
 The ICMP check relies on this Tailscale policy rule, which the operator has
 already added:
@@ -468,7 +476,7 @@ QDevice rules.
 | Staging guard | every cycle | `socket.gethostname()` | hostname starts with `stage`: the agent sends nothing and does nothing else | n/a |
 | Liveness | 60s | heartbeat | (the heartbeat reaching Healthchecks proves guest egress works) | n/a |
 | Monitored services | fast | `systemctl is-active <unit>` for each unit in `/etc/app-ha-monitor/guest.json` `services` | not `active` | p1 |
-| Guest filesystems | slow | `df -P -B1` on real filesystems (skip tmpfs, devtmpfs, overlay, squashfs, efivarfs) | below 10% free, clears above 12% | p2; p1 below 5% |
+| Guest filesystems | slow | `df -P -B1 -T`; include only filesystems whose source is a block device (`/dev/...`) and whose type is not one of tmpfs, devtmpfs, efivarfs, overlay, squashfs (on prod1 that leaves `/` (ext4) and `/boot/efi` (vfat); the many `none` tmpfs mounts under `/run/credentials/` are skipped) | below 10% free, clears above 12% | p2; p1 below 5% |
 | Certificate expiry | slow | for each path in `cert_paths`: `openssl x509 -enddate -noout -in <path>` | expires within `MONITOR_CERT_WARN_DAYS` (14) | p2; p1 within 3 days or expired; p2 if unreadable |
 
 The staging guard is in the agent, not in staging clone patching: staging VMs
@@ -791,12 +799,12 @@ It contains this node's ping URL and is therefore secret.
     "nvme_wear_warn_percent": 90, "reminder_hours": 6
   },
   "host": {
-    "expected_peers": ["mox2", "mox3"],
-    "qdevice_expected": false
+    "expected_peers": ["mox2"],
+    "qdevice_expected": true
   },
   "qdevice": {
     "hosts": [{"name": "mox1", "tailscale_hostname": "mox1"}],
-    "qnetd_expected": false,
+    "qnetd_expected": true,
     "probes": [
       {"vm": "prod1", "fqdn": "prod1.example.com", "path": "/api/v1/healthz",
        "expected_status": 200, "expected_text": null}
@@ -865,6 +873,24 @@ lists checks (ping URLs are included only for read-write keys);
 `DELETE /api/v3/checks/<uuid>` deletes; `timeout` and `grace` are seconds with a
 minimum of 60; a check that has never been pinged has status `new` and never
 alerts.
+
+Confirmed from a live `GET /api/v3/checks/` (read-write key, HTTP 200; full
+field list in [§19.1](#191-confirmed-shapes)):
+
+- `tags` is one space-separated string, not a list; filter by tag with
+  `?tag=` and also check the string client-side.
+- `channels` is a comma-separated string of integration UUIDs (empty when
+  none).
+- `timeout` and `grace` are integers in seconds.
+- `status` was `down` for the test check; expect `new`, `up`, `grace`,
+  `down`, `paused`, and `started`.
+- **`slug` does not follow renames**: after the test check was renamed from
+  `bmaccheck testcheck` to `MyAppCloud bmaccheck test`, its slug stayed
+  `bmaccheck-testcheck`. BMAC must always send `slug` explicitly when it
+  creates or updates a check.
+- The check's UUID, which is the secret part of its ping URL, also appears in
+  `update_url`, `pause_url`, and `resume_url`. (`badge_url` uses a different,
+  non-secret ID.)
 
 Why this name: Healthchecks puts the check name in the subject and body of
 every email about the check (verified with a test check named `bmac_check
@@ -1208,9 +1234,23 @@ Healthchecks ever includes older ping bodies in a DOWN email, `bmacclear`
 could appear in it. Requiring "up" in the subject makes deletion impossible for
 DOWN emails. Note the consequence: a DOWN email that contains `bmacclear` would
 match neither F1 nor F2 and would stay in the inbox without being forwarded.
-That is acceptable as a fallback, and [§19](#19-facts-to-verify-before-or-during-implementation)
-item C2 checks whether it can happen at all. Confirm the subject wording
-(C1): Gmail's `subject:up` matches the word "up" in any case.
+That is only a fallback: testing showed that a dead-man DOWN email contains
+only the last ping's body, and the agent never leaves a token in the last
+ping ([§5](#5-the-pulse-protocol)).
+
+Confirmed Healthchecks email details (used by these filters):
+
+- Subjects are `DOWN | <check name>` and `UP | <check name>`, for example
+  `DOWN | MyAppCloud bmaccheck mox1`. Gmail's `subject:up` matches the word
+  "UP".
+- The first line of the body repeats the check name in quotes and says why:
+  "is DOWN (received a failure signal)" for a pulse, "is DOWN (success signal
+  did not arrive on time, grace time passed)" for a dead-man alert, and "is
+  UP" for both a clear and a recovery.
+- The body includes "Last Ping Body" (the body of the last ping only) and a
+  "Projects Overview" listing the account's projects and whether their checks
+  are up. The overview names projects, not checks, so it does not add
+  `bmaccheck` to unrelated emails.
 
 **Optional priority split.** To get two Pushover priorities, replace F2 with:
 
@@ -1316,8 +1356,6 @@ Put this table in the README section too.
 | QDevice reports `ingress:*` for all apps plus Cloudflare tunnel Down email | No tunnel replica is connected, or Cloudflare is having a problem. |
 | Dead-man DOWN for a production VM only | The VM is down, or its egress is broken. |
 | `postfix-queue` on a host | Proxmox's own alert emails are not leaving that host; BMAC's own alerts are unaffected. |
-| `tailscale-control:<host>` only | The host's Tailscale client lost its connection to Tailscale's coordination server, but traffic still flows. It will not receive policy or key changes until it reconnects. Check `tailscale status` and `journalctl -u tailscaled` on the host. |
-| `qnetd-stale` | Hosts are still running `corosync-qdevice` against the QDevice although the cluster no longer uses it. Stop and disable `corosync-qdevice` on those hosts. |
 
 ## 17. Security
 
@@ -1327,7 +1365,10 @@ Put this table in the README section too.
 - Each node receives only its own ping URL, in `/etc/app-ha-monitor/config.json`
   (root, 0600). A compromised node can only affect its own check.
 - Ping URLs never appear in logs, history, Dashboard output, or the UI
-  protocol stream. Redact them as `https://hc-ping.com/<redacted>`.
+  protocol stream. Redact them as `https://hc-ping.com/<redacted>`. A check's
+  UUID is the secret part of its ping URL, and the API also returns it in
+  `uuid`, `update_url`, `pause_url`, and `resume_url`: redact every check UUID
+  wherever it appears in anything BMAC prints, and show checks by name only.
 - No secrets in the registry: the `monitoring` field holds probe settings only.
 - No inbound ports are added anywhere. The only new network permission is the
   Tailscale ICMP rule from the QDevice to hosts.
@@ -1377,11 +1418,11 @@ Write tests in `scripts/tests/` following existing patterns
   restart without re-announcement, reminders after the configured hours (use
   an injected clock, never `sleep`).
 - Staging guard: hostname `stage1prod1` sends nothing.
-- Tailscale JSON: non-host peers ignored; `Online: false` with ICMP success
-  opens only `tailscale-control:<host>` after 20 cycles; `LastSeen` zero value.
-- qnetd: registered QDevice with all hosts ACKed; a missing node; `Vote` not
-  ACK; unregistered QDevice with stale clients (the captured output) opens
-  `qnetd-stale`.
+- Tailscale JSON: non-host peers ignored; a tagged host that is not in BMAC's
+  membership ignored; `Online`/`LastSeen` included in a failed ping's message;
+  `LastSeen` zero value.
+- qnetd: registered QDevice with all hosts ACKed (the captured output); a
+  missing node; `Vote` not ending in `(ACK)`; the cluster name absent.
 - Quorum: `Total votes` below `Expected votes`.
 - `--help` works without root and without config.
 
@@ -1429,13 +1470,24 @@ This section has two parts: output shapes the operator has already captured
 from the live cluster (use these to build test fixtures), and facts still to
 collect. Fixtures are committed to a public repository, so anonymize them as
 the excerpts below are anonymized: replace public IPs, Tailscale IPs, serial
-numbers, connector IDs, node keys, and tailnet names with placeholders.
+numbers, connector IDs, node keys, email addresses, and tailnet names with
+placeholders. Make the anonymized values consistent across fixtures (the same
+drive has the same placeholder serial in `smartctl` and `zpool status`).
 
-### 19.1 Confirmed shapes (captured 2026-10-23)
+### 19.1 Confirmed shapes
 
-**Quorum** (`ssh mox1 'corosync-quorumtool -s'`; 3 hosts, no QDevice
-registered). `pvecm status` prints the same sections, but lists members by IP
-and node IDs in hex, so use `corosync-quorumtool -s`:
+All captured on 2026-10-23 on a test cluster that had not been updated with
+`apt upgrade`: Proxmox hosts had `smartctl` 7.5 and Python 3.13.5 on kernel
+7.0.2-6-pve; the QDevice and prod1 had Ubuntu 26.04.1 with Python 3.14.4.
+Versions, and possibly output details, will change after upgrades. Parsers
+must tolerate extra fields and lines, and must not depend on tool versions.
+
+#### Quorum: three hosts, no QDevice
+
+`ssh mox1 'corosync-quorumtool -s'` while the cluster had three hosts. Use
+`corosync-quorumtool -s` rather than `pvecm status`: it prints the same
+sections but names members by host name and uses decimal node IDs
+(`pvecm status` uses IPs and hex IDs such as `0x00000001`).
 
 ```
 Quorum information
@@ -1463,11 +1515,101 @@ Membership information
          3          1 mox3
 ```
 
-Note the trailing spaces after `Quorum:           2` and `Flags:            Quorate`.
-Parse with `^\s*Key:\s*(.*?)\s*$`.
+#### Quorum: two hosts and a QDevice, healthy
 
-**Corosync links** (`ssh mox1 'corosync-cfgtool -n'`; all links up). Already
-parsed by `parse_links` in `show_cluster_health.sh`:
+```
+Quorum information
+------------------
+Date:             Fri Oct 23 09:53:15 2026
+Quorum provider:  corosync_votequorum
+Nodes:            2
+Node ID:          1
+Ring ID:          1.3e
+Quorate:          Yes
+
+Votequorum information
+----------------------
+Expected votes:   3
+Highest expected: 3
+Total votes:      3
+Quorum:           2  
+Flags:            Quorate Qdevice 
+
+Membership information
+----------------------
+    Nodeid      Votes    Qdevice Name
+         1          1    A,V,NMW mox1 (local)
+         2          1    A,V,NMW mox2
+         0          1            Qdevice
+```
+
+#### Quorum: two hosts and a QDevice, qnetd stopped (vote lost)
+
+Captured 20 seconds after `systemctl stop corosync-qnetd` on the QDevice:
+
+```
+Votequorum information
+----------------------
+Expected votes:   3
+Highest expected: 3
+Total votes:      2
+Quorum:           2  
+Flags:            Quorate Qdevice 
+
+Membership information
+----------------------
+    Nodeid      Votes    Qdevice Name
+         1          1   A,NV,NMW mox1 (local)
+         2          1   A,NV,NMW mox2
+         0          0            Qdevice (votes 1)
+```
+
+Parsing notes for all three shapes:
+
+- Key lines have trailing spaces (`Quorum:           2  `, `Flags:            Quorate `).
+  Parse with `^\s*([^:]+):\s*(.*?)\s*$`.
+- The `Qdevice` column exists only when a QDevice is configured, the Qdevice
+  member line has an empty value in that column, and host names carry a
+  ` (local)` suffix. Parse the membership table using the header line's column
+  positions rather than splitting on whitespace, and test all three fixtures.
+- In the Qdevice column, `A` means alive, `V` voting, `NV` not voting, and
+  `NMW` "not master wins".
+- `Flags:` still reads `Quorate Qdevice` after the vote is lost, so it says
+  only that a QDevice is configured.
+- After `systemctl start corosync-qnetd`, the healthy shape returned within
+  30 seconds.
+
+#### QDevice client status on a host
+
+`ssh mox1 'corosync-qdevice-tool -s'`, healthy:
+
+```
+Qdevice information
+-------------------
+Model:			Net
+Node ID:		1
+Configuration version:	7
+Configured node list:
+    0	Node ID = 1
+    1	Node ID = 2
+Membership node list:	1, 2
+
+Qdevice-net information
+----------------------
+Cluster name:		MyAppCloud
+QNetd host:		100.64.0.2:5403
+Algorithm:		Fifty-Fifty split
+Tie-breaker:		Node with lowest node ID
+State:			Connected
+```
+
+With qnetd stopped, the output is identical except `State:			Connect failed`.
+Values are separated from keys by tabs.
+
+#### Corosync links
+
+`ssh mox1 'corosync-cfgtool -n'` with three hosts (already parsed by
+`parse_links` in `show_cluster_health.sh`):
 
 ```
 Local node ID 1, transport knet
@@ -1480,12 +1622,15 @@ nodeid: 3 reachable
    LINK: 1 udp (100.64.0.11->100.64.0.13) enabled connected mtu: 1173
 ```
 
-Node IDs map to names through the `corosync-quorumtool -s` membership list.
+With two hosts, the output contains only the `nodeid: 2` block. A link that is
+down has not been captured; `parse_links` treats a `LINK` line as up only when
+it contains `connected` and not `disconnected`, and a missing `nodeid` block
+as the peer missing. Keep that logic and its existing tests.
 
-**qnetd** (`ssh qdevice 'corosync-qnetd-tool -l'`). Captured while the
-QDevice was **not** registered for the current 3-host cluster, so this is also
-the fixture for the `qnetd-stale` check ([§6.2](#62-qdevice-role-qdevice)).
-Fields are separated by tabs after the colon:
+#### qnetd
+
+`ssh qdevice 'corosync-qnetd-tool -l'`, healthy, QDevice registered for the
+two-host cluster. Values are separated from keys by tabs:
 
 ```
 Cluster "MyAppCloud":
@@ -1505,35 +1650,83 @@ Cluster "MyAppCloud":
         Vote:			No change (ACK)
 ```
 
-`Vote:` shows the last vote and, in parentheses, the current one; a healthy
-client's current vote is `ACK`.
+`Vote:` shows the last vote and, in parentheses, the current one. With qnetd
+stopped: `systemctl is-active corosync-qnetd` prints `inactive`; the tool
+prints `corosync-qnetd-tool: Can't connect to qnetd socket (is QNetd running?): No such file or directory`
+on stderr and exits 3.
 
-**cloudflared readiness** (`ssh mox1 'curl -s -i http://127.0.0.1:20241/ready'`):
+#### cloudflared readiness
+
+`ssh mox1 'curl -s -i http://127.0.0.1:20241/ready'`:
 
 ```
 HTTP/1.1 200 OK
+Content-Length: 88
 Content-Type: text/plain; charset=utf-8
 
 {"status":200,"readyConnections":4,"connectorId":"00000000-0000-0000-0000-000000000000"}
 ```
 
-When `cloudflared` is stopped, the metrics port is closed (connection refused);
-treat that the same as not ready.
+With `app-ha-cloudflared.service` stopped, the port is closed (curl exit 7,
+connection refused). Ten seconds after a restart it was ready again with 4
+connections and a **new** `connectorId`.
 
-**Postfix queue** (`ssh mox1 'postqueue -j'`): empty output when the queue is
-empty. Each queued message is one JSON object per line (Postfix documentation
-format; no captured example with mail queued).
+#### Postfix queue
 
-**SMART, NVMe** (`ssh mox1 'smartctl --scan'` and `smartctl -j -H -A /dev/nvme0`).
-`--scan` prints one line per drive:
+Empty queue: `postqueue -j` prints nothing. One deferred message (captured by
+temporarily setting `defer_transports = smtp`):
 
-```
-/dev/nvme0 -d nvme # /dev/nvme0, NVMe device
-/dev/nvme1 -d nvme # /dev/nvme1, NVMe device
+```json
+{"queue_name": "deferred", "queue_id": "A0B19119BF", "arrival_time": 1792771213, "message_size": 489, "forced_expire": false, "sender": "root@mox1.pve.internal", "recipients": [{"address": "admin@example.com", "delay_reason": "deferred transport"}]}
 ```
 
-Relevant parts of the JSON (`-i` must be added to get `model_name` and
-`serial_number`; they are absent from `-H -A` output):
+#### ZFS
+
+```
+$ zpool list -H -o name
+rpool
+$ zpool status -x
+all pools are healthy
+$ zpool status -P -p rpool
+  pool: rpool
+ state: ONLINE
+config:
+
+	NAME                                                                   STATE     READ WRITE CKSUM
+	rpool                                                                  ONLINE       0     0     0
+	  mirror-0                                                             ONLINE       0     0     0
+	    /dev/disk/by-id/nvme-INTEL_SSDPE2KX020T8_SERIALA0000000000-part3  ONLINE       0     0     0
+	    /dev/disk/by-id/nvme-INTEL_SSDPE2KX020T7_SERIALB0000000000-part3  ONLINE       0     0     0
+
+errors: No known data errors
+$ zfs list -H -p -o used,available rpool
+9796521984	1921358725120
+```
+
+The by-id names contain the model and serial, which ties ZFS members to
+`smartctl` serials for messages ("mirror member SERIALA… is the drive with
+SMART warnings"). A degraded pool has not been captured; use
+`simulate_disk_failure_and_replacement.sh` on a test cluster, or upstream
+examples, for that fixture.
+
+#### SMART, NVMe
+
+`smartctl --scan -j`:
+
+```json
+{
+  "smartctl": {"argv": ["smartctl", "--scan", "-j"], "exit_status": 0},
+  "devices": [
+    {"name": "/dev/nvme0", "info_name": "/dev/nvme0", "type": "nvme", "protocol": "NVMe"},
+    {"name": "/dev/nvme1", "info_name": "/dev/nvme1", "type": "nvme", "protocol": "NVMe"}
+  ]
+}
+```
+
+`smartctl -j -i /dev/nvme0` identity fields: `model_name` (`INTEL
+SSDPE2KX020T8`), `serial_number`, `firmware_version`. `smartctl -j -H -A
+/dev/nvme0`, relevant parts (`-H -A` alone has no `model_name` or
+`serial_number`, so the agent runs `-j -i -H -A`):
 
 ```json
 {
@@ -1557,13 +1750,46 @@ Relevant parts of the JSON (`-i` must be added to get `model_name` and
 }
 ```
 
-Read the values from `nvme_smart_health_information_log` (the summary objects
-`spare_available` and `endurance_used` duplicate them). `smartctl -j -H -A`
-with no device prints `"exit_status": 1` and the message "smartctl requires a
-device name as the final command-line argument."
+Read values from `nvme_smart_health_information_log`; the summary objects
+duplicate them. `smartctl -j -H -A` with no device prints `"exit_status": 1`
+and the message "smartctl requires a device name as the final command-line
+argument." No ATA drives exist on these hosts; build ATA fixtures from
+smartmontools' documented JSON.
 
-**Tailscale peers** (`ssh qdevice 'tailscale status --json'`). `Peer` is an
-object keyed by node key. One host entry, trimmed:
+#### Filesystems
+
+`ssh prod1 'df -P -B1 -T'` (columns: Filesystem, Type, 1-blocks, Used,
+Available, Capacity, Mounted on), abridged:
+
+```
+Filesystem     Type          1-blocks        Used     Available Capacity Mounted on
+tmpfs          tmpfs      15096426496     1445888   15094980608       1% /run
+/dev/sda2      ext4     1079988703232 12111208448 1012941602816       2% /
+efivarfs       efivarfs        262044       62668        194256      25% /sys/firmware/efi/efivars
+/dev/sda1      vfat        1124995072     6606848    1118388224       1% /boot/efi
+none           tmpfs          1048576        8192       1040384       1% /run/credentials/hello-todo.service
+```
+
+The QDevice has a single real filesystem, `/dev/sda` (ext4) on `/`, about 24
+GiB, 16% used.
+
+#### Production VM details
+
+- `hostname`: `prod1`; `hello-todo.service`: `active`.
+- The example app's Cloudflare Origin certificate:
+  `openssl x509 -enddate -noout` prints `notAfter=Sep 16 23:49:00 2041 GMT`
+  (a 15-year certificate). Parse the `notAfter=` value with format
+  `%b %d %H:%M:%S %Y GMT`, allowing a space-padded day.
+- `systemctl list-unit-files --state=enabled --type=service --no-pager` has a
+  header line (`UNIT FILE  STATE  PRESET`), then one unit per line, and a
+  footer with a count. The Monitored services tile offers these as
+  suggestions; skip template units ending in `@.service`.
+
+#### Tailscale peers
+
+`ssh qdevice 'tailscale status --json'`. `Peer` is an object keyed by node
+key. One entry, trimmed; this is mox3 shortly after it was removed from the
+cluster and shut down, so it is also the fixture for an offline peer:
 
 ```json
 "nodekey:<redacted>": {
@@ -1582,83 +1808,108 @@ object keyed by node key. One host entry, trimmed:
 ```
 
 Peers that are people's devices have no `Tags` (or other tags) and must be
-ignored. `Self` describes the QDevice itself.
+ignored. `Self` describes the QDevice itself. ICMP over Tailscale from the
+QDevice to a host works with the new policy rule (`ping -c 2`: 0% loss, about
+14 ms).
 
-**ICMP over Tailscale** from the QDevice to a host works with the new policy
-rule (`ping -c 2 <host tailscale ip>`: 0% loss, about 14 ms).
+#### Healthchecks.io
 
-**Healthchecks.io behavior** (tested by the operator with a test check):
+Tested by the operator with a test check (1-minute period and grace):
 
 - Both the DOWN email (from `/fail`) and the UP email (from the success)
-  include the ping body.
+  include the ping body, under "Last Ping Body".
 - A `/fail` immediately followed by a success, with no delay, produces both
   emails, every time.
 - A second `/fail` while the check is already down sends no email.
-- A check name may contain spaces; the test name `bmac_check test_check_name`
-  appeared in the subject and the body of both emails. (BMAC uses the token
-  `bmaccheck`, without the underscore.)
+- A check name may contain spaces.
+- Subjects: `DOWN | <check name>` and `UP | <check name>`.
+- First body line: `"<check name>" is DOWN (received a failure signal).`,
+  `"<check name>" is DOWN (success signal did not arrive on time, grace time passed).`,
+  or `"<check name>" is UP. The downtime lasted 0 seconds.`
+- After a `/fail`, a clear, and a plain heartbeat, the dead-man DOWN email
+  contained only `plain heartbeat` as "Last Ping Body", with "Last Ping Type:
+  Success". No earlier ping bodies appear.
+- Every email also shows Project, Period, Total Pings, Last Ping (time and
+  source IP), Last Ping Type, the time of the status change, and a "Projects
+  Overview" of the account's projects.
 
-**smartd email path**: see [§15.7](#157-verifying-proxmoxs-smart-email-optional).
+#### Healthchecks Management API
+
+`GET https://healthchecks.io/api/v3/checks/` with a read-write key in
+`X-Api-Key` returned HTTP 200 and this check object (UUIDs and URLs
+replaced):
+
+```json
+{"checks": [{"name": "MyAppCloud bmaccheck test", "slug": "bmaccheck-testcheck",
+  "tags": "", "desc": "", "grace": 60, "n_pings": 5, "status": "down",
+  "started": false, "last_ping": "2026-10-23T16:07:07+00:00", "next_ping": null,
+  "manual_resume": false, "methods": "", "subject": "", "subject_fail": "",
+  "start_kw": "", "success_kw": "", "failure_kw": "", "filter_subject": false,
+  "filter_body": false, "filter_http_body": false, "filter_default_fail": false,
+  "badge_url": "https://healthchecks.io/b/2/<badge-id>.svg",
+  "uuid": "<uuid>", "ping_url": "https://hc-ping.com/<uuid>",
+  "update_url": "https://healthchecks.io/api/v3/checks/<uuid>",
+  "pause_url": "https://healthchecks.io/api/v3/checks/<uuid>/pause",
+  "resume_url": "https://healthchecks.io/api/v3/checks/<uuid>/resume",
+  "channels": "<integration-uuid>", "timeout": 60}]}
+```
+
+An earlier attempt printed `null` because the key line was commented out (the
+API returned an error object, which `jq '.checks[0]'` turned into `null`).
+Always check the HTTP status and print the API's error message.
+
+#### Ingress probe from the QDevice
+
+`curl -s -o /dev/null -D - https://pinbinapp.com<path>` from the QDevice,
+with curl's default user agent and with `-A "bmac-monitor/test"`: no request
+was challenged, on any path. Headers returned:
+
+| Path | Status | `content-type` | Notes |
+|---|---|---|---|
+| `/` | `HTTP/2 200` | `text/html; charset=utf-8` | not challenged, even outside `/api/` |
+| `/api/v1/info` | `HTTP/2 200` | `application/json` | |
+| `/api/v1/healthz` | `HTTP/2 404` | `application/json` | endpoint not implemented yet; the app's own JSON 404 |
+
+Every response had `server: cloudflare` and a `cf-ray` header, and no
+`cf-mitigated` header. Keep the challenge detection anyway (other operators'
+zones may have stricter bot settings), and keep the recommendation to put
+health endpoints under `/api/`.
+
+#### smartd email path
+
+See [§15.7](#157-verifying-proxmoxs-smart-email-optional).
 
 ### 19.2 Still to collect
 
-Ask the operator to run these and paste the output (and to redact anything
-private before it is committed). Commands are run from the workstation in the
-repository root unless they say otherwise.
-
 | # | Fact | Command or action |
 |---|---|---|
-| C1 | Exact subject lines of Healthchecks DOWN and UP emails | Copy both subject lines from the test emails already received |
-| C2 | Whether a dead-man DOWN email contains bodies of earlier pings | Set the test check to period 1 minute and grace 1 minute, then run `URL=...; curl -fsS -m 10 --data-raw 'bmacevent test' "$URL/fail"; curl -fsS -m 10 --data-raw 'bmacclear test' "$URL"; curl -fsS -m 10 --data-raw 'plain heartbeat' "$URL"`, send nothing more, and wait about 3 minutes. In the resulting DOWN email, report whether `bmacclear` or `bmacevent` appears anywhere (temporarily disable the BMAC filters first, or the test emails will be forwarded or deleted) |
-| C3 | Gmail search matches the token | Rename the test check to `MyAppCloud bmaccheck test`, send one `/fail` and one success, then search Gmail for `bmaccheck`; report whether it finds both emails |
-| C4 | Healthchecks Management API field names | `KEY=$(grep '^HEALTHCHECKS_API_KEY=' config/secrets.env \| cut -d= -f2-); curl -s -H "X-Api-Key: $KEY" https://healthchecks.io/api/v3/checks/ \| jq '.checks[0] \| del(.ping_url, .update_url, .pause_url, .resume_url, .unique_key, .uuid)'` (the `del` keeps the ping URL out of the output) |
-| C5 | Cloudflare challenge behavior for a probe from the QDevice | `ssh qdevice 'for p in / /api/v1/info; do echo "== $p"; curl -s -o /dev/null -D - "https://<prod1 domain>$p" \| grep -i -E "^(HTTP\|cf-mitigated\|server\|cf-ray)"; done'` |
-| C6 | Production VM basics | `ssh prod1 'hostname; python3 --version; systemctl is-active hello-todo.service; openssl x509 -enddate -noout -in /etc/hello-todo/cert.pem; df -P -B1 -T'` |
-| C7 | QDevice basics | `ssh qdevice 'python3 --version; command -v ping corosync-qnetd-tool tailscale; df -P -B1 -T'` |
-| C8 | Host ZFS shapes | `ssh mox1 'zpool list -H -o name; zpool status -x; zfs list -H -p -o used,available rpool'` |
-| C9 | `smartctl` scan JSON and identity fields | `ssh mox1 'smartctl --scan -j; smartctl -j -i /dev/nvme0 \| jq "{model_name, serial_number, firmware_version}"'` (redact the serial before committing) |
-| C10 | Why qnetd still lists mox1 and mox2 (see [§20](#20-rollout-to-the-existing-cluster)) | `for h in mox1 mox2 mox3; do echo "== $h"; ssh $h 'systemctl is-active corosync-qdevice; systemctl is-enabled corosync-qdevice; grep -A6 quorum /etc/pve/corosync.conf'; done` |
-| C11 | Why mox3 showed `Online: false` in Tailscale | `ssh mox3 'tailscale status \| head -3; tailscale netcheck; journalctl -u tailscaled --since "-2 hours" --no-pager \| tail -50'` |
-| C12 | Quorum output with a registered QDevice (`Qdevice` member line and `Flags`) | Only available on a cluster with an even number of hosts; until then use the Proxmox documentation's example and mark the fixture as not captured |
-| C13 | Pushover alias priority options; Workspace admin locations for automatic forwarding and the email allowlist | Look in the Pushover dashboard and the Admin console |
+| C3 | Gmail search matches the token | Search Gmail for `bmaccheck`; report whether it finds the four test emails whose check names contain it |
+| C13 | Pushover alias priority options; Workspace Admin console locations for automatic forwarding and the email allowlist | Look in the Pushover dashboard and the Admin console |
 | C14 | systemd sandbox compatibility | During implementation: run `app_ha_monitor.py check --once` under the unit's settings on a host, the QDevice, and prod1 |
 
 ## 20. Rollout to the existing cluster
 
-The operator's cluster: three Proxmox hosts (`mox1`–`mox3`), a QDevice VPS on
-standby (`ssh qdevice` works; not voting because the host count is odd), one
-production VM (`ssh prod1` via jump SSH). Already done: the Tailscale ICMP
-rule is in the policy; Cloudflare tunnel email alerts are configured;
-`MONITORING_ENABLED=true` is in `cluster.conf`; `HEALTHCHECKS_API_KEY` is in
-`secrets.env`.
+The operator's cluster at the time of writing: two Proxmox hosts (`mox1`,
+`mox2`), the QDevice registered and voting (`ssh qdevice` works), and one
+production VM (`ssh prod1` via jump SSH). mox3 was removed from the cluster,
+and from Tailscale, to bring the QDevice into its quorum role so its output
+could be captured. Already done: the Tailscale ICMP rule is in the policy;
+Cloudflare tunnel email alerts are configured; `MONITORING_ENABLED=true` is in
+`cluster.conf`; `HEALTHCHECKS_API_KEY` is in `secrets.env`.
 
-### 20.1 Two things to look at first
+The steps below do not depend on the host count. If mox3 is added back before
+monitoring is rolled out, expect one more check and agent, and the QDevice's
+role changes to standby (odd host count), which the agents handle: hosts stop
+expecting the QDevice vote and the QDevice skips its qnetd check. If mox3 is
+added back afterwards, `add_proxmox_host.sh` runs `monitoring_sync`, which
+does the same.
 
-The captured output showed two anomalies. Neither blocks the implementation,
-but both should be understood before monitoring goes live, or they will be the
-first alerts it sends:
+Steps after the implementation is merged:
 
-1. **Stale qnetd clients.** The QDevice's `corosync-qnetd-tool -l` lists
-   cluster `MyAppCloud` with mox1 and mox2 connected (configuration version 7,
-   node list 1, 2), while the cluster itself has three members, configuration
-   version 5, and no QDevice vote. This looks like `corosync-qdevice` still
-   running on mox1 and mox2 from an earlier two-host setup. If so, the step
-   that removes the QDevice when a third host joins may not stop and disable
-   `corosync-qdevice` on the existing hosts, which would be a bug in
-   `add_proxmox_host.sh` or `scripts/lib/qdevice.sh` to fix as part of this
-   work. Collect C10 to confirm. The new `qnetd-stale` check would report it.
-2. **mox3 offline in Tailscale's control plane.** At capture time,
-   `tailscale status` on both the workstation and the QDevice showed mox3
-   "offline, last seen 5m ago", while corosync's link1 to mox3 over Tailscale
-   was connected. Collect C11. If it recurs, the new `tailscale-control:mox3`
-   check would report it after 10 minutes.
-
-### 20.2 Steps after the implementation is merged
-
-1. `update_cluster_runtime.sh --dry-run`, review: 5 checks to create
-   (`MyAppCloud bmaccheck mox1`, `… mox2`, `… mox3`, `… qdevice`,
-   `… prod1`), agents to install on all five nodes. Budget 5/20.
-2. `update_cluster_runtime.sh`. Expect all five checks to leave `new` and
+1. `update_cluster_runtime.sh --dry-run`, review: 4 checks to create
+   (`MyAppCloud bmaccheck mox1`, `… mox2`, `… qdevice`, `… prod1`), agents
+   to install on all four nodes. Budget 4/20.
+2. `update_cluster_runtime.sh`. Expect all four checks to leave `new` and
    report `up`. prod1's registry record has no `monitoring` field, so no
    ingress probe runs yet.
 3. Redeploy the example app to get `/api/v1/healthz`:
@@ -1674,7 +1925,12 @@ first alerts it sends:
 8. Dead-man test: `ssh prod1 systemctl stop app-ha-monitor`, wait about 4
    minutes for the DOWN email (forwarded by F2), then start it again and
    confirm the UP email is kept and forwarded (F2).
-9. `show_monitoring_state.sh` shows everything up with no open problems.
+9. QDevice-vote test (two-host cluster only, during a quiet period):
+   `ssh qdevice systemctl stop corosync-qnetd`, wait about 2 minutes, and
+   expect a `qdevice-vote` event from each host and a `qnetd:service` event
+   from the QDevice. Start it again and confirm the RESOLVED pulses. The
+   cluster stays quorate while both hosts are up.
+10. `show_monitoring_state.sh` shows everything up with no open problems.
 
 No host, VM, or cluster rebuild is needed.
 
