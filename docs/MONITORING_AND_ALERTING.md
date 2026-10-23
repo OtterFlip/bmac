@@ -753,7 +753,7 @@ Add an optional top-level field `monitoring` to production resource records:
 
 Services and certificate paths live **on the VM**, because they describe what
 runs inside it, and the operator manages them with the Production page's
-Monitoring settings tile ([§13](#13-workflows-scripts-and-the-dashboard)):
+Monitored services tile ([§13](#13-workflows-scripts-and-the-dashboard)):
 
 ```json
 {
@@ -970,7 +970,7 @@ whole cluster. It is idempotent. Call it at the end of:
 | `remove_proxmox_host.sh` | **delete the removed host's check** (listed in the plan; the existing typed confirmation covers it); update peers and QDevice expectations. For forced removal of a dead host, deleting its check is what stops further dead-man alerts for it |
 | `add_qdevice.sh` | set `qdevice_expected`/`qnetd_expected` on every host and the QDevice; reuse the QDevice's existing check and agent (create them only if missing) |
 | `remove_qdevice.sh` | clear `qdevice_expected`/`qnetd_expected`. **Keep the QDevice's check and agent:** removing it from its quorum role does not remove it as the cluster's external monitor. Say so in the plan and result |
-| `add_prod_vm.sh` | create the VM's check; install the guest agent; write an empty `guest.json` unless services were given (see below); no probe |
+| `add_prod_vm.sh` | create the VM's check; install the guest agent; write an empty `guest.json`; no services and no probe questions |
 | `remove_prod_vm.sh` | **delete the VM's check** (listed in the plan); the registry record, and with it any probe, is removed by the existing workflow, so re-render the QDevice config |
 | `manage_prod_vm_monitoring.sh` | none beyond the VM's own `guest.json` |
 | `manage_qdevice_probes.sh` | re-render and install the QDevice config |
@@ -982,11 +982,14 @@ the QDevice as a monitor, which is a manual step documented in the README
 `MONITORING_ENABLED` is set to `false` and `update_cluster_runtime.sh` is run
 (which offers to delete all of this cluster's checks; see [§11](#11-deployment-and-the-runtime-update)).
 
-`add_prod_vm.sh` may accept an optional list of services to monitor (form
-field and `--monitor-service UNIT` flag, repeatable), defaulting to none,
-because the operator may already know which services the VM will run. Most
-operators will set services later with the Monitoring settings tile, or let
-`deploy_hello_app_to_prod.sh` add the example app's service.
+`add_prod_vm.sh` asks nothing about monitoring: a newly created VM has no app
+deployed yet, so there are no services to monitor and no health endpoint to
+probe. It only creates the check and installs the agent with an empty
+`guest.json` (so the dead-man switch covers the VM from the start). After an
+app is deployed, the operator adds its services with the Production page's
+**Monitored services** tile and its health endpoint with the QDevice page's
+**Health-check probes** tile. `deploy_hello_app_to_prod.sh` adds the example
+app's service and certificate automatically.
 
 If monitoring is enabled but the sync fails, the membership workflow must still
 complete its main job, then report the monitoring failure as an error result
@@ -1067,8 +1070,11 @@ Add `probe` to the agent subcommands in [§8](#8-the-monitor-agent-app_ha_monito
 
 - **Production page:** add `manage_prod_vm_monitoring` to the `WorkflowTiles`
   list on `dashboard/src/pages/ProductionPage.tsx` (the "Production
-  operations" section), titled "Monitoring settings", and a row menu item
-  "Monitoring settings…" that launches it with `{ resource: vm.name }`.
+  operations" section) as its own new tile titled **"Monitored services"**
+  (summary: view and add/remove the systemd services, and certificate files,
+  that a production VM's monitor watches), and a row menu item "Monitored
+  services…" that launches it with `{ resource: vm.name }`. The tile opens
+  with a guest picker limited to production VMs.
 - **QDevice page:** add `manage_qdevice_probes` as a tile on
   `dashboard/src/pages/QDevicePage.tsx`, titled "Health-check probes" (follow
   how that page lays out its existing tiles and update
@@ -1106,7 +1112,7 @@ and which filters should act on them.
 
 | Script | Change |
 |---|---|
-| `add_prod_vm.sh` | No probe questions. Optional list of services to monitor (default none). Install the guest agent; write `guest.json`; run `monitoring_sync` (creates the check); wait for the first ping. |
+| `add_prod_vm.sh` | No monitoring questions (no services, no probe). Install the guest agent; write an empty `guest.json`; run `monitoring_sync` (creates the check); wait for the first ping. |
 | `remove_prod_vm.sh` | Delete the VM's check as part of the plan; run `monitoring_sync`. |
 | `deploy_hello_app_to_prod.sh` | After installing the app, add `hello-todo.service` and `/etc/hello-todo/cert.pem` to `guest.json` if monitoring is enabled. |
 | `add_proxmox_host.sh`, `remove_proxmox_host.sh` | Call `monitoring_sync` as in [§12](#12-membership-changes); host removal deletes the host's check. |
@@ -1130,7 +1136,9 @@ Add `GET /api/v1/healthz` to `scripts/user_callable/guests/prod/hello_todo/src/m
   existing `info` tests.
 
 Document in the README that users' own apps should expose an equivalent cheap
-endpoint under `/api/` and set it with the Monitoring settings tile.
+endpoint under `/api/`, set it with the QDevice page's **Health-check probes**
+tile, and add the app's systemd services with the Production page's
+**Monitored services** tile.
 
 ## 15. Things outside BMAC (README material)
 
@@ -1656,7 +1664,7 @@ first alerts it sends:
 3. Redeploy the example app to get `/api/v1/healthz`:
    `deploy_hello_app_to_prod.sh` for prod1. This also adds
    `hello-todo.service` and its certificate to prod1's `guest.json`; confirm
-   with the Production page's **Monitoring settings** tile.
+   with the Production page's **Monitored services** tile.
 4. QDevice page → **Health-check probes** → prod1: enable the probe with path
    `/api/v1/healthz`, status 200. The tool runs the probe once before saving.
 5. Turn off the Healthchecks monthly summary report; enable reminders.
@@ -1714,8 +1722,8 @@ The work is done when:
 - [ ] Every check is named `<cluster> bmaccheck <node>`.
 - [ ] Removing a host or prod VM deletes its check; removing the QDevice's
       quorum role keeps the QDevice's check and agent.
-- [ ] The Production page has a Monitoring settings tile; the QDevice page has
-      a Health-check probes tile; `add_prod_vm.sh` asks no probe questions.
+- [ ] The Production page has its own Monitored services tile; the QDevice page has
+      a Health-check probes tile; `add_prod_vm.sh` asks no monitoring questions.
 - [ ] Optional monitoring keys work from `cluster.conf` but are not in
       `cluster_dot_conf`.
 - [ ] A staging clone of prod1 sends nothing.
@@ -1740,7 +1748,7 @@ The work is done when:
 | Cluster name at the start of every check name | Operators with several clusters can tell which one alerted, and names stay unique across clusters in one Healthchecks project. |
 | Two-filter basic set; delete only "up" emails with `bmacclear` | Simple to set up; a DOWN email can never be deleted. |
 | QDevice keeps its check when its quorum role is removed | It remains the cluster's external monitor. |
-| Probes edited from the QDevice page, not asked at VM creation | A new VM has no app yet; probes are set after deploying the app. |
+| Services and probes edited from their own Dashboard tiles, never asked at VM creation | A new VM has no app deployed yet, so there are no services to monitor or endpoints to probe; both are set after deploying the app. |
 | Optional monitoring keys kept out of `cluster_dot_conf` | Keeps the example config approachable; defaults are sensible and documented in the README. |
 | Single-word lowercase tokens | Gmail search ignores most punctuation; single words match reliably. |
 | Mutually exclusive filters | Gmail applies every matching filter, in no particular order. |
