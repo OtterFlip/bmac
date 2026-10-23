@@ -181,6 +181,19 @@ RESOURCE_KEYS = {
     "updated_at",
     "revision",
 }
+# Optional top-level resource fields; records written before a field existed
+# lack it.
+OPTIONAL_RESOURCE_KEYS = {"monitoring"}
+PROBE_KEYS = {"enabled", "path", "expected_status", "expected_text", "fqdns"}
+PROBE_TEXT_MAX = 200
+PROBE_PATH_RE = re.compile(r"^/[^\s\x00-\x1f\x7f]{0,199}$")
+DISABLED_PROBE = {
+    "enabled": False,
+    "path": None,
+    "expected_status": None,
+    "expected_text": None,
+    "fqdns": [],
+}
 
 SECRET_KEY_RE = re.compile(
     r"(?:^|_)(?:password|passwd|secret|token|credential|private_key|auth_key)(?:$|_)",
@@ -1277,7 +1290,11 @@ def effective_disk_bytes(spec: dict[str, Any]) -> int:
 def validate_resource(resource: Any, policy: dict[str, Any]) -> None:
     if not isinstance(resource, dict):
         raise RegistryError("resource record must be a JSON object")
-    require_exact_keys(resource, RESOURCE_KEYS, "resource record")
+    require_exact_keys(
+        {key: value for key, value in resource.items() if key not in OPTIONAL_RESOURCE_KEYS},
+        RESOURCE_KEYS,
+        "resource record",
+    )
     if (
         resource["schema_version"] != SCHEMA_VERSION
         or resource["record_type"] != "resource"
@@ -1489,7 +1506,101 @@ def validate_resource(resource: Any, policy: dict[str, Any]) -> None:
             raise RegistryError("staging placement must contain exactly one node")
         if ha_nodes:
             raise RegistryError("staging resources may not have HA nodes")
+    if "monitoring" in resource:
+        if resource["kind"] != "production":
+            raise RegistryError("only production resources have monitoring settings")
+        validate_monitoring(resource["monitoring"], resource["domains"])
     reject_secret_material(resource, f"resource {resource['name']}")
+
+
+def _record_domains(domains: dict[str, Any]) -> list[str]:
+    return [domains["primary"], *domains["aliases"]]
+
+
+def validate_probe(probe: Any, domains: dict[str, Any]) -> dict[str, Any]:
+    """Validate one ingress probe definition; return it unchanged."""
+
+    if not isinstance(probe, dict):
+        raise RegistryError("monitoring probe must be a JSON object")
+    require_exact_keys(probe, PROBE_KEYS, "monitoring probe")
+    if not isinstance(probe["enabled"], bool):
+        raise RegistryError("monitoring probe enabled must be true or false")
+    path = probe["path"]
+    if not isinstance(path, str) or not PROBE_PATH_RE.fullmatch(path):
+        raise RegistryError(
+            "monitoring probe path must start with / and be at most "
+            f"{PROBE_TEXT_MAX} characters without spaces or control characters"
+        )
+    status = probe["expected_status"]
+    if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
+        raise RegistryError("monitoring probe expected_status must be an integer 100-599")
+    text = probe["expected_text"]
+    if text is not None and (
+        not isinstance(text, str)
+        or not 1 <= len(text) <= PROBE_TEXT_MAX
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in text)
+    ):
+        raise RegistryError(
+            f"monitoring probe expected_text must be null or 1-{PROBE_TEXT_MAX} "
+            "characters on one line"
+        )
+    fqdns = probe["fqdns"]
+    if not isinstance(fqdns, list) or not fqdns or not all(isinstance(f, str) for f in fqdns):
+        raise RegistryError("monitoring probe fqdns must be a non-empty array of domains")
+    if normalize_domains(fqdns) != fqdns:
+        raise RegistryError("monitoring probe fqdns are not normalized")
+    allowed = _record_domains(domains)
+    foreign = [fqdn for fqdn in fqdns if fqdn not in allowed]
+    if foreign:
+        raise RegistryError(
+            "monitoring probe fqdns must be this resource's domains: "
+            + ", ".join(foreign)
+        )
+    reject_secret_material(probe, "monitoring probe")
+    return probe
+
+
+def validate_monitoring(value: Any, domains: dict[str, Any]) -> None:
+    if not isinstance(value, dict):
+        raise RegistryError("monitoring settings must be a JSON object")
+    require_exact_keys(value, {"probe"}, "monitoring settings")
+    validate_probe(value["probe"], domains)
+
+
+def parse_monitoring_request(text: str, domains: dict[str, Any]) -> dict[str, Any]:
+    """Build stored monitoring settings from --monitoring-json input."""
+
+    try:
+        value = json.loads(text)
+    except ValueError as exc:
+        raise RegistryError(f"--monitoring-json is not valid JSON: {exc}") from exc
+    if not isinstance(value, dict) or set(value) != {"probe"}:
+        raise RegistryError('--monitoring-json must be an object with one "probe" field')
+    probe = value["probe"]
+    if not isinstance(probe, dict):
+        raise RegistryError("monitoring probe must be a JSON object")
+    probe = dict(probe)
+    missing = sorted({"enabled", "path", "expected_status", "expected_text"} - set(probe))
+    if missing:
+        raise RegistryError(f"monitoring probe is missing fields: {', '.join(missing)}")
+    fqdns = probe.get("fqdns") or []
+    if not isinstance(fqdns, list) or not all(isinstance(f, str) for f in fqdns):
+        raise RegistryError("monitoring probe fqdns must be an array of domains")
+    probe["fqdns"] = normalize_domains(fqdns) if fqdns else [domains["primary"]]
+    settings = {"probe": probe}
+    validate_monitoring(settings, domains)
+    return settings
+
+
+def prune_monitoring_fqdns(resource: dict[str, Any]) -> None:
+    """Drop probe FQDNs a domain change removed; fall back to the primary."""
+
+    monitoring = resource.get("monitoring")
+    if not monitoring:
+        return
+    allowed = _record_domains(resource["domains"])
+    kept = [fqdn for fqdn in monitoring["probe"]["fqdns"] if fqdn in allowed]
+    monitoring["probe"]["fqdns"] = kept or [resource["domains"]["primary"]]
 
 
 def validate_registry_invariants(resources: Sequence[dict[str, Any]]) -> None:
@@ -2533,6 +2644,18 @@ def command_update(registry: Registry, args: argparse.Namespace) -> Any:
             snapshot["guids"].update(_parse_snapshot_guids(args.snapshot_guid))
             updated["proxmox"]["snapshot"] = snapshot
             changed = True
+        if args.clear_monitoring or args.monitoring_json is not None:
+            if current["kind"] != "production":
+                raise RegistryError("only production resources have monitoring settings")
+            if args.clear_monitoring:
+                updated.pop("monitoring", None)
+            else:
+                updated["monitoring"] = parse_monitoring_request(
+                    args.monitoring_json, updated["domains"]
+                )
+            changed = True
+        elif args.primary_domain is not None or args.alias is not None or args.clear_aliases:
+            prune_monitoring_fqdns(updated)
         if args.disk_bytes is not None:
             if current["kind"] != "production":
                 raise RegistryError("only production root disk sizes may be updated")
@@ -3376,6 +3499,32 @@ def tunnel_productions(resources: Sequence[dict[str, Any]]) -> list[dict[str, An
 
 def command_tunnel_productions(registry: Registry, args: argparse.Namespace) -> Any:
     return tunnel_productions(registry.resources())
+
+
+def monitoring_probes(resources: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every production guest's ingress probe settings, in slot order.
+
+    A record created before monitoring settings existed has its probe off.
+    """
+
+    rows = [
+        {
+            "name": resource["name"],
+            "state": resource["state"],
+            "primary": resource["domains"]["primary"],
+            "aliases": list(resource["domains"]["aliases"]),
+            "probe": copy.deepcopy(
+                (resource.get("monitoring") or {}).get("probe") or DISABLED_PROBE
+            ),
+        }
+        for resource in resources
+        if resource["kind"] == "production"
+    ]
+    return sorted(rows, key=lambda row: int(row["name"][len("prod"):]))
+
+
+def command_monitoring_probes(registry: Registry, args: argparse.Namespace) -> Any:
+    return monitoring_probes(registry.resources())
 
 
 OBSERVED_KEYS = {
@@ -4283,6 +4432,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="grow the exact registered production root disk size (whole MiB)",
     )
+    monitoring = update.add_mutually_exclusive_group()
+    monitoring.add_argument(
+        "--monitoring-json",
+        help='replace production monitoring settings: {"probe": {...}}',
+    )
+    monitoring.add_argument("--clear-monitoring", action="store_true")
     update.set_defaults(handler=command_update)
 
     record_owner = subparsers.add_parser(
@@ -4394,6 +4549,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="list every production guest's slot and domains for the tunnel config",
     )
     tunnel.set_defaults(handler=command_tunnel_productions)
+
+    probes = subparsers.add_parser(
+        "monitoring-probes",
+        help="list every production guest's ingress probe settings for the QDevice monitor",
+    )
+    probes.set_defaults(handler=command_monitoring_probes)
 
     reconcile = subparsers.add_parser(
         "reconcile",

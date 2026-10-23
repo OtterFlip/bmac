@@ -1,4 +1,4 @@
-import { Gauge, Timer } from "lucide-react";
+import { BellRing, Gauge, Timer } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "@/state/store";
 import { Card, CardHeader } from "@/components/ui/card";
@@ -9,6 +9,7 @@ import { ago, elapsed } from "@/lib/format";
 
 const FAST = ["list_hosts", "list_guests", "list_replication", "list_storage", "list_disks"];
 const FULL = ["show_cluster_health", "show_cluster_state", "show_proxmox_host_state", "show_prod_vm_state", "show_qdevice_state"];
+const MONITORING = ["show_monitoring_state", "send_test_alert"];
 
 export function DiagnosticsPage() {
   const focusRun = useStore((s) => s.focusRun);
@@ -35,6 +36,11 @@ export function DiagnosticsPage() {
         </h2>
         <p className="mb-2.5 text-[12.5px] text-fg-subtle">Thorough checks that can take a minute or more. Their full output streams to the console below.</p>
         <WorkflowTiles ids={FULL} className="mb-6" />
+        <h2 className="mb-1 flex items-center gap-2 text-[12px] font-semibold uppercase tracking-[0.08em] text-fg-subtle">
+          <BellRing className="size-3.5" /> Monitoring
+        </h2>
+        <p className="mb-2.5 text-[12.5px] text-fg-subtle">Healthchecks.io checks and monitor agents on every node. A test alert sends two emails through your filters; nothing in the cluster changes.</p>
+        <WorkflowTiles ids={MONITORING} className="mb-6" />
         {runs.length > 0 && (
           <Card>
             <CardHeader title="Recent diagnostic runs" />

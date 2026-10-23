@@ -430,6 +430,21 @@ any change.
 The Tailscale policy must still allow the mox hosts to reach this machine on
 TCP `22` for `pvecm qdevice setup`.
 
+### Monitoring
+
+With `MONITORING_ENABLED=true` in `cluster.conf`, BMAC also uses this machine
+as the cluster's external monitor (see the README's "Monitoring and Alerts").
+No manual step is needed here: `update_cluster_runtime.sh`, `add_qdevice.sh`,
+and the other membership workflows install the monitor agent
+(`/usr/local/lib/app-ha-monitor/app_ha_monitor.py`, `app-ha-monitor.service`,
+and `/etc/app-ha-monitor/config.json`) over `ssh root@qdevice`, and install
+`iputils-ping` if it is missing. The agent pings every host over Tailscale,
+which needs the README's Tailscale ICMP rule from `tag:proxmox-qdevice` to
+`tag:proxmox-host`; it opens no port and only makes outbound connections, so
+the UFW rules above stay as they are. It runs even when the cluster has an
+odd number of hosts and does not use this machine's vote, and removing the
+QDevice with `remove_qdevice.sh` keeps it.
+
 ---
 
 ## 17. Final security verification

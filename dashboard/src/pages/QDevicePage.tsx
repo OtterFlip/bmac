@@ -70,7 +70,7 @@ export function QDevicePage() {
         <h2 className="mb-2.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-fg-subtle">QDevice operations</h2>
         <WorkflowTiles
           links={[{ title: "QDevice Setup Prereq", summary: "Prepare the QDevice machine and reach it over Tailscale before adding it.", url: QDEVICE_SETUP_URL }]}
-          ids={["add_qdevice", "remove_qdevice", "show_qdevice_state"]}
+          ids={["add_qdevice", "remove_qdevice", "manage_qdevice_probes", "show_qdevice_state"]}
         />
       </PageBody>
     </>

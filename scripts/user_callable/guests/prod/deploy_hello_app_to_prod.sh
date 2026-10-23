@@ -129,6 +129,8 @@ load_config() {
   source "$CONFIG_LIB"
   load_proxmox_config --no-secrets >/dev/null ||
     die "Could not load config/cluster.conf"
+  # shellcheck source=../../../lib/monitoring.sh
+  source "${REPO_ROOT}/scripts/lib/monitoring.sh"
 
   [[ -n "${CLUSTER_STATE_DIR:-}" ]] || die "CLUSTER_STATE_DIR is not configured"
   [[ -n "${MAX_MOX_HOSTS:-}" ]] || die "MAX_MOX_HOSTS is not configured"
@@ -630,6 +632,46 @@ deploy_to_guest() {
   REMOTE_STAGE_DIR=""
 }
 
+# The VM's monitor agent watches the app's service and its origin
+# certificate; it re-reads guest.json every cycle. Existing entries are kept.
+add_app_to_monitoring() {
+  monitoring_enabled || return 0
+  log "Add the app to $RESOURCE_NAME's monitored services"
+  # shellcheck disable=SC2016 # Evaluated by python3 on the VM.
+  if ssh -o BatchMode=yes "$RESOURCE_NAME" python3 - <<'REMOTE'; then
+import json
+import os
+from pathlib import Path
+import tempfile
+
+path = Path("/etc/app-ha-monitor/guest.json")
+try:
+    settings = json.loads(path.read_text(encoding="utf-8"))
+except FileNotFoundError:
+    settings = {"schema_version": 1, "services": [], "cert_paths": []}
+settings.setdefault("services", [])
+settings.setdefault("cert_paths", [])
+changed = False
+for key, value in (("services", "hello-todo.service"), ("cert_paths", "/etc/hello-todo/cert.pem")):
+    if value not in settings[key]:
+        settings[key].append(value)
+        changed = True
+if changed:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".guest.json.")
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(settings, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+print("added" if changed else "already watched")
+REMOTE
+    info "The monitor watches hello-todo.service and /etc/hello-todo/cert.pem."
+  else
+    warn "Could not update /etc/app-ha-monitor/guest.json; add the app with the Production page's Monitored services tile"
+  fi
+}
+
 print_completion() {
   log "Todo app deployment complete"
   info "Production VM: $RESOURCE_NAME"
@@ -651,6 +693,15 @@ EOF2
   bmac_ui_result resource "$RESOURCE_NAME" url "https://$PRIMARY_DOMAIN/" \
     api_url "https://$PRIMARY_DOMAIN/api/v1/todos"
   bmac_ui_next_step "Open https://$PRIMARY_DOMAIN/ to use the todo list."
+  if monitoring_enabled; then
+    printf '\nThe app answers https://%s/api/v1/healthz for monitoring. To have the QDevice\n' "$PRIMARY_DOMAIN"
+    printf 'probe it, use the QDevice page'"'"'s Health-check probes tile, or run:\n\n'
+    printf '    scripts/user_callable/qdevice/manage_qdevice_probes.sh --vm %s --enable --path /api/v1/healthz --status 200\n' \
+      "$RESOURCE_NAME"
+    bmac_ui_next_step "Probe the app's health endpoint from the QDevice." \
+      --command "scripts/user_callable/qdevice/manage_qdevice_probes.sh --vm $RESOURCE_NAME --enable --path /api/v1/healthz --status 200" \
+      --workflow manage_qdevice_probes --arg "resource=$RESOURCE_NAME"
+  fi
 }
 
 main() {
@@ -685,6 +736,7 @@ main() {
   prompt_yes "Proceed with deployment?" || die "Deployment cancelled"
 
   deploy_to_guest
+  add_app_to_monitoring
   print_completion
 }
 

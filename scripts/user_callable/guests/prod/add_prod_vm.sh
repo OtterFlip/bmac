@@ -596,6 +596,8 @@ load_and_validate_config() {
   source "$CONFIG_LIB"
   load_proxmox_config --require-secrets ||
     die "Could not load cluster.conf and secrets.env"
+  # shellcheck source=../../../lib/monitoring.sh
+  source "${REPO_ROOT}/scripts/lib/monitoring.sh"
 
   local required=(
     PROXMOX_CLUSTER_NAME MAX_MOX_HOSTS PRIVATE_SUBNET_CIDR GUEST_GATEWAY_IP
@@ -672,6 +674,7 @@ preflight_workstation() {
   local legacy_artifacts
   legacy_artifacts="$(config_legacy_artifacts_problem prod)"
   [[ -z "$legacy_artifacts" ]] || die "$legacy_artifacts"
+  monitoring_require_qdevice || die "The QDevice must be reachable while monitoring is enabled"
   [[ ! -L "$PROXMOX_ARTIFACTS_DIR" && ! -L "${PROXMOX_ARTIFACTS_DIR}/prod" ]] ||
     die "The production artifacts path may not be a symlink"
   install -d -m 0700 "$PROXMOX_ARTIFACTS_DIR" "${PROXMOX_ARTIFACTS_DIR}/prod"
@@ -3503,6 +3506,9 @@ main() {
   ensure_ha_resource
   register_ingress_and_finalize
   print_completion
+  # The new VM gets its check and an agent with an empty guest.json, so the
+  # dead-man switch covers it before any app is deployed.
+  monitoring_membership_sync "$COORDINATOR"
 }
 
 if [[ "${PRODUCTION_VM_SOURCE_ONLY:-0}" != 1 ]]; then

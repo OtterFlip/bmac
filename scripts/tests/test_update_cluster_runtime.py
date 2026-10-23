@@ -36,6 +36,7 @@ class UpdateClusterRuntimeTests(unittest.TestCase):
             "tunnel_config.py",
             "tunnel_sync.sh",
             "cloudflared_setup.sh",
+            "app_ha_monitor.py",
         ):
             self.assertIn(f"/usr/local/lib/app-ha-proxmox/lib/{name}", text)
             self.assertTrue((runtime / name).is_file(), name)
@@ -67,6 +68,29 @@ class UpdateClusterRuntimeTests(unittest.TestCase):
         self.assertIn('if [[ -f "$stage/${name}.absent" ]]; then', text)
         self.assertIn("systemctl try-restart app-ha-egress-health.service", text)
         self.assertIn('"$REMOTE_TUNNEL_SYNC" --check', text)
+
+    def test_monitoring_is_planned_before_changes_and_applied_after_hosts(self) -> None:
+        text = SCRIPT.read_text(encoding="utf-8")
+        main = text[text.index("main() {") :]
+        # The preflight (every node reachable, API key works) and the plan
+        # come before the confirmation and before any node is staged.
+        self.assertLess(main.index("plan_monitoring"), main.index('if [[ "$DRY_RUN" == true ]]'))
+        self.assertLess(main.index("plan_monitoring"), main.index("confirm_update"))
+        self.assertLess(main.index('verify_node "$node"'), main.index("update_monitoring"))
+        self.assertIn('monitoring_sync "$COORDINATOR" --dry-run', text)
+        self.assertIn("monitoring_disable_everywhere", text)
+        self.assertIn("monitoring_require_qdevice", text)
+        # A running monitor picks up its new program on commit and rollback.
+        self.assertEqual(text.count("systemctl try-restart app-ha-monitor.service"), 2)
+        self.assertIn("--delete-obsolete-checks", text)
+
+    def test_monitoring_files_are_shipped_with_the_workstation_tools(self) -> None:
+        lib = SCRIPT.parent.parent.parent / "lib"
+        for name in ("monitoring.sh", "monitor_node_install.sh", "healthchecks.py", "monitor_config.py"):
+            self.assertTrue((lib / name).is_file(), name)
+        add_host = (SCRIPT.parent / "add_proxmox_host.sh").read_text(encoding="utf-8")
+        start = add_host.index("RUNTIME_LIB_FILES=(")
+        self.assertIn("app_ha_monitor.py", add_host[start : add_host.index(")", start)])
 
 if __name__ == "__main__":
     unittest.main()

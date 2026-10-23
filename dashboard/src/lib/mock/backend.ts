@@ -258,6 +258,31 @@ export function createMockBackend(): Backend {
       }
       return;
     }
+    if (id === "show_monitoring_state") {
+      for (const label of ["Read the cluster", "Read the Healthchecks checks", "Read the agent on mox1", "Read the agent on qdevice", "Read the agent on prod1"]) {
+        step(run, label);
+        await sleep(run, 150);
+      }
+      await log(run, [
+        "",
+        "  NODE     ROLE     CHECK  LAST PING                  AGENT HEARTBEAT       OPEN",
+        "  mox1     host     up     2026-10-23T16:07:07+00:00  2026-10-23T16:07:07Z  0",
+        "  mox2     host     up     2026-10-23T16:07:05+00:00  2026-10-23T16:07:05Z  0",
+        "  qdevice  qdevice  up     2026-10-23T16:07:01+00:00  2026-10-23T16:07:01Z  1",
+        "  prod1    guest    up     2026-10-23T16:06:58+00:00  2026-10-23T16:06:58Z  0",
+        "",
+        "Check budget: 4 of 20 checks in the Healthchecks project",
+        "ATTENTION: 1 item:",
+        "  - qdevice: [p1] ingress:prod1.example.com: https://prod1.example.com/api/v1/healthz returned HTTP 404, expected 200 (prod1)",
+      ], 20);
+      emit(run, { type: "result", data: {
+        enabled: true, verdict: "attention", obsolete_checks: [], budget: { used: 4, max: 20 },
+        problems: ["qdevice: [p1] ingress:prod1.example.com: https://prod1.example.com/api/v1/healthz returned HTTP 404, expected 200 (prod1)"],
+        nodes: ["mox1", "mox2", "qdevice", "prod1"].map((node) => ({ node, check_status: "up", reachable: true })),
+      } });
+      emit(run, { type: "next_step", text: "Send a test alert through the email, filter, and Pushover chain.", command: "scripts/user_callable/diagnostics/send_test_alert.sh", workflow: "send_test_alert", args: {} });
+      return;
+    }
     if (workflow.mode === "read_only") {
       for (const section of ["Cluster membership", "Corosync links", "ZFS pools", "SMART health"]) {
         step(run, section);

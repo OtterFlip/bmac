@@ -176,6 +176,14 @@ declare -ag _PROXMOX_CONFIG_CLUSTER_KEYS=(
   SNIPPETS_STORAGE_ID DNS_SEARCH_DOMAIN GUEST_DNS_SERVERS
   MOX_SSH_USER MOX_SSH_CONNECT_TIMEOUT GUEST_SSH_USER
   PROXMOX_SSH_KNOWN_HOSTS_FILE
+  MONITORING_ENABLED HEALTHCHECKS_API_URL
+  MONITOR_MAX_CHECKS MONITOR_ALIVE_PERIOD_SECONDS MONITOR_ALIVE_GRACE_SECONDS
+  MONITOR_FAST_INTERVAL_SECONDS MONITOR_FAST_FAIL_THRESHOLD
+  MONITOR_SLOW_INTERVAL_SECONDS
+  MONITOR_POOL_MIN_FREE_PERCENT MONITOR_POOL_CLEAR_FREE_PERCENT
+  MONITOR_REMINDER_HOURS MONITOR_POSTFIX_QUEUE_MAX_AGE_MINUTES
+  MONITOR_CERT_WARN_DAYS MONITOR_NVME_WEAR_WARN_PERCENT
+  MONITOR_PROBE_DEFAULT_PATH MONITOR_PROBE_DEFAULT_STATUS
 )
 declare -ag _PROXMOX_CONFIG_MOX_KEYS=(
   IDRAC_IP IDRAC_ASSET_ID
@@ -190,7 +198,7 @@ declare -ag _PROXMOX_CONFIG_ALLOWED_SECRET_KEYS=(
   IDRAC_USER IDRAC_PASSWORD PROXMOX_ROOT_PASSWORD
   PROD_GUEST_VM_ROOT_PASSWORD STAGING_GUEST_VM_ROOT_PASSWORD
   PROXMOX_LUKS_PASSWORD PROXMOX_QDEVICE_ROOT_PASSWORD
-  CLOUDFLARE_TUNNEL_SECRET
+  CLOUDFLARE_TUNNEL_SECRET HEALTHCHECKS_API_KEY
 )
 
 _config_initialize_allowlist() {
@@ -956,6 +964,78 @@ _config_validate_mox() {
   _config_validate_selected_host "$host" "$index" "$prefix"
 }
 
+# Optional monitoring settings: KEY DEFAULT MIN MAX. A MIN or MAX of "-" means
+# no bound. MONITORING_ENABLED, HEALTHCHECKS_API_URL, the probe path, and the
+# pool clear threshold (which must exceed the minimum) are validated
+# separately. Only MONITORING_ENABLED appears in the example cluster.conf;
+# operators may add any of the others to cluster.conf (see README.md,
+# "Monitoring and Alerts").
+declare -ag _PROXMOX_CONFIG_MONITOR_INTEGERS=(
+  "MONITOR_MAX_CHECKS 20 1 1000"
+  "MONITOR_ALIVE_PERIOD_SECONDS 60 60 -"
+  "MONITOR_ALIVE_GRACE_SECONDS 180 60 -"
+  "MONITOR_FAST_INTERVAL_SECONDS 30 10 300"
+  "MONITOR_FAST_FAIL_THRESHOLD 3 1 10"
+  "MONITOR_SLOW_INTERVAL_SECONDS 1800 300 86400"
+  "MONITOR_POOL_MIN_FREE_PERCENT 10 1 50"
+  "MONITOR_POOL_CLEAR_FREE_PERCENT 12 - 100"
+  "MONITOR_REMINDER_HOURS 6 1 168"
+  "MONITOR_POSTFIX_QUEUE_MAX_AGE_MINUTES 60 10 1440"
+  "MONITOR_CERT_WARN_DAYS 14 1 90"
+  "MONITOR_NVME_WEAR_WARN_PERCENT 90 50 100"
+  "MONITOR_PROBE_DEFAULT_STATUS 200 100 599"
+)
+
+# Give an absent monitoring key its default, marked derived so require_var
+# accepts it.
+_config_monitor_default() {
+  local name="$1" value="$2"
+  [[ -z "${!name+x}" ]] || return 0
+  printf -v "$name" '%s' "$value"
+  export "${name?}"
+  _PROXMOX_CONFIG_PUBLIC_KEYS+=("$name")
+  _PROXMOX_CONFIG_DERIVED["$name"]=1
+}
+
+_config_validate_monitoring() {
+  local entry name default minimum maximum value
+  _config_monitor_default MONITORING_ENABLED false
+  [[ "$MONITORING_ENABLED" == true || "$MONITORING_ENABLED" == false ]] ||
+    config_die "MONITORING_ENABLED must be true or false" || return
+  _config_monitor_default HEALTHCHECKS_API_URL https://healthchecks.io
+  [[ "$HEALTHCHECKS_API_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$ &&
+    "$HEALTHCHECKS_API_URL" != */ ]] ||
+    config_die "HEALTHCHECKS_API_URL must be an https URL without a trailing slash" || return
+  for entry in "${_PROXMOX_CONFIG_MONITOR_INTEGERS[@]}"; do
+    read -r name default minimum maximum <<<"$entry"
+    _config_monitor_default "$name" "$default"
+    value="${!name}"
+    [[ "$value" =~ ^(0|[1-9][0-9]{0,8})$ ]] ||
+      config_die "${name} must be an integer" || return
+    [[ "$minimum" == - ]] || ((value >= minimum)) ||
+      config_die "${name} must be at least ${minimum}" || return
+    [[ "$maximum" == - ]] || ((value <= maximum)) ||
+      config_die "${name} must be at most ${maximum}" || return
+  done
+  ((MONITOR_POOL_CLEAR_FREE_PERCENT > MONITOR_POOL_MIN_FREE_PERCENT)) ||
+    config_die "MONITOR_POOL_CLEAR_FREE_PERCENT must be greater than MONITOR_POOL_MIN_FREE_PERCENT" || return
+  _config_monitor_default MONITOR_PROBE_DEFAULT_PATH /api/v1/healthz
+  [[ "$MONITOR_PROBE_DEFAULT_PATH" =~ ^/[A-Za-z0-9._~!$\&\'()*+,\;=:@%/?-]*$ ]] ||
+    config_die "MONITOR_PROBE_DEFAULT_PATH must be an absolute URL path starting with /" || return
+  if [[ "$MONITORING_ENABLED" == true ]]; then
+    [[ -n "${PROXMOX_QDEVICE_HOST:-}" ]] ||
+      config_die "MONITORING_ENABLED=true requires PROXMOX_QDEVICE_HOST in cluster.conf: the QDevice runs the cluster's external monitor" || return
+  fi
+}
+
+# The API key is checked only when secrets.env was actually loaded. Its value
+# is never printed.
+_config_validate_monitoring_secrets() {
+  [[ "$MONITORING_ENABLED" == true ]] || return 0
+  [[ -n "${HEALTHCHECKS_API_KEY:-}" && "${HEALTHCHECKS_API_KEY,,}" != redacted ]] ||
+    config_die "MONITORING_ENABLED=true in cluster.conf requires HEALTHCHECKS_API_KEY (a Healthchecks.io read-write project API key) in secrets.env"
+}
+
 _config_compute_hash() {
   local key
   local -a keys=()
@@ -970,6 +1050,11 @@ _config_compute_hash() {
       config_die "Internal error: secret key ${key} entered the public hash set" || return
     # The control node moves with cluster membership; it is not host setup input.
     [[ "$key" != PROXMOX_CONTROL_NODE ]] || continue
+    # Monitoring settings are not host setup input either: changing them must
+    # not invalidate host-setup checkpoints or show as cluster.conf drift.
+    case "$key" in
+      MONITORING_ENABLED | MONITOR_* | HEALTHCHECKS_*) continue ;;
+    esac
     keys+=("$key")
   done
   mapfile -t keys < <(printf '%s\n' "${keys[@]}" | LC_ALL=C sort -u)
@@ -1040,6 +1125,7 @@ load_proxmox_config() {
 
   _config_parse_file "$cluster_file" cluster 0 || return
   _config_validate_cluster || return
+  _config_validate_monitoring || return
 
   if [[ -n "$selected_host" ]]; then
     mox_index "$selected_host" >/dev/null || return
@@ -1055,6 +1141,7 @@ load_proxmox_config() {
         set +x
       }
       _config_parse_file "$PROXMOX_SECRETS_CONFIG" secrets 1 || return
+      _config_validate_monitoring_secrets || return
       if [[ "${APP_HA_CONFIG_TEST_MODE:-0}" != 1 ]]; then
         config_require_git_ignored "$PROXMOX_SECRETS_CONFIG" "Secret configuration" || return
       fi

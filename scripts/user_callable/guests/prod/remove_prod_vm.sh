@@ -85,6 +85,8 @@ done
 source "$CONFIG_LIB"
 load_proxmox_config --no-secrets ||
   die "Could not load cluster configuration"
+# shellcheck source=../../../lib/monitoring.sh
+source "${REPO_ROOT}/scripts/lib/monitoring.sh"
 
 for command_name in awk bash date install mktemp paste python3 scp ssh; do
   command -v "$command_name" >/dev/null 2>&1 ||
@@ -443,6 +445,10 @@ bmac_ui_plan_item remove "replication" "${REPLICATION_JOBS[*]:-none}"
 bmac_ui_plan_item remove "tunnel FQDNs" "Its FQDNs and its staging slots' FQDNs are removed from the Cloudflare Tunnel config"
 bmac_ui_plan_item remove "registry" "Resource $RESOURCE_ID metadata is archived and the allocation released"
 bmac_ui_plan_item keep "source ISO cache" "$CACHE_ISO ($cache_state)"
+if monitoring_enabled; then
+  info "Monitoring: delete the check ${PROXMOX_CLUSTER_NAME} bmaccheck ${RESOURCE_NAME} and remove its ingress probes from the QDevice"
+  bmac_ui_plan_item remove "monitoring" "Delete the check ${PROXMOX_CLUSTER_NAME} bmaccheck ${RESOURCE_NAME}; the QDevice stops probing its FQDNs"
+fi
 BMAC_UI_DRY_RUN="$DRY_RUN" bmac_ui_plan_end
 
 if [[ "$DRY_RUN" == true ]]; then
@@ -678,6 +684,8 @@ read -r observed _ < <(sha256sum "$iso")
 ' -- "$CACHE_ISO" "$CACHE_SIDECAR" "$SOURCE_ISO_SHA256" ||
     die "Shared source cache changed during teardown"
 fi
+
+monitoring_membership_sync "$COORDINATOR" --delete-node "$RESOURCE_NAME"
 
 log "Production VM destruction complete"
 info "Destroyed resource: $RESOURCE_NAME (former VMID $VMID)"

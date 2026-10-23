@@ -1,4 +1,4 @@
-import { Boxes, Eye, GitBranch, HardDriveDownload, KeyRound, Plus, Trash2 } from "lucide-react";
+import { Activity, Boxes, Eye, GitBranch, HardDriveDownload, KeyRound, Plus, Trash2 } from "lucide-react";
 import { useStore } from "@/state/store";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -102,6 +102,7 @@ export function ProductionPage() {
                       { label: "Replication jobs", icon: <GitBranch />, onSelect: () => launchWorkflow("list_replication", { guest: vm.name }) },
                       { label: "Extend disk…", icon: <HardDriveDownload />, onSelect: () => launchWorkflow("extend_prod_vm_disk") },
                       { label: "Set up jump SSH…", icon: <KeyRound />, onSelect: () => launchWorkflow("setup_jump_ssh_access", { resource: vm.name }) },
+                      { label: "Monitored services…", icon: <Activity />, onSelect: () => launchWorkflow("manage_prod_vm_monitoring", { resource: vm.name }) },
                       "separator",
                       { label: "Remove VM…", icon: <Trash2 />, danger: true, onSelect: () => launchWorkflow("remove_prod_vm", { resource: vm.name }) },
                     ]}
@@ -151,7 +152,7 @@ export function ProductionPage() {
         </Card>
 
         <h2 className="mb-2.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-fg-subtle">Production operations</h2>
-        <WorkflowTiles ids={["add_prod_vm", "change_prod_vm_owner", "reconcile_prod_vm_owner", "change_prod_vm_placement", "extend_prod_vm_disk", "setup_jump_ssh_access", "deploy_hello_app_to_prod", "show_prod_vm_state", "list_slots", "remove_prod_vm"]} />
+        <WorkflowTiles ids={["add_prod_vm", "change_prod_vm_owner", "reconcile_prod_vm_owner", "change_prod_vm_placement", "extend_prod_vm_disk", "setup_jump_ssh_access", "deploy_hello_app_to_prod", "manage_prod_vm_monitoring", "show_prod_vm_state", "list_slots", "remove_prod_vm"]} />
       </PageBody>
     </>
   );

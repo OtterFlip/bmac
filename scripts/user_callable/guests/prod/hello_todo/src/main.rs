@@ -10,6 +10,7 @@
 //! The page is at `/`; the JSON API is under `/api/v1/` (BMAC's Cloudflare
 //! setup never challenges paths under `/api/`):
 //!
+//!   GET    /api/v1/healthz       {"status": "ok"}, or 503 when the database fails
 //!   GET    /api/v1/info          host name, todo count and limit
 //!   GET    /api/v1/todos         every todo
 //!   POST   /api/v1/todos         {"title": "..."}            -> 201
@@ -159,6 +160,19 @@ async fn info(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiErro
     ))
 }
 
+/// A cheap health check for monitoring: one read of the todo table, so a broken
+/// database fails it. Errors carry no detail; `headers` adds `no-store`.
+async fn healthz(State(app): State<App>) -> Response {
+    match with_store(&app, |store| store.count()).await {
+        Ok(_) => Json(json!({ "status": "ok" })).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "error" })),
+        )
+            .into_response(),
+    }
+}
+
 async fn list(State(app): State<App>) -> Result<impl IntoResponse, ApiError> {
     Ok(Json(with_store(&app, |store| store.list()).await?))
 }
@@ -249,6 +263,7 @@ fn router(app: App) -> Router {
             "/app.css",
             get(|| async { asset("text/css; charset=utf-8", APP_CSS) }),
         )
+        .route("/api/v1/healthz", get(healthz))
         .route("/api/v1/info", get(info))
         .route("/api/v1/todos", get(list).post(create))
         .route(
@@ -422,6 +437,32 @@ mod tests {
         let (status, body, _) = call(&mut app, "GET", &format!("/api/v1/todos/{id}"), None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("todo not found"));
+    }
+
+    #[tokio::test]
+    async fn healthz_reports_the_database_and_is_never_cached() {
+        let mut app = test_app();
+        let (status, body, response) = call(&mut app, "GET", "/api/v1/healthz", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            json!({ "status": "ok" })
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+
+        let store = Store::open_in_memory().unwrap();
+        store.drop_table_for_test();
+        let mut broken = router(App {
+            store: Arc::new(Mutex::new(store)),
+            hostname: "testhost".into(),
+        });
+        let (status, body, response) = call(&mut broken, "GET", "/api/v1/healthz", None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            json!({ "status": "error" })
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     }
 
     #[tokio::test]

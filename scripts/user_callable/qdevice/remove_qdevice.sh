@@ -51,6 +51,8 @@ source "$CONFIG_LIB"
 source "$CONTROL_LIB"
 # shellcheck source=../../lib/host_membership.sh
 source "$MEMBERSHIP_LIB"
+# shellcheck source=../../lib/monitoring.sh
+source "${REPO_ROOT}/scripts/lib/monitoring.sh"
 bmac_ui_bootstrap "$@"
 
 load_proxmox_config --no-secrets || {
@@ -502,6 +504,11 @@ echo "- The coroqnetd system account/group is gone."
 echo "- apt autoremove was NOT run; generic/shared dependency packages were intentionally retained."
 echo "- General system journal/history was intentionally retained."
 echo "- $QDEVICE_HOST is still enrolled in Tailscale. scripts/user_callable/qdevice/add_qdevice.sh can add it again."
+if monitoring_enabled; then
+  echo "- The QDevice keeps its monitoring check and agent: it remains the cluster's external monitor."
+  # Hosts stop expecting the QDevice's vote and the QDevice stops checking qnetd.
+  monitoring_membership_sync "$HM_COORDINATOR"
+fi
 bmac_ui_result removal "${QD_REMOVAL:-detached}" qdevice_host "$QDEVICE_HOST"
 print_even_count_warning
 bmac_ui_next_step "$QDEVICE_HOST is still enrolled in Tailscale; the add QDevice workflow can add it again." \

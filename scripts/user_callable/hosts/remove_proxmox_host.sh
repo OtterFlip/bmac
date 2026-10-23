@@ -40,6 +40,8 @@ source "$CONFIG_LIB"
 source "$CONTROL_LIB"
 # shellcheck source=../../lib/host_membership.sh
 source "$MEMBERSHIP_LIB"
+# shellcheck source=../../lib/monitoring.sh
+source "${REPO_ROOT}/scripts/lib/monitoring.sh"
 bmac_ui_bootstrap "$@"
 
 SHUTDOWN_TIMEOUT_SECONDS=600
@@ -735,6 +737,7 @@ show_graceful_plan() {
   [[ -z "$NEW_CONTROL_NODE" ]] ||
     bmac_ui_plan_item update "control node" "$TARGET_HOST -> $NEW_CONTROL_NODE"
   bmac_ui_plan_item update "registry slot" "Free the $TARGET_HOST slot for a future host"
+  show_monitoring_plan
   bmac_ui_plan_end
   info "The host is powered off and must be wiped or reinstalled before it joins any cluster again."
 }
@@ -772,7 +775,16 @@ show_forced_plan() {
   [[ -z "$NEW_CONTROL_NODE" ]] ||
     bmac_ui_plan_item update "control node" "$TARGET_HOST -> $NEW_CONTROL_NODE"
   bmac_ui_plan_item update "registry slot" "Free the $TARGET_HOST slot for a future host"
+  show_monitoring_plan
   bmac_ui_plan_end
+}
+
+# With monitoring on, removing a host deletes its Healthchecks check, which is
+# also what stops further dead-man alerts for a dead host.
+show_monitoring_plan() {
+  monitoring_enabled || return 0
+  info "Monitoring: delete ${TARGET_HOST}'s Healthchecks check and update every remaining agent"
+  bmac_ui_plan_item remove "monitoring" "Delete the check ${PROXMOX_CLUSTER_NAME} bmaccheck ${TARGET_HOST}; update every agent's peers and the QDevice's host list"
 }
 
 # The final confirmation of a forced removal is the operator's statement that
@@ -1119,6 +1131,7 @@ remove_gracefully() {
   release_slot
   hm_release_control_plane_lock
   hm_archive_host_artifacts "$TARGET_HOST"
+  monitoring_membership_sync "$HM_COORDINATOR" --delete-node "$TARGET_HOST"
 
   log "Graceful host removal complete"
   info "$TARGET_HOST is powered off and no longer a member of $PROXMOX_CLUSTER_NAME"
@@ -1155,6 +1168,7 @@ remove_forcefully() {
   release_slot
   hm_release_control_plane_lock
   hm_archive_host_artifacts "$TARGET_HOST"
+  monitoring_membership_sync "$HM_COORDINATOR" --delete-node "$TARGET_HOST"
 
   log "Forced host removal complete"
   info "$TARGET_HOST is no longer part of $PROXMOX_CLUSTER_NAME"

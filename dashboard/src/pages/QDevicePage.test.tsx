@@ -16,5 +16,6 @@ describe("QDevice page operations", () => {
     const prereq = titles.findIndex((t) => t.includes("QDevice Setup Prereq"));
     expect(prereq).toBeGreaterThanOrEqual(0);
     expect(prereq).toBeLessThan(titles.findIndex((t) => t.includes("Add QDevice")));
+    expect(titles.some((t) => t.includes("Health-check probes"))).toBe(true);
   }, 15000);
 });

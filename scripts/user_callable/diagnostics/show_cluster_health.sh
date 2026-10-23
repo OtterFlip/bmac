@@ -251,7 +251,8 @@ REMOTE
 
 render_report() {
   python3 - "$RUN_DIR" "$PROXMOX_CLUSTER_NAME" "$PROBE" "$REGISTERED" \
-    "$REGISTERED_ADDRESS" "$PROXMOX_QDEVICE_HOST" "$BMAC_UI_LIB_DIR" <<'PY'
+    "$REGISTERED_ADDRESS" "$PROXMOX_QDEVICE_HOST" "$BMAC_UI_LIB_DIR" \
+    "${REPO_ROOT}/scripts/host_runtime" <<'PY'
 import json
 from pathlib import Path
 import re
@@ -261,6 +262,10 @@ run_dir = Path(sys.argv[1])
 cluster, probe, registered, registered_address, qdevice_host = sys.argv[2:7]
 sys.path.insert(0, sys.argv[7])
 from ui_protocol import emit_event, emit_next_step  # noqa: E402
+# The monitor agent parses the same corosync and ZFS output; share its parsers.
+sys.path.insert(0, sys.argv[8])
+sys.dont_write_bytecode = True
+from app_ha_monitor import parse_links, parse_pool, status_value  # noqa: E402
 
 current_phase = None
 
@@ -320,11 +325,6 @@ def table(headers, rows, indent="  "):
 
 def first_line(text):
     return next((line.strip() for line in text.splitlines() if line.strip()), "")
-
-
-def status_value(text, key):
-    match = re.search(rf"^{re.escape(key)}:\s*(.*?)\s*$", text, re.M)
-    return match.group(1) if match else None
 
 
 members = []
@@ -428,35 +428,6 @@ section(
     "COROSYNC LINKS BETWEEN HOSTS",
     "corosync carries quorum and cluster traffic; each host must reach every other host.",
 )
-
-
-def parse_links(text):
-    local, peers, current = None, {}, None
-    for raw in text.splitlines():
-        line = raw.strip()
-        match = re.match(r"Local node ID (\d+)", line)
-        if match:
-            local = int(match.group(1))
-            continue
-        match = re.match(r"nodeid:?\s*(\d+)\s*:?\s*(reachable|unreachable)?", line)
-        if match:
-            current = int(match.group(1))
-            peers[current] = {
-                "reachable": None if match.group(2) is None else match.group(2) == "reachable",
-                "links": {},
-            }
-            continue
-        match = re.match(r"LINK:?\s*(\d+)\b(.*)$", line)
-        if match and current is not None:
-            rest = match.group(2)
-            peers[current]["links"][int(match.group(1))] = (
-                "disabled" not in rest
-                and "disconnected" not in rest
-                and "connected" in rest
-            )
-    if local is not None:
-        peers.pop(local, None)
-    return peers
 
 
 names_by_id = {nodeid: name for nodeid, name in node_names.items() if name in member_names}
@@ -592,40 +563,6 @@ section(
     "ZFS POOLS AND VDEV MEMBERS",
     "a faulted, missing, or erroring member means a drive, cable, or controller needs attention.",
 )
-HEADER = re.compile(
-    r"^\s*(pool|state|status|action|see|scan|remove|checkpoint|expand|config|errors):\s?(.*)$"
-)
-
-
-def parse_pool(text):
-    header, entries, key, in_config = {}, [], None, False
-    for raw in text.splitlines():
-        match = HEADER.match(raw)
-        if match and not (in_config and raw.startswith("\t")):
-            key = match.group(1)
-            header[key] = match.group(2).strip()
-            in_config = key == "config"
-            continue
-        if in_config:
-            body = raw[1:] if raw.startswith("\t") else raw
-            tokens = body.split()
-            if not tokens or (tokens[0] == "NAME" and "STATE" in tokens):
-                continue
-            counts = tokens[2:5] if len(tokens) >= 5 else None
-            entries.append(
-                {
-                    "name": tokens[0],
-                    "depth": (len(body) - len(body.lstrip(" "))) // 2,
-                    "state": tokens[1] if len(tokens) > 1 else None,
-                    "counts": counts,
-                    "note": " ".join(tokens[5:]),
-                }
-            )
-        elif key and raw.startswith("\t") and raw.strip():
-            header[key] += " " + raw.strip()
-    return header, entries
-
-
 def disk_index(report):
     index = {}
     try:

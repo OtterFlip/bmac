@@ -79,6 +79,12 @@ impl Store {
         Self::init(Connection::open_in_memory()?)
     }
 
+    /// Break the store so every read fails, for health-check tests.
+    #[cfg(test)]
+    pub fn drop_table_for_test(&self) {
+        self.connection.execute_batch("DROP TABLE todos;").unwrap();
+    }
+
     fn init(connection: Connection) -> Result<Self, StoreError> {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;

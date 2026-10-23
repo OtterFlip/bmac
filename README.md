@@ -36,6 +36,7 @@ BMAC release [v2.0.0](https://github.com/OtterFlip/bmac/releases/tag/v2.0.0) add
 - Full At-Rest Disk Encryption.  Many webapps need to satisfy security requirements and so BMAC has the option to configure all cluster hosts with disk-level encryption using LUKS.  When this option is enabled, you must enter a password on the hosts during host boot.  All mirror members for all mirror sets (each mirror is called a vdev) share the same password, so only one password must be entered at boot time.
 - Software RAID1, Including OS Boot Volume.  Even if your servers don't have a hardware RAID controller, BMAC will configure them with ZFS RAID1, mirroring each set of identical-capacity disks. During host setup, BMAC also offers the option to fully-test failure scenarios for each mirror member of the boot disk RAID1 set in order to prove host bootability.  BMAC also ensures that each boot disk has a mirrored EFI System Partition (ESP), in addition to mirroring the ZFS partition.  For servers that support host-swap of NVMe disks, this enables each server to endure a single-member disk failure for each mirror set without any downtime or data loss.  Simply pull the failed disk, insert an identical-capacity replacment, and resilver the mirror set.
 - Dell iDRAC9 IPMI support.  BMAC has been tested on Dell Poweredge R640 'Dual Intel Xeon Gold 6138 40 core/80 thread' hosts at FiberState, and one of the host setup script options is to use iDRAC to simplify hardware discovery. This is not required, and a hardware discovery script is provided in cases where you're using some other type of host.
+- Free Monitoring and Alerting.  Every host, the QDevice, and every production VM runs a monitor agent that reports to its own free Healthchecks.io check, so you get an email (and, through Gmail filters, an optional Pushover notification) when a node goes silent, a link or quorum is lost, an app stops answering through Cloudflare, a disk or pool degrades or fills, or a service stops. See [Monitoring and Alerts](#monitoring-and-alerts).
 - BMAC supports decommissioning disk capacity you no longer need. The disk workflows trim affected guests, force replication, scrub the pool, evacuate an eligible non-boot vdev, finalize its retirement, and identify the exact disks that are safe to remove physically. This can be useful after data has moved elsewhere and a host no longer needs all of its installed capacity.
 
 ## Prereqs - What You Need to Use BMAC
@@ -92,6 +93,8 @@ Public web traffic reaches your VMs through one Cloudflare Tunnel per cluster. E
 4. Copy the three values from that JSON file into your configuration: `AccountTag` into `CLOUDFLARE_ACCOUNT_ID` and `TunnelID` into `CLOUDFLARE_TUNNEL_ID` in `config/cluster.conf`, and `TunnelSecret` into `CLOUDFLARE_TUNNEL_SECRET` in `config/secrets.env`. Keep the JSON file somewhere safe outside the checkout, or delete it.
 
 Host setup installs the replica on every Proxmox host. The tunnel then appears in the Zero Trust dashboard (`one.dash.cloudflare.com`) under Networks → Tunnels, marked as locally managed, with one connector per host. If you run several BMAC clusters, create one tunnel per cluster; an account can hold 1,000 tunnels at no cost. A tunnel only serves domains in its own Cloudflare account.
+
+**Once per cluster: the tunnel health alert.** Under Notifications in the Cloudflare dashboard, add a **Tunnel Health Alert** for the tunnel, delivered by email, for the Degraded and Down states (see [Monitoring and Alerts](#cloudflare-tunnel-health-alert)).
 
 **Once per production VM's domain** (when the production VM is created; `add_prod_vm.sh` prints these steps with the right values):
 
@@ -200,7 +203,16 @@ Next, navigate to "Access controls" | "Policies" and under "General access rules
 	"dst": ["tag:proxmox-host"],
 	"ip":  ["udp:5405-5412"],
 }
+
+// Monitoring: QDevice may ping hosts over Tailscale (no ports, no shell)
+{
+	"src": ["tag:proxmox-qdevice"],
+	"dst": ["tag:proxmox-host"],
+	"ip":  ["icmp:*"],
+}
 ```
+
+The last rule is required when monitoring is enabled (see [Monitoring and Alerts](#monitoring-and-alerts)): the QDevice's monitor agent pings every host over Tailscale. It grants no ports and no shell access.
 
 Each time you set up a proxmox host, the script will prompt you for a unique Tailscale Auth Key.  You can generate in the Tailscale web UI unser "Settings | "Keys" and on that page under "Auth Keys" use the "Generate auth key..." button and give the key any name (typically something like `mox1`) of the key, make sure Reusable is Off, any expiration day count value is fine (as these will switch to never expiring once they're actually used), and keep Ephemeral Off, and most importantly turn Tags ON and select the tag:proxmox-host tag.  Generate the key and copy it somewhere so that you have it ready for when the `scripts/user_callable/hosts/add_proxmox_host.sh` script prompts for it.  You'll need one key for each proxmox host you setup.
 
@@ -411,6 +423,12 @@ sudo apt install musl-tools
 The app's source is in `scripts/user_callable/guests/prod/hello_todo/`; run its
 tests there with `cargo test`.
 
+The app answers `GET /api/v1/healthz` with `200 {"status":"ok"}` after a read
+from its database (`503 {"status":"error"}` otherwise). With monitoring
+enabled, the script adds `hello-todo.service` and its certificate to the VM's
+monitored services; turn on the QDevice's probe of the health endpoint as
+described in [Monitoring your apps](#monitoring-your-apps).
+
 ### Updating BMAC Runtime Code on Existing Hosts
 
 When checked-in runtime helpers or hooks have changed, preview drift and then
@@ -423,6 +441,17 @@ deploy the validated bundle atomically to every configured online node:
 
 The second command requires `GO`; use `--yes` only in controlled automation.
 This updates BMAC runtime code, not Proxmox packages or host configuration.
+
+With `MONITORING_ENABLED=true`, the same command also brings monitoring up to
+date on every node (see [Monitoring and Alerts](#monitoring-and-alerts)):
+before changing anything it checks that every host, the QDevice, and every
+active production VM is reachable over SSH and that `HEALTHCHECKS_API_KEY`
+works; after the hosts are updated it creates or updates the cluster's
+Healthchecks checks and installs the monitor agent, its unit, and its config
+on every node, then waits for every check's first ping. The dry run shows the
+checks it would create, update, or find obsolete. Checks that no node uses any
+more are deleted only if you agree (or pass `--delete-obsolete-checks`). With
+`MONITORING_ENABLED=false`, agents installed earlier are stopped.
 
 ### Changing the VM Slots, Guest Gateway, Transfer Caps, or Tunnel
 
@@ -530,6 +559,152 @@ release the disks (erase only their LUKS key slots, ZFS labels, signatures,
 and partition table; no data wipe), and mark them retired. Physically pull
 only disks shown under **Disks eligible for safe physical removal**.
 Run `decommission_disks.sh` once per vdev.
+
+## Monitoring and Alerts
+
+BMAC can alert you, by email and optionally as push notifications on your phone, when anything in the cluster goes wrong: a host, the QDevice, or a production VM stops working or loses its internet connection; hosts can't reach each other over Tailscale or the private VLAN; an app can't be reached through Cloudflare; a disk reports SMART problems or wears out; a ZFS pool is degraded or nearly full; Proxmox's own alert email is stuck; a monitored service on a production VM stops, its disk fills, or its certificate nears expiry; or the cluster loses quorum or the QDevice's vote. Staging VMs are never monitored. The full design is in [`docs/MONITORING_AND_ALERTING.md`](docs/MONITORING_AND_ALERTING.md).
+
+### How it works
+
+You get alerts from three independent sources, all by email:
+
+1. **BMAC's monitor agents through Healthchecks.io.** Every Proxmox host, the QDevice, and every active production VM runs a small agent (`app-ha-monitor.service`) bound to that node's own Healthchecks.io check. The agent pings its check every minute. If a node dies or loses its internet connection, the pings stop and Healthchecks emails you that the check is **DOWN** (the "dead-man switch"). When an agent finds a problem it sends a *pulse*: a failure ping that describes the problem, immediately followed by a success ping that clears it again. You receive a DOWN email describing the problem and an UP email that your Gmail filters delete. Because each pulse is cleared at once, the check stays up and the dead-man switch keeps working while problems are open. Each pulse lists what is NEW, REMINDER (every 6 hours while a problem stays open), RESOLVED, and ONGOING, so every email is a complete picture.
+2. **Cloudflare's Tunnel Health Alert**, which reports when the cluster's tunnel is degraded or down.
+3. **Proxmox's own email** (smartd, ZFS, fencing, replication), which BMAC leaves unchanged as a separate path.
+
+It costs nothing: Healthchecks.io's free Hobbyist plan allows 20 checks, and Pushover (optional) is a one-time purchase per platform. BMAC uses one check per monitored node, so your cluster must satisfy **hosts + 1 (the QDevice) + production VMs ≤ 20** (or `MONITOR_MAX_CHECKS`). No component accepts inbound connections; everything only makes outbound requests.
+
+The QDevice is required while monitoring is enabled: it is the only node outside the data center and the only one that can test your apps end to end through Cloudflare. It runs the agent even when the cluster has an odd number of hosts and doesn't use its vote.
+
+### Setting up Healthchecks.io
+
+1. Create an account and a project at [healthchecks.io](https://healthchecks.io).
+2. In the project's settings, create a **read-write API key** and put it in `config/secrets.env` as `HEALTHCHECKS_API_KEY`. Only your workstation uses it; nodes never receive it, only their own check's ping URL.
+3. Keep the project's default email integration. Its recipient must be the (Google Workspace) address your Gmail filters run on.
+4. In your account settings, **turn on email reminders** for down checks, and **turn off the monthly summary report** (it lists every check by name, so the forwarding filter below would forward it).
+5. Make sure the Tailscale ICMP rule for the QDevice is in your policy (see [Instructions for Tailscale Setup](#instructions-for-tailscale-setup)).
+6. Set `MONITORING_ENABLED=true` in `config/cluster.conf`, then preview and deploy:
+
+    ```bash
+    ./scripts/user_callable/hosts/update_cluster_runtime.sh --dry-run
+    ./scripts/user_callable/hosts/update_cluster_runtime.sh
+    ```
+
+    The dry run shows the checks it will create (named `<cluster> bmaccheck <node>`, such as `MyAppCloud bmaccheck mox1`), the budget, and every node that gets the agent. Every host, the QDevice, and every active production VM must be reachable over SSH (`ssh prodN`, set up by `setup_jump_ssh_access.sh`) before anything changes. The update then installs the agent a phase at a time (hosts, the QDevice, production VMs), rolling a phase back if one of its nodes fails, and waits until every check has received a ping, because a check that never received one never alerts.
+7. Create the Gmail filters and Pushover addresses below, then test the whole chain:
+
+    ```bash
+    ./scripts/user_callable/diagnostics/send_test_alert.sh --node mox1 --priority p1
+    ./scripts/user_callable/diagnostics/send_test_alert.sh --node qdevice --priority p2
+    ```
+
+    Then test the dead-man switch: run `ssh prod1 systemctl stop app-ha-monitor`, wait about four minutes for the DOWN email, and start it again (`systemctl start app-ha-monitor`) to get the UP email.
+
+Check monitoring at any time with `./scripts/user_callable/diagnostics/show_monitoring_state.sh`: every node's check status and last ping, every agent's open problems, checks that no node uses any more, and the check budget.
+
+Monitoring follows the cluster's membership: adding or removing a host, the QDevice, or a production VM updates every agent and the checks. Removing a host or production VM deletes its check. Removing the QDevice from its quorum role keeps its check and agent, because it remains the cluster's external monitor. If a membership change can't update monitoring (for example because Healthchecks is unreachable), the change itself still completes and tells you to run `update_cluster_runtime.sh` to finish.
+
+To turn monitoring off, set `MONITORING_ENABLED=false` and run `update_cluster_runtime.sh`: it stops and disables every agent and offers (after you type `DELETE CHECKS`) to delete the cluster's checks. Checks you keep will report every node as down.
+
+To retire the QDevice as the cluster's monitor without turning monitoring off (for example when replacing the machine), run `systemctl disable --now app-ha-monitor` on it, then delete its check (`<cluster> bmaccheck qdevice`) in the Healthchecks UI. The next `update_cluster_runtime.sh` recreates both on the configured QDevice.
+
+### Optional monitoring settings
+
+These settings are not in `config/cluster_dot_conf`. Add any of them to your `config/cluster.conf` to change the default:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `HEALTHCHECKS_API_URL` | `https://healthchecks.io` | Healthchecks instance (https, no trailing slash) |
+| `MONITOR_MAX_CHECKS` | `20` | Most checks BMAC lets the Healthchecks project hold (1-1000) |
+| `MONITOR_ALIVE_PERIOD_SECONDS` | `60` | Each check's period: how often agents ping (at least 60) |
+| `MONITOR_ALIVE_GRACE_SECONDS` | `180` | Grace time before a silent node is reported down (at least 60) |
+| `MONITOR_FAST_INTERVAL_SECONDS` | `30` | How often connectivity and service checks run (10-300) |
+| `MONITOR_FAST_FAIL_THRESHOLD` | `3` | Consecutive failures (and passes) before a connectivity problem opens (or resolves) (1-10) |
+| `MONITOR_SLOW_INTERVAL_SECONDS` | `1800` | How often SMART, ZFS, capacity, filesystem, and certificate checks run (300-86400) |
+| `MONITOR_POOL_MIN_FREE_PERCENT` | `10` | A pool or filesystem below this free space is a problem (1-50) |
+| `MONITOR_POOL_CLEAR_FREE_PERCENT` | `12` | ...and is resolved only above this (greater than the minimum) |
+| `MONITOR_REMINDER_HOURS` | `6` | Hours between reminders of an open problem (1-168) |
+| `MONITOR_POSTFIX_QUEUE_MAX_AGE_MINUTES` | `60` | Mail waiting longer than this in a host's queue is a problem (10-1440) |
+| `MONITOR_CERT_WARN_DAYS` | `14` | Warn this many days before a monitored certificate expires (1-90) |
+| `MONITOR_NVME_WEAR_WARN_PERCENT` | `90` | Warn when an NVMe drive has used this much of its rated endurance (50-100) |
+| `MONITOR_PROBE_DEFAULT_PATH` | `/api/v1/healthz` | The path the probe editor suggests |
+| `MONITOR_PROBE_DEFAULT_STATUS` | `200` | The status the probe editor suggests (100-599) |
+
+### Monitoring your apps
+
+A new production VM is monitored as soon as it is created (its check proves the VM is alive and its egress works), but nothing inside it is watched until you deploy an app:
+
+- **Services and certificates.** Add your app's systemd services and its certificate files with the Production page's **Monitored services** tile, or `./scripts/user_callable/guests/prod/manage_prod_vm_monitoring.sh prod1 --add-service myapp.service --add-cert /etc/myapp/cert.pem`. A watched service that isn't active is a high-priority alert. `deploy_hello_app_to_prod.sh` adds the example app's service and certificate for you.
+- **A health endpoint.** Give your app a cheap endpoint under `/api/` (which BMAC's Cloudflare setup never challenges) that checks its own dependencies, like the example app's `GET /api/v1/healthz`, which answers `200 {"status":"ok"}` or `503 {"status":"error"}`. Then turn on its probe with the QDevice page's **Health-check probes** tile, or `./scripts/user_callable/qdevice/manage_qdevice_probes.sh --vm prod1 --enable --path /api/v1/healthz --status 200`. The QDevice then requests it through Cloudflare every minute; the tool runs the probe once before saving.
+
+### Cloudflare tunnel health alert
+
+In the Cloudflare dashboard, under Notifications, add a notification of type **Tunnel Health Alert** for your cluster's tunnel, delivered by email to your alert address, for the **Degraded** and **Down** states. It reports only the connection between the tunnel replicas and Cloudflare, not whether your apps answer, which is why the QDevice also probes each app.
+
+### Gmail filters
+
+A few facts about Gmail filters first:
+
+- Gmail applies **every** filter that matches a message, in no particular order, so these filters are written not to overlap.
+- Filters search the whole message, including the subject and the ping body Healthchecks puts in its email.
+- The filters don't use the sender's address. They match the word `bmaccheck`, which every BMAC email contains because it is part of every check's name. Healthchecks' subjects are `DOWN | <check name>` and `UP | <check name>`.
+- Test each query in Gmail's search box first and make sure it finds the test emails you expect and nothing else.
+- Filters only act on mail that arrives after they are created.
+- Before creating a forwarding filter, add each Pushover address as a forwarding address (Settings → Forwarding and POP/IMAP → Add a forwarding address). Gmail sends a confirmation code to it, which Pushover shows on your phone. With Google Workspace, an administrator must first allow automatic forwarding for your account in the Google Admin console's Gmail settings.
+
+Create these two filters (Settings → Filters and Blocked Addresses → Create a new filter → "Has the words"):
+
+| # | Purpose | Has the words | Actions |
+|---|---|---|---|
+| F1 | A pulse being cleared (noise) | `bmaccheck bmacclear subject:up` | Delete it |
+| F2 | Everything else about BMAC checks: a node went silent, an event, a node came back | `bmaccheck -bmacclear` | Never send it to Spam; Apply label `BMAC`; Forward to your Pushover address |
+
+F1 also requires "up" in the subject so a DOWN email can never be deleted. The agent makes sure the last ping before a node could go silent never contains `bmacclear`, so a dead-man DOWN email always reaches F2.
+
+**Optional priority split.** To get two Pushover priorities, replace F2 with these two (the agents mark every event `bmacp1`, high, or `bmacp2`, normal):
+
+| # | Purpose | Has the words | Actions |
+|---|---|---|---|
+| F2a | High priority: p1 events, and nodes going silent | `bmaccheck -bmacclear -bmacp2` | as F2, forwarding to the high-priority Pushover address |
+| F2b | Normal priority: p2 events | `bmaccheck -bmacclear bmacp2` | as F2, forwarding to the normal Pushover address |
+
+Healthchecks' reminder emails (while a check is down) also contain `bmaccheck` and are forwarded, which is useful.
+
+For the other two sources, add filters on words from their subjects, as you receive them, for example `subject:tunnel` for Cloudflare's alert and `subject:("SMART error")` for Proxmox's SMART email, each with: Never send it to Spam; label; forward to Pushover.
+
+### Pushover
+
+[Pushover](https://pushover.net) turns emails into push notifications; after a 30-day trial it is a one-time purchase per platform, and each user can receive up to 10,000 messages a month. The basic filter set needs one Pushover address: your account's default `@pomail.net` address. For the priority split, create two email aliases in the Pushover dashboard, one with high priority (and a distinct sound) and one with normal priority. Send a test email from Gmail to each address before setting up forwarding.
+
+### Keeping Proxmox's own email out of spam
+
+Proxmox delivers its alert email straight to your mail server from `root@<host>.pve.internal`, a domain that isn't public, so it can never pass SPF or DKIM, and Gmail shows an unverified-sender warning. To keep it out of spam with Google Workspace:
+
+1. In the Google Admin console, open Apps → Google Workspace → Gmail → Spam, Phishing and Malware → **Email allowlist**, and add each Proxmox host's public IPv4 address.
+2. Optionally, set the Proxmox notification "from" address to one on a domain you control, publish an SPF record listing the hosts' public IPs, and ask your provider for reverse DNS (PTR) records for them.
+
+BMAC's host agents report stuck Proxmox email (the `postfix-queue` problem) and check the disks themselves, so a blocked Proxmox email path doesn't hide disk alerts.
+
+To prove smartd's email path on a host (optional), temporarily change the `DEVICESCAN` line in `/etc/smartd.conf` to `DEVICESCAN -d removable -n standby -m root -M exec /usr/share/smartmontools/smartd-runner -M test`, run `systemctl restart smartmontools`, and expect one test email per disk (`journalctl -u smartmontools --since '-2 min'` lists the disks). Remove ` -M test` and restart again afterwards.
+
+### Interpreting alerts
+
+Each event lists problem keys such as `link0:mox2` or `ingress:prod1.example.com`.
+
+| What you receive | Most likely meaning |
+|---|---|
+| Dead-man DOWN for one host, and other hosts report `link1:<host>` DOWN but not `link0:<host>` | The host is alive but lost its internet connection. Its guests fall back through another host; ingress continues through the other replicas. |
+| Dead-man DOWN for one host, other hosts report both `link0` and `link1` to it DOWN, and the QDevice reports `tailscale:<host>` | The host is down or completely isolated. Check its iDRAC. HA restarts its production VMs elsewhere. |
+| Every host reports `link0` to every peer DOWN; no dead-man alerts | Private VLAN failure. Corosync keeps running over Tailscale; replication fails (Proxmox emails too). |
+| Hosts report `link1` DOWN to each other, the QDevice reports `tailscale:*`; no dead-man alerts | Tailscale problem. The cluster runs on the VLAN link; the QDevice's vote (if used) and your SSH access are affected. |
+| The QDevice reports `tailscale:<host>` for every host at once, hosts are fine | Tailscale problem on the QDevice's side. |
+| Dead-man DOWN for the QDevice; hosts report `qdevice-vote` (if a QDevice is registered) | The QDevice is down. With an even number of hosts, one more host failure loses quorum. |
+| The QDevice reports `ingress:<fqdn>` only | That app isn't answering through Cloudflare (app down, origin certificate, tunnel route). Look for `service:*` from the VM and Cloudflare's tunnel email. |
+| The QDevice reports `ingress:*` for every app, plus Cloudflare's tunnel Down email | No tunnel replica is connected, or Cloudflare has a problem. |
+| Dead-man DOWN for a production VM only | The VM is down, or its egress is broken. |
+| `postfix-queue` on a host | Proxmox's own alert email isn't leaving that host; BMAC's alerts are unaffected. |
+| `smart:<serial>` saying a counter rose | The drive is degrading. Once you've dealt with it, accept its counters with `show_monitoring_state.sh --reset-smart-baseline <host>:<serial>`. |
+| `agent:<check>` | One of the agent's own checks failed to run; the message says why. |
 
 ## Less Common Tasks
 

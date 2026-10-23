@@ -165,6 +165,37 @@
       "params": []
     },
     {
+      "id": "show_monitoring_state",
+      "title": "Monitoring state",
+      "summary": "Every node's Healthchecks check, last ping, and open problems.",
+      "description": "Reads this cluster's Healthchecks.io checks and every monitored node's agent (Proxmox hosts, the QDevice, and active production VMs) over SSH, and lists open problems, checks no node uses, and the check budget. Needs MONITORING_ENABLED=true. Changes nothing.",
+      "category": "diagnostics",
+      "script": "scripts/user_callable/diagnostics/show_monitoring_state.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": []
+    },
+    {
+      "id": "send_test_alert",
+      "title": "Send a test alert",
+      "summary": "Make one node send a labelled test pulse through its Healthchecks check.",
+      "description": "Runs the monitor agent's test pulse on one node: a DOWN email marked bmacevent and an UP email marked bmacclear, to test your Gmail filters and Pushover. Nothing in the cluster changes.",
+      "category": "diagnostics",
+      "script": "scripts/user_callable/diagnostics/send_test_alert.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "concurrent": true,
+      "params": [
+        { "id": "node", "label": "Node", "type": "hostname", "flag": "--node", "help": "moxN, qdevice, or prodN. Asked for when empty." },
+        { "id": "priority", "label": "Priority", "type": "choice", "flag": "--priority", "choices": [
+          { "value": "p1", "label": "p1 (high)" },
+          { "value": "p2", "label": "p2 (normal)" }
+        ] }
+      ]
+    },
+    {
       "id": "inventory_disks",
       "title": "Inventory disks",
       "summary": "Every physical disk, pool vdev, and disk that is safe to pull.",
@@ -308,6 +339,21 @@
         "linux"
       ],
       "params": []
+    },
+    {
+      "id": "manage_prod_vm_monitoring",
+      "title": "Monitored services",
+      "summary": "View and add or remove the systemd services and certificate files a production VM's monitor watches.",
+      "description": "Reads /etc/app-ha-monitor/guest.json on the VM over ssh prodN with each watched service's state and certificate's expiry, then lets you change the lists. Validates every unit and certificate on the VM before saving. Never touches the registry or the QDevice.",
+      "category": "production",
+      "script": "scripts/user_callable/guests/prod/manage_prod_vm_monitoring.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "resource", "label": "Production VM", "type": "production", "required": true },
+        { "id": "show", "label": "Only show the current settings", "type": "flag", "flag": "--show", "advanced": true }
+      ]
     },
     {
       "id": "add_staging_vm",
@@ -497,6 +543,21 @@
       "platform_note": "Takes the same workstation flock as host setup, so it runs on Linux workstations only.",
       "params": [
         { "id": "qdevice_host", "label": "QDevice SSH host", "type": "hostname", "help": "Defaults to PROXMOX_QDEVICE_HOST from config/cluster.conf." }
+      ]
+    },
+    {
+      "id": "manage_qdevice_probes",
+      "title": "Health-check probes",
+      "summary": "View and change the HTTPS probes the QDevice runs through Cloudflare for each production VM.",
+      "description": "Shows every production VM's ingress health-check probe and the QDevice's latest result, and edits one VM's probe (FQDNs, path, expected status and text). The probe runs once from the QDevice before it is saved in the registry and installed in the QDevice's monitor config.",
+      "category": "qdevice",
+      "script": "scripts/user_callable/qdevice/manage_qdevice_probes.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "resource", "label": "Production VM", "type": "production", "help": "The VM whose probe to change; asked for when empty." },
+        { "id": "show", "label": "Only show the probes", "type": "flag", "flag": "--show", "advanced": true }
       ]
     }
   ]

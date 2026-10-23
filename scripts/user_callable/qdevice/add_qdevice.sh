@@ -31,6 +31,8 @@ source "$CONFIG_LIB"
 source "$CONTROL_LIB"
 # shellcheck source=../../lib/host_membership.sh
 source "$MEMBERSHIP_LIB"
+# shellcheck source=../../lib/monitoring.sh
+source "${REPO_ROOT}/scripts/lib/monitoring.sh"
 
 CURRENT_PHASE="startup"
 NODE_COUNT=0
@@ -261,6 +263,9 @@ main() {
   CURRENT_PHASE="adding the QDevice"
   qd_add "$NODE_COUNT"
   hm_release_control_plane_lock
+  # Hosts now expect the QDevice's vote and the QDevice checks qnetd; its
+  # existing monitoring check and agent are reused.
+  monitoring_membership_sync "$HM_COORDINATOR"
 
   log "QDevice added"
   info "${PROXMOX_QDEVICE_HOST} (${QD_IPV4}) is alive and voting on all ${NODE_COUNT} members."

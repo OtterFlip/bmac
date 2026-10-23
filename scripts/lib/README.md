@@ -139,6 +139,12 @@ The registry also records host slots and the control node:
   compare-and-set the control node. New hosts join through it, and it holds
   the control-plane lock.
 
+Production records may hold an ingress health-check probe in an optional
+`monitoring` field: `update prodN --expected-revision N --monitoring-json
+'{"probe": {...}}'` sets it, `--clear-monitoring` removes it, and
+`monitoring-probes` lists every production record's probe (disabled when
+absent) for the monitoring config renderer.
+
 ## Guest networking and tunnel runtime
 
 These host-runtime files implement
@@ -161,6 +167,35 @@ These host-runtime files implement
   registry; `tunnel_sync.sh --local|--all|--check` installs a changed config
   and restarts replicas one host at a time; `cloudflared_setup.sh` installs
   `cloudflared` and writes the credentials file.
+
+## Monitoring
+
+These implement [`MONITORING_AND_ALERTING.md`](../../docs/MONITORING_AND_ALERTING.md):
+
+- `../host_runtime/app_ha_monitor.py` is the monitor agent on every host,
+  the QDevice, and every active production VM: `run`, `check --once
+  [--json]`, `status [--json]`, `test-pulse [--priority p1|p2]`, `probe
+  --fqdn F --path P --status N [--text T]`, `reset-smart-baseline SERIAL`,
+  `validate-config`, and `print-unit --role R --program PATH`.
+- `monitoring.sh` (sourced after `config.sh` and `ui_protocol.sh`):
+  `monitoring_enabled`, `monitoring_sync COORD [--dry-run]
+  [--delete-node NODE]... [--delete-obsolete] [--no-verify]` (with
+  `MONITORING_PLAN_OUT` it also writes the Healthchecks plan as JSON),
+  `monitoring_membership_sync` (the same, but a failure is only a warning
+  with a next step), `monitoring_require_qdevice`,
+  `monitoring_disable_everywhere COORD [--dry-run] [--yes]`,
+  `monitoring_inventory COORD FILE`, `monitoring_hc ARGS...` (runs
+  `healthchecks.py` with the API key in its environment only), and
+  `monitoring_exec ROLE TARGET ARGV...`.
+- `healthchecks.py status|sync|wait-ping|delete` is the Healthchecks.io
+  Management API client. It reads the key from `HEALTHCHECKS_API_KEY` (or
+  `--key-stdin`), names checks by name only, and writes ping URLs only to
+  the `0600` file named by `sync --out`.
+- `monitor_config.py nodes|desired|render` turns the inventory into the
+  monitored nodes, the desired checks, and one `0600` agent config per node.
+- `monitor_node_install.sh install|rollback|cleanup|disable|installed` runs
+  on one node from a private staging directory and installs the agent, its
+  unit, and its config atomically, keeping what it replaced for rollback.
 
 ## `process_deferred_cleanup.sh`
 
@@ -361,7 +396,8 @@ From the repository root, every library test, in parallel:
 dev/run_tests.py scripts/tests/test_{disk_inventory,host_storage}.py \
   scripts/tests/test_{egress_health,guest_network,transfer_counter,tunnel_config}.py \
   scripts/tests/test_{process_deferred_cleanup,quick_state,report_stale_jump_ssh}.py \
-  scripts/tests/test_{rpool_mirror,shared_libs,storage_state,ui_json_forms,ui_protocol}.py
+  scripts/tests/test_{rpool_mirror,shared_libs,storage_state,ui_json_forms,ui_protocol}.py \
+  scripts/tests/test_{app_ha_monitor,monitoring_workstation,registry_monitoring}.py
 ```
 
 The JSON-mode library, forms, and quick-state tests alone:

@@ -62,6 +62,7 @@ defaults. In that example:
 - [Cloudflare Tunnel](#cloudflare-tunnel)
 - [Shared guest gateway and egress fallback](#shared-guest-gateway-and-egress-fallback)
 - [Corosync, quorum, and QDevice](#corosync-quorum-and-qdevice)
+- [Monitoring and alerting](#monitoring-and-alerting)
 - [Host storage, LUKS, and mirrors](#host-storage-luks-and-mirrors)
 - [Configuration, secrets, and artifacts](#configuration-secrets-and-artifacts)
 - [The main workflows](#the-main-workflows)
@@ -778,6 +779,106 @@ The host workflow and production creator both validate this parity through ten
 nodes. Before enabling HA, every selected node must report all configured mox
 voters alive/voting and, for an even cluster, exactly one healthy QDevice vote.
 
+## Monitoring and alerting
+
+[`MONITORING_AND_ALERTING.md`](MONITORING_AND_ALERTING.md) is the full
+design; this section records what is built. Monitoring is off unless
+`cluster.conf` sets `MONITORING_ENABLED=true`; then `HEALTHCHECKS_API_KEY`
+must be in `secrets.env` and `PROXMOX_QDEVICE_HOST` must be set and reachable.
+
+Every monitored node runs one agent,
+[`app_ha_monitor.py`](../scripts/host_runtime/app_ha_monitor.py)
+(`app-ha-monitor.service`, standard library only, Python 3.11 or newer),
+bound to its own Healthchecks.io check named `<PROXMOX_CLUSTER_NAME>
+bmaccheck <node>`: every Proxmox host (role `host`), the QDevice (role
+`qdevice`, node name always `qdevice` whatever `PROXMOX_QDEVICE_HOST` is),
+and every production VM in registry state `active` (role `guest`). Staging
+VMs are never monitored: the agent sends nothing on a host whose name starts
+with `stage`, and the guest unit's `ExecCondition` keeps it from starting on
+a staging clone.
+
+The agent sends a plain success ping every `MONITOR_ALIVE_PERIOD_SECONDS`
+(the dead-man switch, from its own thread so a slow check never delays it).
+Each change in its problems is sent as a pulse: `/fail` with a body whose line
+1 is `bmacevent bmacp1` or `bmacevent bmacp2` and whose sections are NEW,
+REMINDER, RESOLVED, and ONGOING, then a success whose body starts with
+`bmacclear`, then a plain heartbeat, so the most recent ping never carries a
+token. Every message is sanitized so no other ping contains a token. Pulses
+are limited to one a minute and twelve an hour; undelivered items stay
+queued until a pulse carrying them is delivered, and a pending clear is
+retried with every heartbeat.
+
+Checks (each with a timeout; a check that cannot run becomes an
+`agent:<check>` problem):
+
+- host: corosync links to every expected peer (`corosync-cfgtool -n`, node
+  IDs from `corosync.conf`), quorum, missing votes, and the QDevice's vote
+  when one is registered (`corosync-quorumtool -s`,
+  `corosync-qdevice-tool -s`), this host's tunnel replica
+  (`http://127.0.0.1:20241/ready`), old Postfix mail (`postqueue -j`), ZFS
+  health, pool capacity, and SMART/NVMe health, wear, spare, and counters;
+- qdevice: ICMP over Tailscale to every host, qnetd connections while the
+  QDevice is registered, ingress probes through Cloudflare for every enabled
+  probe, and its own filesystems;
+- guest: the systemd services and certificate files in
+  `/etc/app-ha-monitor/guest.json`, and its own filesystems.
+
+Connectivity checks open after `MONITOR_FAST_FAIL_THRESHOLD` failures and
+resolve after as many passes; monitored services after two failures; slow
+checks on first detection. Capacity opens below
+`MONITOR_POOL_MIN_FREE_PERCENT` and resolves only above
+`MONITOR_POOL_CLEAR_FREE_PERCENT`. The parsers for corosync links, `zpool
+status`, and status lines are shared with `show_cluster_health.sh`.
+
+Workstation side: [`monitoring.sh`](../scripts/lib/monitoring.sh) builds an
+inventory through a coordinator (cluster nodes with node IDs, whether
+`corosync.conf` has a QDevice, and the registry's `monitoring-probes`),
+[`monitor_config.py`](../scripts/lib/monitor_config.py) renders the desired
+checks and each node's config, [`healthchecks.py`](../scripts/lib/healthchecks.py)
+creates or updates the checks (`unique: ["name"]`, slug always sent, budget
+counted over the whole project against `MONITOR_MAX_CHECKS`), and
+[`monitor_node_install.sh`](../scripts/lib/monitor_node_install.sh) installs
+one node atomically, keeping every replaced file for rollback. `monitoring_sync`
+does all of it, idempotently, a phase at a time (hosts, the QDevice,
+production VMs); a failing node rolls its phase back, and checks created by
+a failed run are kept for the next. It then waits until every check has
+received a ping after the install and runs `check --once` on every node.
+
+Membership: `add_proxmox_host.sh`, `remove_proxmox_host.sh`,
+`add_qdevice.sh`, `remove_qdevice.sh`, `add_prod_vm.sh`, and
+`remove_prod_vm.sh` end with `monitoring_membership_sync`, whose failure is
+a warning with the next step "run update_cluster_runtime.sh", never a failure
+of the main operation. Host and production VM removal delete that node's
+check (`--delete-node`, listed in the removal plan). QDevice removal keeps the
+QDevice's check and agent. `add_proxmox_host.sh`, `add_prod_vm.sh`, and
+`update_cluster_runtime.sh` stop before changing anything when monitoring is
+enabled and the QDevice is unreachable; removals only warn.
+
+Operator tools: `show_monitoring_state.sh` (read-only, plus
+`--reset-smart-baseline moxN:SERIAL`), `send_test_alert.sh`,
+`manage_prod_vm_monitoring.sh` (edits only the VM's `guest.json`), and
+`manage_qdevice_probes.sh` (edits the registry's probe, trial-runs it from
+the QDevice first, then syncs). `deploy_hello_app_to_prod.sh` adds
+`hello-todo.service` and `/etc/hello-todo/cert.pem` to `guest.json`, and
+the example app serves `GET /api/v1/healthz`.
+
+Node files:
+
+```text
+/usr/local/lib/app-ha-proxmox/lib/app_ha_monitor.py   hosts (runtime file set)
+/usr/local/lib/app-ha-monitor/app_ha_monitor.py       QDevice and production VMs
+/etc/systemd/system/app-ha-monitor.service
+/etc/app-ha-monitor/config.json                       0600; this node's ping URL
+/etc/app-ha-monitor/guest.json                        0600; production VMs only
+/var/lib/app-ha-monitor/state.json                    0600; problems, queue, baselines
+/var/lib/app-ha-monitor/requests/                     e.g. reset-smart-<serial>
+```
+
+The agent re-reads its config and `guest.json` every cycle, so a sync that
+changes only config does not restart it. A state file that cannot be read
+is moved aside as `state.json.corrupt-<time>`, and the agent starts fresh,
+announcing every open problem once.
+
 ## Host storage, LUKS, and mirrors
 
 The reviewed source is `proxmox-ve_9.2-1.iso`, verified against the exact
@@ -923,7 +1024,13 @@ a non-secret effective hash.
 `MAX_MOX_HOSTS=10`, the complete address policy, fixed tags/storage IDs, the
 host media path/hash, guest media HTTPS URL/hash/install mode, default
 compute/storage policy, DNS, public
-administrator keys, Tailscale host tag, and SSH behavior. Each `moxN.conf`
+administrator keys, Tailscale host tag, SSH behavior, and
+`MONITORING_ENABLED`. The optional monitoring keys (`HEALTHCHECKS_API_URL` and
+the `MONITOR_*` keys listed in the README's "Monitoring and Alerts" section)
+are accepted, validated, and defaulted by `config.sh` but deliberately absent
+from `cluster_dot_conf`. Monitoring keys are excluded from the effective
+configuration hash, so changing them neither invalidates host-setup
+checkpoints nor shows as configuration drift. Each `moxN.conf`
 owns an optional iDRAC address, exact NVMe serial pairs, optional
 manual-inventory byte capacities, public IP/gateway/prefix/MAC, private
 MAC/address, per-host production and staging VM limits, and the optional
@@ -964,8 +1071,15 @@ PROXMOX_ROOT_PASSWORD
 PROD_GUEST_VM_ROOT_PASSWORD
 STAGING_GUEST_VM_ROOT_PASSWORD
 PROXMOX_LUKS_PASSWORD
+PROXMOX_QDEVICE_ROOT_PASSWORD
 CLOUDFLARE_TUNNEL_SECRET
+HEALTHCHECKS_API_KEY
 ```
+
+`HEALTHCHECKS_API_KEY` is the Healthchecks.io project's read-write API key,
+required when `MONITORING_ENABLED=true`; the loader rejects an empty value or
+the template's `redacted`. Only the workstation uses it, through the
+environment of `healthchecks.py`.
 
 `IDRAC_USER` and `IDRAC_PASSWORD` are optional unless host setup is run in
 iDRAC/Redfish inventory mode. `CLOUDFLARE_TUNNEL_SECRET` is the tunnel's
@@ -1430,6 +1544,15 @@ shared orchestration layer:
   `scripts/host_runtime/egress_probe_targets.txt` is its shipped probe list.
 - `scripts/host_runtime/transfer_counter.py` keeps the monthly public-NIC
   transfer count.
+- `scripts/host_runtime/app_ha_monitor.py` is the monitor agent run on every
+  host, the QDevice, and every active production VM (`run`, `check --once`,
+  `status`, `test-pulse`, `probe`, `reset-smart-baseline`,
+  `validate-config`, `print-unit`); its version is stamped by
+  `dev/set_version.py`. `scripts/lib/monitoring.sh`,
+  `scripts/lib/monitor_config.py`, `scripts/lib/healthchecks.py`, and
+  `scripts/lib/monitor_node_install.sh` deploy it and keep the Healthchecks
+  checks in step with membership; see
+  [Monitoring and alerting](#monitoring-and-alerting).
 - `scripts/host_runtime/tunnel_config.py` renders the deterministic
   Cloudflare Tunnel config from the registry and `cluster.conf`;
   `scripts/host_runtime/tunnel_sync.sh` installs it and restarts replicas one
@@ -1667,6 +1790,7 @@ Important installed host-local paths and units include:
 /usr/local/lib/app-ha-proxmox/lib/tunnel_config.py
 /usr/local/lib/app-ha-proxmox/lib/tunnel_sync.sh
 /usr/local/lib/app-ha-proxmox/lib/cloudflared_setup.sh
+/usr/local/lib/app-ha-proxmox/lib/app_ha_monitor.py
 /usr/local/lib/app-ha-proxmox/config/cluster.conf
 /var/lib/vz/snippets/app-ha-guest-role-hook.sh
 /etc/app-ha/guest-network.env
@@ -1677,6 +1801,8 @@ Important installed host-local paths and units include:
 /var/lib/app-ha/egress-targets.json
 /var/lib/app-ha/transfer.json
 /run/app-ha/egress-health.json
+/etc/app-ha-monitor/config.json              (monitoring enabled)
+/var/lib/app-ha-monitor/state.json           (monitoring enabled)
 
 app-ha-host-guard.service
 app-ha-guest-network.service
@@ -1688,6 +1814,7 @@ app-ha-tunnel-sync.service
 app-ha-tunnel-sync.timer
 app-ha-deferred-cleanup.service
 app-ha-deferred-cleanup.timer
+app-ha-monitor.service                       (monitoring enabled)
 ```
 
 The hook is stored on local snippet storage on every host because guests may
@@ -1695,11 +1822,12 @@ move; it is not a custom pmxcfs registry file.
 
 ### Updating the deployed cluster runtime
 
-After changing the registry, deferred cleanup worker, lifecycle hook, or any
-of the networking runtime files (`guest_network.sh`, `egress_health.py`,
-`egress_probe_targets.txt`, `transfer_counter.py`, `tunnel_config.py`,
-`tunnel_sync.sh`, `cloudflared_setup.sh`) in this checkout, update their
-installed copies before running a guest workflow:
+After changing the registry, deferred cleanup worker, lifecycle hook, the
+monitor agent (`app_ha_monitor.py`), or any of the networking runtime files
+(`guest_network.sh`, `egress_health.py`, `egress_probe_targets.txt`,
+`transfer_counter.py`, `tunnel_config.py`, `tunnel_sync.sh`,
+`cloudflared_setup.sh`) in this checkout, update their installed copies
+before running a guest workflow:
 
 ```bash
 scripts/user_callable/hosts/update_cluster_runtime.sh --dry-run
@@ -1716,6 +1844,23 @@ that were absent before), restarts `app-ha-egress-health.service`, runs
 update fails. It does not restart VMs or require existing guests to reattach
 their hook. It does not change networking settings; use
 `sync_cluster_network.sh` for those.
+
+The host commit step only try-restarts `app-ha-monitor.service` where its
+unit exists, so a running agent picks up its new program. With
+`MONITORING_ENABLED=true`, a monitoring preflight runs before the
+confirmation and before any node is staged: every host, the QDevice, and
+every active production VM must answer BatchMode SSH, and the API key must
+work; the dry run stops after showing the Healthchecks plan (checks to
+create, update, keep, or delete as obsolete, and the budget). After the
+hosts are verified, `monitoring_sync` installs the agent, unit, and config
+on every node (the unit is written by this phase, not by the host commit
+step) and waits for every check's first ping. Obsolete checks are deleted
+only after the operator agrees, or with `--delete-obsolete-checks`. A
+failure in this phase leaves the host runtime in place and says to rerun.
+With `MONITORING_ENABLED=false`, agents installed earlier are stopped and
+disabled on every node and deleting the cluster's checks is offered behind
+the typed confirmation `DELETE CHECKS`; when no host has the unit, nothing is
+contacted and no API call is made.
 
 Host setup does not create production VMs, replication jobs, HA resources, or
 Cloudflare DNS or zone configuration. Those belong to later workflows and the
@@ -2345,8 +2490,25 @@ allocate/update/snapshot commands; the lifecycle hook marks evicted staging
 VM-less reservation failed; release/finalization removes the live record
 after writing history.
 
+Production records may carry an optional top-level `monitoring` field,
+`{"probe": {"enabled", "path", "expected_status", "expected_text", "fqdns"}}`,
+holding the ingress health-check probe that the QDevice's monitor agent runs
+through Cloudflare. It holds no secrets. Records created before this field
+existed, and every new record, lack it; readers treat that as a disabled
+probe. Staging records never have it. `path` is an absolute URL path of at
+most 200 characters, `expected_status` is 100-599, and `expected_text` is
+null or one line of at most 200 characters. `fqdns` must be the record's own
+primary domain or aliases and defaults to the primary. It is set only with
+`cluster_registry.py update <name> --expected-revision N --monitoring-json
+'<json>'` (cleared with `--clear-monitoring`), which the QDevice page's
+Health-check probes tile runs. A later domain change drops FQDNs that no
+longer belong. `cluster_registry.py monitoring-probes` lists every
+production record's probe, in slot order, for rendering the QDevice agent's
+config.
+
 Readers: all registry listings/invariant checks, both creators,
-`tunnel-productions` (and so the tunnel config renderer), lifecycle hook,
+`tunnel-productions` (and so the tunnel config renderer),
+`monitoring-probes` (and so the monitoring config renderer), lifecycle hook,
 cleanup worker, reconciliation, diagnostics, and operators.
 
 Uniqueness is cluster-wide for name, VMID, IP, MAC, domain, allocation ID,
@@ -2645,6 +2807,32 @@ credentials and config under `/etc/cloudflared` are not pmxcfs.
 - A source snapshot is neither a backup nor a safe long-term data-sharing
   mechanism. Retain it only while the exact clone dependency requires it.
 
+### Monitoring
+
+- `HEALTHCHECKS_API_KEY` stays on the workstation in `secrets.env`. It is
+  passed to `healthchecks.py` only through that process's environment, never
+  in argv, the environment of a remote command, logs, or pmxcfs.
+- Each node receives only its own check's ping URL, in
+  `/etc/app-ha-monitor/config.json` (root, `0600`); a compromised node can
+  only affect its own check.
+- Ping URLs and check UUIDs (also in `update_url`, `pause_url`, and
+  `resume_url`) never appear in logs, the UI protocol stream, or dashboard
+  output: the agent logs `ping=<redacted>`, and the workstation tools name
+  checks by name only. Ping URLs exist on the workstation only in the sync's
+  private `0600` run directory, removed when it ends.
+- The registry's `monitoring` field holds probe settings only.
+- No inbound port is added anywhere; the only new network permission is the
+  Tailscale ICMP rule from `tag:proxmox-qdevice` to `tag:proxmox-host`.
+- The agent runs as root under systemd sandboxing (`NoNewPrivileges`,
+  `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome`, writes only to
+  `/var/lib/app-ha-monitor`).
+- Staging clones inherit a production VM's agent config, including its ping
+  URL; the hostname guard (in the agent and the unit's `ExecCondition`)
+  keeps them from using it.
+- Ingress probes send no credentials and follow no redirects. Pulse bodies
+  hold host, pool, unit, and FQDN names and drive models and serials, never
+  secrets or certificate contents.
+
 ## Failure cases and recovery
 
 ### Complete mox failure
@@ -2896,6 +3084,22 @@ Verify both CNAMEs and their proxy status, Always Use HTTPS, the
 bot-protection settings and `/api/` rule order, the tunnel's status and
 connected replicas in Cloudflare's Zero Trust dashboard, 404 for unknown
 names, and every public listener from a non-Tailscale network.
+
+### Monitoring failures
+
+A node that dies or loses its internet connection goes silent and its check
+reports DOWN after its period plus grace; that is the intended signal (the
+README's "Interpreting alerts" table combines it with peers' link reports).
+If Healthchecks is unreachable, agents keep checking, queue their pulses,
+and deliver them when it answers again. If the QDevice is down, the cluster
+loses its outside view (ingress probes and Tailscale reachability) as well
+as its dead-man coverage of the QDevice itself, which Healthchecks reports.
+A membership workflow that cannot update monitoring completes its main job
+and says to run `update_cluster_runtime.sh`; `update_cluster_runtime.sh`
+rolls back the failing phase's nodes and keeps the checks it created. A check
+left in state `new` never alerts, which is why every install waits for each
+check's first ping. `show_monitoring_state.sh` shows every check, agent, and
+open problem, and checks no node uses.
 
 ## Operator checks and drills
 
@@ -3152,6 +3356,28 @@ Coverage by test helper:
   connection never retiring targets, fallback order, falling back after
   three failed checks and returning after five good ones, replacing a
   failing fallback, and staying put when no host works.
+- `scripts/tests/test_app_ha_monitor.py`: the monitor agent against fixtures
+  captured on a live cluster: corosync links, quorum with and without a
+  QDevice and with its vote lost, qnetd, cloudflared readiness, Postfix
+  queue, ZFS health and capacity hysteresis, NVMe and ATA SMART (warning
+  bits, spare, wear, counter baselines, deduplication by serial, read errors),
+  Tailscale reachability, ingress probes and challenges, guest services,
+  filesystems, and certificates; debounce, escalation, reminders with an
+  injected clock, the fail/clear/heartbeat sequence against a local HTTP
+  server, retries, queued items and `pending_clear` across restarts, rate
+  limits, body sanitizing and truncation, corrupt state, the staging guard,
+  and no ping URL in output.
+- `scripts/tests/test_monitoring_workstation.py`: `healthchecks.py` against a
+  fake Management API (create, idempotent resync, update, obsolete checks,
+  budget refusal, dry run, wait-ping, no key or UUID in output), config
+  rendering, `monitor_node_install.sh` under a temporary root (install,
+  config-only update, rollback, never overwriting `guest.json`), and
+  `monitoring_sync` end to end (happy path, dry run, unreachable node before
+  any change, phase rollback, removed node's check, missing first ping,
+  membership warnings, disabled monitoring making no calls).
+- `scripts/tests/test_registry_monitoring.py`: the registry's `monitoring`
+  field, `update --monitoring-json` and `--clear-monitoring`, and
+  `monitoring-probes`.
 - `scripts/tests/test_transfer_counter.py`: combined inbound and outbound
   counting, reset day above 28, exactly one reset per period, and reboot or
   counter-reset handling, with a controlled clock and readings.

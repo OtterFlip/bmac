@@ -5,8 +5,54 @@ SPDX-License-Identifier: GPL-3.0-only
 
 # BMAC v2 Monitoring and Alerting
 
-Status: design, approved for implementation. Target location in the repository:
-`docs/MONITORING_AND_ALERTING.md`.
+Status: implemented in v2 (see [Implementation notes](#implementation-notes)
+for where the implementation differs from this design). The operator-facing
+guide is the README's "Monitoring and Alerts" section; `docs/MAIN_DESIGN.md`
+("Monitoring and alerting") records the built behavior.
+
+### Implementation notes
+
+The implementation follows this design except for these deliberate
+differences:
+
+- The QDevice's monitoring node is always named `qdevice` (its check is
+  `<cluster> bmaccheck qdevice`), whatever `PROXMOX_QDEVICE_HOST` is, so the
+  check survives a change of the SSH alias.
+- Monitoring keys (`MONITORING_ENABLED`, `MONITOR_*`, `HEALTHCHECKS_*`) are
+  excluded from `CONFIG_EFFECTIVE_SHA256`, so changing them neither
+  invalidates host-setup checkpoints nor shows as configuration drift.
+- `update_cluster_runtime.sh`'s host commit step installs only the agent
+  program (as a runtime file) and try-restarts `app-ha-monitor.service` where
+  its unit exists; the unit and config are written by the monitoring phase
+  (`scripts/lib/monitor_node_install.sh`), which has its own per-phase
+  rollback. The unit text comes from `app_ha_monitor.py print-unit`.
+- Membership workflows delete only the removed node's check
+  (`monitoring_sync --delete-node`). `update_cluster_runtime.sh` lists every
+  obsolete check and deletes them only after a yes/no prompt, or with
+  `--delete-obsolete-checks`.
+- `add_proxmox_host.sh`, `add_prod_vm.sh`, and `update_cluster_runtime.sh`
+  stop before changing anything when monitoring is enabled and the QDevice is
+  unreachable; removal workflows only warn, so they can still recover from
+  failures.
+- `send_test_alert.sh` is a `mutating` workflow (it sends email); it is listed
+  with the diagnostics. `show_monitoring_state.sh --reset-smart-baseline` is
+  terminal-only, since the dashboard tile is read-only.
+- The guest unit's `ExecCondition` uses `$$(hostname)`, because systemd would
+  otherwise treat `$` as a variable reference.
+- `reset-smart-baseline` writes a request file under
+  `/var/lib/app-ha-monitor/requests/`; the running agent applies it on its next
+  cycle and reruns its slow checks, so the agent and the command never race on
+  the state file. Ping sequences are serialized across processes with a lock
+  file, so `test-pulse` never interleaves with the service's pings.
+- The agent's `AGENT_VERSION` is stamped by `dev/set_version.py` from
+  `dev/VERSION`.
+- The example app's `/api/v1/healthz` reads the todos table (a count) rather
+  than `SELECT 1`, so a missing table also fails it.
+- `wait-ping` identifies checks by name (never by UUID on a command line) and
+  passes when every named check has left `new` and received a ping since the
+  install started.
+- `manage_qdevice_probes.sh` adds `--yes` and `--save-if-probe-fails` for
+  non-interactive use, and `manage_prod_vm_monitoring.sh` adds `--yes`.
 
 This document is the source material for implementing monitoring and alerting
 in the **v2** codebase (everything in the repository outside `v3/`). It records

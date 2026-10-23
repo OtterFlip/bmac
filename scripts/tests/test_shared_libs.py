@@ -2314,6 +2314,180 @@ bash -c '[[ -z "${PROMPTED_SECRET+x}" && -z "${TAILSCALE_AUTH_KEY+x}" ]]'
         )
         self.assertNotIn("must-not-appear", completed.stdout + completed.stderr)
 
+    MONITOR_DEFAULTS = {
+        "MONITORING_ENABLED": "false",
+        "HEALTHCHECKS_API_URL": "https://healthchecks.io",
+        "MONITOR_MAX_CHECKS": "20",
+        "MONITOR_ALIVE_PERIOD_SECONDS": "60",
+        "MONITOR_ALIVE_GRACE_SECONDS": "180",
+        "MONITOR_FAST_INTERVAL_SECONDS": "30",
+        "MONITOR_FAST_FAIL_THRESHOLD": "3",
+        "MONITOR_SLOW_INTERVAL_SECONDS": "1800",
+        "MONITOR_POOL_MIN_FREE_PERCENT": "10",
+        "MONITOR_POOL_CLEAR_FREE_PERCENT": "12",
+        "MONITOR_REMINDER_HOURS": "6",
+        "MONITOR_POSTFIX_QUEUE_MAX_AGE_MINUTES": "60",
+        "MONITOR_CERT_WARN_DAYS": "14",
+        "MONITOR_NVME_WEAR_WARN_PERCENT": "90",
+        "MONITOR_PROBE_DEFAULT_PATH": "/api/v1/healthz",
+        "MONITOR_PROBE_DEFAULT_STATUS": "200",
+    }
+
+    def append_cluster(self, *lines: str) -> None:
+        with self.cluster.open("a", encoding="utf-8") as handle:
+            handle.write("".join(f"{line}\n" for line in lines))
+
+    def loaded_values(self, *keys: str, secrets: str = "--no-secrets") -> dict[str, str]:
+        environment = os.environ.copy()
+        environment.update(
+            {"APP_HA_CONFIG_TEST_MODE": "1", "APP_HA_CONFIG_DIR": str(self.config_dir)}
+        )
+        script = (
+            'source "$1"; shift; load_proxmox_config "$1" >/dev/null || exit 1; shift; '
+            'for key in "$@"; do require_var "$key" >/dev/null || exit 2; '
+            'printf "%s=%s\\n" "$key" "${!key}"; done'
+        )
+        completed = subprocess.run(
+            ["bash", "-c", script, "bash", str(CONFIG), secrets, *keys],
+            env=environment, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        return dict(line.split("=", 1) for line in completed.stdout.splitlines())
+
+    def effective_hash(self) -> str:
+        completed = self.run_config("--check", "--no-secrets")
+        prefix = "Effective non-secret SHA-256: "
+        return next(
+            line.removeprefix(prefix)
+            for line in completed.stdout.splitlines()
+            if line.startswith(prefix)
+        )
+
+    def test_monitoring_keys_default_when_absent(self) -> None:
+        values = self.loaded_values(*self.MONITOR_DEFAULTS)
+        self.assertEqual(values, self.MONITOR_DEFAULTS)
+
+    def test_every_optional_monitoring_key_is_accepted_and_validated(self) -> None:
+        original = self.cluster.read_text(encoding="utf-8")
+        accepted = {
+            "HEALTHCHECKS_API_URL": "https://hc.example.com/sub",
+            "MONITOR_MAX_CHECKS": "1000",
+            "MONITOR_ALIVE_PERIOD_SECONDS": "120",
+            "MONITOR_ALIVE_GRACE_SECONDS": "60",
+            "MONITOR_FAST_INTERVAL_SECONDS": "10",
+            "MONITOR_FAST_FAIL_THRESHOLD": "10",
+            "MONITOR_SLOW_INTERVAL_SECONDS": "300",
+            "MONITOR_POOL_MIN_FREE_PERCENT": "20",
+            "MONITOR_POOL_CLEAR_FREE_PERCENT": "25",
+            "MONITOR_REMINDER_HOURS": "168",
+            "MONITOR_POSTFIX_QUEUE_MAX_AGE_MINUTES": "10",
+            "MONITOR_CERT_WARN_DAYS": "90",
+            "MONITOR_NVME_WEAR_WARN_PERCENT": "50",
+            "MONITOR_PROBE_DEFAULT_PATH": "/health?full=1",
+            "MONITOR_PROBE_DEFAULT_STATUS": "204",
+        }
+        self.append_cluster(*(f"{key}={value}" for key, value in accepted.items()))
+        self.assertEqual(self.loaded_values(*accepted), accepted)
+        rejected = {
+            "HEALTHCHECKS_API_URL": "http://healthchecks.io",
+            "MONITOR_MAX_CHECKS": "1001",
+            "MONITOR_ALIVE_PERIOD_SECONDS": "59",
+            "MONITOR_ALIVE_GRACE_SECONDS": "30",
+            "MONITOR_FAST_INTERVAL_SECONDS": "301",
+            "MONITOR_FAST_FAIL_THRESHOLD": "0",
+            "MONITOR_SLOW_INTERVAL_SECONDS": "86401",
+            "MONITOR_POOL_MIN_FREE_PERCENT": "51",
+            "MONITOR_POOL_CLEAR_FREE_PERCENT": "10",
+            "MONITOR_REMINDER_HOURS": "169",
+            "MONITOR_POSTFIX_QUEUE_MAX_AGE_MINUTES": "five",
+            "MONITOR_CERT_WARN_DAYS": "0",
+            "MONITOR_NVME_WEAR_WARN_PERCENT": "101",
+            "MONITOR_PROBE_DEFAULT_PATH": "api/v1/healthz",
+            "MONITOR_PROBE_DEFAULT_STATUS": "600",
+        }
+        for key, value in rejected.items():
+            with self.subTest(key=key):
+                self.cluster.write_text(original + f"{key}={value}\n", encoding="utf-8")
+                failed = self.run_config("--check", "--no-secrets", expected=1)
+                self.assertIn(key, failed.stderr)
+        self.cluster.write_text(original, encoding="utf-8")
+        self.append_cluster("HEALTHCHECKS_API_URL=https://healthchecks.io/")
+        self.assertIn(
+            "trailing slash", self.run_config("--check", "--no-secrets", expected=1).stderr
+        )
+
+    def test_pool_clear_threshold_must_exceed_the_minimum(self) -> None:
+        self.append_cluster(
+            "MONITOR_POOL_MIN_FREE_PERCENT=15", "MONITOR_POOL_CLEAR_FREE_PERCENT=15"
+        )
+        failed = self.run_config("--check", "--no-secrets", expected=1)
+        self.assertIn(
+            "MONITOR_POOL_CLEAR_FREE_PERCENT must be greater than MONITOR_POOL_MIN_FREE_PERCENT",
+            failed.stderr,
+        )
+
+    def test_monitoring_enabled_is_strictly_boolean(self) -> None:
+        self.append_cluster("MONITORING_ENABLED=yes")
+        failed = self.run_config("--check", "--no-secrets", expected=1)
+        self.assertIn("MONITORING_ENABLED must be true or false", failed.stderr)
+
+    def test_enabled_monitoring_requires_the_qdevice_host(self) -> None:
+        self.append_cluster("MONITORING_ENABLED=true")
+        failed = self.run_config("--check", "--no-secrets", expected=1)
+        self.assertIn("PROXMOX_QDEVICE_HOST", failed.stderr)
+
+    def test_enabled_monitoring_requires_a_real_api_key_in_secrets(self) -> None:
+        self.append_cluster("PROXMOX_QDEVICE_HOST=qdevice", "MONITORING_ENABLED=true")
+        # Without the secret layer there is nothing to check.
+        self.run_config("--check", "--no-secrets")
+        missing = self.run_config("--check", "--require-secrets", expected=1)
+        self.assertIn("HEALTHCHECKS_API_KEY", missing.stderr)
+        self.assertIn("secrets.env", missing.stderr)
+        for placeholder in ("redacted", "REDACTED", ""):
+            with self.subTest(placeholder=placeholder):
+                self.secrets.write_text(
+                    f"HEALTHCHECKS_API_KEY={placeholder}\n", encoding="utf-8"
+                )
+                failed = self.run_config("--check", "--require-secrets", expected=1)
+                self.assertIn("HEALTHCHECKS_API_KEY", failed.stderr)
+        self.secrets.write_text(
+            "HEALTHCHECKS_API_KEY=hcw_must-not-appear\n", encoding="utf-8"
+        )
+        self.run_config("--check", "--require-secrets")
+        self.assertEqual(
+            self.loaded_values("MONITORING_ENABLED", secrets="--require-secrets"),
+            {"MONITORING_ENABLED": "true"},
+        )
+
+    def test_api_key_belongs_only_in_secrets(self) -> None:
+        self.append_cluster("HEALTHCHECKS_API_KEY=hcw_must-not-appear")
+        failed = self.run_config("--check", "--no-secrets", expected=1)
+        self.assertIn("unknown or misplaced key HEALTHCHECKS_API_KEY", failed.stderr)
+
+    def test_monitoring_keys_do_not_change_the_effective_hash(self) -> None:
+        self.append_cluster("PROXMOX_QDEVICE_HOST=qdevice")
+        before = self.effective_hash()
+        self.append_cluster(
+            "MONITORING_ENABLED=true",
+            "MONITOR_REMINDER_HOURS=12",
+            "HEALTHCHECKS_API_URL=https://hc.example.com",
+        )
+        self.assertEqual(self.effective_hash(), before)
+
+    def test_optional_monitoring_keys_are_not_in_the_example_cluster_conf(self) -> None:
+        example = (SCRIPTS_DIR.parent / "config" / "cluster_dot_conf").read_text(
+            encoding="utf-8"
+        )
+        keys = {
+            line.split("=", 1)[0]
+            for line in example.splitlines()
+            if line and not line.startswith("#") and "=" in line
+        }
+        self.assertIn("MONITORING_ENABLED", keys)
+        for key in self.MONITOR_DEFAULTS:
+            if key != "MONITORING_ENABLED":
+                self.assertNotIn(key, keys)
+
     def test_unknown_keys_and_unsafe_modes_fail_closed(self) -> None:
         with self.cluster.open("a", encoding="utf-8") as handle:
             handle.write("GUEST_EGRESS_VPI=typo\n")

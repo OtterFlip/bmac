@@ -27,7 +27,7 @@ DEFERRED_CLEANUP_SOURCE="${RUNTIME_SOURCE_DIR}/process_deferred_cleanup.sh"
 RUNTIME_LIB_FILES=(
   cluster_registry.py process_deferred_cleanup.sh
   guest_network.sh egress_health.py egress_probe_targets.txt transfer_counter.py
-  tunnel_config.py tunnel_sync.sh cloudflared_setup.sh
+  tunnel_config.py tunnel_sync.sh cloudflared_setup.sh app_ha_monitor.py
 )
 RPOOL_MIRROR_SOURCE="${SCRIPT_DIR}/../../host_runtime/rpool_mirror.sh"
 RPOOL_MIRROR_TOOL=/usr/local/sbin/app-ha-rpool-mirror
@@ -57,6 +57,8 @@ QDEVICE_LIB="${SCRIPT_DIR}/../../lib/qdevice.sh"
 }
 # shellcheck source=../../lib/qdevice.sh
 source "$QDEVICE_LIB"
+# shellcheck source=../../lib/monitoring.sh
+source "${REPO_ROOT}/scripts/lib/monitoring.sh"
 
 SELECTED_HOST=""
 HOST_ID=""
@@ -714,6 +716,7 @@ PY
 preflight() {
   require_command curl jq openssl ssh scp ssh-keygen ssh-keyscan sha256sum python3 \
     ip tailscale awk base64 flock shred
+  monitoring_require_qdevice || fail "The QDevice must be reachable while monitoring is enabled"
   if source_iso_is_required; then
     require_command xorriso dpkg-deb
   fi
@@ -4501,6 +4504,9 @@ EOF
   final_verify
   retire_setup_key_with_admin_identity
   enable_admin_ssh_for_target
+  # The new host's check and agent, every host's peers, and the QDevice's
+  # host list and vote expectations.
+  monitoring_membership_sync "$HOST_ID"
 
   log "Proxmox host setup complete"
   info "Host: $HOST_ID"

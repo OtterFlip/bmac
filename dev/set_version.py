@@ -35,6 +35,9 @@ COPIES = [
      re.compile(r'(^name = "bmac-dashboard"\nversion = ")([^"]*)(")', re.M)),
     ("dashboard/Cargo.lock",
      re.compile(r'(^name = "bmac-engine"\nversion = ")([^"]*)(")', re.M)),
+    # The monitor agent runs on nodes without the repository.
+    ("scripts/host_runtime/app_ha_monitor.py",
+     re.compile(r'(^AGENT_VERSION = ")([^"]*)(")', re.M)),
 ]
 
 
