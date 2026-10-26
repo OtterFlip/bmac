@@ -1862,6 +1862,22 @@ disabled on every node and deleting the cluster's checks is offered behind
 the typed confirmation `DELETE CHECKS`; when no host has the unit, nothing is
 contacted and no API call is made.
 
+Last, unless `--skip-cloudflared` is given, the updater upgrades the
+`cloudflared` package on every host whose installed version is older than
+the candidate in Cloudflare's apt repository (`apt-get update`, then
+`dpkg --compare-versions`; the plan, with versions, is shown before the
+confirmation and in the dry run). Replicas run with `--no-autoupdate` and
+`cloudflared_setup.sh` installs the package only when it is absent, so this
+is the only path that upgrades an existing host. Hosts are upgraded one at a
+time: before a host's `app-ha-cloudflared.service` restarts, another host's
+replica must report `readyConnections` above 0 on its readiness endpoint
+(on a one-host cluster, a warning says ingress pauses); after the restart
+the updater waits up to 90 seconds for the upgraded replica to connect. If it
+does not, the previous package version is reinstalled with
+`--allow-downgrades` and restarted, and the update stops before any other
+host's cloudflared changes. The runtime update and monitoring phases are
+complete by then and are not rolled back.
+
 Host setup does not create production VMs, replication jobs, HA resources, or
 Cloudflare DNS or zone configuration. Those belong to later workflows and the
 operator.

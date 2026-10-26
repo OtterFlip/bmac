@@ -440,7 +440,17 @@ deploy the validated bundle atomically to every configured online node:
 ```
 
 The second command requires `GO`; use `--yes` only in controlled automation.
-This updates BMAC runtime code, not Proxmox packages or host configuration.
+This updates BMAC runtime code, not Proxmox packages or host configuration,
+with one exception: it also upgrades every host's `cloudflared` to the newest
+version in Cloudflare's apt repository (the tunnel replicas run with
+`--no-autoupdate`, so nothing else upgrades them). Hosts are upgraded one at
+a time: a host's replica is restarted only while another host's replica is
+connected, and the next host waits until the upgraded one has reconnected, so
+ingress keeps working. If an upgraded replica does not reconnect, its previous
+version is reinstalled (when the repository still has it) and no other host
+is touched. The dry run lists each host's installed and available version;
+`--skip-cloudflared` leaves cloudflared alone. Run the update when Cloudflare
+asks you to upgrade cloudflared.
 
 With `MONITORING_ENABLED=true`, the same command also brings monitoring up to
 date on every node (see [Monitoring and Alerts](#monitoring-and-alerts)):

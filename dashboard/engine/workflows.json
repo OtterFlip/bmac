@@ -435,7 +435,7 @@
       "id": "update_cluster_runtime",
       "title": "Update cluster runtime",
       "summary": "Deploy this checkout's BMAC runtime helpers and hooks to every host.",
-      "description": "Stages and validates the BMAC runtime bundle on every online host, installs it atomically, verifies it cluster-wide, and rolls back on failure. Updates BMAC code only, not Proxmox packages.",
+      "description": "Stages and validates the BMAC runtime bundle on every online host, installs it atomically, verifies it cluster-wide, and rolls back on failure, then upgrades cloudflared one host at a time without interrupting ingress. Updates BMAC code and cloudflared, not other Proxmox packages.",
       "category": "hosts",
       "script": "scripts/user_callable/hosts/update_cluster_runtime.sh",
       "mode": "mutating",
@@ -443,7 +443,8 @@
       "supports_dry_run": true,
       "platforms": ["linux", "macos"],
       "params": [
-        { "id": "dry_run", "label": "Dry run (show hash drift only)", "type": "flag", "flag": "--dry-run", "default": true }
+        { "id": "dry_run", "label": "Dry run (show hash drift only)", "type": "flag", "flag": "--dry-run", "default": true },
+        { "id": "skip_cloudflared", "label": "Leave every host's cloudflared version as it is", "type": "flag", "flag": "--skip-cloudflared", "advanced": true }
       ]
     },
     {

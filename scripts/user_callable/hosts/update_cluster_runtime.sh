@@ -10,7 +10,9 @@
 # of the cluster: it synchronizes the cluster's Healthchecks.io checks and
 # installs the monitor agent and its config on every host, the QDevice, and
 # every active production VM (scripts/lib/monitoring.sh). With monitoring
-# disabled it stops agents that an earlier run installed.
+# disabled it stops agents that an earlier run installed. Last, it upgrades
+# cloudflared from Cloudflare's apt repository one host at a time, waiting for
+# each upgraded tunnel replica to reconnect before the next host's restarts.
 
 set -Eeuo pipefail
 set +x
@@ -22,6 +24,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
 source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
 CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
 MONITORING_LIB="${REPO_ROOT}/scripts/lib/monitoring.sh"
+APT_LOCK_LIB="${REPO_ROOT}/scripts/lib/apt_lock_wait.sh"
 RUNTIME_SOURCE_DIR="${REPO_ROOT}/scripts/host_runtime"
 HOOK_NAME=app-ha-guest-role-hook.sh
 # Every file this updater manages in ${INSTALL_ROOT}/lib.
@@ -38,6 +41,8 @@ REMOTE_SNIPPET=""
 DRY_RUN=false
 ASSUME_YES=false
 DELETE_OBSOLETE_CHECKS=false
+SKIP_CLOUDFLARED=false
+declare -a CLOUDFLARED_UPGRADES=()
 COORDINATOR=""
 REMOTE_STAGE=""
 COMPLETED=false
@@ -68,6 +73,7 @@ die() {
 usage() {
   cat <<'EOF'
 Usage: update_cluster_runtime.sh [--dry-run] [--yes] [--delete-obsolete-checks]
+         [--skip-cloudflared]
 
 Update these runtime files on every configured, online Proxmox node:
   /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py
@@ -100,13 +106,25 @@ node's check must then receive a ping. With MONITORING_ENABLED=false, agents
 installed earlier are stopped and disabled, and deleting the cluster's
 checks is offered.
 
+cloudflared: every host's cloudflared package is upgraded to the newest
+version in Cloudflare's apt repository, one host at a time. Before a host's
+tunnel replica restarts, another host's replica must be connected, so
+ingress keeps working; the next host waits until the upgraded replica is
+connected again. If an upgraded replica does not reconnect, the previous
+version is reinstalled when the repository still has it, and the update stops
+before any other host's cloudflared is touched.
+
 Options:
-  --dry-run  Validate local files and cluster reachability; show hash drift
-             and the monitoring plan without changing any node or check.
+  --dry-run  Validate local files and cluster reachability; show hash drift,
+             the cloudflared upgrades, and the monitoring plan without
+             changing any node or check (it does refresh the hosts' apt
+             package lists).
   --yes      Skip the interactive GO confirmation.
   --delete-obsolete-checks
              Delete this cluster's Healthchecks checks that no node uses any
              more without asking (they are listed in the plan).
+  --skip-cloudflared
+             Leave every host's cloudflared version as it is.
   -h, --help
 EOF
 }
@@ -122,6 +140,9 @@ parse_args() {
         ;;
       --delete-obsolete-checks)
         DELETE_OBSOLETE_CHECKS=true
+        ;;
+      --skip-cloudflared)
+        SKIP_CLOUDFLARED=true
         ;;
       -h | --help)
         usage
@@ -161,6 +182,133 @@ load_config() {
   require_source "$MONITORING_LIB"
   # shellcheck source=../../lib/monitoring.sh
   source "$MONITORING_LIB"
+  require_source "$APT_LOCK_LIB"
+  # shellcheck source=../../lib/apt_lock_wait.sh
+  source "$APT_LOCK_LIB"
+}
+
+# Runs on a host as: bash -c SCRIPT bash ACTION [ATTEMPTS]
+#   plan     refresh the package lists; print "INSTALLED CANDIDATE yes|no"
+#   ready    exit 0 once the local replica has a connection to Cloudflare
+#   upgrade  upgrade, restart, and wait for the replica; print
+#            "upgraded OLD NEW", or exit 3 after reinstalling OLD, or 4
+# The apt lock helpers are prepended by cloudflared_script.
+# shellcheck disable=SC2016 # Evaluated by the remote Bash.
+CLOUDFLARED_REMOTE='
+set -Eeuo pipefail
+action="$1"; attempts="${2:-45}"
+installed() { dpkg-query -W -f="\${Version}" cloudflared 2>/dev/null || true; }
+ready() {
+  local index body
+  for ((index = 0; index < attempts; index += 1)); do
+    if body="$(curl -fsS --max-time 3 http://127.0.0.1:20241/ready 2>/dev/null)" &&
+      python3 -c "import json, sys; sys.exit(0 if int(json.loads(sys.argv[1]).get(\"readyConnections\") or 0) > 0 else 1)" "$body"; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+# Lock-wait progress goes to stderr: stdout carries the result.
+apt_install() {
+  apt_wait_for_locks >&2
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y -q "$@" >/dev/null
+}
+case "$action" in
+  plan)
+    apt_wait_for_locks >&2
+    apt-get -o DPkg::Lock::Timeout=60 update -qq >/dev/null
+    current="$(installed)"
+    candidate="$(apt-cache policy cloudflared | awk "/Candidate:/ { print \$2 }")"
+    needed=no
+    if [[ -n "$current" && -n "$candidate" && "$candidate" != "(none)" ]] &&
+      dpkg --compare-versions "$candidate" gt "$current"; then
+      needed=yes
+    fi
+    printf "%s %s %s\n" "${current:-none}" "${candidate:-none}" "$needed"
+    ;;
+  ready) ready ;;
+  upgrade)
+    old="$(installed)"
+    apt_install --only-upgrade cloudflared
+    systemctl restart app-ha-cloudflared.service
+    if ready; then
+      printf "upgraded %s %s\n" "$old" "$(installed)"
+      exit 0
+    fi
+    if apt_install --allow-downgrades "cloudflared=$old" 2>/dev/null; then
+      systemctl restart app-ha-cloudflared.service
+      ready && exit 3
+    fi
+    exit 4
+    ;;
+  *) exit 2 ;;
+esac
+'
+
+cloudflared_script() {
+  declare -f apt_lock_holder apt_wait_for_locks
+  printf '%s\n' "$CLOUDFLARED_REMOTE"
+}
+
+cloudflared_exec() {
+  local node="$1"
+  shift
+  mox_ssh "$node" bash -c "$(cloudflared_script)" bash "$@" </dev/null
+}
+
+plan_cloudflared() {
+  CLOUDFLARED_UPGRADES=()
+  if [[ "$SKIP_CLOUDFLARED" == true ]]; then
+    info "cloudflared: left as it is (--skip-cloudflared)"
+    return 0
+  fi
+  log "Checking every host's cloudflared version"
+  local node output current candidate needed
+  for node in "${CLUSTER_NODES[@]}"; do
+    output="$(cloudflared_exec "$node" plan)" ||
+      die "Could not read $node's cloudflared version from apt"
+    read -r current candidate needed <<<"$output"
+    if [[ "$current" == none ]]; then
+      warn "$node has no cloudflared package; host setup installs it"
+    elif [[ "$needed" == yes ]]; then
+      info "$node: cloudflared $current -> $candidate"
+      CLOUDFLARED_UPGRADES+=("$node")
+    else
+      info "$node: cloudflared $current is current"
+    fi
+  done
+}
+
+# Another host's replica must be connected before this host's restarts.
+another_replica_ready() {
+  local node="$1" other
+  for other in "${CLUSTER_NODES[@]}"; do
+    [[ "$other" != "$node" ]] || continue
+    cloudflared_exec "$other" ready 3 >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+upgrade_cloudflared() {
+  ((${#CLOUDFLARED_UPGRADES[@]})) || return 0
+  log "Upgrading cloudflared one host at a time"
+  local node output status
+  for node in "${CLOUDFLARED_UPGRADES[@]}"; do
+    if ((${#CLUSTER_NODES[@]} > 1)); then
+      another_replica_ready "$node" ||
+        die "No other host's tunnel replica is connected, so restarting $node's would interrupt ingress; cloudflared was not upgraded on: ${CLOUDFLARED_UPGRADES[*]}"
+    else
+      warn "$node is the only tunnel replica; ingress pauses for a few seconds while it restarts"
+    fi
+    status=0
+    output="$(cloudflared_exec "$node" upgrade)" || status=$?
+    case "$status" in
+      0) info "$node: cloudflared ${output#upgraded }, replica connected again" ;;
+      3) die "$node's upgraded tunnel replica did not reconnect, so its previous cloudflared was reinstalled and it is connected again. No other host was changed; check journalctl -u app-ha-cloudflared on $node." ;;
+      *) die "$node's upgraded tunnel replica did not reconnect and its previous cloudflared could not be restored. Other hosts still serve ingress and were not changed; check journalctl -u app-ha-cloudflared on $node now." ;;
+    esac
+  done
 }
 
 validate_local_bundle() {
@@ -501,9 +649,11 @@ confirm_update() {
     "${CLUSTER_NODES[*]}"
   ! monitoring_enabled ||
     printf 'Then it installs or updates the monitor agent on every host, the QDevice, and every active production VM.\n'
+  ((${#CLOUDFLARED_UPGRADES[@]} == 0)) ||
+    printf 'Last, it upgrades cloudflared one host at a time on: %s\n' "${CLOUDFLARED_UPGRADES[*]}"
   if bmac_ui_is_json; then
     bmac_ui_confirm --id go --severity warning --title "Update the cluster runtime?" \
-      --message "This atomically replaces the app-ha runtime on: ${CLUSTER_NODES[*]}$(monitoring_enabled && printf '%s' ', then updates monitoring on every node'). A failure rolls back the nodes already committed." \
+      --message "This atomically replaces the app-ha runtime on: ${CLUSTER_NODES[*]}$(monitoring_enabled && printf '%s' ', then updates monitoring on every node')$( ((${#CLOUDFLARED_UPGRADES[@]} == 0)) || printf ', then upgrades cloudflared one host at a time on: %s' "${CLOUDFLARED_UPGRADES[*]}"). A failure rolls back the nodes already committed." \
       --confirm-label "Update the runtime" --text GO ||
       die "Confirmation did not match GO; no changes were made"
     return 0
@@ -523,6 +673,7 @@ main() {
   validate_local_bundle
   discover_cluster
   show_hash_status
+  plan_cloudflared
   plan_monitoring
   if [[ "$DRY_RUN" == true ]]; then
     log "Dry run complete; no cluster files were changed"
@@ -567,6 +718,7 @@ main() {
   cleanup_remote_stages
   STAGED_NODES=()
   update_monitoring
+  upgrade_cloudflared
 
   log "Cluster runtime update complete"
   info "Updated nodes: ${CLUSTER_NODES[*]}"
@@ -575,7 +727,9 @@ main() {
     info "Monitoring: every node's agent is installed and its check receives pings"
   fi
   bmac_ui_step_done
+  ((${#CLOUDFLARED_UPGRADES[@]} == 0)) || info "Upgraded cloudflared on: ${CLOUDFLARED_UPGRADES[*]}"
   bmac_ui_result updated_nodes:raw "$(bmac_ui_json_array "${CLUSTER_NODES[@]}")" \
+    cloudflared_upgraded:raw "$(bmac_ui_json_array "${CLOUDFLARED_UPGRADES[@]}")" \
     monitoring "$(monitoring_enabled && echo enabled || echo disabled)"
   if monitoring_enabled; then
     bmac_ui_next_step "See every node's check and open problems." \
