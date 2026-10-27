@@ -1071,7 +1071,8 @@ before its first boot. vCPU and RAM can be overridden on every restore.
   extension, which offers to grow into the space), and updates the
   registry's volume if
   Proxmox renamed it (on PVE 9.2 a forced restore keeps the names). Finally
-  it starts the VM through HA and recreates replication. A restore over an
+  it starts the VM through HA and recreates replication, every N minutes as
+  chosen (default: the previous schedule), which the registry records. A restore over an
   HA-managed VM is allowed while HA holds it stopped. It refuses a VM that is
   locked (for example by a running backup) or that has staging VMs, which
   are clones of its replicas. PVE cannot

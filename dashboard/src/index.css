@@ -44,9 +44,12 @@
     from { opacity: 0; }
     to { opacity: 1; }
   }
+  /* Only the lift and scale: the dialog is centred by its translate classes,
+     which set the separate `translate` property, so a centring transform here
+     would add to them and the dialog would jump when the animation ends. */
   @keyframes pop-in {
-    from { opacity: 0; transform: translate(-50%, -48%) scale(0.97); }
-    to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    from { opacity: 0; transform: translateY(2%) scale(0.97); }
+    to { opacity: 1; transform: none; }
   }
   @keyframes slide-in {
     from { opacity: 0.4; transform: translateX(24px); }
@@ -88,6 +91,16 @@
   * {
     scrollbar-width: thin;
     scrollbar-color: var(--color-line-strong) transparent;
+  }
+  /* The webview paints overlay scrollbars above fixed layers, so a page or
+     table scrollbar that flashes while a modal opens (the scroll lock resizes
+     the page) is drawn over the dialog. While a modal holds the scroll lock,
+     the page behind it shows no scrollbars; the dialog keeps its own. */
+  body[data-scroll-locked] *:not([role="dialog"], [role="dialog"] *, [role="alertdialog"], [role="alertdialog"] *) {
+    scrollbar-width: none;
+  }
+  body[data-scroll-locked] *:not([role="dialog"], [role="dialog"] *, [role="alertdialog"], [role="alertdialog"] *)::-webkit-scrollbar {
+    display: none;
   }
   :focus-visible {
     outline: 2px solid color-mix(in oklab, var(--color-accent) 70%, transparent);

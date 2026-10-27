@@ -2601,6 +2601,13 @@ def command_update(registry: Registry, args: argparse.Namespace) -> Any:
                 raise RegistryError("only a production VM's vCPUs and RAM are recorded")
             updated["spec"][field] = positive_spec_value(field, value)
             changed = True
+        if args.replication_interval is not None:
+            if current["kind"] != "production":
+                raise RegistryError("only a production VM has a replication interval")
+            updated["spec"]["replication_interval"] = str(
+                positive_spec_value("replication interval", args.replication_interval)
+            )
+            changed = True
         if current["kind"] == "production" and (
             args.clear_volume or args.volume_id is not None
         ):
@@ -4471,6 +4478,8 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--replication-targets", action="append")
     update.add_argument("--cores", type=int, help="production only: its configured vCPUs")
     update.add_argument("--memory-mb", type=int, help="production only: its configured RAM in MiB")
+    update.add_argument("--replication-interval", type=int,
+                        help="production only: minutes between replication runs")
     volume = update.add_mutually_exclusive_group()
     volume.add_argument("--volume-id")
     volume.add_argument("--clear-volume", action="store_true")

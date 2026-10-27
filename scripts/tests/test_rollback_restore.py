@@ -191,6 +191,7 @@ if argv[:2] == ["pvesr", "delete"]:
     sys.exit(0)
 if argv[:2] == ["pvesr", "create-local-job"]:
     state["jobs"][argv[2]] = argv[3]
+    state["schedules"] = state.get("schedules", {}) | {argv[2]: argv[argv.index("--schedule") + 1]}
     state["synced"][argv[2]] = 99
     commit()
     sys.exit(0)
@@ -307,7 +308,10 @@ class RollbackRestoreTest(unittest.TestCase):
         picker, form, question, confirmation = seen
         self.assertEqual([option["label"] for option in picker["field"]["options"]],
                          ["2026-10-27 10:04 MDT", "2026-10-26 04:00 MDT · protected"])
-        self.assertEqual([field["id"] for field in form["fields"]], ["cores", "memory_gib"])
+        self.assertEqual([field["id"] for field in form["fields"]], ["cores", "memory_gib", "replication_minutes"])
+        # The current schedule (*/15) is the default, and is kept when unchanged.
+        self.assertEqual(form["fields"][2]["default"], 15)
+        self.assertEqual(self.load()["schedules"], {"100-0": "*/15"})
         self.assertEqual(question["field"]["default"], True)
         self.assertEqual(confirmation["confirmation_text"], "ROLLBACK prod1")
         state = self.load()
@@ -325,7 +329,7 @@ class RollbackRestoreTest(unittest.TestCase):
 
     def test_rolls_back_in_a_safe_order_and_keeps_identity(self) -> None:
         completed = self.run_rollback("prod1", "--snapshot", SNAPSHOT, "--safety-backup",
-                                      answers="\n\nROLLBACK prod1\n")
+                                      answers="\n\n\nROLLBACK prod1\n")
         steps = [m.split(" --")[0].split(" vm:")[0] for m in self.mutations()]
         self.assertEqual(steps, [
             "pvesh create /nodes/mox1/vzdump",      # safety backup, before anything changes
@@ -356,17 +360,20 @@ class RollbackRestoreTest(unittest.TestCase):
         self.state["backup_config"]["scsi0"] = LIVE_CONFIG["scsi0"].replace("size=1T", "size=512G")
         self.save()
         self.run_rollback("prod1", "--snapshot", SNAPSHOT, "--no-safety-backup", "--cores", "8",
-                          "--memory-gib", "16", answers="ROLLBACK prod1\n")
+                          "--memory-gib", "16", "--replication-minutes", "5", answers="ROLLBACK prod1\n")
         state = self.load()
         self.assertEqual((state["config"]["cores"], state["config"]["memory"]), ("8", "16384"))
         # The registry records them too, for the owner-change memory check.
         self.assertIn(["prod1", "--expected-revision", "3", "--cores", "8", "--memory-mb", "16384"], state["updates"])
         self.assertEqual(state["resized"], ["scsi0", "1024G"])
+        # Replication comes back every 5 minutes, and the registry records it.
+        self.assertEqual(state["schedules"], {"100-0": "*/5"})
+        self.assertIn(["prod1", "--expected-revision", "4", "--replication-interval", "5"], state["updates"])
         self.assertFalse(any("vzdump" in m for m in self.mutations()))
 
     def test_a_wrong_confirmation_changes_nothing(self) -> None:
         completed = self.run_rollback("prod1", "--snapshot", SNAPSHOT, "--no-safety-backup",
-                                      answers="\n\nrollback prod1\n", expected=1)
+                                      answers="\n\n\nrollback prod1\n", expected=1)
         self.assertIn("Cancelled; nothing was changed", completed.stderr)
         self.assertIn("Nothing was changed on prod1", completed.stderr)
         self.assertEqual(self.mutations(), [])
@@ -396,7 +403,7 @@ class RollbackRestoreTest(unittest.TestCase):
         self.state["restore_fails"] = True
         self.save()
         completed = self.run_rollback("prod1", "--snapshot", SNAPSHOT, "--no-safety-backup",
-                                      answers="\n\nROLLBACK prod1\n", expected=1)
+                                      answers="\n\n\nROLLBACK prod1\n", expected=1)
         self.assertIn("The restore failed: restore failed", completed.stderr)
         self.assertIn("prod1 is stopped and still has its current disks", completed.stderr)
         self.assertIn("ha-manager set vm:100 --state started", completed.stderr)

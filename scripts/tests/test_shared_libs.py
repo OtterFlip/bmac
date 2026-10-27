@@ -651,8 +651,11 @@ class RegistryCliTest(unittest.TestCase):
                           expected=1)
 
         # A workflow holding the lease (Rollback Restore) records them by update.
-        updated, _ = self.run_registry("update", "prod1", "--cores", "8", "--memory-mb", "16384")
+        updated, _ = self.run_registry("update", "prod1", "--cores", "8", "--memory-mb", "16384",
+                                       "--replication-interval", "5")
         self.assertEqual((updated["spec"]["cores"], updated["spec"]["memory_mb"]), (8, 16384))
+        self.assertEqual(updated["spec"]["replication_interval"], "5")
+        self.run_registry("update", "prod1", "--replication-interval", "0", expected=1)
         self.run_registry("update", "prod1", "--memory-mb", "-1", expected=1)
 
     def test_production_orchestration_lease_and_install_sentinel(self) -> None:

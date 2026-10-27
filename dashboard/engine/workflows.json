@@ -658,6 +658,7 @@
         { "id": "snapshot", "label": "Restore point", "type": "snapshot", "flag": "--snapshot", "help": "Such as vm/100/2026-10-27T14:50:01Z; chosen from the VM's restore points when empty." },
         { "id": "cores", "label": "vCPUs", "type": "integer", "flag": "--cores", "help": "Default: the VM's current vCPUs.", "advanced": true },
         { "id": "memory_gib", "label": "RAM (GiB)", "type": "integer", "flag": "--memory-gib", "help": "Default: the VM's current RAM.", "advanced": true },
+        { "id": "replication_minutes", "label": "Replication interval (minutes)", "type": "integer", "flag": "--replication-minutes", "help": "For the recreated replication jobs. Default: the current schedule.", "advanced": true },
         { "id": "safety_backup", "label": "Safety backup first", "type": "flag_choice", "help": "Asked for when empty.",
           "choices": [
             { "value": "yes", "label": "Back up the current state first", "flag": "--safety-backup" },

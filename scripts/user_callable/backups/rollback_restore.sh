@@ -29,6 +29,7 @@ LEASE_OWNER_LABEL="rollback-restore"
 SNAPSHOT=""
 CORES=""
 MEMORY_GIB=""
+REPLICATION_MINUTES=""
 SAFETY_BACKUP=""
 REPLICATION_TIMEOUT_SECONDS=3600
 STOP_TIMEOUT_SECONDS=600
@@ -46,7 +47,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/user_callable/backups/rollback_restore.sh [prodN] [--vm prodN]
          [--snapshot vm/VMID/TIME] [--cores N] [--memory-gib N]
-         [--safety-backup | --no-safety-backup]
+         [--replication-minutes N] [--safety-backup | --no-safety-backup]
          [--replication-timeout-seconds N] [--json]
 
 Return a production VM to one of its own restore points on PBS. Its disks and
@@ -65,6 +66,8 @@ staging VMs (they are clones of its replicas).
 
   --snapshot vm/VMID/TIME   The restore point (chosen from a list when omitted).
   --cores N, --memory-gib N Default: the VM's current values.
+  --replication-minutes N   Minutes between replication runs of the
+                            recreated jobs. Default: the current schedule.
   --safety-backup, --no-safety-backup
                             Back up the current state first (asked when omitted).
   --replication-timeout-seconds N
@@ -78,13 +81,14 @@ parse_args() {
     case "$1" in
       --safety-backup) SAFETY_BACKUP=true ;;
       --no-safety-backup) SAFETY_BACKUP=false ;;
-      --vm | --snapshot | --cores | --memory-gib | --replication-timeout-seconds)
+      --vm | --snapshot | --cores | --memory-gib | --replication-minutes | --replication-timeout-seconds)
         (($# >= 2)) || die "$1 needs a value"
         case "$1" in
           --vm) REQUESTED_VM="$2" ;;
           --snapshot) SNAPSHOT="$2" ;;
           --cores) CORES="$2" ;;
           --memory-gib) MEMORY_GIB="$2" ;;
+          --replication-minutes) REPLICATION_MINUTES="$2" ;;
           --replication-timeout-seconds) REPLICATION_TIMEOUT_SECONDS="$2" ;;
         esac
         shift
@@ -106,6 +110,8 @@ parse_args() {
     die "--snapshot must look like vm/100/2026-10-27T14:50:01Z"
   [[ -z "$CORES" || "$CORES" =~ ^[1-9][0-9]{0,3}$ ]] || die "--cores must be a positive whole number"
   [[ -z "$MEMORY_GIB" || "$MEMORY_GIB" =~ ^[1-9][0-9]{0,5}$ ]] || die "--memory-gib must be a positive whole number"
+  [[ -z "$REPLICATION_MINUTES" || "$REPLICATION_MINUTES" =~ ^[1-9][0-9]{0,3}$ ]] ||
+    die "--replication-minutes must be a positive whole number"
   [[ "$REPLICATION_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "--replication-timeout-seconds must be a positive whole number"
 }
 
@@ -234,22 +240,38 @@ if not match:
 print(int(float(match.group(1)) * 1024 ** "BKMGT".index(match.group(2) or "B")))' "$1"
 }
 
+# The minutes of a "*/N" replication schedule, or nothing.
+schedule_minutes() {
+  [[ "$1" =~ ^\*/([1-9][0-9]*)$ ]] && printf '%s\n' "${BASH_REMATCH[1]}" || true
+}
+
 choose_compute() {
-  local cores="${LIVE[cores]}" memory_gib=$((LIVE[memory] / 1024))
-  if [[ -z "$CORES$MEMORY_GIB" ]] && bmac_ui_is_json; then
-    bmac_ui_group_begin compute "vCPUs and RAM after the rollback" \
-      "The restore point's own values are replaced by these; the defaults are $RESOURCE_NAME's current ones."
+  local cores="${LIVE[cores]}" memory_gib=$((LIVE[memory] / 1024)) minutes
+  minutes="$(schedule_minutes "${REPLICATION_SCHEDULE:-}")"
+  minutes="${minutes:-${PROD_VM_REPLICATION_INTERVAL##*/}}"
+  if [[ -z "$CORES$MEMORY_GIB$REPLICATION_MINUTES" ]] && bmac_ui_is_json; then
+    bmac_ui_group_begin compute "vCPUs, RAM, and replication after the rollback" \
+      "The restore point's own vCPUs and RAM are replaced by these; the defaults are $RESOURCE_NAME's current settings."
     bmac_ui_group_add CORES --id cores --type integer --label "vCPUs" --default "$cores" --min 1 --max 1024
     bmac_ui_group_add MEMORY_GIB --id memory_gib --type integer --label "RAM (GiB)" --default "$memory_gib" --min 1 --max 100000
+    if ((${#REPLICATION_JOBS[@]})); then
+      bmac_ui_group_add REPLICATION_MINUTES --id replication_minutes --type integer \
+        --label "Replication interval" --suffix minutes --default "$minutes" --min 1 --max 1440
+    fi
     bmac_ui_group_request
-  elif [[ -z "$CORES$MEMORY_GIB" ]]; then
+  elif [[ -z "$CORES$MEMORY_GIB$REPLICATION_MINUTES" ]]; then
     read -r -p "vCPUs after the rollback [$cores]: " CORES
     read -r -p "RAM in GiB after the rollback [$memory_gib]: " MEMORY_GIB
+    if ((${#REPLICATION_JOBS[@]})); then
+      read -r -p "Replication interval in minutes [$minutes]: " REPLICATION_MINUTES
+    fi
   fi
   CORES="${CORES:-$cores}"
   MEMORY_GIB="${MEMORY_GIB:-$memory_gib}"
-  [[ "$CORES" =~ ^[1-9][0-9]{0,3}$ && "$MEMORY_GIB" =~ ^[1-9][0-9]{0,5}$ ]] ||
-    die "vCPUs and RAM must be positive whole numbers"
+  REPLICATION_MINUTES="${REPLICATION_MINUTES:-$minutes}"
+  [[ "$CORES" =~ ^[1-9][0-9]{0,3}$ && "$MEMORY_GIB" =~ ^[1-9][0-9]{0,5}$ &&
+    "$REPLICATION_MINUTES" =~ ^[1-9][0-9]{0,3}$ ]] ||
+    die "vCPUs, RAM, and the replication interval must be positive whole numbers"
 }
 
 choose_safety_backup() {
@@ -273,13 +295,13 @@ confirm_rollback() {
   [[ "$SAFETY_BACKUP" != true ]] || info "First: a safety backup of the current state"
   info "Downtime: from the HA stop until the VM has started again"
   for job in "${REPLICATION_JOBS[@]}"; do
-    info "Replication $job to ${REPLICATION_TARGET[$job]}: deleted with its replica, recreated after, full initial sync"
+    info "Replication $job to ${REPLICATION_TARGET[$job]}: deleted with its replica, recreated every ${REPLICATION_MINUTES} minutes, full initial sync"
   done
   bmac_ui_plan_begin "Roll back $RESOURCE_NAME" "Everything written to $RESOURCE_NAME after ${SNAPSHOT_TIME} is lost."
   [[ "$SAFETY_BACKUP" != true ]] || bmac_ui_plan_item create "safety backup" "A restore point of the current state, made first"
   bmac_ui_plan_item update "$RESOURCE_NAME" "Disks and settings restored from $SNAPSHOT; ${CORES} vCPUs, ${MEMORY_GIB} GiB RAM"
   for job in "${REPLICATION_JOBS[@]}"; do
-    bmac_ui_plan_item update "replication $job" "Deleted with its replica on ${REPLICATION_TARGET[$job]}, recreated, synced from scratch"
+    bmac_ui_plan_item update "replication $job" "Deleted with its replica on ${REPLICATION_TARGET[$job]}, recreated every ${REPLICATION_MINUTES} minutes, synced from scratch"
   done
   bmac_ui_plan_item keep "identity" "VMID $VMID, MAC, address, tags, lifecycle hook, HA rule, tunnel FQDNs"
   bmac_ui_plan_end
@@ -433,16 +455,17 @@ start_vm() {
 }
 
 recreate_replication() {
-  local job target schedule
+  local job target schedule="*/${REPLICATION_MINUTES}"
+  ((${#SAVED_JOBS[@]})) || return 0
   for job in "${SAVED_JOBS[@]}"; do
     target="${SAVED_TARGET[$job]}"
-    schedule="${REPLICATION_SCHEDULE:-*/${PROD_VM_REPLICATION_INTERVAL##*/}}"
     CURRENT_PHASE="recreating replication $job to $target"
     log "Recreating replication $job to $target ($schedule)"
     node_exec "$OWNER_NODE" pvesr create-local-job "$job" "$target" --schedule "$schedule" \
       --comment "Production ${RESOURCE_NAME} replica" || die "Could not recreate replication job $job"
     wait_for_replication "$OWNER_NODE" "$job" "$target" 0 "$REPLICATION_TIMEOUT_SECONDS"
   done
+  registry_update_resource --replication-interval "$REPLICATION_MINUTES"
 }
 
 main() {
@@ -491,7 +514,7 @@ main() {
   STAGE="done"
 
   log "$RESOURCE_NAME is rolled back to ${SNAPSHOT_TIME}"
-  info "It runs on $OWNER_NODE with ${CORES} vCPUs and ${MEMORY_GIB} GiB RAM; replication is healthy again"
+  info "It runs on $OWNER_NODE with ${CORES} vCPUs and ${MEMORY_GIB} GiB RAM; replication every ${REPLICATION_MINUTES} minutes is healthy again"
   [[ -z "$SAFETY_VOLID" ]] || info "The state before the rollback is restore point ${SAFETY_VOLID#*:backup/}"
   bmac_ui_result vm "$RESOURCE_NAME" vmid:int "$VMID" snapshot "$SNAPSHOT" node "$OWNER_NODE" \
     cores:int "$CORES" memory_gib:int "$MEMORY_GIB" safety_backup "${SAFETY_VOLID#*:backup/}"
