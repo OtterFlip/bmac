@@ -3,7 +3,8 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""BMAC's monitor agent: one per Proxmox host, QDevice, and production VM.
+"""BMAC's monitor agent: one per Proxmox host, QDevice, and production VM,
+and optionally one on the Proxmox Backup Server (role pbs).
 
 Every monitored node runs this agent, bound to the node's own Healthchecks.io
 check. It sends a plain success ping every minute, so a node that dies or
@@ -16,7 +17,14 @@ heartbeat, so the check is up again at once and the dead-man switch keeps
 working. Gmail filters on those tokens route the resulting emails.
 
 The agent only checks its own node. It never logs in anywhere; it observes
-peers through local tools (corosync, qnetd, tailscale) and network probes.
+peers through local tools (corosync, qnetd, tailscale) and network probes. A
+host reads its own cluster's PBS namespace with the PVE storage's token, the
+same read-only call the Backups page uses.
+
+The pbs role runs on a PBS server shared by several clusters, installed by
+hand (README.md, "Monitoring the PBS server"). It never reaches into any
+cluster: it watches the pool, its member disks, the PBS services, the
+datastore, PBS's own task results, and each namespace's newest backup.
 
   app_ha_monitor.py run                    the service loop (systemd)
   app_ha_monitor.py check --once [--json]  run every check once; send nothing
@@ -71,7 +79,7 @@ DEFAULT_GUEST_SETTINGS = Path("/etc/app-ha-monitor/guest.json")
 COROSYNC_CONF = (Path("/etc/corosync/corosync.conf"), Path("/etc/pve/corosync.conf"))
 CLOUDFLARED_READY_URL = "http://127.0.0.1:20241/ready"
 UNIT_NAME = "app-ha-monitor.service"
-ROLES = ("host", "qdevice", "guest")
+ROLES = ("host", "qdevice", "guest", "pbs")
 
 # Gmail search ignores most punctuation, so tokens are single plain words.
 TOKEN_EVENT = "bmacevent"
@@ -101,7 +109,30 @@ NVME_WARNING_BITS = {
     4: "volatile memory backup failed",
 }
 
-DEFAULT_INTERVALS = {"alive": 60, "fast": 30, "slow": 1800, "probe": 60}
+# The PBS API answers each host's backup check every five minutes.
+DEFAULT_INTERVALS = {"alive": 60, "fast": 30, "slow": 1800, "probe": 60, "backup": 300}
+# Backups (host role): the PVE storage and helper that Setup PBS installs.
+BACKUP_STORAGE = "bmac-pbs"
+PBS_API = Path(__file__).resolve().with_name("pbs_api.py")
+PVE_STORAGE_CFG = Path("/etc/pve/storage.cfg")
+PVE_JOBS_CFG = Path("/etc/pve/jobs.cfg")
+# The pbs role.
+PBS_SERVICES = ("proxmox-backup.service", "proxmox-backup-proxy.service")
+PBS_TASK_LABELS = {
+    "garbage_collection": "garbage collection",
+    "prunejob": "prune job",
+    "prune": "prune",
+    "verificationjob": "verify job",
+    "verify": "verify",
+    "verify_group": "verify",
+    "verify_snapshot": "verify",
+}
+PBS_TASK_LIMIT = 1000
+# Raw counters watched against a baseline on the pool's ATA disks; Samsung
+# SSDs lack 197 and 198, and a missing attribute does not apply.
+PBS_SMART_COUNTERS = ("5", "179", "183", "187", "197", "198", "199")
+PBS_DEFAULTS = {"namespace_max_age_hours": 8, "scrub_max_age_days": 40}
+PBS_NAMESPACE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*){0,7}")
 DEFAULT_THRESHOLDS = {
     "fast_fail": 3,
     "service_fail": SERVICE_FAIL_THRESHOLD,
@@ -892,12 +923,15 @@ def smart_findings(
     problems = health_problems + counter_problems
     findings.append(Finding(
         f"smart:{serial}", not problems, "p1" if health_problems else "p2",
-        f"drive {label}: " + "; ".join(problems) + (
-            "" if not counter_problems else
-            f" (stays open until show_monitoring_state.sh --reset-smart-baseline {ctx.node}:{serial})"
-        ),
+        f"drive {label}: " + "; ".join(problems) + ("" if not counter_problems else reset_hint(ctx, serial)),
     ))
     return findings
+
+
+def reset_hint(ctx: Context, serial: str) -> str:
+    if ctx.config["role"] == "pbs":
+        return f" (stays open until app_ha_monitor.py reset-smart-baseline {serial})"
+    return f" (stays open until show_monitoring_state.sh --reset-smart-baseline {ctx.node}:{serial})"
 
 
 def ping(ctx: Context, address: str, wait: int) -> bool:
@@ -1107,11 +1141,381 @@ def check_certs(ctx: Context) -> list[Finding]:
     return findings
 
 
+# Backups (host role) ----------------------------------------------------------
+
+
+def pve_sections(text: str, kind: str) -> dict[str, dict[str, str]]:
+    """The `KIND: ID` sections of a PVE section config such as storage.cfg or
+    jobs.cfg; a flag without a value (`disable`) maps to ""."""
+
+    sections: dict[str, dict[str, str]] = {}
+    current: dict[str, str] | None = None
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            header = re.fullmatch(r"(\S+):\s*(\S+)\s*", line)
+            current = sections.setdefault(header.group(2), {}) if header and header.group(1) == kind else None
+            continue
+        if current is not None:
+            key, _, value = line.strip().partition(" ")
+            current[key] = value.strip()
+    return sections
+
+
+def backup_interval_hours(schedule: str | None) -> int | None:
+    """Hours between runs of a BMAC schedule (`0/N:MM` or `HH:MM`), or None."""
+
+    schedule = str(schedule or "").strip()
+    match = re.fullmatch(r"0/([0-9]{1,2}):[0-5][0-9]", schedule)
+    if match and int(match.group(1)) in (1, 2, 3, 4, 6, 8, 12):
+        return int(match.group(1))
+    if re.fullmatch(r"(?:[01]?[0-9]|2[0-3]):[0-5][0-9]", schedule):
+        return 24
+    return None
+
+
+def check_backups(ctx: Context) -> list[Finding]:
+    """pbs:storage, whether this host can use the cluster's PBS namespace, and
+    backup:<prodN> for each scheduled VM this host runs, so a VM's age is
+    reported once, by its owner."""
+
+    try:
+        storage = pve_sections(ctx.read_text(PVE_STORAGE_CFG), "pbs").get(BACKUP_STORAGE)
+    except FileNotFoundError:
+        storage = None
+    if storage is None or "disable" in storage:
+        return []
+    try:
+        jobs = pve_sections(ctx.read_text(PVE_JOBS_CFG), "vzdump")
+    except FileNotFoundError:
+        jobs = {}
+    scheduled = []
+    for job_id, job in sorted(jobs.items()):
+        match = re.fullmatch(r"bmac-(prod[1-9][0-9]*)", job_id)
+        vmid = job.get("vmid", "")
+        if (not match or job.get("enabled", "1") == "0" or job.get("storage") != BACKUP_STORAGE
+                or not re.fullmatch(r"[1-9][0-9]*", vmid)):
+            continue
+        try:
+            ctx.read_text(Path(f"/etc/pve/nodes/{ctx.node}/qemu-server/{vmid}.conf"))
+        except FileNotFoundError:
+            continue
+        scheduled.append((match.group(1), vmid, job_id, backup_interval_hours(job.get("schedule"))))
+
+    result = ctx.run([sys.executable, "-I", str(PBS_API), "groups", "--storage", BACKUP_STORAGE], timeout=60)
+    groups = None
+    if result.rc == 0:
+        try:
+            groups = {row["group"]: row for row in json.loads(result.out)["groups"]}
+        except (ValueError, KeyError, TypeError):
+            pass
+    if groups is None:
+        why = first_line(result.err or result.out).removeprefix("pbs_api.py: ") or f"exit status {result.rc}"
+        # Ages can't be read; keep their state until PBS answers again.
+        return [Finding("pbs:storage", False, "p2",
+                        f"this host cannot use PBS storage {BACKUP_STORAGE}: {sanitize(why)}", "fast"),
+                *(Finding(f"backup:{name}", None) for name, *_ in scheduled)]
+    findings = [Finding("pbs:storage", True, kind="fast")]
+    now = ctx.now()
+    for name, vmid, job_id, hours in scheduled:
+        newest = (groups.get(f"vm/{vmid}") or {}).get("last_backup")
+        if hours is None or not isinstance(newest, (int, float)) or isinstance(newest, bool):
+            # A schedule BMAC didn't write, or no backup yet: nothing to compare.
+            findings.append(Finding(f"backup:{name}", None))
+            continue
+        # Two missed runs, plus an hour for a slow one, as the Backups page does.
+        limit = 2 * hours + 1
+        findings.append(Finding(
+            f"backup:{name}", now - newest <= limit * 3600, "p2",
+            f"{name}'s newest backup is {human_duration(now - newest)} old, but job {job_id} backs "
+            f"it up every {hours}h (VMID {vmid}; alert after {limit}h)",
+        ))
+    return findings
+
+
+# PBS server (pbs role) --------------------------------------------------------
+
+
+def check_pbs_services(ctx: Context) -> list[Finding]:
+    findings = []
+    for unit in PBS_SERVICES:
+        state = ctx.run(["systemctl", "is-active", unit], timeout=10).out.strip() or "unknown"
+        findings.append(Finding(f"service:{unit}", state == "active", "p1",
+                                f"PBS service {unit} is {state}", "service"))
+    return findings
+
+
+def pool_status(ctx: Context, pool: str) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    result = ctx.run(["zpool", "status", "-P", pool], timeout=30)
+    if result.rc != 0:
+        raise CheckError(f"zpool status {pool} failed: {first_line(result.err or result.out)}")
+    return parse_pool(result.out)
+
+
+SCRUB_DONE_RE = re.compile(r"scrub repaired .* on ([A-Z][a-z]{2} [A-Z][a-z]{2} [0-9]{1,2} [0-9:]{8} [0-9]{4})$")
+
+
+def check_scrub(ctx: Context) -> list[Finding]:
+    pool = ctx.config["pbs"]["pool"]
+    limit_days = ctx.config["pbs"]["scrub_max_age_days"]
+    header, _ = pool_status(ctx, pool)
+    scan = " ".join(header.get("scan", "").split())
+    key = f"scrub:{pool}"
+    if "in progress" in scan:
+        return [Finding(key, None)]
+    match = SCRUB_DONE_RE.search(scan)
+    if match:
+        # zpool prints local time, in the C locale's day and month names.
+        finished = time.mktime(time.strptime(match.group(1), "%a %b %d %H:%M:%S %Y"))
+        age = ctx.now() - finished
+        message = f"pool {pool} was last scrubbed {human_duration(age)} ago"
+    else:
+        created = ctx.run(["zfs", "get", "-H", "-p", "-o", "value", "creation", pool], timeout=30)
+        if created.rc != 0 or not created.out.strip().isdigit():
+            raise CheckError(f"cannot read when pool {pool} was created: {first_line(created.err or created.out)}")
+        age = ctx.now() - int(created.out.strip())
+        message = (f"pool {pool} has no completed scrub on record (last scan: {scan or 'none'}); "
+                   f"it was created {human_duration(age)} ago")
+    return [Finding(key, age <= limit_days * 86400, "p2",
+                    f"{message}, more than {limit_days} days; run zpool scrub {pool} and check "
+                    "that the monthly scrub timer or cron job is enabled")]
+
+
+def pool_member_disks(ctx: Context, pool: str) -> list[str]:
+    """The whole disks under the pool's members, from the pool itself, so a
+    VM's virtual OS disk is never included and nothing depends on device
+    letters."""
+
+    _, entries = pool_status(ctx, pool)
+    disks: list[str] = []
+    for member in (entry["name"] for entry in entries if entry["name"].startswith("/dev/")):
+        parent = ctx.run(["lsblk", "-ndo", "PKNAME", member], timeout=10)
+        name = first_line(parent.out) if parent.rc == 0 else ""
+        disk = f"/dev/{name}" if name else member
+        if disk not in disks:
+            disks.append(disk)
+    return disks
+
+
+def read_smart(ctx: Context, disk: str) -> tuple[dict[str, Any] | None, str]:
+    """smartctl's report with automatic device-type detection, then with
+    -d sat, which disks passed through to a VM as SCSI LUNs need."""
+
+    why = ""
+    for argv in (["smartctl", "-j", "-i", "-H", "-A", disk], ["smartctl", "-j", "-d", "sat", "-i", "-H", "-A", disk]):
+        result = ctx.run(argv, timeout=SMART_TIMEOUT_SECONDS)
+        try:
+            data = json.loads(result.out) if result.out.strip() else {}
+        except ValueError:
+            data = {}
+        identified = isinstance(data, dict) and (
+            isinstance((data.get("ata_smart_attributes") or {}).get("table"), list)
+            or isinstance(data.get("nvme_smart_health_information_log"), dict))
+        # Exit-status bits 0-2: bad command line, open failed, SMART command failed.
+        if result.rc not in (124, 127) and not result.rc & 0b111 and identified:
+            return data, ""
+        if result.rc in (124, 127):
+            why = result.err or f"exit status {result.rc}"
+        elif result.rc & 0b111:
+            why = "device open failed" if result.rc & 0b10 else "a SMART command failed"
+        else:
+            why = "no SMART attributes in the report"
+    return None, why
+
+
+def pbs_smart_findings(ctx: Context, serial: str, label: str, data: dict[str, Any]) -> list[Finding]:
+    """Health from attributes, never from the overall-health bit, which LUN
+    passthrough cannot carry (smartctl's PASSED is then only an attribute
+    check)."""
+
+    if isinstance(data.get("nvme_smart_health_information_log"), dict):
+        return smart_findings(ctx, serial, label, data, 0)
+    rows = {str(row.get("id")): row for row in data["ata_smart_attributes"]["table"] if isinstance(row, dict)}
+    failing = []
+    for row in rows.values():
+        value, threshold = row.get("value"), row.get("thresh")
+        if isinstance(value, int) and isinstance(threshold, int) and threshold > 0 and value <= threshold:
+            failing.append(f"{row.get('name') or 'attribute ' + str(row.get('id'))} is {value}, "
+                           f"at or below its failure threshold {threshold}")
+    current = {}
+    for key in PBS_SMART_COUNTERS:
+        raw = (rows.get(key, {}).get("raw") or {}).get("value")
+        if isinstance(raw, int):
+            current[key] = (raw, rows[key].get("name") or f"attribute {key}")
+    counter_problems = []
+    baseline = ctx.baselines.get(serial)
+    if current:
+        if not isinstance(baseline, dict) or not set(current) <= set(baseline):
+            ctx.baselines[serial] = {key: value for key, (value, _) in current.items()}
+            ctx.baselines_changed = True
+        else:
+            for key, (value, name) in sorted(current.items(), key=lambda item: int(item[0])):
+                if value > baseline[key]:
+                    counter_problems.append(f"{name} rose from {baseline[key]} to {value}")
+    problems = failing + counter_problems
+    findings = [Finding(f"smart:{serial}", not problems, "p1" if failing else "p2",
+                        f"drive {label}: " + "; ".join(problems)
+                        + ("" if not counter_problems else reset_hint(ctx, serial)))]
+
+    warn = ctx.threshold("nvme_wear_warn_percent")
+    wear = []
+    level = rows.get("177", {}).get("value")
+    if isinstance(level, int) and 100 - level >= warn:
+        wear.append(f"Wear_Leveling_Count is {level} ({100 - level}% of its rated wear used)")
+    rating = ctx.config["pbs"].get("tbw_rating_tb")
+    lbas = (rows.get("241", {}).get("raw") or {}).get("value")
+    if rating and isinstance(lbas, int):
+        written_tb = lbas * int(data.get("logical_block_size") or 512) / 1e12
+        if written_tb >= rating * warn / 100:
+            wear.append(f"{written_tb:.0f} TB written of its {rating} TB rating")
+    findings.append(Finding(f"smart-wear:{serial}", not wear, "p2",
+                            f"drive {label}: " + "; ".join(wear) + "; plan a replacement"))
+    return findings
+
+
+def check_pool_smart(ctx: Context) -> list[Finding]:
+    findings: list[Finding] = []
+    seen: set[str] = set()
+    all_read = True
+    for disk in pool_member_disks(ctx, ctx.config["pbs"]["pool"]):
+        data, why = read_smart(ctx, disk)
+        serial = str((data or {}).get("serial_number") or "").strip()
+        if data is None or not serial:
+            all_read = False
+            findings.append(Finding(f"smart-read:{disk}", False, "p2",
+                                    f"smartctl could not read pool disk {disk}: {sanitize(why or 'no serial number')} "
+                                    "(in a VM, check the LUN passthrough's rawio and the host's AppArmor rule)"))
+            continue
+        if serial in seen:
+            continue
+        seen.add(serial)
+        findings.append(Finding(f"smart-read:{disk}", True))
+        label = f"{str(data.get('model_name') or 'drive').strip()} {serial}"
+        findings += pbs_smart_findings(ctx, serial, label, data)
+    if all_read:
+        for serial in list(ctx.baselines):
+            if serial not in seen:
+                del ctx.baselines[serial]
+                ctx.baselines_changed = True
+    return findings
+
+
+def datastore_path(ctx: Context, name: str) -> str | None:
+    result = ctx.run(["proxmox-backup-manager", "datastore", "list", "--output-format", "json"], timeout=30)
+    try:
+        rows = json.loads(result.out) if result.rc == 0 else None
+    except ValueError:
+        rows = None
+    if not isinstance(rows, list):
+        raise CheckError(f"proxmox-backup-manager datastore list failed: {first_line(result.err or result.out)}")
+    for row in rows:
+        if isinstance(row, dict) and row.get("name") == name and isinstance(row.get("path"), str):
+            return row["path"]
+    return None
+
+
+def newest_snapshot(directory: Path) -> float | None:
+    """The newest complete snapshot under a namespace's directory: its
+    <type>/<id>/<time> folders, complete once the manifest index.json.blob
+    is written. Child namespaces (ns/) are not included."""
+
+    newest = None
+    for kind in ("vm", "ct", "host"):
+        try:
+            groups = [entry.path for entry in os.scandir(directory / kind) if entry.is_dir()]
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        for group in groups:
+            for snapshot in sorted(os.listdir(group), reverse=True):
+                when = parse_iso(snapshot) if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z", snapshot) else None
+                if when is None or (newest is not None and when <= newest):
+                    continue
+                if os.path.exists(os.path.join(group, snapshot, "index.json.blob")):
+                    newest = when
+                    break
+    return newest
+
+
+def check_datastore(ctx: Context) -> list[Finding]:
+    """datastore:<name>, mounted and initialized, and namespace:<NS>, whose
+    newest backup must be recent; read from the directory tree, so no
+    credentials are needed."""
+
+    section = ctx.config["pbs"]
+    name = section["datastore"]
+    path = datastore_path(ctx, name)
+    namespaces = section["namespaces"]
+    problem = None
+    if path is None:
+        problem = f"PBS has no datastore named {name}"
+    else:
+        mount = ctx.run(["findmnt", "-n", "-o", "TARGET", "--target", path], timeout=10)
+        if mount.rc != 0 or first_line(mount.out) == "/":
+            problem = f"datastore {name}'s path {path} is not on a mounted pool (is pool {section['pool']} imported?)"
+        elif not os.path.isdir(os.path.join(path, ".chunks")):
+            problem = f"datastore {name}'s path {path} has no .chunks directory"
+    if problem:
+        # Namespace ages can't be read; keep their state.
+        return [Finding(f"datastore:{name}", False, "p1", problem),
+                *(Finding(f"namespace:{ns['name']}", None) for ns in namespaces)]
+    findings = [Finding(f"datastore:{name}", True)]
+    now = ctx.now()
+    for ns in namespaces:
+        directory = Path(path, "ns", *"/ns/".join(ns["name"].split("/")).split("/"))
+        key, limit = f"namespace:{ns['name']}", ns["max_age_hours"]
+        if not directory.is_dir():
+            findings.append(Finding(key, False, "p2", f"namespace {ns['name']} does not exist in datastore {name}"))
+            continue
+        newest = newest_snapshot(directory)
+        if newest is None:
+            findings.append(Finding(key, False, "p2", f"namespace {ns['name']} has no complete backup"))
+            continue
+        findings.append(Finding(key, now - newest <= limit * 3600, "p2",
+                                f"namespace {ns['name']}'s newest backup is {human_duration(now - newest)} old "
+                                f"(limit {limit}h); check that cluster's backup jobs"))
+    return findings
+
+
+def check_pbs_tasks(ctx: Context) -> list[Finding]:
+    """pbs-task:<type>:<worker>: the newest finished garbage collection,
+    prune, or verify task of each job; a later success resolves it."""
+
+    result = ctx.run(["proxmox-backup-manager", "task", "list", "--all", "--limit", str(PBS_TASK_LIMIT),
+                      "--output-format", "json"], timeout=60)
+    try:
+        tasks = json.loads(result.out) if result.rc == 0 else None
+    except ValueError:
+        tasks = None
+    if not isinstance(tasks, list):
+        raise CheckError(f"proxmox-backup-manager task list failed: {first_line(result.err or result.out)}")
+    latest: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        if not (isinstance(task, dict) and task.get("worker_type") in PBS_TASK_LABELS
+                and isinstance(task.get("endtime"), int) and task.get("status")):
+            continue
+        key = f"pbs-task:{task['worker_type']}:{task.get('worker_id') or '-'}"
+        if key not in latest or task["endtime"] > latest[key]["endtime"]:
+            latest[key] = task
+    findings = []
+    for key, task in sorted(latest.items()):
+        status = str(task["status"])
+        what = f"{PBS_TASK_LABELS[task['worker_type']]} {task.get('worker_id') or ''}".strip()
+        findings.append(Finding(key, status == "OK", "p2",
+                                f"PBS {what} ended {utc_iso(task['endtime'])} with: {status} "
+                                "(its log is under Administration > Tasks in the PBS web UI)"))
+    # A job whose newest run has left the listing keeps its state until it runs again.
+    for key in ctx.state.get("problems", {}):
+        if key.startswith("pbs-task:") and key not in latest:
+            findings.append(Finding(key, None))
+    return findings
+
+
 @dataclasses.dataclass(frozen=True)
 class Check:
     name: str
     role: str
-    speed: str  # fast | slow | probe
+    speed: str  # fast | slow | probe | backup
     prefixes: tuple[str, ...]
     func: Callable[[Context], list[Finding]]
 
@@ -1128,6 +1532,7 @@ CHECKS = (
     Check("capacity", "host", "slow", ("capacity",), check_capacity),
     Check("smart", "host", "slow",
           ("smart", "smart-read", "nvme-warning", "nvme-spare", "nvme-wear"), check_smart),
+    Check("backups", "host", "backup", ("pbs", "backup"), check_backups),
     Check("tailscale", "qdevice", "fast", ("tailscale",), check_tailscale),
     Check("qnetd", "qdevice", "fast", ("qnetd",), check_qnetd),
     Check("ingress", "qdevice", "probe", ("ingress", "ingress-challenged"), check_ingress),
@@ -1135,6 +1540,14 @@ CHECKS = (
     Check("services", "guest", "fast", ("service",), check_services),
     Check("disk", "guest", "slow", ("disk",), check_disk),
     Check("certs", "guest", "slow", ("cert",), check_certs),
+    Check("services", "pbs", "fast", ("service",), check_pbs_services),
+    Check("zfs", "pbs", "slow", ("zfs",), check_zfs),
+    Check("capacity", "pbs", "slow", ("capacity",), check_capacity),
+    Check("scrub", "pbs", "slow", ("scrub",), check_scrub),
+    Check("smart", "pbs", "slow", ("smart", "smart-read", "smart-wear", "nvme-warning", "nvme-spare", "nvme-wear"),
+          check_pool_smart),
+    Check("datastore", "pbs", "slow", ("datastore", "namespace"), check_datastore),
+    Check("tasks", "pbs", "slow", ("pbs-task",), check_pbs_tasks),
 )
 
 
@@ -1209,7 +1622,36 @@ def validate_config(value: Any) -> dict[str, Any]:
                     and isinstance(probe.get("path"), str) and probe["path"].startswith("/")
                     and isinstance(probe.get("expected_status"), int)):
                 raise ConfigError("qdevice.probes entries need fqdn, path, and expected_status")
+    elif value["role"] == "pbs":
+        value["pbs"] = validate_pbs_section(section)
     return value
+
+
+def validate_pbs_section(section: dict[str, Any]) -> dict[str, Any]:
+    result = {**PBS_DEFAULTS, **section}
+    for key in ("pool", "datastore"):
+        if not isinstance(result.get(key), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", result[key]):
+            raise ConfigError(f"pbs.{key} must be a ZFS pool or datastore name")
+    for key in ("namespace_max_age_hours", "scrub_max_age_days"):
+        number = result[key]
+        if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+            raise ConfigError(f"pbs.{key} must be a positive integer")
+    rating = result.get("tbw_rating_tb")
+    if rating is not None and (not isinstance(rating, int) or isinstance(rating, bool) or rating < 1):
+        raise ConfigError("pbs.tbw_rating_tb must be a positive integer (terabytes)")
+    if not isinstance(result.get("namespaces", []), list):
+        raise ConfigError("pbs.namespaces must be a list")
+    namespaces = []
+    for entry in result.get("namespaces", []):
+        entry = {"name": entry} if isinstance(entry, str) else entry
+        hours = entry.get("max_age_hours", result["namespace_max_age_hours"]) if isinstance(entry, dict) else None
+        if not (isinstance(entry, dict) and isinstance(entry.get("name"), str)
+                and PBS_NAMESPACE_RE.fullmatch(entry["name"])
+                and isinstance(hours, int) and not isinstance(hours, bool) and hours >= 1):
+            raise ConfigError("pbs.namespaces entries need a namespace name and an optional positive max_age_hours")
+        namespaces.append({"name": entry["name"], "max_age_hours": hours})
+    result["namespaces"] = namespaces
+    return result
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -1749,6 +2191,9 @@ def unit_text(role: str, program: str) -> str:
         # systemd turns $$ into a literal $ for the shell.
         condition = ("ExecCondition=/bin/sh -c 'case \"$$(hostname)\" in stage*) exit 1;; "
                      "*) exit 0;; esac'\n")
+    # proxmox-backup-manager takes lock files under /etc and /var even to
+    # read, so the PBS agent cannot have a read-only file system.
+    sandbox = "" if role == "pbs" else "ProtectSystem=strict\nProtectHome=yes\nReadWritePaths=/var/lib/app-ha-monitor\n"
     return f"""[Unit]
 Description=BMAC monitor agent ({role})
 Wants=network-online.target
@@ -1762,10 +2207,7 @@ RestartSec=10
 User=root
 NoNewPrivileges=yes
 PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/var/lib/app-ha-monitor
-StateDirectory=app-ha-monitor
+{sandbox}StateDirectory=app-ha-monitor
 StateDirectoryMode=0700
 
 [Install]

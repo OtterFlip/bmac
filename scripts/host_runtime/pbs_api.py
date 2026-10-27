@@ -20,8 +20,11 @@ they come from the options and the token from the first line of stdin.
   pbs_api.py inspect --storage bmac-pbs
   pbs_api.py inspect --server H [--port P] --datastore D --namespace NS \\
       --username USER@REALM!TOKEN --fingerprint FP --token-stdin
+  pbs_api.py groups --storage bmac-pbs
 
-`inspect` prints one JSON object. Exit status: 0 when the server answered,
+`inspect` prints one JSON object. `groups` prints each backup group in the
+namespace with its newest backup time; the host monitor uses it to check that
+PBS answers and that every scheduled VM's backups are current. Exit status: 0 when the server answered,
 3 when its certificate fingerprint differs, 4 when it cannot be reached,
 5 when it rejects the token, 2 for usage or configuration errors.
 """
@@ -189,6 +192,18 @@ def inspect(client: Client, store: str, namespace: str, username: str) -> dict[s
     return report
 
 
+def groups(client: Client, store: str, namespace: str) -> dict[str, Any]:
+    ns = quote(namespace, safe="")
+    status, rows = client.get(f"/admin/datastore/{quote(store, safe='')}/groups?ns={ns}")
+    if status != 200 or not isinstance(rows, list):
+        raise ApiError(f"PBS refused to list the namespace's backup groups (HTTP {status}): {rows}", 5)
+    return {"groups": sorted(
+        ({"group": f"{row.get('backup-type')}/{row.get('backup-id')}",
+          "last_backup": row.get("last-backup"), "count": row.get("backup-count")}
+         for row in rows if isinstance(row, dict)),
+        key=lambda row: row["group"])}
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -198,7 +213,7 @@ def main(
     storage_priv: Path = STORAGE_PRIV,
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["inspect"])
+    parser.add_argument("command", choices=["inspect", "groups"])
     parser.add_argument("--storage", help="read the settings of this PVE PBS storage")
     parser.add_argument("--server")
     parser.add_argument("--port", type=int, default=8007)
@@ -230,7 +245,9 @@ def main(
         if not token:
             raise ApiError("the API token secret is empty", 2)
         client = client_factory(server, port, username, token, fingerprint)
-        print(json.dumps(inspect(client, store, namespace, username), indent=2, sort_keys=True))
+        report = inspect(client, store, namespace, username) if args.command == "inspect" else \
+            groups(client, store, namespace)
+        print(json.dumps(report, indent=2, sort_keys=True))
         return 0
     except ApiError as error:
         print(f"pbs_api.py: {error}", file=sys.stderr)

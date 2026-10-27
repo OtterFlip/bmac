@@ -240,6 +240,44 @@ sys.exit(0 if any(row.get("name") == sys.argv[2] for row in json.load(open(sys.a
     "${RUN_DIR}/resources.json" "$1"
 }
 
+# domain_holder DOMAIN: prints the registered VM that already routes DOMAIN,
+# as its primary domain, an alias, or one of its staging FQDNs
+# (stageN<name>.<primary>), and fails when no VM does. The registry and the
+# tunnel would refuse it later, after the form.
+domain_holder() {
+  python3 -c '
+import json, re, sys
+domain = sys.argv[2]
+for row in json.load(open(sys.argv[1])):
+    domains = row.get("domains") or {}
+    primary, name = domains.get("primary") or "", row.get("name") or ""
+    if domain == primary or domain in (domains.get("aliases") or []) or (
+            primary and re.fullmatch(r"stage[0-9]+" + re.escape(name) + r"\." + re.escape(primary), domain)):
+        print(name)
+        sys.exit(0)
+sys.exit(1)' "${RUN_DIR}/resources.json" "$1"
+}
+
+# domain_conflicts: one "FIELD<US>MESSAGE" line for the (normalized) primary
+# domain and for each alias that a registered VM already routes.
+domain_conflicts() {
+  local domain holder
+  if holder="$(domain_holder "$PRIMARY_DOMAIN")"; then
+    printf 'primary_domain\x1f%s already routes to %s; enter another FQDN\n' "$PRIMARY_DOMAIN" "$holder"
+  fi
+  for domain in "${ALIAS_DOMAINS[@]}"; do
+    if holder="$(domain_holder "$domain")"; then
+      printf 'aliases\x1fAlias %s already routes to %s\n' "$domain" "$holder"
+    fi
+  done
+}
+
+require_free_domains() {
+  local conflict
+  conflict="$(domain_conflicts | head -n 1)"
+  [[ -z "$conflict" ]] || die "${conflict#*$'\x1f'}"
+}
+
 # A VMID for the new VM: the restore point's own when no live or registered VM
 # uses it (its backup group then continues), otherwise the next one that no
 # VM and no other backup group uses.
@@ -272,11 +310,18 @@ PY
 
 collect_recovery_request() {
   local placement_csv="" aliases_raw="" allocation_choice="sparse" message node default_memory_gib
+  local holder="" domain_help=""
   local -a node_options=()
   default_memory_gib=$(((BACKUP_MEMORY_MB + 1023) / 1024))
   VM_CORES="${REQUESTED_CORES:-$BACKUP_CORES}"
   VM_MEMORY_GIB="${REQUESTED_MEMORY_GIB:-$default_memory_gib}"
   PRIMARY_DOMAIN="$BACKUP_FQDN"
+  # The restore point's FQDN is only a useful default while no VM holds it,
+  # as when its VM is gone.
+  if [[ -n "$BACKUP_FQDN" ]] && holder="$(domain_holder "$BACKUP_FQDN")"; then
+    PRIMARY_DOMAIN=""
+    domain_help="The restore point's FQDN, $BACKUP_FQDN, routes to $holder; this VM needs another one."
+  fi
   REPLICATION_MINUTES="$DEFAULT_REPLICATION_MINUTES"
   INITIAL_NODE="${ONLINE_NODES[0]}"
   if bmac_ui_is_json; then
@@ -291,7 +336,7 @@ collect_recovery_request() {
     bmac_ui_group_add INITIAL_NODE --id initial_node --type select \
       --label "Node to restore on" --required --default "${ONLINE_NODES[0]}" "${node_options[@]}"
     bmac_ui_group_add PRIMARY_DOMAIN --id primary_domain --label "Primary production FQDN" \
-      --default "$BACKUP_FQDN" --placeholder example.com --required
+      --default "$PRIMARY_DOMAIN" --placeholder example.com --required ${domain_help:+--help "$domain_help"}
     bmac_ui_group_add aliases_raw --id aliases --label "Alias domains (comma-separated, optional)" \
       --placeholder "www.example.com"
     bmac_ui_group_add VM_CORES --id cores --type integer --label "vCPUs" \
@@ -315,12 +360,19 @@ collect_recovery_request() {
         die() { printf '%s\n' "$*" >&2; exit 1; }
         PRIMARY_DOMAIN="$(normalize_domain "$PRIMARY_DOMAIN" 2>&1)" || die "$PRIMARY_DOMAIN"
         split_and_normalize_aliases "$aliases_raw"
+        domain_conflicts >&2
       ) 2>&1 >/dev/null)"; then
         if [[ "$message" == *alias* || "$message" == *Alias* ]]; then
           bmac_ui_field_error aliases "$(tail -n 1 <<<"$message")"
         else
           bmac_ui_field_error primary_domain "$(tail -n 1 <<<"$message")"
         fi
+      else
+        local conflict
+        while IFS= read -r conflict; do
+          [[ "$conflict" == *$'\x1f'* ]] &&
+            bmac_ui_field_error "${conflict%%$'\x1f'*}" "${conflict#*$'\x1f'}"
+        done <<<"$message"
       fi
       local field name
       for field in VM_CORES:cores VM_MEMORY_GIB:memory_gib REPLICATION_MINUTES:replication_minutes; do
@@ -334,7 +386,9 @@ collect_recovery_request() {
     prompt_with_default placement_csv "Placement nodes (comma-separated, minimum two)" \
       "$(IFS=,; printf '%s' "${ONLINE_NODES[*]}")"
     prompt_with_default INITIAL_NODE "Node to restore on" "${placement_csv%%,*}"
-    prompt_with_default PRIMARY_DOMAIN "Primary production FQDN" "$BACKUP_FQDN"
+    [[ -z "$domain_help" ]] || info "$domain_help"
+    # shellcheck disable=SC2031 # The form's dry run is a subshell; this path never runs it.
+    prompt_with_default PRIMARY_DOMAIN "Primary production FQDN" "$PRIMARY_DOMAIN"
     read -r -p "Alias domains (comma-separated, optional): " aliases_raw
     prompt_with_default VM_CORES "vCPUs" "$VM_CORES"
     prompt_with_default VM_MEMORY_GIB "RAM in GiB" "$VM_MEMORY_GIB"
@@ -347,6 +401,7 @@ collect_recovery_request() {
   # shellcheck disable=SC2031
   PRIMARY_DOMAIN="$(normalize_domain "$PRIMARY_DOMAIN")" || die "Invalid primary domain"
   split_and_normalize_aliases "$aliases_raw"
+  require_free_domains
   STAGING_DNS_BASE="$(normalize_domain "staging.${PRIMARY_DOMAIN}")" || die "Invalid staging DNS base"
   [[ "$VM_CORES" =~ ^[1-9][0-9]{0,3}$ && "$VM_MEMORY_GIB" =~ ^[1-9][0-9]{0,5}$ &&
     "$REPLICATION_MINUTES" =~ ^[1-9][0-9]*$ ]] || die "vCPUs, RAM, and the replication interval must be positive whole numbers"

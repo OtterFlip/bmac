@@ -288,10 +288,18 @@ class FullRecoveryDashboardTest(unittest.TestCase):
     dashboard drives them."""
 
     def test_the_dashboard_form_defaults_to_the_restore_point(self) -> None:
+        self.check_form([])
+
+    def test_domains_another_vm_routes_are_refused_in_the_form(self) -> None:
+        prod1 = {"name": "prod1", "vmid": 100,
+                 "domains": {"primary": "pinbinapp.com", "aliases": ["www.pinbinapp.com"]}}
+        self.check_form([prod1])
+
+    def check_form(self, registered: list) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             calls = root / "calls"
-            (root / "resources.json").write_text("[]")
+            (root / "resources.json").write_text(json.dumps(registered))
             (root / "allocation.json").write_text(json.dumps({"created": True, "resource": RECORD}))
             harness = root / "harness.sh"
             harness.write_text(textwrap.dedent(f"""\
@@ -328,15 +336,38 @@ class FullRecoveryDashboardTest(unittest.TestCase):
                 values.update(cores=8, memory_gib=16, aliases="")
                 return {"values": values}
 
+            def taken_domains(request):
+                values = {field["id"]: field.get("default") for field in request["fields"]}
+                values.update(primary_domain="stage2prod1.pinbinapp.com", aliases="www.pinbinapp.com")
+                return {"values": values}
+
+            def free_domains(request):
+                errors = request["validation_error"]["field_errors"]
+                self.assertEqual(errors["primary_domain"],
+                                 "stage2prod1.pinbinapp.com already routes to prod1; enter another FQDN")
+                self.assertEqual(errors["aliases"], "Alias www.pinbinapp.com already routes to prod1")
+                values = {field["id"]: field.get("default") for field in request["fields"]}
+                values.update(primary_domain="test.pinbinapp.com", aliases="", cores=8, memory_gib=16)
+                return {"values": values}
+
+            taken = bool(registered)
+            forms = [answer(taken_domains), answer(free_domains)] if taken else [answer(defaults_with_new_compute)]
             run = run_json([str(harness)], scripted(
-                answer({"values": {"purpose": "pinbinapp"}}),
-                answer(defaults_with_new_compute),
+                answer({"values": {"purpose": "pinbinapp-copy" if taken else "pinbinapp"}}),
+                *forms,
                 answer({"confirmed": True}),
             ), env={k: v for k, v in os.environ.items() if not k.startswith("BMAC_UI")}, timeout=60)
             self.assertEqual(run.returncode, 0, run.describe())
-            purpose, form, confirmation = seen
+            purpose, form, *_, confirmation = seen
             self.assertEqual(purpose["field"]["default"], "pinbinapp")
             fields = {field["id"]: field for field in form["fields"]}
+            if taken:
+                # prod1 still routes the restore point's FQDN, so it isn't offered.
+                self.assertFalse(fields["primary_domain"].get("default"))
+                self.assertIn("The restore point's FQDN, pinbinapp.com, routes to prod1",
+                              fields["primary_domain"]["help"])
+                self.assertIn("--primary-domain test.pinbinapp.com", calls.read_text())
+                return
             self.assertEqual(fields["primary_domain"]["default"], "pinbinapp.com")
             self.assertEqual((fields["cores"]["default"], fields["memory_gib"]["default"]), (64, 74))
             self.assertNotIn("disk_gib", fields)

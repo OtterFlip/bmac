@@ -177,6 +177,27 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(json.loads(out)["namespace"], "BTV")
         self.assertNotIn(TOKEN, out + err)
 
+    def test_groups_lists_each_group_with_its_newest_backup(self) -> None:
+        rows = [{"backup-type": "vm", "backup-id": "101", "last-backup": 1793200000, "backup-count": 2},
+                {"backup-type": "vm", "backup-id": "100", "last-backup": 1793210000, "backup-count": 7}]
+        client = FakeClient({"/admin/datastore/pbs/groups": (200, rows)})
+        status, out, err = self.run_main(
+            ["groups", "--server", "h", "--datastore", "pbs", "--namespace", "BTV", "--username", "u@pbs!t",
+             "--fingerprint", FINGERPRINT, "--token-stdin"],
+            client_factory=lambda *_: client, stdin=io.StringIO(TOKEN + "\n"))
+        self.assertEqual(status, 0, msg=err)
+        self.assertEqual(client.paths, ["/admin/datastore/pbs/groups?ns=BTV"])
+        self.assertEqual(json.loads(out), {"groups": [
+            {"group": "vm/100", "last_backup": 1793210000, "count": 7},
+            {"group": "vm/101", "last_backup": 1793200000, "count": 2}]})
+        client = FakeClient({"/admin/datastore/pbs/groups": (403, "permission check failed")})
+        status, _, err = self.run_main(
+            ["groups", "--server", "h", "--datastore", "pbs", "--namespace", "BTV", "--username", "u@pbs!t",
+             "--fingerprint", FINGERPRINT, "--token-stdin"],
+            client_factory=lambda *_: client, stdin=io.StringIO(TOKEN + "\n"))
+        self.assertEqual(status, 5)
+        self.assertIn("HTTP 403", err)
+
     def test_option_mode_reads_the_token_from_stdin(self) -> None:
         created: list[tuple[object, ...]] = []
 

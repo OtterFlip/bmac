@@ -821,11 +821,18 @@ Checks (each with a timeout; a check that cannot run becomes an
   `corosync-qdevice-tool -s`), this host's tunnel replica
   (`http://127.0.0.1:20241/ready`), old Postfix mail (`postqueue -j`), ZFS
   health, pool capacity, and SMART/NVMe health, wear, spare, and counters;
+  every five minutes, while storage `bmac-pbs` exists, whether PBS answers
+  (`pbs:storage`) and the backup age of each scheduled VM this host runs
+  (`backup:<prodN>`, `pbs_api.py groups`);
 - qdevice: ICMP over Tailscale to every host, qnetd connections while the
   QDevice is registered, ingress probes through Cloudflare for every enabled
   probe, and its own filesystems;
 - guest: the systemd services and certificate files in
   `/etc/app-ha-monitor/guest.json`, and its own filesystems.
+- pbs (installed by hand on the PBS server, never by a cluster): the PBS
+  services, pool health, capacity, and scrub age, the SMART attributes of the
+  pool's own member disks, the datastore's mount, failed garbage collection,
+  prune, and verify runs, and each listed namespace's newest backup.
 
 Connectivity checks open after `MONITOR_FAST_FAIL_THRESHOLD` failures and
 resolve after as many passes; monitored services after two failures; slow
@@ -901,12 +908,15 @@ restore-point protection (`protect_restore_point.sh`), Rollback Restore
 (`rollback_restore.sh`), and Full Recovery (`full_recovery.sh`). They share
 `scripts/lib/backups.sh`, and the host-side `scripts/host_runtime/pbs_api.py`
 reads the PBS account. `add_prod_vm.sh` skips VMIDs that have backups, and
-`remove_prod_vm.sh` removes the VM's backup job. The rest is still design,
-built in this order:
+`remove_prod_vm.sh` removes the VM's backup job. Each host's monitor agent
+reports `pbs:storage` and the backup age of the VMs it runs, and the agent's
+`pbs` role monitors the PBS server
+([`MONITORING_AND_ALERTING.md`](MONITORING_AND_ALERTING.md#64-pbs-server-role-pbs)).
+The rest is still design, built in this order:
 
-1. Setup PBS, backup schedules, Back up now, the restore-point list, and
-   restore-point protection (built); backup-age monitoring; the PBS server
-   monitor.
+1. Setup PBS, backup schedules, Back up now, the restore-point list,
+   restore-point protection, backup-age monitoring, and the PBS server
+   monitor (all built).
 2. Rollback Restore and Full Recovery, both as full (not live) restores
    (built).
 3. Instant Restore - Permanent (PVE live restore) and Instant Restore - Test

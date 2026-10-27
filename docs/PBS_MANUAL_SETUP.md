@@ -792,6 +792,10 @@ used,available pbs`; alert below 10%), SMART attributes of the pool member
 disks, PBS services (`proxmox-backup`, `proxmox-backup-proxy`), prune/GC/verify
 task results, and per-namespace backup freshness.
 
+BMAC's monitor agent checks all of these in its `pbs` role. To install it, see
+"Monitoring the PBS server" in BMAC's
+[`README.md`](../README.md#monitoring-the-pbs-server).
+
 ---
 
 ## 13. Moving the pool to another PBS host

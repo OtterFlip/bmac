@@ -816,6 +816,350 @@ class GuestCheckTest(unittest.TestCase):
         self.assertTrue(all(f.ok for f in found.values()))
 
 
+STORAGE_CFG = """dir: local
+	path /var/lib/vz
+	content iso,vztmpl,backup
+
+pbs: bmac-pbs
+	datastore pbs
+	server 203.0.113.7
+	content backup
+	fingerprint 5d:17
+	namespace BTV
+	username btv@pbs!pve
+"""
+
+JOBS_CFG = """vzdump: bmac-prod1
+	schedule 0/4:05
+	enabled 1
+	notes-template bmac prod1 slug=pinbinapp fqdn=pinbinapp.com
+	prune-backups keep-all=1
+	storage bmac-pbs
+	vmid 100
+
+vzdump: bmac-prod2
+	schedule 0/4:12
+	enabled 0
+	storage bmac-pbs
+	vmid 101
+
+vzdump: bmac-prod3
+	schedule 01:19
+	storage bmac-pbs
+	vmid 102
+
+vzdump: backup-1a2b3c
+	schedule sat 02:00
+	storage local
+	vmid 100
+"""
+
+
+def groups_runner(groups: list | None = None, rc: int = 0, err: str = "") -> FakeRunner:
+    runner = FakeRunner()
+    out = "" if groups is None else json.dumps({"groups": groups})
+    runner.set((sys.executable, "-I", str(monitor.PBS_API), "groups", "--storage", "bmac-pbs"), out, rc=rc, err=err)
+    return runner
+
+
+class BackupCheckTest(unittest.TestCase):
+    """The host role's backup check: PBS reachability and each scheduled VM's
+    newest backup, reported by the host that runs the VM."""
+
+    FILES = {
+        "/etc/pve/storage.cfg": STORAGE_CFG,
+        "/etc/pve/jobs.cfg": JOBS_CFG,
+        "/etc/pve/nodes/mox1/qemu-server/100.conf": "name: prod1\n",
+        "/etc/pve/nodes/mox1/qemu-server/101.conf": "name: prod2\n",
+        "/etc/pve/nodes/mox1/qemu-server/102.conf": "name: prod3\n",
+    }
+
+    def check(self, runner: FakeRunner, **files: str) -> dict:
+        return by_key(monitor.check_backups(context(host_config(), runner, files={**self.FILES, **files})))
+
+    def test_recent_and_overdue_backups(self) -> None:
+        found = self.check(groups_runner([
+            {"group": "vm/100", "last_backup": T0 - 8 * 3600, "count": 6},
+            {"group": "vm/101", "last_backup": T0 - 99 * 3600, "count": 6},
+            {"group": "vm/102", "last_backup": T0 - 50 * 3600, "count": 2},
+        ]))
+        self.assertTrue(found["pbs:storage"].ok)
+        self.assertEqual(found["pbs:storage"].kind, "fast")
+        # Every 4 hours: two missed runs plus an hour is 9 hours.
+        self.assertTrue(found["backup:prod1"].ok)
+        # A disabled job is not watched; a daily one allows 49 hours.
+        self.assertNotIn("backup:prod2", found)
+        self.assertFalse(found["backup:prod3"].ok)
+        self.assertEqual(found["backup:prod3"].priority, "p2")
+        self.assertIn("prod3's newest backup is 2d2h old, but job bmac-prod3 backs it up every 24h",
+                      found["backup:prod3"].message)
+        found = self.check(groups_runner([{"group": "vm/100", "last_backup": T0 - 9.5 * 3600, "count": 6}]))
+        self.assertFalse(found["backup:prod1"].ok)
+        self.assertIn("alert after 9h", found["backup:prod1"].message)
+
+    def test_only_the_host_running_the_vm_reports_it(self) -> None:
+        files = {**self.FILES}
+        del files["/etc/pve/nodes/mox1/qemu-server/100.conf"]
+        runner = groups_runner([{"group": "vm/100", "last_backup": T0 - 99 * 3600, "count": 6}])
+        found = by_key(monitor.check_backups(context(host_config(), runner, files=files)))
+        self.assertNotIn("backup:prod1", found)
+        self.assertTrue(found["pbs:storage"].ok)
+
+    def test_a_vm_without_backups_yet_holds_its_state(self) -> None:
+        found = self.check(groups_runner([]))
+        self.assertIsNone(found["backup:prod1"].ok)
+
+    def test_unreachable_pbs_opens_storage_and_holds_backup_ages(self) -> None:
+        found = self.check(groups_runner(rc=4, err="pbs_api.py: cannot reach PBS at 203.0.113.7:8007: timed out\n"))
+        self.assertFalse(found["pbs:storage"].ok)
+        self.assertEqual(found["pbs:storage"].message,
+                         "this host cannot use PBS storage bmac-pbs: cannot reach PBS at 203.0.113.7:8007: timed out")
+        self.assertIsNone(found["backup:prod1"].ok)
+
+    def test_without_the_storage_nothing_is_checked(self) -> None:
+        runner = groups_runner([])
+        self.assertEqual(monitor.check_backups(context(host_config(), runner, files={})), [])
+        disabled = STORAGE_CFG.replace("\tcontent backup\n", "\tcontent backup\n\tdisable\n")
+        self.assertEqual(self.check(runner, **{"/etc/pve/storage.cfg": disabled}), {})
+        self.assertEqual(runner.calls, [])
+
+    def test_schedules_bmac_writes(self) -> None:
+        for schedule, hours in (("0/1:05", 1), ("0/12:40", 12), ("01:19", 24), ("sat 02:00", None),
+                                ("0/5:00", None), ("", None)):
+            with self.subTest(schedule=schedule):
+                self.assertEqual(monitor.backup_interval_hours(schedule), hours)
+
+
+PBS_POOL_STATUS = """  pool: pbs
+ state: ONLINE
+  scan: scrub repaired 0B in 00:41:07 with 0 errors on Sun Oct 11 00:41:08 2026
+config:
+
+	NAME                                                         STATE     READ WRITE CKSUM
+	pbs                                                          ONLINE       0     0     0
+	  raidz1-0                                                   ONLINE       0     0     0
+	    /dev/disk/by-id/ata-Samsung_SSD_870_QVO_8TB_SERIALP1-part1  ONLINE       0     0     0
+	    /dev/disk/by-id/ata-Samsung_SSD_870_QVO_8TB_SERIALP2-part1  ONLINE       0     0     0
+
+errors: No known data errors
+"""
+
+
+def samsung_report(serial: str, **changes: tuple[int, int]) -> str:
+    """Captured from a Samsung 870 QVO passed through to the PBS VM as a LUN;
+    changes map an attribute id to (normalized value, raw value)."""
+
+    rows = [(5, "Reallocated_Sector_Ct", 100, 10, 0), (9, "Power_On_Hours", 99, 0, 25),
+            (177, "Wear_Leveling_Count", 100, 0, 0), (179, "Used_Rsvd_Blk_Cnt_Tot", 100, 10, 0),
+            (183, "Runtime_Bad_Block", 100, 10, 0), (187, "Uncorrectable_Error_Cnt", 100, 0, 0),
+            (190, "Airflow_Temperature_Cel", 74, 0, 26), (199, "CRC_Error_Count", 100, 0, 0),
+            (241, "Total_LBAs_Written", 99, 0, 1294688)]
+    table = []
+    for identifier, name, value, threshold, raw in rows:
+        value, raw = changes.get(f"a{identifier}", (value, raw))
+        table.append({"id": identifier, "name": name, "value": value, "worst": value, "thresh": threshold,
+                      "when_failed": "", "raw": {"value": raw, "string": str(raw)}})
+    return json.dumps({
+        "smartctl": {"exit_status": 0, "messages": [
+            {"string": "Warning: This result is based on an Attribute check.", "severity": "warning"}]},
+        "device": {"name": "/dev/sdd", "info_name": "/dev/sdd [SAT]", "type": "sat", "protocol": "ATA"},
+        "model_name": "Samsung SSD 870 QVO 8TB", "serial_number": serial, "logical_block_size": 512,
+        "smart_status": {"passed": True}, "ata_smart_attributes": {"revision": 1, "table": table},
+    })
+
+
+def pbs_config(**section) -> dict:
+    return monitor.validate_config({
+        "schema_version": 1, "cluster": "PBS", "node": "pbs", "role": "pbs",
+        "ping_url": "https://hc-ping.com/00000000-0000-0000-0000-000000000000",
+        "pbs": {"pool": "pbs", "datastore": "pbs", "namespaces": ["BTV", {"name": "FB", "max_age_hours": 30}],
+                "tbw_rating_tb": 2880, **section},
+    })
+
+
+class PbsCheckTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def smart_runner(self, sdb: str, sdc: str | None = None, auto_rc: int = 0) -> FakeRunner:
+        runner = FakeRunner()
+        runner.set(("zpool", "status", "-P", "pbs"), PBS_POOL_STATUS)
+        for serial, disk in (("SERIALP1", "sdb"), ("SERIALP2", "sdc")):
+            member = f"/dev/disk/by-id/ata-Samsung_SSD_870_QVO_8TB_{serial}-part1"
+            runner.set(("lsblk", "-ndo", "PKNAME", member), f"{disk}\n")
+        runner.set(("smartctl", "-j", "-i", "-H", "-A", "/dev/sdb"), sdb, rc=auto_rc)
+        runner.set(("smartctl", "-j", "-d", "sat", "-i", "-H", "-A", "/dev/sdb"), sdb)
+        runner.set(("smartctl", "-j", "-i", "-H", "-A", "/dev/sdc"), sdc or samsung_report("SERIALP2"))
+        return runner
+
+    def test_pool_disks_come_from_the_pool_and_are_keyed_by_serial(self) -> None:
+        runner = self.smart_runner(samsung_report("SERIALP1"))
+        ctx = context(pbs_config(), runner)
+        found = by_key(monitor.check_pool_smart(ctx))
+        self.assertEqual(sorted(found), [
+            "smart-read:/dev/sdb", "smart-read:/dev/sdc", "smart-wear:SERIALP1", "smart-wear:SERIALP2",
+            "smart:SERIALP1", "smart:SERIALP2"])
+        self.assertTrue(all(finding.ok for finding in found.values()))
+        self.assertEqual(ctx.baselines["SERIALP1"], {"5": 0, "179": 0, "183": 0, "187": 0, "199": 0})
+        self.assertNotIn(("smartctl", "--scan", "-j"), runner.calls)
+
+    def test_sat_is_tried_when_automatic_detection_fails(self) -> None:
+        runner = self.smart_runner(samsung_report("SERIALP1"), auto_rc=2)
+        found = by_key(monitor.check_pool_smart(context(pbs_config(), runner)))
+        self.assertTrue(found["smart:SERIALP1"].ok)
+        self.assertIn(("smartctl", "-j", "-d", "sat", "-i", "-H", "-A", "/dev/sdb"), runner.calls)
+        runner = self.smart_runner("", auto_rc=2)
+        runner.set(("smartctl", "-j", "-d", "sat", "-i", "-H", "-A", "/dev/sdb"), "", rc=2)
+        found = by_key(monitor.check_pool_smart(context(pbs_config(), runner)))
+        self.assertFalse(found["smart-read:/dev/sdb"].ok)
+        self.assertIn("device open failed", found["smart-read:/dev/sdb"].message)
+        self.assertIn("rawio", found["smart-read:/dev/sdb"].message)
+
+    def test_counters_thresholds_and_wear(self) -> None:
+        ctx = context(pbs_config(), self.smart_runner(samsung_report("SERIALP1")))
+        monitor.check_pool_smart(ctx)
+        state = monitor.new_state()
+        state["smart_baselines"] = ctx.baselines
+
+        def found(report: str, **config) -> dict:
+            return by_key(monitor.check_pool_smart(
+                context(pbs_config(**config), self.smart_runner(report), state=state)))
+
+        risen = found(samsung_report("SERIALP1", a187=(100, 3)))["smart:SERIALP1"]
+        self.assertEqual((risen.ok, risen.priority), (False, "p2"))
+        self.assertIn("Uncorrectable_Error_Cnt rose from 0 to 3", risen.message)
+        self.assertIn("app_ha_monitor.py reset-smart-baseline SERIALP1", risen.message)
+        failing = found(samsung_report("SERIALP1", a179=(9, 0)))["smart:SERIALP1"]
+        self.assertEqual((failing.ok, failing.priority), (False, "p1"))
+        self.assertIn("Used_Rsvd_Blk_Cnt_Tot is 9, at or below its failure threshold 10", failing.message)
+        worn = found(samsung_report("SERIALP1", a177=(9, 2900)))["smart-wear:SERIALP1"]
+        self.assertFalse(worn.ok)
+        self.assertIn("Wear_Leveling_Count is 9 (91% of its rated wear used)", worn.message)
+        # 5.1e12 LBAs of 512 bytes is 2,611 TB: over 90% of a 2,880 TB rating.
+        written = found(samsung_report("SERIALP1", a241=(99, 5_100_000_000_000)))["smart-wear:SERIALP1"]
+        self.assertIn("2611 TB written of its 2880 TB rating", written.message)
+        self.assertTrue(found(samsung_report("SERIALP1", a241=(99, 5_100_000_000_000)),
+                              tbw_rating_tb=None)["smart-wear:SERIALP1"].ok)
+
+    def test_scrub_age_running_and_never_scrubbed(self) -> None:
+        finished = monitor.time.mktime(monitor.time.strptime("Sun Oct 11 00:41:08 2026", "%a %b %d %H:%M:%S %Y"))
+
+        def scrub(status: str, now: float, creation: str = "") -> monitor.Finding:
+            runner = FakeRunner()
+            runner.set(("zpool", "status", "-P", "pbs"), status)
+            runner.set(("zfs", "get", "-H", "-p", "-o", "value", "creation", "pbs"), creation)
+            return monitor.check_scrub(monitor.Context(pbs_config(), runner=runner, now=lambda: now))[0]
+
+        self.assertTrue(scrub(PBS_POOL_STATUS, finished + 39 * 86400).ok)
+        old = scrub(PBS_POOL_STATUS, finished + 41 * 86400)
+        self.assertEqual((old.key, old.ok, old.priority), ("scrub:pbs", False, "p2"))
+        self.assertIn("pool pbs was last scrubbed 41d0h ago, more than 40 days", old.message)
+        running = PBS_POOL_STATUS.replace("scrub repaired 0B in 00:41:07 with 0 errors on Sun Oct 11 00:41:08 2026",
+                                          "scrub in progress since Sun Nov  8 00:24:01 2026")
+        self.assertIsNone(scrub(running, finished + 60 * 86400).ok)
+        never = "\n".join(line for line in PBS_POOL_STATUS.splitlines() if "scan:" not in line)
+        self.assertTrue(scrub(never, T0, creation=f"{int(T0 - 3 * 86400)}\n").ok)
+        self.assertIn("has no completed scrub on record",
+                      scrub(never, T0, creation=f"{int(T0 - 45 * 86400)}\n").message)
+
+    def datastore_runner(self, mounted: str = "/mnt/datastore/pbs") -> FakeRunner:
+        runner = FakeRunner()
+        path = str(self.root / "pbs")
+        runner.set(("proxmox-backup-manager", "datastore", "list", "--output-format", "json"),
+                   json.dumps([{"gc-schedule": "sat 06:00", "name": "pbs", "path": path}]))
+        runner.set(("findmnt", "-n", "-o", "TARGET", "--target", path), mounted + "\n")
+        return runner
+
+    def snapshot(self, namespace: str, group: str, when: float, complete: bool = True) -> None:
+        directory = self.root / "pbs" / "ns" / namespace / group / monitor.utc_iso(when)
+        directory.mkdir(parents=True)
+        if complete:
+            (directory / "index.json.blob").write_bytes(b"")
+
+    def test_datastore_and_namespace_freshness(self) -> None:
+        (self.root / "pbs" / ".chunks").mkdir(parents=True)
+        self.snapshot("BTV", "vm/100", T0 - 9 * 3600)
+        self.snapshot("BTV", "vm/101", T0 - 7 * 3600)
+        self.snapshot("BTV", "vm/101", T0 - 600, complete=False)
+        self.snapshot("BTV", "ns/child/vm/200", T0 - 60)
+        self.snapshot("FB", "vm/100", T0 - 31 * 3600)
+        found = by_key(monitor.check_datastore(context(pbs_config(), self.datastore_runner())))
+        self.assertTrue(found["datastore:pbs"].ok)
+        # The newest complete backup, outside child namespaces: 7 hours old.
+        self.assertTrue(found["namespace:BTV"].ok)
+        self.assertFalse(found["namespace:FB"].ok)
+        self.assertIn("namespace FB's newest backup is 31h00m old (limit 30h)", found["namespace:FB"].message)
+        found = by_key(monitor.check_datastore(context(
+            pbs_config(namespaces=["SS", "BTV/child"]), self.datastore_runner())))
+        self.assertIn("does not exist", found["namespace:SS"].message)
+        self.assertTrue(found["namespace:BTV/child"].ok)
+
+    def test_an_unmounted_datastore_holds_namespace_state(self) -> None:
+        (self.root / "pbs").mkdir()
+        found = by_key(monitor.check_datastore(context(pbs_config(), self.datastore_runner(mounted="/"))))
+        self.assertEqual((found["datastore:pbs"].ok, found["datastore:pbs"].priority), (False, "p1"))
+        self.assertIn("is not on a mounted pool", found["datastore:pbs"].message)
+        self.assertIsNone(found["namespace:BTV"].ok)
+        (self.root / "pbs" / ".chunks").mkdir()
+        self.snapshot("BTV", "vm/100", T0 - 60)
+        (self.root / "pbs" / "ns" / "FB").mkdir()
+        found = by_key(monitor.check_datastore(context(pbs_config(), self.datastore_runner())))
+        self.assertTrue(found["datastore:pbs"].ok)
+        self.assertIn("no complete backup", found["namespace:FB"].message)
+
+    def test_newest_task_of_each_job_decides(self) -> None:
+        def task(kind: str, worker: str | None, end: int, status: str | None = "OK") -> dict:
+            row = {"worker_type": kind, "worker_id": worker, "starttime": end - 5, "endtime": end,
+                   "upid": f"UPID:pbs:0:0:0:0:{kind}:{worker}:root@pam:"}
+            if status is not None:
+                row["status"] = status
+            return row
+
+        tasks = [task("prunejob", "pbs:BTV", 300), task("prunejob", "pbs:BTV", 200, "ERROR: oops"),
+                 task("garbage_collection", "pbs", 100, "ERROR: No space left on device"),
+                 task("verificationjob", "pbs:verify-pbs", 150, "WARNINGS: 2"),
+                 task("aptupdate", None, 400, "ERROR: offline"), task("backup", "pbs:BTV:vm/100", 50, "ERROR: x")]
+        runner = FakeRunner()
+        argv = ("proxmox-backup-manager", "task", "list", "--all", "--limit", "1000", "--output-format", "json")
+        runner.set(argv, json.dumps(tasks))
+        state = monitor.new_state()
+        state["problems"]["pbs-task:prune:pbs"] = {"priority": "p2", "message": "old"}
+        found = by_key(monitor.check_pbs_tasks(context(pbs_config(), runner, state=state)))
+        self.assertEqual(sorted(found), ["pbs-task:garbage_collection:pbs", "pbs-task:prune:pbs",
+                                         "pbs-task:prunejob:pbs:BTV", "pbs-task:verificationjob:pbs:verify-pbs"])
+        self.assertTrue(found["pbs-task:prunejob:pbs:BTV"].ok)
+        self.assertFalse(found["pbs-task:garbage_collection:pbs"].ok)
+        self.assertIn("PBS garbage collection pbs ended 1970-01-01T00:01:40Z with: ERROR: No space left on device",
+                      found["pbs-task:garbage_collection:pbs"].message)
+        self.assertFalse(found["pbs-task:verificationjob:pbs:verify-pbs"].ok)
+        # A problem whose job has left the listing holds until the job runs again.
+        self.assertIsNone(found["pbs-task:prune:pbs"].ok)
+
+    def test_services_and_the_role_s_checks(self) -> None:
+        runner = FakeRunner()
+        runner.set(("systemctl", "is-active", "proxmox-backup.service"), "active\n")
+        runner.set(("systemctl", "is-active", "proxmox-backup-proxy.service"), "failed\n", rc=3)
+        found = by_key(monitor.check_pbs_services(context(pbs_config(), runner)))
+        self.assertTrue(found["service:proxmox-backup.service"].ok)
+        self.assertEqual((found["service:proxmox-backup-proxy.service"].ok,
+                          found["service:proxmox-backup-proxy.service"].kind), (False, "service"))
+        self.assertEqual([check.name for check in monitor.checks_for("pbs")],
+                         ["services", "zfs", "capacity", "scrub", "smart", "datastore", "tasks"])
+
+    def test_pbs_config_validation(self) -> None:
+        config = pbs_config()
+        self.assertEqual(config["pbs"]["namespaces"], [{"name": "BTV", "max_age_hours": 8},
+                                                       {"name": "FB", "max_age_hours": 30}])
+        self.assertEqual(config["pbs"]["scrub_max_age_days"], 40)
+        self.assertEqual(config["intervals"]["backup"], 300)
+        for change in ({"pool": ""}, {"namespaces": "BTV"}, {"namespaces": ["../x"]},
+                       {"namespaces": [{"name": "BTV", "max_age_hours": 0}]}, {"tbw_rating_tb": "2880"},
+                       {"scrub_max_age_days": True}):
+            with self.subTest(change=change), self.assertRaises(monitor.ConfigError):
+                pbs_config(**change)
+
+
 class RecordingPinger:
     """A fake Healthchecks ping endpoint on 127.0.0.1 that records requests."""
 
@@ -1217,6 +1561,9 @@ class CommandLineTest(unittest.TestCase):
         self.assertIn("ExecStart=/usr/bin/python3 -I /usr/local/lib/app-ha-proxmox/lib/app_ha_monitor.py run", host)
         with self.assertRaises(monitor.ConfigError):
             monitor.unit_text("host", "relative.py")
+        pbs = monitor.unit_text("pbs", "/usr/local/lib/app-ha-monitor/app_ha_monitor.py")
+        self.assertNotIn("ProtectSystem", pbs)
+        self.assertIn("StateDirectory=app-ha-monitor", pbs)
 
 
 if __name__ == "__main__":

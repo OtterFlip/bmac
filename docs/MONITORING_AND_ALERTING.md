@@ -43,6 +43,14 @@ optionally as Pushover notifications). Staging VMs are never monitored.
   - a drive can't be read.
 - **Proxmox's own email:** alert mail has been stuck in a host's Postfix queue
   for over an hour.
+- **Backups:** a host can't read the cluster's PBS namespace, or a scheduled
+  production VM's newest backup is more than two runs old (reported by the
+  host running the VM).
+- **The PBS server (optional, installed by hand):** the server goes silent;
+  its PBS services stop; its pool is degraded, nearly full, or overdue for a
+  scrub; a pool disk's SMART attributes reach a threshold, rise, or approach
+  rated wear; the datastore isn't mounted; a garbage collection, prune, or
+  verify run fails; or a cluster's namespace has no recent backup.
 - **Inside production VMs:** a watched systemd service isn't running, a
   filesystem has less than 10% free, or a watched certificate expires within
   14 days (high priority within 3 days, or expired) or can't be read.
@@ -415,6 +423,8 @@ Problem keys are stable strings so state can be diffed between cycles:
 | `nvme-spare:<serial>` | host | NVMe available spare at or near its threshold |
 | `nvme-wear:<serial>` | host | NVMe `percentage_used` at or above the warning level |
 | `smart-read:<serial>` | host | `smartctl` failed or timed out on a disk |
+| `pbs:storage` | host | this host cannot read the cluster's PBS namespace through storage `bmac-pbs` |
+| `backup:<prodN>` | host | the newest backup of a VM this host runs is more than two scheduled runs old |
 | `tailscale:<host>` | qdevice | ICMP over Tailscale to a host fails |
 | `qnetd:<host>` | qdevice | host not connected to qnetd while the QDevice is registered |
 | `qnetd:service` | qdevice | `corosync-qnetd` is not running, or `corosync-qnetd-tool -l` fails, while the QDevice is registered |
@@ -423,6 +433,15 @@ Problem keys are stable strings so state can be diffed between cycles:
 | `service:<unit>` | guest | monitored unit not active |
 | `disk:<mountpoint>` | guest (and qdevice) | filesystem free space below threshold |
 | `cert:<path>` | guest | certificate expires soon, has expired, or cannot be read |
+| `service:<unit>` | pbs | `proxmox-backup` or `proxmox-backup-proxy` not active |
+| `zfs:<pool>`, `capacity:<pool>` | pbs | as for a host |
+| `scrub:<pool>` | pbs | the backup pool's last completed scrub is too old |
+| `smart:<serial>` | pbs | a pool disk attribute is at its failure threshold, or a watched counter rose |
+| `smart-wear:<serial>` | pbs | a pool disk is near its rated wear or TBW |
+| `smart-read:<device>` | pbs | `smartctl` could not read a pool disk |
+| `datastore:<name>` | pbs | the datastore is missing, or its pool isn't mounted |
+| `namespace:<NS>` | pbs | a cluster's namespace has no recent complete backup |
+| `pbs-task:<type>:<worker>` | pbs | the newest garbage collection, prune, or verify run of a job failed |
 | `agent:<check>` | any | a check itself crashed (exception) |
 
 `<serial>` is the drive serial number from `smartctl -j` output, so the key
@@ -474,6 +493,8 @@ timeout and runs in a way that one hung command cannot stop the heartbeat
 | NVMe media errors | slow | same JSON, `media_errors` | increased since the stored baseline | p2 |
 | ATA SMART counters | slow | same JSON, `ata_smart_attributes.table` | raw value increased since the stored baseline for attribute 5 (Reallocated_Sector_Ct), 197 (Current_Pending_Sector), or 198 (Offline_Uncorrectable) | p2 |
 | SMART readability | slow | same | `smartctl` exits with an error bit that means it could not read the disk, or times out (30s) | p2 |
+| PBS storage | backup (every 5 minutes) | only while `/etc/pve/storage.cfg` has an enabled `pbs: bmac-pbs`: `pbs_api.py groups --storage bmac-pbs`, the fingerprint-pinned read of the namespace's backup groups that the Backups page also uses | PBS can't be reached, its certificate fingerprint changed, it rejects the token, or it refuses the listing (`pbs:storage`, debounced like a fast check) | p2 |
+| Backup age | backup | for each enabled `bmac-prodN` job in `/etc/pve/jobs.cfg` whose VM's config is under this node (`/etc/pve/nodes/<node>/qemu-server/`), the group's `last-backup` from the same call | older than two scheduled runs plus an hour, as on the Backups page (9 hours for every 4 hours). Nothing is reported for a VM without a backup yet, for a schedule BMAC didn't write, or while PBS can't be read (`backup:<prodN>` keeps its state) | p2 |
 
 Notes:
 
@@ -518,6 +539,11 @@ Notes:
 - The wear and spare checks do not need a baseline. They are threshold checks
   evaluated on every slow run, so a newly added drive that is already worn is
   reported on the agent's first run.
+- Only the host running a VM reports its backup age, so a VM is reported once.
+  After a failover the old host resolves `backup:<prodN>` ("no longer
+  present") and the new owner opens it again if the backup is still overdue.
+  Every host reports its own `pbs:storage`, because each host reaches PBS on
+  its own path.
 
 ### 6.2 QDevice (`role: qdevice`)
 
@@ -583,6 +609,62 @@ staging clone; the in-agent check covers renames while running.
 If the guest's egress breaks, its heartbeats stop and the dead-man switch
 fires, which is the intended signal.
 
+### 6.4 PBS server (`role: pbs`)
+
+The Proxmox Backup Server is not part of any cluster, and one server can hold
+several clusters' namespaces. The operator installs the agent on it by hand
+(README.md, "Monitoring the PBS server") with its own Healthchecks check; no
+cluster workflow installs, updates, or deletes it. The check must not carry a
+`bmac-cluster-*` tag, or that cluster's runtime update would delete it as
+obsolete.
+
+The agent works the same whether PBS is a VM with its data disks passed
+through as SCSI LUNs (the operator's setup, `PBS_MANUAL_SETUP.md` appendix A)
+or a physical machine, and never asks which.
+
+| Check | Speed | How | Problem when | Priority |
+|---|---|---|---|---|
+| PBS services | fast | `systemctl is-active` for `proxmox-backup.service` and `proxmox-backup-proxy.service` | not `active` (debounced like guest services) | p1 |
+| ZFS health, capacity | slow | as for a host, for every pool | as for a host | as for a host |
+| Scrub age | slow | the `scan:` line of `zpool status -P <pool>` (`scrub repaired ... on <local time>`); with no completed scrub on record (none yet, canceled, or a resilver since), the pool's `creation` | older than `scrub_max_age_days` (40: Debian's monthly scrub runs on the second Sunday, up to 35 days apart). A running scrub holds the state | p2 |
+| SMART, from the pool | slow | the pool's `/dev/` members from `zpool status -P`, each resolved to its whole disk with `lsblk -ndo PKNAME` (a whole-disk member stays as is). Never `smartctl --scan`, so a VM's virtual OS disk is never read. `smartctl -j -i -H -A <disk>` with automatic detection, then `-d sat` if that can't read or identify the drive | any attribute at or below its own non-zero threshold (p1); a raw counter above its baseline for 5, 179, 183, 187, 197, 198, or 199 (p2; a missing attribute doesn't apply, and Samsung SSDs lack 197 and 198) | p1/p2 |
+| Wear | slow | attribute 177's normalized value (percent of life left) and attribute 241 (LBAs written, times `logical_block_size`) against `tbw_rating_tb` | at or above `nvme_wear_warn_percent` (90) of rated wear, or of the TBW rating | p2 |
+| Datastore | slow | its path from `proxmox-backup-manager datastore list`; `findmnt --target <path>` | no such datastore, its path is on `/` (pool not mounted), or it has no `.chunks` directory | p1 |
+| Namespace freshness | slow | the datastore's directory tree: `ns/<NS>/{vm,ct,host}/<id>/<RFC 3339 time>/`, counting a snapshot once its `index.json.blob` manifest exists; child namespaces (`ns/<NS>/ns/...`) are separate entries | the newest complete snapshot is older than the namespace's `max_age_hours` (default 8), the namespace has none, or doesn't exist. Not checked while the datastore is unavailable | p2 |
+| PBS jobs | slow | `proxmox-backup-manager task list --all --limit 1000 --output-format json`; for each garbage collection, prune, prune job, and verify task, the newest finished run per worker ID | its status is not `OK` (an error or `WARNINGS: n`); a later successful run resolves it | p2 |
+
+Notes:
+
+- The overall-health bit is ignored. Through LUN passthrough the ATA return
+  registers that carry it don't reach the guest, and smartctl's `PASSED` is
+  then only its own attribute check, which the threshold rule already covers.
+  The same rule serves a physical machine.
+- `smart-read:<device>` usually means a passthrough configuration problem in
+  a VM (a missing `rawio='yes'` or the host's AppArmor `sys_rawio` rule), not
+  a dying disk.
+- SMART baselines are reset on the PBS server itself, with
+  `app_ha_monitor.py reset-smart-baseline <serial>`.
+- The task listing holds at most 1,000 tasks. A job whose newest run has left
+  it (a weekly garbage collection on a busy server) keeps its problem state
+  until it runs again.
+- No PBS credentials are used: everything is read as root on the server.
+- `proxmox-backup-manager` takes lock files under `/etc` and `/var` even to
+  read, so this role's unit omits `ProtectSystem=strict`, `ProtectHome`, and
+  `ReadWritePaths`.
+
+The `pbs` section of the agent config:
+
+```json
+"pbs": {
+  "pool": "pbs",
+  "datastore": "pbs",
+  "namespaces": ["ExampleNamespace1", {"name": "ExampleNamespace2", "max_age_hours": 49}],
+  "namespace_max_age_hours": 8,
+  "scrub_max_age_days": 40,
+  "tbw_rating_tb": 2880
+}
+```
+
 ## 7. Debounce, hysteresis, priorities, and reminders
 
 ### Which checks are debounced
@@ -592,6 +674,7 @@ fires, which is the intended signal.
 | Fast connectivity checks (corosync links, quorum, qdevice vote, Tailscale ICMP, qnetd, ingress, cloudflared) | `MONITOR_FAST_FAIL_THRESHOLD` consecutive failures (default 3; about 90s at 30s intervals) | the same number of consecutive passes |
 | Monitored guest services | 2 consecutive failures (allows a normal restart during a deploy) | 1 pass |
 | Postfix queue age | 1 (the age threshold already debounces) | 1 pass |
+| A host's `pbs:storage` | `MONITOR_FAST_FAIL_THRESHOLD` consecutive failures of the five-minute backup check (15 minutes by default), so a PBS reboot doesn't alert | the same number of passes |
 | Slow checks: SMART, ZFS health, capacity, certificates, filesystems | **1: report on first detection, never wait for later runs** | 1 pass, except capacity hysteresis below |
 
 ### Capacity hysteresis
@@ -725,6 +808,8 @@ WantedBy=multi-user.target
 ```
 
 - The `ExecCondition` line is only installed on production VMs.
+- The PBS server's unit (`print-unit --role pbs`) has no `ProtectSystem`,
+  `ProtectHome`, or `ReadWritePaths` lines (see [§6.4](#64-pbs-server-role-pbs)).
 - The agent runs as root because `smartctl`, `zpool`, corosync tools, and
   reading root-only certificate files require it. Verify that the sandboxing
   does not block `smartctl` device access, `corosync-cfgtool` (it talks to

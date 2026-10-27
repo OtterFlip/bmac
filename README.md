@@ -449,7 +449,12 @@ its retention policy first, following
   before a risky change.
 
 The page shows the PBS server's retention policy (read-only), each VM's
-schedule and newest backup, and every restore point BMAC made. How long
+schedule and newest backup, and every restore point BMAC made. With
+monitoring enabled, each host also alerts when it can't reach PBS
+(`pbs:storage`), and the host running a scheduled VM alerts when the VM's
+newest backup is more than two scheduled runs old (`backup:<prodN>`). To be
+alerted about the PBS server itself, install its monitor by hand; see
+[Monitoring the PBS server](#monitoring-the-pbs-server). How long
 backups are kept is set on the PBS server, not by BMAC. The terminal
 equivalents are under `scripts/user_callable/backups/`, and the design is in
 [Backup and restore (PBS)](docs/MAIN_DESIGN.md#backup-and-restore-pbs).
@@ -602,7 +607,7 @@ Run `decommission_disks.sh` once per vdev.
 
 ## Monitoring and Alerts
 
-BMAC can alert you, by email and optionally as push notifications on your phone, when anything in the cluster goes wrong: a host, the QDevice, or a production VM stops working or loses its internet connection; hosts can't reach each other over Tailscale or the private VLAN; an app can't be reached through Cloudflare; a disk reports SMART problems or wears out; a ZFS pool is degraded or nearly full; Proxmox's own alert email is stuck; a monitored service on a production VM stops, its disk fills, or its certificate nears expiry; or the cluster loses quorum or the QDevice's vote. Staging VMs are never monitored. The full design is in [`docs/MONITORING_AND_ALERTING.md`](docs/MONITORING_AND_ALERTING.md).
+BMAC can alert you, by email and optionally as push notifications on your phone, when anything in the cluster goes wrong: a host, the QDevice, or a production VM stops working or loses its internet connection; hosts can't reach each other over Tailscale or the private VLAN; an app can't be reached through Cloudflare; a disk reports SMART problems or wears out; a ZFS pool is degraded or nearly full; Proxmox's own alert email is stuck; a host can't reach the backup server or a production VM's backups are overdue; a monitored service on a production VM stops, its disk fills, or its certificate nears expiry; or the cluster loses quorum or the QDevice's vote. Staging VMs are never monitored. The full design is in [`docs/MONITORING_AND_ALERTING.md`](docs/MONITORING_AND_ALERTING.md).
 
 ### How it works
 
@@ -677,6 +682,95 @@ A new production VM is monitored as soon as it is created (its check proves the 
 - **Services and certificates.** Add your app's systemd services and its certificate files with the Production page's **Monitored services** tile, or `./scripts/user_callable/guests/prod/manage_prod_vm_monitoring.sh prod1 --add-service myapp.service --add-cert /etc/myapp/cert.pem`. A watched service that isn't active is a high-priority alert. `deploy_hello_app_to_prod.sh` adds the example app's service and certificate for you.
 - **A health endpoint.** Give your app a cheap endpoint under `/api/` (which BMAC's Cloudflare setup never challenges) that checks its own dependencies, like the example app's `GET /api/v1/healthz`, which answers `200 {"status":"ok"}` or `503 {"status":"error"}`. Then turn on its probe with the QDevice page's **Health-check probes** tile, or `./scripts/user_callable/qdevice/manage_qdevice_probes.sh --vm prod1 --enable --path /api/v1/healthz --status 200`. The QDevice then requests it through Cloudflare every minute; the tool runs the probe once before saving.
 
+### Monitoring the PBS server
+
+The PBS server isn't part of any cluster, so no BMAC workflow touches it. You can run the same monitor agent on it, in its `pbs` role, with its own Healthchecks check. It pings every minute, so you hear when the server goes down, and every 30 minutes it checks:
+- the pool's health, free space, and last scrub;
+- the SMART attributes of the pool's disks;
+- the `proxmox-backup` services;
+- that the datastore is mounted;
+- the results of garbage collection, prune, and verify runs;
+- that each cluster's namespace received a backup recently.
+
+It finds the disks from the pool itself, and it works the same whether PBS is a VM with passed-through disks ([`PBS_MANUAL_SETUP.md`](docs/PBS_MANUAL_SETUP.md) appendix A) or a physical machine. The details are in [`docs/MONITORING_AND_ALERTING.md`](docs/MONITORING_AND_ALERTING.md#64-pbs-server-role-pbs).
+
+1. **Create the check.** Use a Healthchecks project whose email goes to your alert address: a cluster's project or a separate one. The check counts toward that project's 20 checks. Run this on your workstation, from this repository's root, with the project's read-write API key. It keeps the check's ping URL in `PBS_PING_URL` for step 3 and prints it; run steps 1 to 3 in the same terminal:
+
+    ```bash
+    export HC_API_KEY='<the project read-write API key>'
+    PBS_PING_URL="$(curl -sS -X POST https://healthchecks.io/api/v3/checks/ \
+      -H "X-Api-Key: $HC_API_KEY" -H 'Content-Type: application/json' \
+      -d '{"name": "PBS bmaccheck pbs", "slug": "pbs-bmaccheck-pbs", "tags": "bmac bmac-role-pbs",
+           "desc": "BMAC monitor of the PBS server. Installed by hand; no cluster manages it.",
+           "timeout": 60, "grace": 180, "channels": "*", "unique": ["name"]}' |
+      python3 -c 'import json, sys; t = sys.stdin.read(); r = json.loads(t) if t.lstrip().startswith("{") else {"error": t.strip() or "no answer"}; print(r["ping_url"]) if "ping_url" in r else sys.exit("Healthchecks refused: " + str(r.get("error", r)))')"
+    echo "$PBS_PING_URL"
+    ```
+
+    Running it again returns the same check (`"unique": ["name"]`), so it's safe to repeat if you lose the URL.
+
+    Keep `bmaccheck` in the name so your Gmail filters route its emails. Don't give it a `bmac-cluster-...` tag: that cluster's `update_cluster_runtime.sh` would delete it as a check no node uses.
+
+2. **Copy the agent** from this repository to the PBS server:
+
+    ```bash
+    scp scripts/host_runtime/app_ha_monitor.py pbs:/tmp/
+    ssh pbs 'install -D -m 0755 /tmp/app_ha_monitor.py /usr/local/lib/app-ha-monitor/app_ha_monitor.py && rm /tmp/app_ha_monitor.py'
+    ```
+
+    It needs Python 3.11 or newer (PBS 4 has 3.13) and `smartctl` (`apt install smartmontools` if it's missing). Repeat this step, then `systemctl restart app-ha-monitor`, when BMAC's agent changes.
+
+3. **Write its config.** First set `PBS_NAMESPACES` to the namespaces that should be receiving backups. Then paste the whole block, from the same terminal as step 1. It writes `/etc/app-ha-monitor/config.json` on the PBS server, readable only by root, and prints it:
+
+    ```bash
+    PBS_NAMESPACES='["ExampleNamespace1"]'
+    [ -n "${PBS_PING_URL:-}" ] || echo 'PBS_PING_URL is empty: run step 1 in this terminal first'
+    [ -n "${PBS_PING_URL:-}" ] && PBS_CONFIG="$(python3 -c 'import json, sys; print(json.dumps({
+        "schema_version": 1, "cluster": "PBS", "node": "pbs", "role": "pbs", "ping_url": sys.argv[1],
+        "pbs": {"pool": "pbs", "datastore": "pbs", "namespaces": json.loads(sys.argv[2]), "tbw_rating_tb": 2880},
+      }, indent=2))' "$PBS_PING_URL" "$PBS_NAMESPACES")" && printf '%s\n' "$PBS_CONFIG" |
+      ssh pbs 'install -d -m 0700 /etc/app-ha-monitor && umask 077 &&
+        cat > /etc/app-ha-monitor/config.json && chmod 0600 /etc/app-ha-monitor/config.json &&
+        cat /etc/app-ha-monitor/config.json'
+    ```
+
+    - `cluster` and `node` only label the emails.
+    - **`namespaces`:** a namespace alerts when its newest complete backup is older than 8 hours, which suits clusters backing up every 4 hours or more often. Don't list a namespace that receives no backups yet: it would alert at once. For a cluster that backs up less often, give its namespace a longer limit: two of its backup intervals plus an hour. For example, if a second cluster with namespace `ExampleNamespace2` backs up daily, use `'["ExampleNamespace1", {"name": "ExampleNamespace2", "max_age_hours": 49}]'`. To change the default for every namespace, add `"namespace_max_age_hours"` to the `pbs` section.
+    - **`tbw_rating_tb`:** the disks' rated terabytes written, from their datasheet (2,880 for the Samsung 870 QVO 8TB). Remove that line to skip the TBW check.
+    - **Optional settings:**
+      - `scrub_max_age_days` (default 40);
+      - `thresholds` such as `pool_min_free_percent` (10), `pool_clear_free_percent` (12), `reminder_hours` (6), and `nvme_wear_warn_percent` (90, which also applies to these disks' wear);
+      - `intervals`, such as `slow` (1800 seconds).
+
+4. **Check it once**, which sends nothing - run these from the pbs host:
+
+    ```bash
+    python3 /usr/local/lib/app-ha-monitor/app_ha_monitor.py validate-config
+    python3 /usr/local/lib/app-ha-monitor/app_ha_monitor.py check --once
+    ```
+
+    Every line should start with `ok`. A `smart-read:` failure in a VM usually means the LUN passthrough lacks `rawio='yes'` or the host's AppArmor `sys_rawio` rule (appendix A.4 and A.5).
+
+5. **Install the service**, which starts at boot - run these from the pbs host:
+
+    ```bash
+    python3 /usr/local/lib/app-ha-monitor/app_ha_monitor.py print-unit --role pbs \
+      --program /usr/local/lib/app-ha-monitor/app_ha_monitor.py > /etc/systemd/system/app-ha-monitor.service
+    systemctl daemon-reload
+    systemctl enable --now app-ha-monitor
+    systemctl status app-ha-monitor
+    ```
+
+    Within a minute the check shows its first ping in Healthchecks.
+
+6. **Test the alerts:**
+   - From the pbs host, run `python3 /usr/local/lib/app-ha-monitor/app_ha_monitor.py test-pulse --priority p2` for a test email.
+   - Then test the dead-man switch: run `systemctl stop app-ha-monitor`, wait about four minutes for the DOWN email, and start it again.
+
+7. **Confirm the pool is scrubbed monthly.** Debian's ZFS packages scrub every pool on the second Sunday of each month, from a cron job or systemd timer. Check with `cat /etc/cron.d/zfsutils-linux` and `systemctl list-timers 'zfs-scrub*'`. If neither exists, run `systemctl enable --now zfs-scrub-monthly@pbs.timer`.
+
+`python3 /usr/local/lib/app-ha-monitor/app_ha_monitor.py status` shows the agent's open problems. After you've dealt with a disk whose counters rose, accept its new counters with `app_ha_monitor.py reset-smart-baseline <serial>`.
+
 ### Cloudflare tunnel health alert
 
 In the Cloudflare dashboard, under Notifications, add a notification of type **Tunnel Health Alert** for your cluster's tunnel, delivered by email to your alert address, for the **Degraded** and **Down** states. It reports only the connection between the tunnel replicas and Cloudflare, not whether your apps answer, which is why the QDevice also probes each app.
@@ -744,6 +838,12 @@ Each event lists problem keys such as `link0:mox2` or `ingress:prod1.example.com
 | Dead-man DOWN for a production VM only | The VM is down, or its egress is broken. |
 | `postfix-queue` on a host | Proxmox's own alert email isn't leaving that host; BMAC's alerts are unaffected. |
 | `smart:<serial>` saying a counter rose | The drive is degrading. Once you've dealt with it, accept its counters with `show_monitoring_state.sh --reset-smart-baseline <host>:<serial>`. |
+| `pbs:storage` from every host | PBS is down or unreachable, its certificate changed (update `PROXMOX_PBS_FINGERPRINT` and the storage), or it rejects the cluster's token. Backups are failing. |
+| `pbs:storage` from one host only | That host's own path to PBS is broken, for example the PBS firewall doesn't admit its address. |
+| `backup:<prodN>` without `pbs:storage` | The VM's backup job isn't running or its backups fail. Check the job's task log in the Proxmox web UI (or **Back up now** on the Backups page) and Proxmox's own backup email. |
+| PBS server: `namespace:<NS>` | A cluster sharing the PBS server hasn't sent a backup recently. That cluster's own monitoring (if any) reports why. |
+| PBS server: `pbs-task:...` | A garbage collection, prune, or verify run failed; its log is under Administration > Tasks in the PBS web UI. A failed verify means some backup chunks are damaged. |
+| PBS server: `smart:<serial>` saying a counter rose | The drive is degrading. Once dealt with, run `app_ha_monitor.py reset-smart-baseline <serial>` on the PBS server. |
 | `agent:<check>` | One of the agent's own checks failed to run; the message says why. |
 
 ## Less Common Tasks
