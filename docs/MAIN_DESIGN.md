@@ -897,8 +897,8 @@ the Dashboard's Backups page, under `scripts/user_callable/backups/`: Setup
 PBS (`setup_pbs.sh`), the backup list (`list_backups.sh`, the `backups` kind
 of `scripts/utilities/quick_state.py`), each VM's backup schedule
 (`manage_backup_schedule.sh`), Back up now (`backup_now.sh`), and
-restore-point protection (`protect_restore_point.sh`), and Rollback Restore
-(`rollback_restore.sh`). They share
+restore-point protection (`protect_restore_point.sh`), Rollback Restore
+(`rollback_restore.sh`), and Full Recovery (`full_recovery.sh`). They share
 `scripts/lib/backups.sh`, and the host-side `scripts/host_runtime/pbs_api.py`
 reads the PBS account. `add_prod_vm.sh` skips VMIDs that have backups, and
 `remove_prod_vm.sh` removes the VM's backup job. The rest is still design,
@@ -907,8 +907,8 @@ built in this order:
 1. Setup PBS, backup schedules, Back up now, the restore-point list, and
    restore-point protection (built); backup-age monitoring; the PBS server
    monitor.
-2. Rollback Restore (built) and Full Recovery, both as full (not live)
-   restores.
+2. Rollback Restore and Full Recovery, both as full (not live) restores
+   (built).
 3. Instant Restore - Permanent (PVE live restore) and Instant Restore - Test
    (disposable test VMs read from PBS), each after testing on a real cluster.
 
@@ -1078,16 +1078,46 @@ before its first boot. vCPU and RAM can be overridden on every restore.
   replicate over the replicas of a restored disk, so they must be removed
   first. The VM has no HA protection until the first full sync completes.
 - **Full Recovery** creates a new permanent production VM from a restore
-  point, for example on a rebuilt cluster. It is `add_prod_vm.sh` with the
-  OS install replaced by a full restore. The original slot, VMID, purpose,
-  and FQDN are offered when they are free, read from the snapshot notes and
-  the backed-up VM config. The restore applies the registry's name, MAC,
-  and tags, and leaves the VM stopped. An offline patch always rewrites the
-  hostname, netplan (new MAC and slot address), and `/etc/hosts`. It
-  regenerates machine-id and SSH host keys only when the slot differs from
-  the original, since the original VM may still exist. The rest is the
-  normal production sequence: network policy, replication, HA, ingress, and
-  monitoring.
+  point, for example on a rebuilt cluster. `full_recovery.sh` sources
+  `add_prod_vm.sh` and replaces only its OS install:
+  - It lists every BMAC restore point this cluster's key can decrypt,
+    including those of VMs that no longer exist, and reads the VM config
+    stored in the chosen one (it must have one EFI disk, one `scsi0` root
+    disk, and one NIC).
+  - The VM gets the restore point's slot (`allocate-prod --index`) when no
+    registered VM holds it, otherwise the lowest free one, and the restore
+    point's VMID when no live or registered VM uses it (its backup group then
+    continues), otherwise the next VMID that no VM and no backup group uses.
+    The purpose defaults to the restore point's; a purpose a registered VM
+    uses is refused, unless it is this recovery's own unfinished
+    allocation (`recover-production-<purpose>`), which resumes. The form asks
+    for placement, the FQDN (default: the restore point's), aliases, vCPUs and
+    RAM (default: the restore point's), allocation, and replication; the root
+    disk keeps the restore point's size.
+  - `qm create --archive` restores into the VMID with the registry's name,
+    MAC, tags, CPU type, vCPUs, and RAM, never `--unique`, and the VM stays
+    stopped. The backed-up lifecycle hook is removed, since it would refuse
+    every start before HA manages the VM; `apply_final_network_policy`
+    attaches it last, as for a new VM. In another slot the VM also gets a new
+    SMBIOS UUID.
+  - The root disk is patched offline by `patch_staging_clone.sh --mode
+    production` (the zvol briefly gets `volmode=full` so its partitions are
+    visible, then its previous setting back). It writes the hostname,
+    `/etc/hosts`, netplan (`50-app-ha-production.yaml`, the slot's MAC and
+    address as `lan0`), the root password hash from `secrets.env`, and root's
+    `authorized_keys` (the current `ADMIN_1`/`ADMIN_2` keys). In another slot,
+    where the original VM may still exist, it also empties the machine-id,
+    regenerates the SSH host keys at boot, and removes the original's
+    monitor config so it never pings the original's check. cloud-init and
+    the guest's own startup script are left alone.
+  - The guest is then verified like a new one (QGA-attested root password
+    hash, hostname, SSH host key, key-only root SSH, `lan0` address, route,
+    DNS, sshd policy), without the install-only cloud-init and startup.sh
+    checks, and `add_prod_vm.sh`'s own steps add the final network policy and
+    hook, replication, HA, tunnel routes, and monitoring. The install phases
+    run `unstarted` → `installed-confirmed` → `guest-verified` →
+    `network-finalized`; a rerun with the same purpose resumes from the phase
+    reached. The new VM has no backup schedule until one is set.
 - **Instant Restore - Permanent** (later) is Rollback Restore using PVE's
   live restore. The VM starts at once and its data streams from PBS into
   `local-zfs` in the background. If PBS becomes unreachable mid-restore, the

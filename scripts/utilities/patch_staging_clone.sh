@@ -4,7 +4,10 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Offline-patch one unattached staging zvol. This helper is copied to the
-# selected Proxmox node by add_staging_vm.sh and runs there as root.
+# selected Proxmox node by add_staging_vm.sh and runs there as root. With
+# --mode production, full_recovery.sh uses it to give a restored production
+# VM's root disk the identity of its slot; that disk may belong to the
+# restored VM, which must be stopped.
 
 set -Eeuo pipefail
 set +x
@@ -23,6 +26,10 @@ MAC=""
 DNS_CSV=""
 ROOT_HASH_FILE=""
 SANITIZER_FILE=""
+MODE=staging
+AUTHORIZED_KEYS_FILE=""
+NEW_IDENTITY=false
+OWNER_VMID=""
 WORK_DIR=""
 MOUNT_DIR=""
 ROOT_PARTITION=""
@@ -45,8 +52,13 @@ Usage: patch_staging_clone.sh --device /dev/zvol/... \
   --volume-id STORAGE:vm-N-disk-N --name stageNprodN \
   --address A.B.C.D/24 --gateway A.B.C.G --mac 02:... --dns CSV \
   --root-hash-file /run/... [--sanitizer /run/...]
+patch_staging_clone.sh --mode production --device /dev/zvol/... \
+  --volume-id STORAGE:vm-N-disk-N --name prodN --owner-vmid N \
+  --address A.B.C.D/24 --gateway A.B.C.G --mac 02:... --dns CSV \
+  --root-hash-file /run/... --authorized-keys-file /run/... [--new-identity]
 
-The zvol must not be attached to any VM, mounted, or opened by any process.
+The zvol must not be attached to any VM, mounted, or opened by any process;
+in production mode it may be attached only to the stopped VM --owner-vmid.
 Exactly one direct ext4 Ubuntu root partition is required. Guest-tree reads,
 writes, and deletes are delegated to the descriptor-relative Python helper.
 The root password hash is read from a mode-0600 file and is never printed.
@@ -60,10 +72,18 @@ parse_args() {
         usage
         exit 0
         ;;
+      --new-identity)
+        NEW_IDENTITY=true
+        shift
+        ;;
       --device | --volume-id | --name | --address | --gateway | --mac | \
-        --dns | --root-hash-file | --sanitizer)
+        --dns | --root-hash-file | --sanitizer | --mode | --authorized-keys-file | \
+        --owner-vmid)
         (($# >= 2)) || die "$1 requires a value"
         case "$1" in
+          --mode) MODE="$2" ;;
+          --authorized-keys-file) AUTHORIZED_KEYS_FILE="$2" ;;
+          --owner-vmid) OWNER_VMID="$2" ;;
           --device) DEVICE="$2" ;;
           --volume-id) VOLUME_ID="$2" ;;
           --name) STAGING_NAME="$2" ;;
@@ -95,8 +115,24 @@ validate_request() {
     die "Device must be a safe /dev/zvol path"
   [[ "$VOLUME_ID" =~ ^[A-Za-z0-9._-]+:vm-[1-9][0-9]*-disk-[0-9]+$ ]] ||
     die "Volume id must be a safe Proxmox VM disk id"
-  [[ "$STAGING_NAME" =~ ^stage[1-9][0-9]*prod[1-9][0-9]*$ ]] ||
-    die "Staging name must use the stageNprodN formula"
+  case "$MODE" in
+    staging)
+      [[ "$STAGING_NAME" =~ ^stage[1-9][0-9]*prod[1-9][0-9]*$ ]] ||
+        die "Staging name must use the stageNprodN formula"
+      [[ -z "$AUTHORIZED_KEYS_FILE$OWNER_VMID" && "$NEW_IDENTITY" == false ]] ||
+        die "--authorized-keys-file, --owner-vmid, and --new-identity are for production mode"
+      ;;
+    production)
+      [[ "$STAGING_NAME" =~ ^prod[1-9][0-9]*$ ]] ||
+        die "Production name must use the prodN formula"
+      [[ -z "$SANITIZER_FILE" ]] || die "Production mode takes no sanitizer"
+      [[ "$OWNER_VMID" =~ ^[1-9][0-9]*$ && "$VOLUME_ID" == *":vm-${OWNER_VMID}-disk-"* ]] ||
+        die "--owner-vmid must be the VMID that owns the volume"
+      [[ -f "$AUTHORIZED_KEYS_FILE" && ! -L "$AUTHORIZED_KEYS_FILE" ]] ||
+        die "Administrator keys must be a regular non-symlink file"
+      ;;
+    *) die "Mode must be staging or production" ;;
+  esac
   [[ "${MAC,,}" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] ||
     die "Staging MAC is invalid"
   python3 - "$ADDRESS" "$GATEWAY" "$DNS_CSV" <<'PY'
@@ -156,13 +192,13 @@ assert_not_in_use() {
 }
 
 assert_not_referenced_by_vm() {
-  python3 - "$VOLUME_ID" <<'PY'
+  python3 - "$VOLUME_ID" "$OWNER_VMID" <<'PY'
 import json
 import re
 import subprocess
 import sys
 
-volume_id = sys.argv[1]
+volume_id, owner = sys.argv[1], sys.argv[2]
 resources = json.loads(
     subprocess.run(
         ["pvesh", "get", "/cluster/resources", "--type", "vm", "--output-format", "json"],
@@ -208,6 +244,9 @@ for resource in resources:
             )
             and str(value).split(",", 1)[0] == volume_id
         ):
+            # A restored production VM owns its disk; it must be stopped.
+            if owner and str(vmid) == owner and resource.get("status") == "stopped":
+                continue
             raise SystemExit(
                 f"refusing offline mapping: VM {vmid} still references {volume_id}"
             )
@@ -413,6 +452,10 @@ patch_guest() {
   )
   [[ -z "$SANITIZER_FILE" ]] ||
     helper_args+=(--sanitizer "$SANITIZER_FILE")
+  if [[ "$MODE" == production ]]; then
+    helper_args+=(--mode production --authorized-keys-file "$AUTHORIZED_KEYS_FILE")
+    [[ "$NEW_IDENTITY" == false ]] || helper_args+=(--new-identity)
+  fi
   python3 "$GUEST_TREE_HELPER" "${helper_args[@]}"
 }
 

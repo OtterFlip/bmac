@@ -664,6 +664,22 @@
             { "value": "no", "label": "No safety backup", "flag": "--no-safety-backup" }
           ] }
       ]
+    },
+    {
+      "id": "full_recovery",
+      "title": "Full Recovery",
+      "summary": "Create a new production VM from a restore point, for example on a rebuilt cluster.",
+      "description": "Creates a production VM from one of BMAC's restore points on PBS: it gets the restore point's own slot (name and address) and VMID when they are free, otherwise new ones, and asks for the purpose, FQDN, aliases, placement, vCPUs and RAM (defaulting to the restore point's). The restore runs stopped; the root disk is patched offline with its hostname, network, this cluster's root password and administrator SSH keys, and, in a different slot, a new machine-id and SSH host keys. Then, as for a new production VM, the guest is verified and gets its networking, replication, HA, Cloudflare Tunnel routes, and monitoring. Rerun with the same purpose to resume.",
+      "category": "backups",
+      "script": "scripts/user_callable/backups/full_recovery.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "snapshot", "label": "Restore point", "type": "snapshot", "flag": "--snapshot", "help": "Such as vm/100/2026-10-27T14:50:01Z; chosen from every restore point this cluster can decrypt when empty." },
+        { "id": "cores", "label": "vCPUs", "type": "integer", "flag": "--cores", "help": "Default: the restore point's vCPUs.", "advanced": true },
+        { "id": "memory_gib", "label": "RAM (GiB)", "type": "integer", "flag": "--memory-gib", "help": "Default: the restore point's RAM.", "advanced": true }
+      ]
     }
   ]
 }

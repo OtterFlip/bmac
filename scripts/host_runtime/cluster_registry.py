@@ -2020,14 +2020,25 @@ def command_allocate_prod(registry: Registry, args: argparse.Namespace) -> Any:
         if existing:
             return {"created": False, "resource": existing}
         used_names = {record["name"] for record in resources}
-        index = next(
-            (
-                candidate
-                for candidate in range(1, policy["limits"]["max_production"] + 1)
-                if f"prod{candidate}" not in used_names
-            ),
-            None,
-        )
+        if args.index is not None:
+            # Full Recovery asks for the slot the restored VM had, so it keeps
+            # its name and address.
+            if not 1 <= args.index <= policy["limits"]["max_production"]:
+                raise RegistryError(
+                    f"production slot {args.index} is outside 1-{policy['limits']['max_production']}"
+                )
+            if f"prod{args.index}" in used_names:
+                raise RegistryError(f"production slot prod{args.index} is in use")
+            index = args.index
+        else:
+            index = next(
+                (
+                    candidate
+                    for candidate in range(1, policy["limits"]["max_production"] + 1)
+                    if f"prod{candidate}" not in used_names
+                ),
+                None,
+            )
         if index is None:
             raise RegistryError("every production slot is in use")
         name = f"prod{index}"
@@ -4357,6 +4368,7 @@ def build_parser() -> argparse.ArgumentParser:
     prod.add_argument("--placement", action="append", required=True)
     prod.add_argument("--initial-node")
     prod.add_argument("--allocation-id")
+    prod.add_argument("--index", type=int, help="this production slot (prodN), which must be free")
     add_spec_arguments(prod)
     prod.set_defaults(handler=command_allocate_prod)
 

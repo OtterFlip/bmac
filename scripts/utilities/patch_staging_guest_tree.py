@@ -3,7 +3,13 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Safely rewrite an offline guest tree without following guest symlinks."""
+"""Safely rewrite an offline guest tree without following guest symlinks.
+
+--mode staging (the default) gives a production clone a staging identity.
+--mode production gives a restored production VM the identity of its slot
+(Full Recovery): hostname, network, root password, and administrator keys,
+and with --new-identity also a new machine-id and SSH host keys.
+"""
 
 from __future__ import annotations
 
@@ -323,7 +329,8 @@ def patch(tree: GuestTree, args: argparse.Namespace) -> None:
         }
     }
     tree.write(
-        "etc/netplan/90-app-ha-staging.yaml",
+        "etc/netplan/90-app-ha-staging.yaml" if args.mode == "staging"
+        else "etc/netplan/50-app-ha-production.yaml",
         (json.dumps(document, sort_keys=True, indent=2) + "\n").encode(),
         0o600,
     )
@@ -354,9 +361,16 @@ def patch(tree: GuestTree, args: argparse.Namespace) -> None:
         owner=(shadow_stat.st_uid, shadow_stat.st_gid),
     )
 
-    tree.write("etc/machine-id", b"", 0o444)
-    tree.unlink("var/lib/dbus/machine-id")
-    tree.remove_matching("etc/ssh", ("ssh_host_*_key*",))
+    if args.mode == "production":
+        write_authorized_keys(tree, args)
+        if args.new_identity:
+            regenerate_identity(tree, "production guest")
+            # The original VM's monitor config would ping its Healthchecks
+            # check from this copy; the monitoring sync installs this VM's own.
+            tree.unlink("etc/app-ha-monitor/config.json")
+        return
+
+    regenerate_identity(tree, "staging guest")
     tree.clear_directory("var/lib/cloud", create=True)
     tree.write("etc/cloud/cloud-init.disabled", b"", 0o644)
     tree.remove_matching(
@@ -369,36 +383,6 @@ def patch(tree: GuestTree, args: argparse.Namespace) -> None:
         "var/lib/systemd/network",
     ):
         tree.remove_matching(path, ("*lease*", "*.leases"), recursive=True)
-
-    ssh_key_unit = b"""[Unit]
-Description=Generate unique SSH host keys for this staging guest
-DefaultDependencies=no
-After=local-fs.target
-Before=ssh.service sshd.service ssh.socket
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/ssh-keygen -A
-RemainAfterExit=yes
-"""
-    tree.write(
-        "etc/systemd/system/app-ha-ssh-host-keys.service", ssh_key_unit, 0o644
-    )
-    dependency = b"""[Unit]
-Requires=app-ha-ssh-host-keys.service
-After=app-ha-ssh-host-keys.service
-"""
-    for unit in ("ssh.service", "sshd.service", "ssh.socket"):
-        tree.write(
-            f"etc/systemd/system/{unit}.d/50-app-ha-host-keys.conf",
-            dependency,
-            0o644,
-            create_parent=True,
-        )
-    tree.symlink(
-        "etc/systemd/system/multi-user.target.wants/app-ha-ssh-host-keys.service",
-        "../app-ha-ssh-host-keys.service",
-    )
 
     library = "usr/local/lib/app-ha"
     state = "var/lib/app-ha"
@@ -477,6 +461,72 @@ After=app-ha-staging-sanitizer.service
             )
 
 
+def regenerate_identity(tree: GuestTree, label: str) -> None:
+    """Empty machine-id and remove the SSH host keys; a unit recreates the
+    keys before sshd starts on the next boot."""
+
+    tree.write("etc/machine-id", b"", 0o444)
+    tree.unlink("var/lib/dbus/machine-id")
+    tree.remove_matching("etc/ssh", ("ssh_host_*_key*",))
+    ssh_key_unit = f"""[Unit]
+Description=Generate unique SSH host keys for this {label}
+DefaultDependencies=no
+After=local-fs.target
+Before=ssh.service sshd.service ssh.socket
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+RemainAfterExit=yes
+""".encode()
+    tree.write(
+        "etc/systemd/system/app-ha-ssh-host-keys.service", ssh_key_unit, 0o644
+    )
+    dependency = b"""[Unit]
+Requires=app-ha-ssh-host-keys.service
+After=app-ha-ssh-host-keys.service
+"""
+    for unit in ("ssh.service", "sshd.service", "ssh.socket"):
+        tree.write(
+            f"etc/systemd/system/{unit}.d/50-app-ha-host-keys.conf",
+            dependency,
+            0o644,
+            create_parent=True,
+        )
+    tree.symlink(
+        "etc/systemd/system/multi-user.target.wants/app-ha-ssh-host-keys.service",
+        "../app-ha-ssh-host-keys.service",
+    )
+
+
+def write_authorized_keys(tree: GuestTree, args: argparse.Namespace) -> None:
+    """Replace root's authorized_keys with the cluster's administrator keys."""
+
+    keys = Path(args.authorized_keys_file).read_text(encoding="utf-8")
+    lines = [line.strip() for line in keys.splitlines() if line.strip()]
+    if not lines or any(
+        not line.startswith(("ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-")) for line in lines
+    ):
+        raise UnsafeGuestPath("administrator keys must be OpenSSH public keys")
+    # Owned like the guest's /root, which is root on any real guest.
+    home_fd = tree.directory("root")
+    try:
+        home = os.fstat(home_fd)
+    finally:
+        os.close(home_fd)
+    owner = (home.st_uid, home.st_gid)
+    fd = tree.directory("root/.ssh", create=True, mode=0o700)
+    try:
+        os.fchmod(fd, 0o700)
+        os.fchown(fd, *owner)
+    finally:
+        os.close(fd)
+    tree.write(
+        "root/.ssh/authorized_keys", ("\n".join(lines) + "\n").encode(), 0o600,
+        owner=owner,
+    )
+
+
 def inspect_ubuntu_root(root: str) -> tuple[bool, str]:
     tree = GuestTree(root)
     try:
@@ -528,7 +578,14 @@ def main() -> int:
     parser.add_argument("--dns", required=True)
     parser.add_argument("--root-hash-file", required=True)
     parser.add_argument("--sanitizer")
+    parser.add_argument("--mode", choices=("staging", "production"), default="staging")
+    parser.add_argument("--authorized-keys-file")
+    parser.add_argument("--new-identity", action="store_true")
     args = parser.parse_args()
+    if args.mode == "production" and (args.sanitizer or not args.authorized_keys_file):
+        parser.error("production mode needs --authorized-keys-file and takes no --sanitizer")
+    if args.mode == "staging" and (args.authorized_keys_file or args.new_identity):
+        parser.error("--authorized-keys-file and --new-identity are for production mode")
     tree = GuestTree(args.root)
     try:
         patch(tree, args)

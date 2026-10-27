@@ -1,4 +1,4 @@
-import { Archive, CalendarClock, History, Lock, LockOpen, MessageSquare, Play, RotateCcw, ShieldCheck } from "lucide-react";
+import { Archive, CalendarClock, CopyPlus, History, Lock, LockOpen, MessageSquare, Play, RotateCcw, ShieldCheck } from "lucide-react";
 import { useStore } from "@/state/store";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -253,6 +253,15 @@ export function BackupsPage() {
                               "separator" as const,
                             ]
                           : []),
+                        ...(point.key_matches
+                          ? [
+                              {
+                                label: "Full Recovery from this point…",
+                                icon: <CopyPlus />,
+                                onSelect: () => launchWorkflow("full_recovery", { snapshot: snapshotOf(point) }),
+                              },
+                            ]
+                          : []),
                         point.protected
                           ? { label: "Clear protection…", icon: <LockOpen />, onSelect: () => launchWorkflow("protect_restore_point", { snapshot: snapshotOf(point), action: "unprotect" }) }
                           : { label: "Protect…", icon: <Lock />, onSelect: () => launchWorkflow("protect_restore_point", { snapshot: snapshotOf(point), action: "protect" }) },
@@ -281,7 +290,7 @@ export function BackupsPage() {
         <h2 className="mb-2.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-fg-subtle">Backup operations</h2>
         <WorkflowTiles
           links={[{ title: "PBS Server Setup", summary: "How the PBS server, its namespaces, tokens, and prune jobs are set up.", url: PBS_SETUP_URL }]}
-          ids={["setup_pbs", "manage_backup_schedule", "backup_now", "protect_restore_point", "rollback_restore", "list_backups"]}
+          ids={["setup_pbs", "manage_backup_schedule", "backup_now", "protect_restore_point", "rollback_restore", "full_recovery", "list_backups"]}
         />
       </PageBody>
     </>

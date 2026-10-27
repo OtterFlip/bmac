@@ -596,6 +596,23 @@ class RegistryCliTest(unittest.TestCase):
         back, _ = self.run_registry("record-owner", "prod1", "--node", "mox1")
         self.assertEqual((back["owner_node"], back["replication_targets"]), ("mox1", ["mox2"]))
 
+    def test_full_recovery_can_ask_for_a_specific_slot(self) -> None:
+        def allocate(vmid: int, purpose: str, domain: str, *extra: str, expected: int = 0):
+            result, completed = self.run_registry(
+                "allocate-prod", "--vmid", str(vmid), "--purpose", purpose, "--primary-domain", domain,
+                "--placement", "mox1,mox2", "--initial-node", "mox1", *extra, expected=expected)
+            return result, completed
+
+        third, _ = allocate(105, "shop", "shop.example.com", "--index", "3")
+        self.assertEqual((third["resource"]["name"], third["resource"]["ip"]), ("prod3", "10.213.0.130"))
+        # Without --index the lowest free slot is used, as before.
+        first, _ = allocate(106, "blog", "blog.example.com")
+        self.assertEqual(first["resource"]["name"], "prod1")
+        _, taken = allocate(107, "wiki", "wiki.example.com", "--index", "3", expected=1)
+        self.assertIn("production slot prod3 is in use", taken.stderr)
+        _, outside = allocate(108, "docs", "docs.example.com", "--index", "11", expected=1)
+        self.assertIn("is outside 1-10", outside.stderr)
+
     def test_vcpus_and_ram_are_recorded_on_start_and_by_update(self) -> None:
         self.allocate_prod()
         self.run_registry("update", "prod1", "--state", "provisioning", "--owner-node", "mox1",
