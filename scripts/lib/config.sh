@@ -184,6 +184,8 @@ declare -ag _PROXMOX_CONFIG_CLUSTER_KEYS=(
   MONITOR_REMINDER_HOURS MONITOR_POSTFIX_QUEUE_MAX_AGE_MINUTES
   MONITOR_CERT_WARN_DAYS MONITOR_NVME_WEAR_WARN_PERCENT
   MONITOR_PROBE_DEFAULT_PATH MONITOR_PROBE_DEFAULT_STATUS
+  PROXMOX_PBS_SERVER_HOST PROXMOX_PBS_SERVER_PORT PROXMOX_PBS_DATASTORE
+  PROXMOX_PBS_NAMESPACE PROXMOX_PBS_USERNAME PROXMOX_PBS_FINGERPRINT
 )
 declare -ag _PROXMOX_CONFIG_MOX_KEYS=(
   IDRAC_IP IDRAC_ASSET_ID
@@ -198,7 +200,7 @@ declare -ag _PROXMOX_CONFIG_ALLOWED_SECRET_KEYS=(
   IDRAC_USER IDRAC_PASSWORD PROXMOX_ROOT_PASSWORD
   PROD_GUEST_VM_ROOT_PASSWORD STAGING_GUEST_VM_ROOT_PASSWORD
   PROXMOX_LUKS_PASSWORD PROXMOX_QDEVICE_ROOT_PASSWORD
-  CLOUDFLARE_TUNNEL_SECRET HEALTHCHECKS_API_KEY
+  CLOUDFLARE_TUNNEL_SECRET HEALTHCHECKS_API_KEY PROXMOX_PBS_TOKEN
 )
 
 _config_initialize_allowlist() {
@@ -1036,6 +1038,82 @@ _config_validate_monitoring_secrets() {
     config_die "MONITORING_ENABLED=true in cluster.conf requires HEALTHCHECKS_API_KEY (a Healthchecks.io read-write project API key) in secrets.env"
 }
 
+# Proxmox Backup Server settings are optional as a group: with none of them
+# set, backups are not configured. Setting any of them requires every key
+# except PROXMOX_PBS_SERVER_PORT, which defaults to 8007. The username must be
+# an API token ID (user@realm!token), because PROXMOX_PBS_TOKEN in secrets.env
+# is that token's secret.
+declare -ag _PROXMOX_CONFIG_PBS_REQUIRED=(
+  PROXMOX_PBS_SERVER_HOST PROXMOX_PBS_DATASTORE PROXMOX_PBS_NAMESPACE
+  PROXMOX_PBS_USERNAME PROXMOX_PBS_FINGERPRINT
+)
+
+# True when cluster.conf configures a PBS server. Valid after
+# load_proxmox_config.
+config_pbs_configured() {
+  [[ -n "${PROXMOX_PBS_SERVER_HOST:-}" ]]
+}
+
+_config_validate_pbs() {
+  local name component any=0
+  local -a missing=() components=()
+  for name in "${_PROXMOX_CONFIG_PBS_REQUIRED[@]}" PROXMOX_PBS_SERVER_PORT; do
+    [[ -z "${!name+x}" ]] || any=1
+  done
+  ((any)) || return 0
+  for name in "${_PROXMOX_CONFIG_PBS_REQUIRED[@]}"; do
+    [[ -n "${!name:-}" ]] || missing+=("$name")
+  done
+  ((${#missing[@]} == 0)) ||
+    config_die "PBS backups need every PROXMOX_PBS_* key in cluster.conf; missing or empty: ${missing[*]}" || return
+  _config_monitor_default PROXMOX_PBS_SERVER_PORT 8007
+  if [[ "$PROXMOX_PBS_SERVER_HOST" =~ ^[0-9.]+$ ]]; then
+    _config_validate_ipv4 "$PROXMOX_PBS_SERVER_HOST" ||
+      config_die "PROXMOX_PBS_SERVER_HOST is not a valid IPv4 address" || return
+  else
+    [[ "$PROXMOX_PBS_SERVER_HOST" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ &&
+      ${#PROXMOX_PBS_SERVER_HOST} -le 253 ]] ||
+      config_die "PROXMOX_PBS_SERVER_HOST must be an IPv4 address or a DNS name" || return
+  fi
+  [[ "$PROXMOX_PBS_SERVER_PORT" =~ ^[1-9][0-9]{0,4}$ ]] &&
+    ((PROXMOX_PBS_SERVER_PORT <= 65535)) ||
+    config_die "PROXMOX_PBS_SERVER_PORT must be a TCP port (1-65535)" || return
+  [[ "$PROXMOX_PBS_DATASTORE" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,31}$ ]] ||
+    config_die "PROXMOX_PBS_DATASTORE must be a PBS datastore name (letters, digits, '.', '_', '-'; at most 32 characters)" || return
+  # PBS namespaces are up to seven '/'-separated levels of the same safe
+  # identifiers as datastore names.
+  IFS=/ read -r -a components <<<"$PROXMOX_PBS_NAMESPACE"
+  [[ "$PROXMOX_PBS_NAMESPACE" != */ && ${#components[@]} -ge 1 && ${#components[@]} -le 7 ]] ||
+    config_die "PROXMOX_PBS_NAMESPACE must be a PBS namespace of 1-7 '/'-separated levels" || return
+  for component in "${components[@]}"; do
+    [[ "$component" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,31}$ ]] ||
+      config_die "PROXMOX_PBS_NAMESPACE level '${component}' must use letters, digits, '.', '_', '-' (at most 32 characters)" || return
+  done
+  [[ "$PROXMOX_PBS_USERNAME" =~ ^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+![A-Za-z0-9_][A-Za-z0-9._-]*$ ]] ||
+    config_die "PROXMOX_PBS_USERNAME must be a PBS API token ID such as mycluster@pbs!pve" || return
+  [[ "$PROXMOX_PBS_FINGERPRINT" =~ ^[[:xdigit:]]{2}(:[[:xdigit:]]{2}){31}$ ]] ||
+    config_die "PROXMOX_PBS_FINGERPRINT must be a SHA-256 fingerprint: 32 colon-separated hex pairs" || return
+}
+
+# The token is checked only when secrets.env was actually loaded and contains
+# it: only the backup workflows need it, and they require it explicitly with
+# config_require_pbs_token. Its value is never printed.
+_config_validate_pbs_secrets() {
+  [[ -n "${PROXMOX_PBS_TOKEN:-}" && "${PROXMOX_PBS_TOKEN,,}" != redacted ]] || return 0
+  config_pbs_configured ||
+    config_die "PROXMOX_PBS_TOKEN is set in secrets.env but cluster.conf configures no PBS server (PROXMOX_PBS_*)" || return
+  [[ "$PROXMOX_PBS_TOKEN" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] ||
+    config_die "PROXMOX_PBS_TOKEN in secrets.env must be the PBS API token secret (a UUID)"
+}
+
+# Backup workflows call this after load_proxmox_config --require-secrets.
+config_require_pbs_token() {
+  config_pbs_configured ||
+    config_die "PBS backups are not configured: set the PROXMOX_PBS_* keys in cluster.conf" || return
+  [[ -n "${PROXMOX_PBS_TOKEN:-}" && "${PROXMOX_PBS_TOKEN,,}" != redacted ]] ||
+    config_die "PROXMOX_PBS_TOKEN (the secret of ${PROXMOX_PBS_USERNAME}) must be set in secrets.env"
+}
+
 _config_compute_hash() {
   local key
   local -a keys=()
@@ -1050,10 +1128,11 @@ _config_compute_hash() {
       config_die "Internal error: secret key ${key} entered the public hash set" || return
     # The control node moves with cluster membership; it is not host setup input.
     [[ "$key" != PROXMOX_CONTROL_NODE ]] || continue
-    # Monitoring settings are not host setup input either: changing them must
-    # not invalidate host-setup checkpoints or show as cluster.conf drift.
+    # Monitoring and PBS settings are not host setup input either: changing
+    # them must not invalidate host-setup checkpoints or show as cluster.conf
+    # drift.
     case "$key" in
-      MONITORING_ENABLED | MONITOR_* | HEALTHCHECKS_*) continue ;;
+      MONITORING_ENABLED | MONITOR_* | HEALTHCHECKS_* | PROXMOX_PBS_*) continue ;;
     esac
     keys+=("$key")
   done
@@ -1126,6 +1205,7 @@ load_proxmox_config() {
   _config_parse_file "$cluster_file" cluster 0 || return
   _config_validate_cluster || return
   _config_validate_monitoring || return
+  _config_validate_pbs || return
 
   if [[ -n "$selected_host" ]]; then
     mox_index "$selected_host" >/dev/null || return
@@ -1142,6 +1222,7 @@ load_proxmox_config() {
       }
       _config_parse_file "$PROXMOX_SECRETS_CONFIG" secrets 1 || return
       _config_validate_monitoring_secrets || return
+      _config_validate_pbs_secrets || return
       if [[ "${APP_HA_CONFIG_TEST_MODE:-0}" != 1 ]]; then
         config_require_git_ignored "$PROXMOX_SECRETS_CONFIG" "Secret configuration" || return
       fi

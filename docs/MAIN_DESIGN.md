@@ -63,6 +63,7 @@ defaults. In that example:
 - [Shared guest gateway and egress fallback](#shared-guest-gateway-and-egress-fallback)
 - [Corosync, quorum, and QDevice](#corosync-quorum-and-qdevice)
 - [Monitoring and alerting](#monitoring-and-alerting)
+- [Backup and restore (PBS)](#backup-and-restore-pbs)
 - [Host storage, LUKS, and mirrors](#host-storage-luks-and-mirrors)
 - [Configuration, secrets, and artifacts](#configuration-secrets-and-artifacts)
 - [The main workflows](#the-main-workflows)
@@ -108,7 +109,10 @@ shared guest gateway and its egress fallback, a transfer counter, and a
 
 This design provides host-level application availability. It does not create
 an active/active application, synchronous storage, zero-RPO recovery, a
-database cluster, a backup, or an application-consistency mechanism.
+database cluster, or an application-consistency mechanism. ZFS replication is
+not a backup; off-cluster backups of production VMs go to a Proxmox Backup
+Server through Proxmox VE's own PBS integration (see
+[Backup and restore (PBS)](#backup-and-restore-pbs)).
 
 ## Required assumptions
 
@@ -879,6 +883,224 @@ changes only config does not restart it. A state file that cannot be read
 is moved aside as `state.json.corrupt-<time>`, and the agent starts fresh,
 announcing every open problem once.
 
+## Backup and restore (PBS)
+
+Backups use Proxmox VE's native Proxmox Backup Server integration: a PVE
+`pbs` storage, PVE backup jobs (`vzdump`), and PVE restores (`qmrestore`).
+BMAC implements no backup mechanism of its own. ZFS replication and staging
+snapshots remain separate from backups.
+
+**Status.** `config.sh` accepts and validates the `PROXMOX_PBS_*` keys and
+`PROXMOX_PBS_TOKEN` (see [Configuration, secrets, and
+artifacts](#configuration-secrets-and-artifacts)). These workflows exist, on
+the Dashboard's Backups page, under `scripts/user_callable/backups/`: Setup
+PBS (`setup_pbs.sh`), the backup list (`list_backups.sh`, the `backups` kind
+of `scripts/utilities/quick_state.py`), each VM's backup schedule
+(`manage_backup_schedule.sh`), Back up now (`backup_now.sh`), and
+restore-point protection (`protect_restore_point.sh`), and Rollback Restore
+(`rollback_restore.sh`). They share
+`scripts/lib/backups.sh`, and the host-side `scripts/host_runtime/pbs_api.py`
+reads the PBS account. `add_prod_vm.sh` skips VMIDs that have backups, and
+`remove_prod_vm.sh` removes the VM's backup job. The rest is still design,
+built in this order:
+
+1. Setup PBS, backup schedules, Back up now, the restore-point list, and
+   restore-point protection (built); backup-age monitoring; the PBS server
+   monitor.
+2. Rollback Restore (built) and Full Recovery, both as full (not live)
+   restores.
+3. Instant Restore - Permanent (PVE live restore) and Instant Restore - Test
+   (disposable test VMs read from PBS), each after testing on a real cluster.
+
+### PBS server and per-cluster isolation
+
+One PBS server can serve several BMAC clusters (see
+[`PBS_MANUAL_SETUP.md`](PBS_MANUAL_SETUP.md)). Each cluster has its own
+namespace and its own API token, holding the `DatastoreBackup` and
+`DatastoreAudit` roles on that namespace only. Such a token can list every
+backup group in its namespace, restore the groups it owns (it owns everything
+it writes), write new snapshots, edit their notes, and set or clear their
+`protected` flag. It cannot delete, prune, create namespaces, or see another
+cluster's namespace (PBS answers 403), the datastore's capacity, or the
+datastore's verify jobs and tasks. The PVE storage therefore uses
+`prune-backups keep-all=1`, and retention is whatever the PBS administrator's
+prune job for the namespace keeps.
+
+The Backups page shows that policy read-only. `GET /api2/json/config/prune`
+returns only the prune jobs whose namespace the token can audit; BMAC shows
+the job whose `store` and `ns` match `PROXMOX_PBS_DATASTORE` and
+`PROXMOX_PBS_NAMESPACE`. A mox host makes the call, not the workstation, so it
+works behind a PBS firewall that admits only the clusters' addresses. The
+host reads the token from the PVE storage's root-only
+`/etc/pve/priv/storage/bmac-pbs.pw` and accepts the connection only when the
+server certificate's SHA-256 fingerprint equals the one in the storage
+configuration. If the token cannot read the policy, or the namespace has no
+prune job, the page says so; BMAC never displays a guessed policy.
+
+### Setup PBS and the encryption key
+
+Setup PBS is a separate Backups-page workflow, run once per cluster (again
+after a cluster is rebuilt). It adds the PVE storage `bmac-pbs` from the
+`PROXMOX_PBS_*` keys and the token, with client-side encryption and a master
+public key:
+
+- `--encryption-key autogen` creates one key per cluster, not per backup:
+  `/etc/pve/priv/storage/bmac-pbs.enc`, a JSON key without a passphrase
+  (PVE supports only those). pmxcfs replicates it to every host.
+- `--master-pubkey` takes the administrator's RSA master public key
+  (default `pbs-master-public.pem` in the configuration directory; Setup
+  refuses a file that contains a private key). PVE keeps it as
+  `/etc/pve/priv/storage/bmac-pbs.master.pem`, and every snapshot carries the
+  cluster key encrypted with it (`rsa-encrypted.key`). `pvesm` reads the
+  master key, and an existing encryption key, from files. Setup sends them
+  over SSH on stdin, and the host keeps them in a root-only directory under
+  `/run` that it shreds as soon as `pvesm` returns.
+- Before generating a key, Setup lists the namespace. If any snapshot exists,
+  it refuses to generate one and requires the existing key instead, either
+  the cluster's saved `.enc` file or a key recovered with the master key.
+  It checks that key's fingerprint against the fingerprints the snapshots
+  record. A new key would leave every existing backup unreadable.
+- After the key is in place, Setup shows the host path, offers a copy to a
+  workstation path and a printable paper key, and waits until the operator
+  confirms the key is stored offline.
+
+The cluster administrator restores with the cluster key. The holder of the
+master private key can restore any cluster's backup by recovering that
+cluster's key from any of its snapshots:
+
+```bash
+proxmox-backup-client restore --ns <namespace> vm/<vmid>/<time> \
+  rsa-encrypted.key ./wrapped.key
+proxmox-backup-client key import-with-master-key ./cluster.enc \
+  --master-keyfile master-private.pem --encrypted-keyfile ./wrapped.key --kdf none
+```
+
+### Backup IDs, jobs, and schedules
+
+PBS names a VM's backups `vm/<VMID>`, which cannot be changed. BMAC marks its
+own work instead:
+
+- One PVE backup job per production VM, with job ID `bmac-prodN`.
+- Snapshot notes written by the job: `bmac prodN slug=<purpose>
+  fqdn=<primary> cluster=<name>`. The Backups page lists only snapshots whose
+  notes start with `bmac `. Back up now may add a comment after ` | ` on the
+  same line (Proxmox lists only a note's first line); it is one line of at
+  most 200 characters without `{ } \ |`, which vzdump's notes template or
+  this format would interpret. Rollback's safety backup is commented
+  "Before rollback to <time>". The page marks a commented restore point with
+  an icon whose tooltip shows the comment.
+- Once PBS is configured, production VMID allocation skips any VMID that
+  already has a backup group, so a new VM never shares a group with an older
+  one. That covers VMIDs reused after a VM is removed and a rebuilt cluster
+  whose VMIDs start again at 100. Full Recovery reuses the original VMID when
+  it is free.
+
+The schedule is a single choice: back up every 1, 2, 3, 4, 6, 8, 12, or 24
+hours (default 4), staggered by slot. Fixed job options are `mode=snapshot`
+(QEMU live backup with the guest agent's filesystem freeze),
+`repeat-missed=1`, and fleecing on `local-zfs`, which keeps a slow or remote
+PBS from stalling production writes. A bandwidth limit is optional. Per-VM
+actions are change frequency, disable, Back up now, and protect or unprotect
+a restore point. Protected points are marked in the restore-point list
+because they are never pruned.
+
+The PBS prune policy, not the backup frequency, bounds history. For example,
+with `keep-last 6, keep-daily 3, keep-weekly 4`, a 4-hour schedule keeps a
+point every 4 hours for the last day, and an hourly one keeps only the last 6
+hours in full; both keep about 13 points spanning about 5 weeks. QEMU's
+dirty bitmap survives live migration but not a VM restart or an HA failover,
+so the next backup after either reads the whole disk (it still uploads only
+changed chunks).
+
+PBS shows every snapshot at the VM disk's full logical size, because each
+one is a complete image that can be restored on its own. Its chunks are
+deduplicated across all snapshots, so a later backup stores only the chunks
+PBS did not already have. The Backups page shows, per restore point, how the
+backup was made, as its vzdump task log records it:
+
+- a fast incremental backup (only blocks the dirty bitmap marked as changed
+  were read), or a full read, and why;
+- the data read (`transferred` in the log, which is what vzdump processed,
+  not what it uploaded), the zeros, the data reused, and the approximate new
+  data (the image size less what was reused);
+- the transfer time and the total time.
+
+`list_backups.sh` reads each log once. The host that answers the listing
+caches the result in `/var/lib/app-ha/backup-metrics.json` (root-only, not in
+pmxcfs), keyed by server, datastore, namespace, and snapshot, so every
+workstation sees the same metrics and a task log PVE later prunes loses
+nothing. That host first consults its own cache, then the other online hosts'
+caches over the cluster's host SSH trust, and fetches a task log only when
+the task's run covers a restore point none of them has. Entries of restore
+points PBS has pruned are dropped. This cache is the listing's only write. A
+restore point whose log PVE no longer keeps, or whose host is offline, shows
+"no log" and is retried on the next listing.
+
+Backups and restores travel over each host's public interface, so they count
+toward the monthly transfer cap (`PROXMOX_HOST_TRANSFER_MONTHLY_LIMIT_GIB`).
+A VM's first backup uploads all of its non-zero data, and later ones only the
+changed chunks; a restore downloads the whole image. The first test backup
+(prod1, 1 TiB disk with about 8 GiB in use) took 7 minutes, mostly reading
+zeros, and uploaded at up to about 1 Gbit/s, the PBS link's capacity, with no
+sign of throttling. PBS traffic is TLS over TCP, so the provider's inbound UDP
+rate limit does not apply. Backup jobs therefore set no bandwidth limit by
+default; the optional limit remains available.
+
+Removing a production VM removes its backup job. Its backups stay on PBS,
+since the token cannot delete them, and Full Recovery can restore them.
+
+### Restores
+
+The production lifecycle hook refuses to start a VM whose HA state, VMID,
+MAC, `scsi0` volume, or tags differ from the registry, and a guest's netplan
+matches its MAC. Every restore therefore updates the registry before the VM
+first starts, and every restore that changes a guest's identity is patched
+before its first boot. vCPU and RAM can be overridden on every restore.
+
+- **Rollback Restore** returns an existing production VM to one of its own
+  restore points, keeping its identity. The workflow takes the orchestration
+  lease, requires a typed confirmation, and offers a safety backup first
+  (which counts toward `keep-last`). It then stops the VM through HA,
+  deletes its replication jobs and waits for the replica volumes to go, and
+  restores with `--force` (never `--unique`, which would replace the MAC).
+  A restore brings back the whole VM config of the restore point, so it then
+  re-applies the VM's current name, `net0`, tags, lifecycle hook, and
+  description, and the chosen vCPUs and RAM; it grows the disk back if it
+  was extended after the restore point (only the zvol: the guest's partition
+  and filesystem keep the restore point's size until the next disk
+  extension, which offers to grow into the space), and updates the
+  registry's volume if
+  Proxmox renamed it (on PVE 9.2 a forced restore keeps the names). Finally
+  it starts the VM through HA and recreates replication. A restore over an
+  HA-managed VM is allowed while HA holds it stopped. It refuses a VM that is
+  locked (for example by a running backup) or that has staging VMs, which
+  are clones of its replicas. PVE cannot
+  replicate over the replicas of a restored disk, so they must be removed
+  first. The VM has no HA protection until the first full sync completes.
+- **Full Recovery** creates a new permanent production VM from a restore
+  point, for example on a rebuilt cluster. It is `add_prod_vm.sh` with the
+  OS install replaced by a full restore. The original slot, VMID, purpose,
+  and FQDN are offered when they are free, read from the snapshot notes and
+  the backed-up VM config. The restore applies the registry's name, MAC,
+  and tags, and leaves the VM stopped. An offline patch always rewrites the
+  hostname, netplan (new MAC and slot address), and `/etc/hosts`. It
+  regenerates machine-id and SSH host keys only when the slot differs from
+  the original, since the original VM may still exist. The rest is the
+  normal production sequence: network policy, replication, HA, ingress, and
+  monitoring.
+- **Instant Restore - Permanent** (later) is Rollback Restore using PVE's
+  live restore. The VM starts at once and its data streams from PBS into
+  `local-zfs` in the background. If PBS becomes unreachable mid-restore, the
+  VM is stopped and writes made since the restore began are lost.
+- **Instant Restore - Test** (later) creates a disposable test VM on a host
+  without running production VMs, inside the staging slots, quotas, and
+  compute defaults. `proxmox-backup-client map` exposes the snapshot's disk
+  read-only; a qcow2 overlay on the host holds the VM's writes, and its
+  identity is patched offline before first boot. The full disk is never
+  copied. A Backups-page tile deletes these VMs.
+
+Single files are restored with Proxmox's own File Restore, not through BMAC.
+
 ## Host storage, LUKS, and mirrors
 
 The reviewed source is `proxmox-ve_9.2-1.iso`, verified against the exact
@@ -1028,7 +1250,12 @@ administrator keys, Tailscale host tag, SSH behavior, and
 `MONITORING_ENABLED`. The optional monitoring keys (`HEALTHCHECKS_API_URL` and
 the `MONITOR_*` keys listed in the README's "Monitoring and Alerts" section)
 are accepted, validated, and defaulted by `config.sh` but deliberately absent
-from `cluster_dot_conf`. Monitoring keys are excluded from the effective
+from `cluster_dot_conf`. The optional `PROXMOX_PBS_*` keys describe this
+cluster's Proxmox Backup Server: host, port (default 8007), datastore,
+namespace, API token ID, and the server's TLS certificate fingerprint. They
+are all-or-nothing: with none set, backups are not configured, and setting
+any requires all of them but the port. `config_pbs_configured` reports which
+case applies. Monitoring and PBS keys are excluded from the effective
 configuration hash, so changing them neither invalidates host-setup
 checkpoints nor shows as configuration drift. Each `moxN.conf`
 owns an optional iDRAC address, exact NVMe serial pairs, optional
@@ -1074,12 +1301,22 @@ PROXMOX_LUKS_PASSWORD
 PROXMOX_QDEVICE_ROOT_PASSWORD
 CLOUDFLARE_TUNNEL_SECRET
 HEALTHCHECKS_API_KEY
+PROXMOX_PBS_TOKEN
 ```
 
 `HEALTHCHECKS_API_KEY` is the Healthchecks.io project's read-write API key,
 required when `MONITORING_ENABLED=true`; the loader rejects an empty value or
 the template's `redacted`. Only the workstation uses it, through the
 environment of `healthchecks.py`.
+
+`PROXMOX_PBS_TOKEN` is the secret of the PBS API token named by
+`PROXMOX_PBS_USERNAME` (a UUID). It is optional: the loader accepts an absent
+value or the template's `redacted`, rejects a real value when no PBS server
+is configured, and otherwise requires a UUID. Backup workflows require it
+with `config_require_pbs_token`. Setup stores it in Proxmox's own
+root-only `/etc/pve/priv/storage/<storage>.pw`. It reaches the mox on stdin,
+but `pvesm` takes it as an argument, so root on that host can briefly see it
+in the process list. Encryption keys never appear on a command line.
 
 `IDRAC_USER` and `IDRAC_PASSWORD` are optional unless host setup is run in
 iDRAC/Redfish inventory mode. `CLOUDFLARE_TUNNEL_SECRET` is the tunnel's
@@ -1791,6 +2028,7 @@ Important installed host-local paths and units include:
 /usr/local/lib/app-ha-proxmox/lib/tunnel_sync.sh
 /usr/local/lib/app-ha-proxmox/lib/cloudflared_setup.sh
 /usr/local/lib/app-ha-proxmox/lib/app_ha_monitor.py
+/usr/local/lib/app-ha-proxmox/lib/pbs_api.py
 /usr/local/lib/app-ha-proxmox/config/cluster.conf
 /var/lib/vz/snippets/app-ha-guest-role-hook.sh
 /etc/app-ha/guest-network.env
@@ -1800,6 +2038,7 @@ Important installed host-local paths and units include:
 /etc/cloudflared/config.yml
 /var/lib/app-ha/egress-targets.json
 /var/lib/app-ha/transfer.json
+/var/lib/app-ha/backup-metrics.json           (once backups are listed)
 /run/app-ha/egress-health.json
 /etc/app-ha-monitor/config.json              (monitoring enabled)
 /var/lib/app-ha-monitor/state.json           (monitoring enabled)
@@ -1822,8 +2061,9 @@ move; it is not a custom pmxcfs registry file.
 
 ### Updating the deployed cluster runtime
 
-After changing the registry, deferred cleanup worker, lifecycle hook, the
-monitor agent (`app_ha_monitor.py`), or any of the networking runtime files
+After changing the configuration parser (`config.sh`), the registry,
+deferred cleanup worker, lifecycle hook, the monitor agent
+(`app_ha_monitor.py`), or any of the networking runtime files
 (`guest_network.sh`, `egress_health.py`, `egress_probe_targets.txt`,
 `transfer_counter.py`, `tunnel_config.py`, `tunnel_sync.sh`,
 `cloudflared_setup.sh`) in this checkout, update their installed copies
@@ -1841,7 +2081,15 @@ local snippet (adding any managed file a node lacks; a rollback removes files
 that were absent before), restarts `app-ha-egress-health.service`, runs
 `tunnel_sync.sh --all`, verifies hashes, registry readability, and
 `tunnel_sync.sh --check` on every node, and restores the prior files if the
-update fails. It does not restart VMs or require existing guests to reattach
+update fails. Each host's commit also runs the newly installed `config.sh
+--check` against its installed `cluster.conf`; a parser that rejects it fails
+that commit.
+
+Update the runtime before syncing a `cluster.conf` that uses a newly added
+key: the lifecycle hook and tunnel sync parse the installed `cluster.conf`
+with the installed `config.sh`, which rejects keys it does not know. The sync
+therefore checks the new file with the host's parser and, if it is rejected,
+keeps the previous file on that host and stops. It does not restart VMs or require existing guests to reattach
 their hook. It does not change networking settings; use
 `sync_cluster_network.sh` for those.
 
@@ -3300,7 +3548,8 @@ bash -n \
   scripts/user_callable/hosts/update_cluster_runtime.sh
 ```
 
-Run the complete unit suite, every tracked `test_*.py`, in parallel:
+Run the complete unit suite, every `test_*.py` that Git tracks or would add
+(untracked files no `.gitignore` excludes), in parallel:
 
 ```bash
 dev/run_tests.py
@@ -3326,7 +3575,7 @@ an intermittent failure.
 Plain `python3 -m unittest FILE...` still works for any subset and runs it
 serially in one process.
 
-On a Mac, `dev/run-tests-in-vm.sh` runs `bash -n` on every tracked script and
+On a Mac, `dev/run-tests-in-vm.sh` runs `bash -n` on every script Git knows of and
 then `dev/run_tests.py` inside a Debian 13 Lima VM; see
 [`dev/README.md`](../dev/README.md).
 
@@ -3464,13 +3713,14 @@ and must not be inferred from registry primitives or old design prose:
   not an application. Real applications use their own deployment tooling.
   The sample `scripts/user_callable/guests/prod/deploy_hello_app_to_prod.sh` only deploys an example todo
   app for platform smoke-testing.
-- **Backups and point-in-time recovery.** ZFS replication and staging
-  snapshots are not backup jobs. No script configures off-cluster backups,
-  PostgreSQL PITR, restore testing, or retention.
-- **Monitoring and alerting.** No script deploys metrics/log aggregation or
-  alerts for quorum, QDevice, egress fallback, transfer caps, tunnel
-  replicas, Cloudflare, application health, replication lag, pool capacity,
-  or pending cleanup.
+- **Application-level backups and point-in-time recovery.** Backups are
+  whole-VM PBS snapshots (see [Backup and restore (PBS)](#backup-and-restore-pbs)),
+  filesystem-consistent through the guest agent's filesystem freeze but not
+  application-consistent. No script configures database dumps, PostgreSQL PITR,
+  or retention: retention belongs to the PBS server's prune jobs.
+- **Metrics and log aggregation.** Monitoring is event alerting through
+  Healthchecks.io (see [Monitoring and alerting](#monitoring-and-alerting));
+  no script deploys metrics collection, dashboards, or log aggregation.
 - **Complete network isolation.** The code does not create a staging VLAN,
   routed guest subnets, default-deny per-guest firewall rules, or restricted
   guest egress.

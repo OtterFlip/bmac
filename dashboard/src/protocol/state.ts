@@ -239,6 +239,102 @@ export interface QDeviceAccessState {
   problem?: string;
 }
 
+/** scripts/user_callable/backups/list_backups.sh (quick_state.py render backups). */
+export interface BackupStorage {
+  configured: boolean;
+  id: string;
+  /** Null until the storage exists. */
+  active: boolean | null;
+  server: string | null;
+  port: number | null;
+  datastore: string | null;
+  namespace: string | null;
+  username: string | null;
+  key_fingerprint: string | null;
+  master_pubkey: boolean;
+}
+
+export interface BackupRetention {
+  /** False when the cluster's token cannot read the PBS prune jobs; nothing is guessed. */
+  readable: boolean;
+  jobs: { id: string; schedule: string | null; keep: Record<string, number> }[];
+  error: string | null;
+}
+
+export interface BackupJob {
+  id: string;
+  enabled: boolean;
+  schedule: string;
+  /** 1, 2, 3, 4, 6, 8, 12 or 24; null for a schedule BMAC did not write. */
+  every_hours: number | null;
+  next_run: number | null;
+  bwlimit: number | null;
+}
+
+export interface BackupVm {
+  name: string;
+  vmid: number | null;
+  purpose: string | null;
+  fqdn: string | null;
+  state: string | null;
+  job: BackupJob | null;
+  latest_backup: number | null;
+  restore_points: number;
+}
+
+/** How a backup was made, read once from its vzdump task log and cached on the workstation. */
+export interface BackupMetrics {
+  /** fast-incremental: only blocks changed since the previous backup were read. */
+  mode: "fast-incremental" | "full-read";
+  detail: string;
+  dirty_bytes: number | null;
+  /** What vzdump read and processed ("transferred" in its log), not what it uploaded. */
+  read_bytes: number | null;
+  zero_bytes: number | null;
+  reused_bytes: number | null;
+  reused_percent: number | null;
+  /** Data PBS did not have yet: the image size less what was reused (approximate). */
+  new_bytes: number | null;
+  transfer_seconds: number | null;
+  duration_seconds: number | null;
+  node: string;
+  task: string;
+}
+
+export interface RestorePoint {
+  volid: string;
+  vmid: number | null;
+  time: number | null;
+  /** The prodN named in the snapshot's notes, which outlives a removed VM. */
+  name: string | null;
+  purpose: string | null;
+  fqdn: string | null;
+  cluster: string | null;
+  notes: string;
+  /** The comment given when the backup was made, if any. */
+  comment: string | null;
+  protected: boolean;
+  size: number | null;
+  encrypted: string | null;
+  /** Encrypted with this cluster's current key, so it can be restored here. */
+  key_matches: boolean;
+  verified: string | null;
+  /** Null when no task log for it was found (pruned from PVE's task history, or its host is offline). */
+  metrics: BackupMetrics | null;
+}
+
+export interface BackupsState {
+  collected_at: number;
+  probe: string | null;
+  storage: BackupStorage;
+  retention: BackupRetention;
+  vms: BackupVm[];
+  restore_points: RestorePoint[];
+  /** Backups in the namespace without BMAC's notes; counted, never listed. */
+  unmanaged_backups: number;
+  problems: string[];
+}
+
 export interface StateSources {
   list_hosts: HostsState;
   list_guests: GuestsState;
@@ -246,9 +342,10 @@ export interface StateSources {
   list_storage: StorageState;
   list_disks: DisksState;
   check_qdevice_access: QDeviceAccessState;
+  list_backups: BackupsState;
 }
 
 export type SourceId = keyof StateSources;
-export const SOURCE_IDS: SourceId[] = ["list_hosts", "list_guests", "list_replication", "list_storage", "list_disks", "check_qdevice_access"];
+export const SOURCE_IDS: SourceId[] = ["list_hosts", "list_guests", "list_replication", "list_storage", "list_disks", "check_qdevice_access", "list_backups"];
 /** The sources read through a cluster member; check_qdevice_access is not one of them. */
 export const CLUSTER_SOURCE_IDS: SourceId[] = SOURCE_IDS.filter((id) => id !== "check_qdevice_access");

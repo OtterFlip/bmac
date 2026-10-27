@@ -25,7 +25,7 @@ function useKnownNames() {
   }, [hosts, guests, repo]);
 }
 
-const NAME_HINT: Record<string, string> = { host: "mox1", production: "prod1", staging: "stage1prod1", guest: "prod1 or stage1prod1", hostname: "qdevice" };
+const NAME_HINT: Record<string, string> = { host: "mox1", production: "prod1", staging: "stage1prod1", guest: "prod1 or stage1prod1", hostname: "qdevice", snapshot: "vm/100/2026-10-27T14:50:01Z" };
 
 function ParamInput({ param, value, onChange }: { param: Param; value: unknown; onChange: (v: unknown) => void }) {
   const known = useKnownNames();

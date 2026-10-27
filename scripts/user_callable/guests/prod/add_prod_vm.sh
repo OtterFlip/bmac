@@ -1202,9 +1202,19 @@ reserve_or_resume_resource() {
     write_json "${RUN_DIR}/all-live-vms.json" "$(
       pvesh_get /cluster/resources --type vm
     )"
+    # PBS names a VM's backups after its VMID, so a VMID that already has
+    # backups (of a removed VM, or from before the cluster was rebuilt) would
+    # mix two VMs' histories in one backup group. Skip those too.
+    if pvesh_get /storage/bmac-pbs >/dev/null 2>&1; then
+      write_json "${RUN_DIR}/backups.json" "$(
+        pvesh_get "/nodes/${COORDINATOR}/storage/bmac-pbs/content"
+      )" || die "Could not list the backups on PBS storage bmac-pbs, so a new VMID could share a VM's backup group; retry when PBS is reachable (list_backups.sh shows the storage state)"
+    else
+      write_json "${RUN_DIR}/backups.json" "[]"
+    fi
     VMID="$(
       python3 - "$nextid_json" "${RUN_DIR}/all-live-vms.json" \
-        "${RUN_DIR}/resources.json" <<'PY'
+        "${RUN_DIR}/resources.json" "${RUN_DIR}/backups.json" <<'PY'
 import json
 import sys
 value = json.loads(sys.argv[1])
@@ -1216,9 +1226,11 @@ with open(sys.argv[2], encoding="utf-8") as stream:
     live = json.load(stream)
 with open(sys.argv[3], encoding="utf-8") as stream:
     registered = json.load(stream)
+with open(sys.argv[4], encoding="utf-8") as stream:
+    backups = json.load(stream)
 used = {
     int(row["vmid"])
-    for row in [*live, *registered]
+    for row in [*live, *registered, *backups]
     if str(row.get("vmid", "")).isdigit()
 }
 while value in used:

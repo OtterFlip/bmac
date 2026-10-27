@@ -207,6 +207,16 @@ class QuickStateTest(unittest.TestCase):
         self.assertEqual(filtered["production"], [])
         self.assertNotIn("PRODUCTION VMS", self.render_terminal("guests", GUESTS_REPORT, "--kind-filter", "staging"))
 
+    def test_vcpus_and_ram_come_from_proxmox_before_the_registry(self) -> None:
+        summary, _, _ = self.render_json("guests", GUESTS_REPORT)
+        self.assertEqual((summary["production"][0]["cores"], summary["production"][0]["memory_mb"]), (2, 4096))
+        # Changed by a rollback or in the Proxmox web UI: the listing follows.
+        changed = json.loads(json.dumps(GUESTS_REPORT))
+        changed["live"][0].update(maxcpu=60, maxmem=32 * GIB, maxdisk=40 * GIB)
+        summary, _, _ = self.render_json("guests", changed)
+        self.assertEqual((summary["production"][0]["cores"], summary["production"][0]["memory_mb"]), (60, 32768))
+        self.assertEqual(summary["production"][0]["disk_bytes"], 40 * GIB)
+
     def test_failed_over_production_links_to_recording_its_owner(self) -> None:
         moved = json.loads(json.dumps(GUESTS_REPORT))
         moved["live"][0].update(status="running", node="mox2")

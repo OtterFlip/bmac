@@ -18,7 +18,7 @@ import type {
   WorkflowEvent,
   WorkflowInfo,
 } from "@/protocol/types";
-import { disksState, guestsState, hostsState, replicationState, storageState } from "./fixtures";
+import { backupsState, disksState, guestsState, hostsState, replicationState, storageState } from "./fixtures";
 import { createMockConfig } from "./config";
 
 // dev/VERSION, substituted by vite.config.ts.
@@ -243,7 +243,7 @@ export function createMockBackend(): Backend {
       await sleep(run, 300);
       await log(run, [`Reading cluster state through mox1 ...`], 400);
       await log(run, tableLines[id] ?? ["", "(table output)", ""], 12);
-      const data = { list_hosts: hostsState, list_guests: guestsState, list_replication: replicationState, list_storage: storageState, list_disks: disksState }[
+      const data = { list_hosts: hostsState, list_guests: guestsState, list_replication: replicationState, list_storage: storageState, list_disks: disksState, list_backups: backupsState }[
         id as "list_hosts"
       ]();
       emit(run, { type: "result", data });

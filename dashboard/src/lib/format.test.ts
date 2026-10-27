@@ -1,7 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { ago, bytes, duration, percent, plural } from "./format";
+import { ago, bytes, duration, localDateTime, percent, plural } from "./format";
 
 describe("format", () => {
+  it("shows a full date and time in this workstation's time zone", () => {
+    const zone = process.env.TZ;
+    process.env.TZ = "America/Denver";
+    try {
+      // 2026-10-27T16:04:23Z is 10:04 in Denver, still on daylight time.
+      const text = localDateTime(Date.UTC(2026, 9, 27, 16, 4, 23) / 1000);
+      expect(text).toMatch(/2026/);
+      expect(text).toMatch(/10:04/);
+      expect(text).toMatch(/MDT|GMT-6/);
+    } finally {
+      process.env.TZ = zone;
+    }
+    expect(localDateTime(null)).toBe("—");
+  });
   it("formats bytes in binary units", () => {
     expect(bytes(null)).toBe("—");
     expect(bytes(512)).toMatch(/512 B/);

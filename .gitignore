@@ -1,6 +1,7 @@
 *.env
 *.key
 secrets.env
+pbs-master-public.pem
 tailscale.jsonc
 config/*.conf
 config/*.cer

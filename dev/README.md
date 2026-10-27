@@ -41,7 +41,8 @@ drifts. The shell scripts carry no version of their own.
 The suite runs from a clone of this repository on Linux or macOS. It needs:
 
 - **Git.** With no targets, `run_tests.py` asks `git ls-files` for the
-  tracked `test_*.py` files.
+  `test_*.py` files: tracked ones and new ones not yet added, unless a
+  `.gitignore` excludes them.
 - **Python 3.9 or newer**, standard library only.
 - **Bash 4.4 or newer, OpenSSL 3, and `flock`**, for the scripts under
   test. Ubuntu and Debian ship all three; a Mac needs them from Homebrew
@@ -172,8 +173,8 @@ image and installs the packages, which takes about four minutes. The VM uses
 Apple's Virtualization framework (arm64 on Apple Silicon), 4 vCPUs, 8 GiB of
 RAM, and a sparse 30 GiB disk. Later runs take under a minute.
 
-Each run starts the VM if it is stopped, runs `bash -n` on every tracked
-`*.sh`, then runs every tracked `test_*.py` in parallel through
+Each run starts the VM if it is stopped, runs `bash -n` on every `*.sh`
+and then every `test_*.py` that Git tracks or would add, in parallel through
 `dev/run_tests.py`, one worker per VM vCPU. Once `config/mox1.conf` exists (see
 above), the expected result is every test passing with nothing skipped. Extra
 arguments go to `dev/run_tests.py`:

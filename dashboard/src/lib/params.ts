@@ -30,6 +30,7 @@ const CHECKS: Partial<Record<Param["type"], [RegExp, string]>> = {
   integer: [/^[1-9][0-9]{0,8}$/, "Expected a positive whole number."],
   path: [/^\/[^\n]*$/, "Expected an absolute path."],
   hostname: [/^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/, "Expected a host name."],
+  snapshot: [/^vm\/[1-9][0-9]{0,8}\/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/, "Expected a restore point like vm/100/2026-10-27T14:50:01Z."],
 };
 
 export interface NameOption {

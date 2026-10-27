@@ -253,16 +253,29 @@ sync_slots() {
 }
 
 sync_node() {
-  local node="$1" secret_file
+  local node="$1" secret_file status=0
   log "Applying the network settings on $node"
   copy_to_node "$node" "$PROXMOX_CLUSTER_CONFIG" /root/.app-ha-cluster.conf
+  # The lifecycle hook and the tunnel sync parse the installed cluster.conf
+  # with the host's config.sh. If that parser rejects the new file (it
+  # predates a key, so update_cluster_runtime.sh has not run), put the
+  # previous file back so guests keep starting.
   # shellcheck disable=SC2016 # Evaluated on the host.
   mox_ssh "$node" bash -c '
 set -Eeuo pipefail
 install -o root -g root -m 0644 /root/.app-ha-cluster.conf "$1.new"
 rm -f /root/.app-ha-cluster.conf
+cp -p "$1" "$1.previous"
 mv -f "$1.new" "$1"
-' bash "$REMOTE_CLUSTER_CONF" </dev/null
+if ! "$2/config.sh" --check --no-secrets >/dev/null; then
+  mv -f "$1.previous" "$1"
+  exit 3
+fi
+rm -f "$1.previous"
+' bash "$REMOTE_CLUSTER_CONF" "$REMOTE_LIB" </dev/null || status=$?
+  ((status != 3)) ||
+    die "$node's installed config.sh rejects this cluster.conf, so $node keeps its previous copy. Run update_cluster_runtime.sh first, then sync again."
+  ((status == 0)) || die "Could not install cluster.conf on $node"
   copy_to_node "$node" "${RUN_DIR}/${node}.env" /root/.app-ha-guest-network.env
   mox_ssh "$node" "${REMOTE_LIB}/guest_network.sh" configure \
     /root/.app-ha-guest-network.env </dev/null

@@ -12,6 +12,7 @@ import type { SourceId, StateSources } from "@/protocol/state";
 const DEFAULT_STALE_MS = 2 * 60 * 1000;
 
 export const QDEVICE_SETUP_URL = "https://github.com/OtterFlip/bmac/blob/main/docs/QDEVICE_MANUAL_SETUP.md";
+export const PBS_SETUP_URL = "https://github.com/OtterFlip/bmac/blob/main/docs/PBS_MANUAL_SETUP.md";
 
 /** A fast state source. Loads on mount when stale, and on the configured interval. */
 export function useSource<K extends SourceId>(id: K): SourceEntry<StateSources[K]> & { refresh: () => void } {

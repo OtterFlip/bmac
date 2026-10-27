@@ -25,7 +25,7 @@
 # removing or purging a host are reused, lowest number first. The external
 # QDevice contributes quorum only and is never a Cloudflare Tunnel replica,
 # storage node, or guest egress path.
-PROXMOX_CLUSTER_NAME=MyAppCloud
+PROXMOX_CLUSTER_NAME=mycluster
 PROXMOX_QDEVICE_HOST=qdevice
 
 # Optional join/control node: new hosts join through it and it hosts the
@@ -209,3 +209,27 @@ ADMIN_2_PUBLIC_SSH_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPIdG/s65LGj6TCZMI9g
 # When MONITORING_ENABLED=true, HEALTHCHECKS_API_KEY must be set in
 # secrets.env and PROXMOX_QDEVICE_HOST must be set and reachable via ssh
 MONITORING_ENABLED=true
+
+# IPv4 address or domain of PBS server
+PROXMOX_PBS_SERVER_HOST=1.2.3.4
+
+# PBS server port (default, if missing, is 8007)
+PROXMOX_PBS_SERVER_PORT=8007
+
+# PBS server datastore
+PROXMOX_PBS_DATASTORE=pbs
+
+# This cluster's PBS namespace
+PROXMOX_PBS_NAMESPACE=mycluster
+
+# This cluster's PBS username
+PROXMOX_PBS_USERNAME=mycluster@pbs!pve
+
+# SHA-256 fingerprint of the PBS server's TLS certificate (port 8007).
+# Get the known-good value ON the PBS server itself (not over the network):
+#   CLI:  proxmox-backup-manager cert info | grep -i fingerprint
+#   GUI:  PBS web UI -> Dashboard -> "Show Fingerprint"
+# Use the colon-separated hex form, e.g. 5d:17:0f:...:07:8d (case-insensitive).
+# This value changes if the PBS certificate is regenerated or replaced
+# (e.g. a new self-signed cert or an ACME/Let's Encrypt cert); update it here if so.
+PROXMOX_PBS_FINGERPRINT=00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff

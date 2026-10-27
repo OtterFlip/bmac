@@ -798,23 +798,48 @@ classify_role() {
 }
 
 # After an HA failover the VM stays where it restarted (failback is off), so
-# record this node as its owner. Runs only after production is up, never
-# fails the hook, and is skipped by the registry while a workflow holds the
-# VM's orchestration lease or the VM is not yet active.
+# record this node as its owner, and record the vCPUs, RAM, and root disk size
+# it started with, which a rollback or a change in the Proxmox web UI may have
+# changed.
+# Runs only after production is up, never fails the hook, and is skipped by
+# the registry while a workflow holds the VM's orchestration lease or the VM
+# is not yet active.
 record_production_owner() {
-  local name="$1" result
+  local name="$1" result config cores memory disk
+  local -a sizes=()
   (
     set +e
     source "$CONFIG_LIB" &&
       load_proxmox_config --no-secrets >/dev/null &&
       require_vars CLUSTER_STATE_DIR >/dev/null || exit 1
+    config="$(timeout 30 qm config "$VMID" 2>/dev/null)" || config=""
+    cores="$(awk -F': ' '$1 == "cores" {print $2; exit}' <<<"$config")"
+    # memory is "<MiB>" or, on newer Proxmox, "current=<MiB>[,...]".
+    memory="$(awk -F': ' '$1 == "memory" {print $2; exit}' <<<"$config")"
+    memory="${memory#current=}"
+    memory="${memory%%,*}"
+    [[ ! "$cores" =~ ^[1-9][0-9]{0,3}$ ]] || sizes+=(--cores "$cores")
+    [[ ! "$memory" =~ ^[1-9][0-9]{0,8}$ ]] || sizes+=(--memory-mb "$memory")
+    # The root disk's size, from "scsi0: <volume>,...,size=<N><unit>,...".
+    disk="$(awk -F': ' '$1 == "scsi0" {print $2; exit}' <<<"$config" |
+      sed -nE 's/(^|.*,)size=([0-9]+)([KMGT]?)(,.*|$)/\2 \3/p')"
+    if [[ "$disk" =~ ^([0-9]{1,12})\ ([KMGT]?)$ ]]; then
+      case "${BASH_REMATCH[2]}" in
+        T) disk=$((BASH_REMATCH[1] * 1024 ** 4)) ;;
+        G) disk=$((BASH_REMATCH[1] * 1024 ** 3)) ;;
+        M) disk=$((BASH_REMATCH[1] * 1024 ** 2)) ;;
+        K) disk=$((BASH_REMATCH[1] * 1024)) ;;
+        *) disk="${BASH_REMATCH[1]}" ;;
+      esac
+      sizes+=(--disk-bytes "$disk")
+    fi
     result="$(timeout 30 "$REGISTRY" --state-dir "$CLUSTER_STATE_DIR" \
-      record-owner "$name" --node "$LOCAL_NODE" 2>&1)" || {
+      record-owner "$name" --node "$LOCAL_NODE" "${sizes[@]}" 2>&1)" || {
       log "could not record $LOCAL_NODE as the owner of $name: ${result:-registry error}"
       exit 0
     }
     if [[ "$result" == *'"changed": true'* ]]; then
-      log "recorded $LOCAL_NODE as the owner of $name"
+      log "recorded $LOCAL_NODE as the owner of $name (${cores:-?} vCPUs, ${memory:-?} MiB RAM)"
     fi
   ) || log "could not load the cluster configuration to record the owner of $name"
 }

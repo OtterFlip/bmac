@@ -429,6 +429,31 @@ enabled, the script adds `hello-todo.service` and its certificate to the VM's
 monitored services; turn on the QDevice's probe of the health endpoint as
 described in [Monitoring your apps](#monitoring-your-apps).
 
+### Backing Up Production VMs
+
+Backups go to a Proxmox Backup Server (PBS) through Proxmox VE's own PBS
+integration. Set up the PBS server, its per-cluster namespace and token, and
+its retention policy first, following
+[`docs/PBS_MANUAL_SETUP.md`](docs/PBS_MANUAL_SETUP.md). Then put the
+`PROXMOX_PBS_*` settings in `config/cluster.conf` and the token secret
+(`PROXMOX_PBS_TOKEN`) in `config/secrets.env`, run
+`update_cluster_runtime.sh`, and use the Dashboard's **Backups** page:
+
+- **Setup PBS** adds the cluster's PBS storage `bmac-pbs` with a new
+  encryption key and your master public key, and saves a copy of the key for
+  you to store offline. Keep that copy: without it, or the master private
+  key, the cluster's backups cannot be restored.
+- **Backup schedule** backs a production VM up every 1, 2, 3, 4, 6, 8, 12 or
+  24 hours; **Back up now** makes one more backup straight away.
+- **Protect a restore point** keeps one however old it gets, for example
+  before a risky change.
+
+The page shows the PBS server's retention policy (read-only), each VM's
+schedule and newest backup, and every restore point BMAC made. How long
+backups are kept is set on the PBS server, not by BMAC. The terminal
+equivalents are under `scripts/user_callable/backups/`, and the design is in
+[Backup and restore (PBS)](docs/MAIN_DESIGN.md#backup-and-restore-pbs).
+
 ### Updating BMAC Runtime Code on Existing Hosts
 
 When checked-in runtime helpers or hooks have changed, preview drift and then
@@ -451,6 +476,11 @@ version is reinstalled (when the repository still has it) and no other host
 is touched. The dry run lists each host's installed and available version;
 `--skip-cloudflared` leaves cloudflared alone. Run the update when Cloudflare
 asks you to upgrade cloudflared.
+
+The update also installs the configuration parser (`config.sh`) on every
+host. Run it before syncing a `cluster.conf` that uses a newly added key
+(such as the `PROXMOX_PBS_*` keys): a host's older parser rejects keys it
+doesn't know, so the sync keeps that host's previous `cluster.conf` and stops.
 
 With `MONITORING_ENABLED=true`, the same command also brings monitoring up to
 date on every node (see [Monitoring and Alerts](#monitoring-and-alerts)):

@@ -16,6 +16,7 @@ import { ProductionPage } from "@/pages/ProductionPage";
 import { StagingPage } from "@/pages/StagingPage";
 import { StoragePage } from "@/pages/StoragePage";
 import { QDevicePage } from "@/pages/QDevicePage";
+import { BackupsPage } from "@/pages/BackupsPage";
 import { DiagnosticsPage } from "@/pages/DiagnosticsPage";
 import { OperationsPage } from "@/pages/OperationsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -28,6 +29,7 @@ const PAGES: Record<Page, () => React.JSX.Element> = {
   staging: StagingPage,
   storage: StoragePage,
   qdevice: QDevicePage,
+  backups: BackupsPage,
   diagnostics: DiagnosticsPage,
   operations: OperationsPage,
   config: ConfigPage,

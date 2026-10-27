@@ -5,13 +5,14 @@
 
 """Run the unittest suite in parallel, one test per worker process.
 
-    dev/run_tests.py                                        every tracked test_*.py
+    dev/run_tests.py                                        every test_*.py git knows of
     dev/run_tests.py -j 8 -k reservation                    8 workers, filtered
     dev/run_tests.py scripts/tests/test_tunnel_config.py   specific targets
     dev/run_tests.py scripts.tests.test_rpool_mirror.RpoolMirrorToolTest.test_add
 
 Targets are test files, modules, classes, or single test ids, as accepted by
-``python3 -m unittest``; with none, every tracked test_*.py runs. -k follows
+``python3 -m unittest``; with none, every test_*.py that git tracks or would
+add (untracked files that no .gitignore excludes) runs. -k follows
 unittest's rules (a plain substring, or an fnmatch pattern if it contains a
 wildcard) and may be repeated. Each test runs in its own ``python3`` process
 with stdin closed, so no test can see another's interpreter state, and the
@@ -39,15 +40,19 @@ from typing import Any, Iterator
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def tracked_test_files() -> list[str]:
+def repository_test_files() -> list[str]:
+    """Tracked test files plus new ones not yet added, so uncommitted work is
+    tested too. Ignored files (such as bundled copies) and files deleted from
+    the working tree are left out."""
     # safe.directory: a VM mount can briefly report this checkout as foreign.
     listed = subprocess.run(
-        ["git", "-c", f"safe.directory={REPO_ROOT}", "ls-files", "--",
-         "test_*.py", "*/test_*.py"],
+        ["git", "-c", f"safe.directory={REPO_ROOT}", "ls-files", "--cached",
+         "--others", "--exclude-standard", "--", "test_*.py", "*/test_*.py"],
         cwd=REPO_ROOT, check=True, capture_output=True, text=True,
     ).stdout.split()
+    listed = sorted({path for path in listed if (REPO_ROOT / path).is_file()})
     if not listed:
-        sys.exit("ERROR: no tracked test_*.py files")
+        sys.exit("ERROR: no test_*.py files found")
     return listed
 
 
@@ -182,7 +187,7 @@ def main(argv: list[str]) -> int:
         pattern if "*" in pattern else f"*{pattern}*" for pattern in args.patterns
     ] or None
     names = [target_name(t) for t in args.targets] or [
-        target_name(path) for path in tracked_test_files()]
+        target_name(path) for path in repository_test_files()]
     tests = list(flatten(loader.loadTestsFromNames(names)))
 
     started = time.monotonic()

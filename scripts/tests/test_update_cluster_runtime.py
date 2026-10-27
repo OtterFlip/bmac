@@ -40,11 +40,27 @@ class UpdateClusterRuntimeTests(unittest.TestCase):
             "tunnel_sync.sh",
             "cloudflared_setup.sh",
             "app_ha_monitor.py",
+            "pbs_api.py",
         ):
             self.assertIn(f"/usr/local/lib/app-ha-proxmox/lib/{name}", text)
             self.assertTrue((runtime / name).is_file(), name)
         self.assertIn("GUEST_ROLE_HOOK_PATH", text)
         self.assertNotIn("haproxy", text.lower())
+
+    def test_config_parser_is_updated_and_must_accept_the_installed_cluster_conf(self) -> None:
+        # The hook and tunnel sync parse the installed cluster.conf with the
+        # installed config.sh, so a new cluster.conf key needs a new parser.
+        text = SCRIPT.read_text(encoding="utf-8")
+        files = text[text.index("RUNTIME_FILES=(") : text.index(")", text.index("RUNTIME_FILES=("))]
+        self.assertIn("config.sh", files.split())
+        self.assertIn("/usr/local/lib/app-ha-proxmox/lib/config.sh", text)
+        self.assertIn('config.sh) printf \'%s\\n\' "$CONFIG_LIB" ;;', text)
+        self.assertTrue((SCRIPT.parent.parent.parent / "lib" / "config.sh").is_file())
+        commit = text[text.index("commit_node() {") : text.index("rollback_node() {")]
+        self.assertLess(
+            commit.index('mv -f "${installed}.new" "$installed"'),
+            commit.index('"${install_root}/lib/config.sh" --check --no-secrets'),
+        )
 
     def test_cluster_wide_safety_order_and_rollback_are_explicit(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")

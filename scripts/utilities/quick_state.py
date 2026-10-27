@@ -8,11 +8,13 @@ scripts/user_callable/diagnostics/list_*.sh scripts.
 
 `collect KIND` runs on one cluster member as root, fed over SSH as
 `python3 - collect KIND ...`. It runs only read-only Proxmox API (pvesh),
-pvecm, and registry queries and prints one JSON document. `render KIND` runs
+pvecm, and registry queries and prints one JSON document. The one write is
+the backups kind's own cache of what each backup's task log recorded, in
+/var/lib/app-ha/ on that host. `render KIND` runs
 on the workstation: it prints a terminal report and, in JSON mode, emits the
 same state as one structured `result` event plus `next_step` suggestions.
 
-KIND is hosts, guests, replication, or storage.
+KIND is hosts, guests, replication, storage, or backups.
 """
 
 import argparse
@@ -25,6 +27,12 @@ import sys
 import time
 
 GIB = 1024**3
+
+# The PVE storage Setup PBS creates, and the marker that starts the notes of
+# every snapshot a BMAC backup job or Back up now writes.
+BACKUP_STORAGE = "bmac-pbs"
+BACKUP_NOTES_PREFIX = "bmac "
+BACKUP_JOB_PREFIX = "bmac-"
 
 
 # ---------------------------------------------------------------------------
@@ -205,11 +213,260 @@ def collect_storage(args):
     return {"hosts": hosts, "errors": errors}
 
 
+UNITS = {"B": 1, "KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40, "PiB": 2**50}
+SIZE_RE = r"([0-9.]+) (B|KiB|MiB|GiB|TiB|PiB)"
+
+
+def size_bytes(number, unit):
+    return int(float(number) * UNITS[unit])
+
+
+def parse_vzdump_log(lines):
+    """Per-snapshot metrics from one vzdump task log, which may hold several
+    VMs' backups: {"vm/100/2026-...Z": {...}}."""
+    found = {}
+    current = None
+    for text in lines:
+        text = re.sub(r"^INFO:\s*", "", str(text))
+        if text.startswith("Starting Backup of VM "):
+            current = {"bitmaps": [], "dirty_bytes": None}
+            continue
+        if current is None:
+            continue
+        match = re.match(r"creating Proxmox Backup Server archive '([^']+)'", text)
+        if match:
+            current["snapshot"] = match.group(1)
+            continue
+        match = re.match(r"(\S+): dirty-bitmap status: (.*)$", text)
+        if match:
+            current["bitmaps"].append({"drive": match.group(1), "status": match.group(2)})
+            continue
+        match = re.match(rf"using fast incremental mode \(dirty-bitmap\), {SIZE_RE} dirty of {SIZE_RE} total", text)
+        if match:
+            current["fast"] = True
+            current["dirty_bytes"] = size_bytes(match.group(1), match.group(2))
+            current["total_bytes"] = size_bytes(match.group(3), match.group(4))
+            continue
+        match = re.match(rf"backup is sparse: {SIZE_RE} \((\d+)%\) total zero data", text)
+        if match:
+            current["zero_bytes"] = size_bytes(match.group(1), match.group(2))
+            continue
+        match = re.match(rf"backup was done incrementally, reused {SIZE_RE} \((\d+)%\)", text)
+        if match:
+            current["reused_bytes"] = size_bytes(match.group(1), match.group(2))
+            current["reused_percent"] = int(match.group(3))
+            continue
+        match = re.match(rf"transferred {SIZE_RE} in (\d+) seconds", text)
+        if match:
+            current["read_bytes"] = size_bytes(match.group(1), match.group(2))
+            current["transfer_seconds"] = int(match.group(3))
+            continue
+        match = re.match(r"Finished Backup of VM \d+ \((\d+):(\d+):(\d+)\)", text)
+        if match:
+            hours, minutes, seconds = (int(value) for value in match.groups())
+            current["duration_seconds"] = hours * 3600 + minutes * 60 + seconds
+            if current.get("snapshot"):
+                found[current.pop("snapshot")] = backup_metrics(current)
+            current = None
+    return found
+
+
+def backup_metrics(raw):
+    """How a backup was made, from the lines parse_vzdump_log collected."""
+    statuses = [row["status"] for row in raw["bitmaps"]]
+    if raw.get("fast"):
+        mode, detail = "fast-incremental", "only the blocks changed since the previous backup were read (dirty bitmap)"
+    elif any("invalid" in status for status in statuses):
+        mode, detail = "full-read", "the whole disk was read: the dirty bitmap no longer matched the previous backup"
+    elif any("created new" in status or "recreated" in status for status in statuses):
+        mode, detail = "full-read", ("the whole disk was read: no dirty bitmap yet (the first backup, or after "
+                                     "the VM restarted, failed over, or its disk changed)")
+    else:
+        mode, detail = "full-read", "the whole disk was read"
+    total = raw.get("total_bytes")
+    reused = raw.get("reused_bytes")
+    if total is None and reused is not None and raw.get("reused_percent"):
+        total = int(reused * 100 / raw["reused_percent"])
+    return {
+        "mode": mode,
+        "detail": detail,
+        "dirty_bytes": raw.get("dirty_bytes"),
+        "read_bytes": raw.get("read_bytes"),
+        "zero_bytes": raw.get("zero_bytes"),
+        "reused_bytes": reused,
+        "reused_percent": raw.get("reused_percent"),
+        # Data PBS did not have yet: the image size less what it reused.
+        "new_bytes": max(total - reused, 0) if total is not None and reused is not None else None,
+        "transfer_seconds": raw.get("transfer_seconds"),
+        "duration_seconds": raw.get("duration_seconds"),
+    }
+
+
+# Metrics read from a task log once are cached on the host that answered the
+# listing, outside pmxcfs, so every workstation sees the same metrics and PVE
+# pruning a task log loses nothing already read.
+METRICS_CACHE = "/var/lib/app-ha/backup-metrics.json"
+
+
+def metrics_cache_key(storage, snapshot):
+    return "/".join([str(storage.get("server") or ""), str(storage.get("datastore") or ""),
+                     str(storage.get("namespace") or ""), snapshot])
+
+
+def parse_metrics_cache(text):
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return {}
+    entries = data.get("restore_points") if isinstance(data, dict) else None
+    return entries if isinstance(entries, dict) else {}
+
+
+def load_metrics_cache(path):
+    try:
+        return parse_metrics_cache(open(path, encoding="utf-8").read())
+    except OSError:
+        return {}
+
+
+def save_metrics_cache(path, entries):
+    """Write the cache atomically, readable only by root."""
+    os.makedirs(os.path.dirname(path) or ".", mode=0o755, exist_ok=True)
+    temporary = f"{path}.{os.getpid()}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump({"schema_version": 1, "restore_points": entries}, stream, indent=1, sort_keys=True)
+    os.replace(temporary, path)
+
+
+def peer_metrics_cache(node, domain, path):
+    """Another host's cache, read over the cluster's own SSH host trust."""
+    known_hosts = f"/etc/pve/nodes/{node}/ssh_known_hosts"
+    if not domain or not os.path.isfile(known_hosts):
+        return {}
+    result = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=yes",
+                  "-o", "CheckHostIP=no", "-o", f"HostKeyAlias={node}", "-o", f"UserKnownHostsFile={known_hosts}",
+                  "-o", "GlobalKnownHostsFile=none", f"root@{node}.{domain}", "cat", path], timeout=15)
+    return parse_metrics_cache(result["out"]) if result["rc"] == 0 else {}
+
+
+def collect_backup_metrics(points, storage, args, errors):
+    """Metrics for every BMAC restore point: from this host's cache, then the
+    other online hosts' caches, then the vzdump task logs of every online
+    host, where a log is fetched only when its task's run covers a restore
+    point still missing. This host's cache is then rewritten without the
+    restore points PBS has pruned."""
+    path = args.metrics_cache or METRICS_CACHE
+    probe = os.uname().nodename.split(".")[0]
+    cache = load_metrics_cache(path)
+    prefix = metrics_cache_key(storage, "")
+    times = {}
+    for row in points:
+        snapshot = str(row.get("volid", "")).split(":backup/", 1)[-1]
+        if backup_notes(row.get("notes")) is not None:
+            times[snapshot] = int_or_none(row.get("ctime")) or 0
+    metrics = {snapshot: cache[prefix + snapshot] for snapshot in times if prefix + snapshot in cache}
+    nodes = []
+    if len(metrics) < len(times):
+        listed, err = pvesh("/nodes")
+        if err:
+            errors.append(err)
+        online = online_nodes(listed)
+        for node in online:
+            if node == probe or len(metrics) == len(times):
+                continue
+            peer = peer_metrics_cache(node, args.internal_domain, path)
+            for snapshot in times:
+                if snapshot not in metrics and prefix + snapshot in peer:
+                    metrics[snapshot] = peer[prefix + snapshot]
+        # This host's logs first: it most often made the backup.
+        nodes = sorted(online, key=lambda node: node != probe)
+    wanted = {snapshot: when for snapshot, when in times.items() if snapshot not in metrics}
+    if wanted:
+        metrics.update(backup_metrics_from_logs(nodes, wanted, errors))
+    entries = {key: value for key, value in cache.items() if not key.startswith(prefix)}
+    entries.update({prefix + snapshot: value for snapshot, value in metrics.items()})
+    if entries != cache:
+        try:
+            save_metrics_cache(path, entries)
+        except OSError as error:
+            errors.append(f"could not save the backup metrics cache {path}: {error}")
+    return metrics
+
+
+def backup_metrics_from_logs(nodes, wanted, errors):
+    """Metrics of the restore points in `wanted` (snapshot -> time) found in
+    the vzdump task logs of `nodes`."""
+    metrics = {}
+    for node in nodes:
+        tasks, err = pvesh(f"/nodes/{node}/tasks", "--typefilter", "vzdump", "--limit", "1000", "--source", "all")
+        if err:
+            errors.append(f"{node}: could not list backup tasks: {err}")
+            continue
+        for task in tasks or []:
+            start = int_or_none(task.get("starttime")) or 0
+            end = int_or_none(task.get("endtime")) or int(time.time())
+            if not any(start - 60 <= when <= end + 60 for snapshot, when in wanted.items() if snapshot not in metrics):
+                continue
+            log, err = pvesh(f"/nodes/{node}/tasks/{task.get('upid')}/log", "--limit", "100000")
+            if err:
+                continue
+            for snapshot, values in parse_vzdump_log(row.get("t", "") for row in log or []).items():
+                if snapshot in wanted:
+                    metrics[snapshot] = {**values, "node": node, "task": task.get("upid")}
+        if len(metrics) == len(wanted):
+            break
+    return metrics
+
+
+def collect_backups(args):
+    errors = []
+    probe = os.uname().nodename.split(".")[0]
+    storages, err = pvesh("/storage")
+    if err:
+        errors.append(err)
+    storage = next((row for row in storages or [] if row.get("storage") == BACKUP_STORAGE), None)
+    status = content = inspect = None
+    if storage:
+        status, err = pvesh(f"/nodes/{probe}/storage/{BACKUP_STORAGE}/status")
+        if err:
+            errors.append(err)
+        content, err = pvesh(f"/nodes/{probe}/storage/{BACKUP_STORAGE}/content")
+        if err:
+            errors.append(f"could not list the restore points: {err}")
+        if args.pbs_api and os.access(args.pbs_api, os.X_OK):
+            result = run(["python3", "-I", args.pbs_api, "inspect", "--storage", BACKUP_STORAGE])
+            try:
+                inspect = json.loads(result["out"]) if result["rc"] == 0 else {"error": result["err"]}
+            except ValueError:
+                inspect = {"error": "pbs_api.py returned invalid JSON"}
+        else:
+            inspect = {"error": "pbs_api.py is not installed on this host; run update_cluster_runtime.sh"}
+    jobs, err = pvesh("/cluster/backup")
+    if err:
+        errors.append(err)
+    resources, err = registry(args, "list")
+    if err:
+        errors.append(err)
+    metrics = collect_backup_metrics(content or [], storage, args, errors) if storage else {}
+    return {
+        "metrics": metrics,
+        "storage": storage,
+        "storage_status": status,
+        "content": content or [],
+        "inspect": inspect,
+        "jobs": jobs or [],
+        "resources": resources or [],
+        "errors": errors,
+    }
+
+
 COLLECTORS = {
     "hosts": collect_hosts,
     "guests": collect_guests,
     "replication": collect_replication,
     "storage": collect_storage,
+    "backups": collect_backups,
 }
 
 
@@ -574,10 +831,14 @@ def render_guests(report, args, ui):
             "ip": resource.get("ip"),
             "placement": resource.get("placement") or [],
             "domain": domains.get("primary"),
-            "cores": spec.get("cores"),
-            "memory_mb": spec.get("memory_mb"),
+            # Proxmox's own figures (here and for the disk below), so a rollback
+            # or a change made in its web UI shows at once; the registry's spec
+            # is the fallback.
+            "cores": int_or_none(observed.get("maxcpu")) or spec.get("cores"),
+            "memory_mb": (int_or_none(observed.get("maxmem")) or 0) // 2**20 or spec.get("memory_mb"),
             "disk_gib": spec.get("disk_gib"),
-            "disk_bytes": int_or_none(spec.get("disk_bytes"))
+            "disk_bytes": int_or_none(observed.get("maxdisk"))
+            or int_or_none(spec.get("disk_bytes"))
             or (int_or_none(spec.get("disk_gib")) or 0) * 2**30 or None,
             "uptime_seconds": int_or_none(observed.get("uptime")),
         }
@@ -846,6 +1107,261 @@ def render_storage(report, args, ui):
     finish(summary, problems, ui, steps)
 
 
+def backup_notes(text):
+    """The fields of BMAC's snapshot notes, `bmac prodN key=value ... [| comment]`,
+    or None."""
+    first = str(text or "").splitlines()[0] if text else ""
+    if not first.startswith(BACKUP_NOTES_PREFIX):
+        return None
+    first, _, comment = first.partition(" | ")
+    words = first.split()
+    fields = {"name": words[1] if len(words) > 1 and "=" not in words[1] else None,
+              "comment": comment.strip() or None}
+    for word in words[1:]:
+        key, sep, value = word.partition("=")
+        if sep:
+            fields[key] = value
+    return fields
+
+
+def backup_interval_hours(schedule):
+    """Hours between runs of a BMAC schedule (`0/N:MM` or `HH:MM`), or None."""
+    schedule = str(schedule or "").strip()
+    match = re.fullmatch(r"0/([0-9]{1,2}):[0-5][0-9]", schedule)
+    if match and int(match.group(1)) in (1, 2, 3, 4, 6, 8, 12):
+        return int(match.group(1))
+    if re.fullmatch(r"(?:[01]?[0-9]|2[0-3]):[0-5][0-9]", schedule):
+        return 24
+    return None
+
+
+def keep_settings(job):
+    return {key.removeprefix("keep-"): value for key, value in sorted(job.items())
+            if key.startswith("keep-")}
+
+
+def render_backups(report, args, ui):
+    now = report.get("collected_at") or int(time.time())
+    problems = list(report.get("errors") or [])
+    storage = report.get("storage")
+    status = report.get("storage_status") or {}
+    inspect = report.get("inspect") or {}
+    key = (storage or {}).get("encryption-key")
+    summary_storage = {
+        "configured": storage is not None,
+        "id": BACKUP_STORAGE,
+        "active": bool(status.get("active")) if storage else None,
+        "server": (storage or {}).get("server"),
+        "port": int_or_none((storage or {}).get("port")) or (8007 if storage else None),
+        "datastore": (storage or {}).get("datastore"),
+        "namespace": (storage or {}).get("namespace"),
+        "username": (storage or {}).get("username"),
+        "key_fingerprint": key,
+        "master_pubkey": bool((storage or {}).get("master-pubkey")),
+    }
+    if storage and not summary_storage["active"]:
+        problems.append(f"storage {BACKUP_STORAGE} is not active on {report.get('probe')}: "
+                        "PBS may be unreachable")
+    if storage and not key:
+        problems.append(f"storage {BACKUP_STORAGE} has no encryption key")
+
+    prune = inspect.get("prune") or {}
+    retention = {
+        "readable": bool(prune.get("readable")),
+        "jobs": [{"id": job.get("id"), "schedule": job.get("schedule"), "keep": keep_settings(job)}
+                 for job in prune.get("jobs") or []],
+        "error": inspect.get("error") or prune.get("error"),
+    }
+    if storage and inspect.get("error"):
+        problems.append(f"could not read the PBS account: {inspect['error']}")
+    privileges = inspect.get("privileges") or {}
+    for missing in privileges.get("missing") or []:
+        problems.append(f"the PBS token lacks {missing} on {privileges.get('path')}")
+    for row in privileges.get("excess") or []:
+        if row.get("dangerous"):
+            problems.append(f"the PBS token holds {row.get('privilege')} on {row.get('path')}, "
+                            "which can delete backups")
+
+    resources = report.get("resources") or []
+    productions = sorted((row for row in resources if row.get("kind") == "production"),
+                         key=lambda row: int_or_none(row.get("index")) or 0)
+    registered = {row.get("name"): row for row in productions}
+
+    points = []
+    unmanaged = 0
+    for row in report.get("content") or []:
+        if row.get("content") != "backup":
+            continue
+        notes = backup_notes(row.get("notes"))
+        if notes is None:
+            unmanaged += 1
+            continue
+        # PVE reports the key fingerprint, or "1" when PBS does not say which.
+        encrypted = row.get("encrypted")
+        encrypted = None if encrypted in (None, "", 0, "0") else str(encrypted)
+        points.append({
+            "volid": row.get("volid"),
+            "vmid": int_or_none(row.get("vmid")),
+            "time": int_or_none(row.get("ctime")),
+            "name": notes.get("name"),
+            "purpose": notes.get("slug"),
+            "fqdn": notes.get("fqdn"),
+            "cluster": notes.get("cluster"),
+            "notes": str(row.get("notes") or "").splitlines()[0],
+            "comment": notes.get("comment"),
+            "protected": bool(row.get("protected")),
+            "size": int_or_none(row.get("size")),
+            "encrypted": encrypted,
+            "key_matches": encrypted is not None and encrypted.lower() == str(key or "").lower(),
+            "verified": (row.get("verification") or {}).get("state"),
+        })
+    points.sort(key=lambda point: (point["time"] or 0), reverse=True)
+
+    metrics = report.get("metrics") or {}
+    for point in points:
+        point["metrics"] = metrics.get(str(point["volid"] or "").split(":backup/", 1)[-1])
+
+    unencrypted = [point for point in points if not point["encrypted"]]
+    other_key = [point for point in points if point["encrypted"] and not point["key_matches"]]
+    if unencrypted:
+        problems.append(f"{len(unencrypted)} BMAC restore point(s) are not encrypted")
+    if other_key:
+        problems.append(f"{len(other_key)} restore point(s) were encrypted with another key; "
+                        "this cluster cannot restore them")
+
+    jobs = {row.get("id"): row for row in report.get("jobs") or []
+            if str(row.get("id", "")).startswith(BACKUP_JOB_PREFIX)}
+    vms = []
+    for production in productions:
+        name = production.get("name")
+        vmid = int_or_none(production.get("vmid"))
+        job = jobs.pop(f"{BACKUP_JOB_PREFIX}{name}", None)
+        own = [point for point in points if point["vmid"] == vmid and point["name"] == name]
+        entry = {
+            "name": name,
+            "vmid": vmid,
+            "purpose": (production.get("purpose") or {}).get("slug"),
+            "fqdn": (production.get("domains") or {}).get("primary"),
+            "state": production.get("state"),
+            "job": None,
+            "latest_backup": own[0]["time"] if own else None,
+            "restore_points": len(own),
+        }
+        if job:
+            hours = backup_interval_hours(job.get("schedule"))
+            entry["job"] = {
+                "id": job.get("id"),
+                "enabled": job.get("enabled", 1) not in (0, "0", False),
+                "schedule": job.get("schedule"),
+                "every_hours": hours,
+                "next_run": int_or_none(job.get("next-run")),
+                "bwlimit": int_or_none(job.get("bwlimit")),
+            }
+            if job.get("storage") != BACKUP_STORAGE or str(job.get("vmid")) != str(vmid):
+                problems.append(f"backup job {job.get('id')} does not back up {name} (VMID {vmid}) "
+                                f"to {BACKUP_STORAGE}; change {name}'s backup schedule to repair it")
+            # Two missed runs, plus an hour for a slow one, before it is overdue.
+            newest = entry["latest_backup"]
+            if entry["job"]["enabled"] and hours and newest is not None and \
+                    now - newest > (2 * hours + 1) * 3600:
+                problems.append(f"{name}'s newest backup is {ago(newest, now)}, "
+                                f"but it is backed up every {hours}h")
+        vms.append(entry)
+    for job in jobs.values():
+        problems.append(f"backup job {job.get('id')} belongs to no registered production VM "
+                        f"(it backs up VMID {job.get('vmid')})")
+
+    summary = {
+        "collected_at": now,
+        "probe": report.get("probe"),
+        "storage": summary_storage,
+        "retention": retention,
+        "vms": vms,
+        "restore_points": points,
+        "unmanaged_backups": unmanaged,
+        "problems": problems,
+    }
+
+    heading("BACKUP STORAGE")
+    if not storage:
+        print(f"  PBS is not set up: the cluster has no {BACKUP_STORAGE} storage.")
+    else:
+        print(f"  {BACKUP_STORAGE}: {'active' if summary_storage['active'] else 'NOT ACTIVE'}, "
+              f"{summary_storage['username']} at {summary_storage['server']}:{summary_storage['port']}, "
+              f"datastore {summary_storage['datastore']}, namespace {summary_storage['namespace']}")
+        print(f"  Encryption key: {key or 'none'}"
+              f"{' (with master public key)' if summary_storage['master_pubkey'] else ''}")
+        if not retention["readable"]:
+            print(f"  Retention: not readable with this token ({retention['error'] or 'unknown error'})")
+        elif not retention["jobs"]:
+            print("  Retention: the PBS server has no prune job for this namespace; it keeps every backup")
+        for job in retention["jobs"]:
+            keeps = ", ".join(f"keep-{name} {value}" for name, value in job["keep"].items())
+            print(f"  Retention ({job['id']}, runs {job['schedule'] or '?'} PBS time): {keeps or 'keep everything'}")
+
+    heading("PRODUCTION VM BACKUPS")
+    if vms:
+        table(
+            ["VM", "VMID", "PURPOSE", "SCHEDULE", "NEXT RUN", "NEWEST BACKUP", "RESTORE POINTS"],
+            [
+                [vm["name"], vm["vmid"], vm["purpose"] or "-",
+                 ("-" if not vm["job"] else
+                  ("disabled" if not vm["job"]["enabled"] else
+                   (f"every {vm['job']['every_hours']}h" if vm["job"]["every_hours"]
+                    else vm["job"]["schedule"]))),
+                 until(vm["job"]["next_run"], now) if vm["job"] and vm["job"]["enabled"] else "-",
+                 ago(vm["latest_backup"], now) if vm["latest_backup"] else "none",
+                 vm["restore_points"]]
+                for vm in vms
+            ],
+        )
+    else:
+        print("  No production VMs are registered.")
+
+    heading("RESTORE POINTS")
+    if points:
+        table(
+            ["TAKEN", "VM", "VMID", "PROTECTED", "KEY", "BACKUP", "REUSED", "NEW", "TOOK", "VOLUME"],
+            [
+                [time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(point["time"])) if point["time"] else "?",
+                 point["name"] or "?", point["vmid"], "yes" if point["protected"] else "",
+                 "ok" if point["key_matches"] else ("none" if not point["encrypted"] else "OTHER"),
+                 *metrics_columns(point["metrics"]),
+                 point["volid"]]
+                for point in points
+            ],
+        )
+    else:
+        print("  No BMAC restore points." if storage else "  -")
+    if unmanaged:
+        print(f"\n  {unmanaged} other backup(s) in the namespace were not made by BMAC and are not listed.")
+    commented = [point for point in points if point["comment"]]
+    if commented:
+        print("\n  Comments:")
+        for point in commented:
+            taken = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(point["time"])) if point["time"] else "?"
+            print(f"    {taken}  {point['name'] or '?'}: {point['comment']}")
+
+    steps = []
+    if not storage:
+        steps.append((True, "Connect the cluster to its Proxmox Backup Server.",
+                      "scripts/user_callable/backups/setup_pbs.sh", "setup_pbs", {}))
+    finish(summary, problems, ui, steps)
+
+
+def metrics_columns(metrics):
+    if not metrics:
+        return ["no log", "-", "-", "-"]
+    mode = "incremental" if metrics["mode"] == "fast-incremental" else "full read"
+    reused = (f"{size(metrics['reused_bytes'])} ({metrics['reused_percent']}%)"
+              if metrics.get("reused_bytes") is not None else "?")
+    new = f"~{size(metrics['new_bytes'])}" if metrics.get("new_bytes") is not None else "?"
+    took = duration(metrics["duration_seconds"]) if metrics.get("duration_seconds") is not None else "?"
+    if metrics.get("duration_seconds") is not None and metrics["duration_seconds"] < 60:
+        took = f"{metrics['duration_seconds']}s"
+    return [mode, reused, new, took]
+
+
 def finish(summary, problems, ui, steps):
     print()
     if problems:
@@ -869,6 +1385,7 @@ RENDERERS = {
     "guests": render_guests,
     "replication": render_replication,
     "storage": render_storage,
+    "backups": render_backups,
 }
 
 
@@ -890,6 +1407,9 @@ def main(argv=None):
     collect.add_argument("--registry", default="")
     collect.add_argument("--state-dir", default="/etc/pve/priv/app-ha")
     collect.add_argument("--host", default="")
+    collect.add_argument("--pbs-api", default="")
+    collect.add_argument("--metrics-cache", default="", help=f"backups only; default {METRICS_CACHE}")
+    collect.add_argument("--internal-domain", default="", help="backups only; to read other hosts' caches")
     collect.set_defaults(handler=command_collect)
     render = sub.add_parser("render")
     render.add_argument("kind", choices=sorted(RENDERERS))

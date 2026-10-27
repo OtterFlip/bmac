@@ -560,6 +560,110 @@
         { "id": "resource", "label": "Production VM", "type": "production", "help": "The VM whose probe to change; asked for when empty." },
         { "id": "show", "label": "Only show the probes", "type": "flag", "flag": "--show", "advanced": true }
       ]
+    },
+    {
+      "id": "list_backups",
+      "title": "List backups",
+      "summary": "PBS storage, retention policy, each production VM's backup schedule, and BMAC's restore points.",
+      "description": "Reads through one reachable member whether the bmac-pbs storage is set up and active, the retention policy the PBS server's prune job applies (when the cluster's token can read it), each production VM's backup job and newest backup, and every restore point BMAC made, with its protection and encryption key. Changes nothing.",
+      "category": "backups",
+      "script": "scripts/user_callable/backups/list_backups.sh",
+      "mode": "read_only",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": []
+    },
+    {
+      "id": "setup_pbs",
+      "title": "Setup PBS",
+      "summary": "Connect the cluster to its Proxmox Backup Server with an encryption key and your master public key.",
+      "description": "Checks from a cluster host that the PBS certificate matches PROXMOX_PBS_FINGERPRINT, that the token holds Datastore.Backup and Datastore.Audit on its namespace (warning about any privilege that could delete backups), and whether the namespace already holds backups. Then adds the PVE storage bmac-pbs with a new encryption key, or with the existing key when backups exist, and your master public key, and saves a copy of the key for you to store offline. When bmac-pbs already exists, it only saves the key copy.",
+      "category": "backups",
+      "script": "scripts/user_callable/backups/setup_pbs.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "master_pubkey", "label": "Master public key", "type": "path", "flag": "--master-pubkey", "help": "PEM file of the master public key. Defaults to pbs-master-public.pem in the configuration directory, and is asked for when that file does not exist.", "advanced": true },
+        { "id": "key_file", "label": "Existing encryption key", "type": "path", "flag": "--key-file", "help": "Use this key instead of generating one; asked for when the namespace already holds backups.", "advanced": true },
+        { "id": "check", "label": "Only run the checks", "type": "flag", "flag": "--check", "advanced": true }
+      ]
+    },
+    {
+      "id": "manage_backup_schedule",
+      "title": "Backup schedule",
+      "summary": "Back a production VM up every 1, 2, 3, 4, 6, 8, 12 or 24 hours, or disable or remove its backup job.",
+      "description": "Creates or changes the production VM's PVE backup job bmac-prodN: snapshot mode with the guest agent's filesystem freeze, fleecing on local storage, BMAC's notes on every backup, and no bandwidth limit unless you set one. The job runs on whichever host runs the VM. Disabling keeps the job; removing deletes it, and the VM's existing backups stay on PBS. How long backups are kept is set by the PBS server's prune job.",
+      "category": "backups",
+      "script": "scripts/user_callable/backups/manage_backup_schedule.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "resource", "label": "Production VM", "type": "production", "help": "Asked for when empty." },
+        { "id": "every", "label": "Back up every", "type": "choice", "flag": "--every", "help": "Asked for when empty.",
+          "choices": [
+            { "value": "1", "label": "1 hour" }, { "value": "2", "label": "2 hours" }, { "value": "3", "label": "3 hours" },
+            { "value": "4", "label": "4 hours" }, { "value": "6", "label": "6 hours" }, { "value": "8", "label": "8 hours" },
+            { "value": "12", "label": "12 hours" }, { "value": "24", "label": "24 hours" }
+          ] },
+        { "id": "bwlimit_mib", "label": "Upload limit (MiB/s)", "type": "integer", "flag": "--bwlimit-mib", "help": "Optional; backups are not limited by default.", "advanced": true }
+      ]
+    },
+    {
+      "id": "backup_now",
+      "title": "Back up now",
+      "summary": "Back a production VM up to PBS now, with the same settings as its scheduled backups.",
+      "description": "Starts a backup of the production VM as a PVE task on the host that runs it, in snapshot mode while the VM keeps running, and shows its progress. The task finishes even if this workstation disconnects. The new restore point counts toward the PBS prune job's keep-last.",
+      "category": "backups",
+      "script": "scripts/user_callable/backups/backup_now.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "resource", "label": "Production VM", "type": "production", "help": "Asked for when empty." }
+      ]
+    },
+    {
+      "id": "protect_restore_point",
+      "title": "Protect a restore point",
+      "summary": "Keep a restore point however old it gets, or clear that protection again.",
+      "description": "Sets or clears the protected flag of one of BMAC's restore points on PBS. The PBS prune job never removes a protected restore point; once its protection is cleared, the normal retention policy applies to it again. Protected restore points use PBS space until then.",
+      "category": "backups",
+      "script": "scripts/user_callable/backups/protect_restore_point.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "snapshot", "label": "Restore point", "type": "snapshot", "flag": "--snapshot", "help": "Such as vm/100/2026-10-27T14:50:01Z; chosen from a list when empty." },
+        { "id": "action", "label": "Action", "type": "flag_choice", "help": "The opposite of the current state when empty.",
+          "choices": [
+            { "value": "protect", "label": "Protect", "flag": "--protect" },
+            { "value": "unprotect", "label": "Clear protection", "flag": "--unprotect" }
+          ] }
+      ]
+    },
+    {
+      "id": "rollback_restore",
+      "title": "Rollback Restore",
+      "summary": "Return a production VM to one of its own restore points; everything written since is lost.",
+      "description": "Restores a production VM's disks and settings from one of its restore points on PBS, keeping its identity (VMID, name, MAC, address, tags, lifecycle hook) and, unless you choose others, its vCPUs and RAM. Offers a safety backup of the current state first. Stops the VM through HA, deletes its replication jobs and replicas, restores on the VM's host, starts it again through HA, and recreates replication with a full initial sync, during which the VM cannot fail over. Requires a typed confirmation.",
+      "category": "backups",
+      "script": "scripts/user_callable/backups/rollback_restore.sh",
+      "mode": "mutating",
+      "destructive": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "resource", "label": "Production VM", "type": "production", "help": "Asked for when empty." },
+        { "id": "snapshot", "label": "Restore point", "type": "snapshot", "flag": "--snapshot", "help": "Such as vm/100/2026-10-27T14:50:01Z; chosen from the VM's restore points when empty." },
+        { "id": "cores", "label": "vCPUs", "type": "integer", "flag": "--cores", "help": "Default: the VM's current vCPUs.", "advanced": true },
+        { "id": "memory_gib", "label": "RAM (GiB)", "type": "integer", "flag": "--memory-gib", "help": "Default: the VM's current RAM.", "advanced": true },
+        { "id": "safety_backup", "label": "Safety backup first", "type": "flag_choice", "help": "Asked for when empty.",
+          "choices": [
+            { "value": "yes", "label": "Back up the current state first", "flag": "--safety-backup" },
+            { "value": "no", "label": "No safety backup", "flag": "--no-safety-backup" }
+          ] }
+      ]
     }
   ]
 }

@@ -180,6 +180,46 @@ class GuestNetworkTest(unittest.TestCase):
         for text in ("VM slot", "guest gateway", "transfer cap", "probe target", "Tunnel"):
             self.assertIn(text, completed.stdout)
 
+    def test_sync_keeps_the_previous_cluster_conf_when_the_host_parser_rejects_it(self) -> None:
+        text = (SCRIPTS_DIR / "user_callable" / "hosts" / "sync_cluster_network.sh").read_text(
+            encoding="utf-8"
+        )
+        start = text.index("\nset -Eeuo pipefail\ninstall -o root -g root -m 0644 /root/.app-ha-cluster.conf")
+        remote = text[start : text.index("' bash \"$REMOTE_CLUSTER_CONF\" \"$REMOTE_LIB\"", start)]
+        # The host paths become per-test paths; install's ownership options
+        # need root, so the fake keeps only the copy.
+        remote = remote.replace("/root/.app-ha-cluster.conf", "$3").replace(
+            "install -o root -g root -m 0644", "cp"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            installed = root / "cluster.conf"
+            incoming = root / "incoming.conf"
+            lib = root / "lib"
+            lib.mkdir()
+            checker = lib / "config.sh"
+            # The fake parser rejects any file that mentions NEW_KEY.
+            checker.write_text(
+                f"#!/bin/bash\n! grep -q NEW_KEY {installed}\n",
+                encoding="utf-8",
+            )
+            checker.chmod(0o755)
+            for content, expected_status, expected_text in (
+                ("OLD=1\nNEW_KEY=1\n", 3, "OLD=1\n"),
+                ("OLD=2\n", 0, "OLD=2\n"),
+            ):
+                with self.subTest(content=content):
+                    installed.write_text("OLD=1\n", encoding="utf-8")
+                    incoming.write_text(content, encoding="utf-8")
+                    completed = subprocess.run(
+                        ["bash", "-c", remote, "bash", str(installed), str(lib), str(incoming)],
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(completed.returncode, expected_status, msg=completed.stderr)
+                    self.assertEqual(installed.read_text(encoding="utf-8"), expected_text)
+                    self.assertFalse(incoming.exists())
+                    self.assertFalse((root / "cluster.conf.previous").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

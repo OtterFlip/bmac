@@ -427,6 +427,17 @@ printf "valid\n"
 )" || die "Shared source cache exists but failed integrity validation"
 [[ "$cache_state" != valid ]] || CACHE_WAS_VALID=true
 
+# Its PBS backup job, if any. The backups themselves stay on PBS: the
+# cluster's token cannot delete them, and Full Recovery can restore them.
+BACKUP_JOB="bmac-${RESOURCE_NAME}"
+backup_jobs_json="$(pvesh_get /cluster/backup)" || die "Could not read the cluster's backup jobs"
+BACKUP_JOB_PRESENT="$(
+  python3 -c '
+import json, sys
+print("true" if any(job.get("id") == sys.argv[2] for job in json.loads(sys.argv[1] or "[]")) else "false")' \
+    "$backup_jobs_json" "$BACKUP_JOB"
+)" || die "Could not read the cluster's backup jobs"
+
 log "Validated production destruction plan"
 info "Resource: $RESOURCE_NAME / VMID $VMID / state $RESOURCE_STATE"
 info "Registry resource ID: $RESOURCE_ID"
@@ -436,12 +447,17 @@ info "Root volume: $ROOT_VOLUME"
 info "EFI volume: $EFI_VOLUME"
 info "HA state/rules: ${HA_STATE:-none} / ${HA_RULES[*]:-none}"
 info "Replication jobs: ${REPLICATION_JOBS[*]:-none}"
+info "PBS backup job: $([[ "$BACKUP_JOB_PRESENT" == true ]] && printf '%s (removed; its backups stay on PBS)' "$BACKUP_JOB" || printf none)"
 info "Shared source cache: $CACHE_ISO ($cache_state; retained)"
 bmac_ui_plan_begin "Destroy $RESOURCE_NAME" "Validated against the live cluster; nothing has changed yet."
 bmac_ui_plan_item remove "$RESOURCE_NAME" "VMID $VMID, state $RESOURCE_STATE, owner $OWNER_NODE, placement ${PLACEMENT_NODES[*]}"
 bmac_ui_plan_item remove "disks" "Root ${ROOT_VOLUME:-none}, EFI ${EFI_VOLUME:-none}, and every replica"
 bmac_ui_plan_item remove "HA" "State ${HA_STATE:-none}; rules ${HA_RULES[*]:-none}"
 bmac_ui_plan_item remove "replication" "${REPLICATION_JOBS[*]:-none}"
+if [[ "$BACKUP_JOB_PRESENT" == true ]]; then
+  bmac_ui_plan_item remove "backup job" "$BACKUP_JOB, so no backup starts during or after the removal"
+  bmac_ui_plan_item keep "PBS backups" "$RESOURCE_NAME's restore points stay on PBS; Full Recovery can restore them"
+fi
 bmac_ui_plan_item remove "tunnel FQDNs" "Its FQDNs and its staging slots' FQDNs are removed from the Cloudflare Tunnel config"
 bmac_ui_plan_item remove "registry" "Resource $RESOURCE_ID metadata is archived and the allocation released"
 bmac_ui_plan_item keep "source ISO cache" "$CACHE_ISO ($cache_state)"
@@ -499,6 +515,12 @@ registry_update() {
       'import json,sys; print(json.loads(sys.argv[1])["revision"])' "$value"
   )"
 }
+
+if [[ "$BACKUP_JOB_PRESENT" == true ]]; then
+  log "Removing PBS backup job $BACKUP_JOB (its backups stay on PBS)"
+  mox_ssh "$COORDINATOR" pvesh delete "/cluster/backup/${BACKUP_JOB}" </dev/null >/dev/null ||
+    die "Could not remove backup job $BACKUP_JOB; nothing else was changed"
+fi
 
 log "Entering teardown state"
 case "$RESOURCE_STATE" in

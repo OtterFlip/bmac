@@ -1,7 +1,7 @@
 // Sample cluster state for the in-browser mock backend (development and
 // screenshots only; the desktop app always talks to real scripts).
 
-import type { DiskRow, DisksState, GuestsState, HostsState, ReplicationState, StorageState, VdevMember, VdevRow } from "@/protocol/state";
+import type { BackupMetrics, BackupsState, DiskRow, DisksState, GuestsState, HostsState, ReplicationState, RestorePoint, StorageState, VdevMember, VdevRow } from "@/protocol/state";
 
 const now = () => Math.floor(Date.now() / 1000);
 const GiB = 1024 ** 3;
@@ -326,5 +326,96 @@ export function disksState(): DisksState {
       "mox3: rpool mirror-0 is DEGRADED",
       "mox3: disks BTLN8401002P2P0B, BTLN8401003Q2P0B finished evacuating and await retirement finalization",
     ],
+  };
+}
+
+const BACKUP_KEY = "24:a7:6e:9e:65:9f:c8:d6:b1:08:9a:2f:b5:dc:3a:61:a4:0b:98:6b:d5:2e:c1:c3:e2:dd:d5:2f:71:b6:89:d9";
+
+const INCREMENTAL: BackupMetrics = {
+  mode: "fast-incremental",
+  detail: "only the blocks changed since the previous backup were read (dirty bitmap)",
+  dirty_bytes: 71303168,
+  read_bytes: 71303168,
+  zero_bytes: null,
+  reused_bytes: 1099447203266,
+  reused_percent: 99,
+  new_bytes: 64424510,
+  transfer_seconds: 1,
+  duration_seconds: 3,
+  node: "mox1",
+  task: "UPID:mox1:003FD8EC:02CB1464:6AE0BA19:vzdump:100:root@pam:",
+};
+
+const FULL_READ: BackupMetrics = {
+  mode: "full-read",
+  detail: "the whole disk was read: no dirty bitmap yet (the first backup, or after the VM restarted, failed over, or its disk changed)",
+  dirty_bytes: null,
+  read_bytes: 1099511627776,
+  zero_bytes: 1091490520187,
+  reused_bytes: 1093700558192,
+  reused_percent: 99,
+  new_bytes: 5811069584,
+  transfer_seconds: 413,
+  duration_seconds: 414,
+  node: "mox1",
+  task: "UPID:mox1:003FD8EC:02CB1464:6AE0BA19:vzdump:100:root@pam:",
+};
+
+export function backupsState(): BackupsState {
+  const now = Math.floor(Date.now() / 1000);
+  const hour = 3600;
+  const point = (hoursAgo: number, extra: Partial<RestorePoint> = {}): RestorePoint => {
+    const time = now - hoursAgo * hour;
+    const stamp = new Date(time * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+    return {
+      volid: `bmac-pbs:backup/vm/100/${stamp}`,
+      vmid: 100,
+      time,
+      name: "prod1",
+      purpose: "pinbinapp",
+      fqdn: "pinbinapp.com",
+      cluster: "MyAppCloud",
+      notes: "bmac prod1 slug=pinbinapp fqdn=pinbinapp.com cluster=MyAppCloud guest=prod1",
+      comment: null,
+      protected: false,
+      size: 1099512170236,
+      encrypted: BACKUP_KEY,
+      key_matches: true,
+      verified: "ok",
+      metrics: INCREMENTAL,
+      ...extra,
+    };
+  };
+  return {
+    collected_at: now,
+    probe: "mox1",
+    storage: {
+      configured: true,
+      id: "bmac-pbs",
+      active: true,
+      server: "203.0.113.7",
+      port: 8007,
+      datastore: "pbs",
+      namespace: "BTV",
+      username: "btv@pbs!pve",
+      key_fingerprint: BACKUP_KEY,
+      master_pubkey: true,
+    },
+    retention: {
+      readable: true,
+      jobs: [{ id: "prune-btv", schedule: "05:00", keep: { daily: 3, last: 6, weekly: 4 } }],
+      error: null,
+    },
+    vms: [
+      {
+        name: "prod1", vmid: 100, purpose: "pinbinapp", fqdn: "pinbinapp.com", state: "active",
+        job: { id: "bmac-prod1", enabled: true, schedule: "0/4:05", every_hours: 4, next_run: now + 2 * hour, bwlimit: null },
+        latest_backup: now - 2 * hour, restore_points: 4,
+      },
+      { name: "prod2", vmid: 101, purpose: "shop", fqdn: "shop.example.com", state: "active", job: null, latest_backup: null, restore_points: 0 },
+    ],
+    restore_points: [point(2), point(6, { verified: null }), point(10, { metrics: null }), point(30, { protected: true, metrics: FULL_READ, comment: "Before upgrading Postgres" })],
+    unmanaged_backups: 1,
+    problems: [],
   };
 }

@@ -50,11 +50,17 @@ read -r -d '' VM_SCRIPT <<'VM' || true
 set -Eeuo pipefail
 
 # virtiofs has briefly reported this checkout as foreign right after boot,
-# and Git then refuses to run; the checkout is the caller's own.
-git_files() { git -c safe.directory="$PWD" ls-files -- "$@"; }
+# and Git then refuses to run; the checkout is the caller's own. Files not
+# yet added count too, unless a .gitignore excludes them; files deleted from
+# the working tree do not.
+git_files() {
+  local path
+  git -c safe.directory="$PWD" ls-files --cached --others --exclude-standard -- "$@" |
+    while IFS= read -r path; do [[ ! -f "$path" ]] || printf '%s\n' "$path"; done
+}
 
 scripts_list="$(git_files '*.sh')"
-[[ -n "$scripts_list" ]] || { echo "ERROR: no tracked *.sh files" >&2; exit 1; }
+[[ -n "$scripts_list" ]] || { echo "ERROR: no *.sh files found" >&2; exit 1; }
 mapfile -t scripts <<<"$scripts_list"
 bash -n "${scripts[@]}" </dev/null
 echo "bash -n: ${#scripts[@]} scripts OK"

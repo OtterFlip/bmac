@@ -596,6 +596,48 @@ class RegistryCliTest(unittest.TestCase):
         back, _ = self.run_registry("record-owner", "prod1", "--node", "mox1")
         self.assertEqual((back["owner_node"], back["replication_targets"]), ("mox1", ["mox2"]))
 
+    def test_vcpus_and_ram_are_recorded_on_start_and_by_update(self) -> None:
+        self.allocate_prod()
+        self.run_registry("update", "prod1", "--state", "provisioning", "--owner-node", "mox1",
+                          "--volume-id", "local-zfs:vm-100-disk-0")
+        self.run_registry("update", "prod1", "--state", "stopped", "--ha-nodes", "mox1,mox2",
+                          "--replication-targets", "mox2")
+        self.run_registry("update", "prod1", "--state", "active")
+        before, _ = self.run_registry("get", "prod1")
+
+        # Same owner, new vCPUs and RAM (changed in the Proxmox web UI): recorded.
+        resized, _ = self.run_registry("record-owner", "prod1", "--node", "mox1",
+                                       "--cores", "60", "--memory-mb", "32768")
+        self.assertTrue(resized["changed"])
+        self.assertEqual((resized["previous_cores"], resized["cores"], resized["memory_mb"]),
+                         (before["spec"]["cores"], 60, 32768))
+        record, _ = self.run_registry("get", "prod1")
+        self.assertEqual((record["spec"]["cores"], record["spec"]["memory_mb"], record["owner_node"]),
+                         (60, 32768, "mox1"))
+        self.assertEqual(record["spec"]["disk_gib"], before["spec"]["disk_gib"])
+        again, _ = self.run_registry("record-owner", "prod1", "--node", "mox1",
+                                     "--cores", "60", "--memory-mb", "32768")
+        self.assertEqual((again["changed"], again["reason"]), (False, "already-recorded"))
+        self.run_registry("record-owner", "prod1", "--node", "mox1", "--cores", "0", expected=1)
+
+        # A root disk grown in the web UI is recorded; a smaller size never is.
+        grown_bytes = (before["spec"]["disk_gib"] + 8) * 2**30
+        grown, _ = self.run_registry("record-owner", "prod1", "--node", "mox1",
+                                     "--cores", "60", "--memory-mb", "32768", "--disk-bytes", str(grown_bytes))
+        self.assertEqual((grown["changed"], grown["disk_bytes"]), (True, grown_bytes))
+        smaller, _ = self.run_registry("record-owner", "prod1", "--node", "mox1",
+                                       "--cores", "60", "--memory-mb", "32768", "--disk-bytes", str(2**30))
+        self.assertEqual((smaller["changed"], smaller["reason"]), (False, "already-recorded"))
+        record, _ = self.run_registry("get", "prod1")
+        self.assertEqual(record["spec"]["disk_bytes"], grown_bytes)
+        self.run_registry("record-owner", "prod1", "--node", "mox1", "--disk-bytes", str(grown_bytes + 1),
+                          expected=1)
+
+        # A workflow holding the lease (Rollback Restore) records them by update.
+        updated, _ = self.run_registry("update", "prod1", "--cores", "8", "--memory-mb", "16384")
+        self.assertEqual((updated["spec"]["cores"], updated["spec"]["memory_mb"]), (8, 16384))
+        self.run_registry("update", "prod1", "--memory-mb", "-1", expected=1)
+
     def test_production_orchestration_lease_and_install_sentinel(self) -> None:
         allocation = self.allocate_prod()
         resource = allocation["resource"]
@@ -2487,6 +2529,120 @@ bash -c '[[ -z "${PROMPTED_SECRET+x}" && -z "${TAILSCALE_AUTH_KEY+x}" ]]'
         for key in self.MONITOR_DEFAULTS:
             if key != "MONITORING_ENABLED":
                 self.assertNotIn(key, keys)
+
+    PBS_SETTINGS = {
+        "PROXMOX_PBS_SERVER_HOST": "203.0.113.7",
+        "PROXMOX_PBS_DATASTORE": "pbs",
+        "PROXMOX_PBS_NAMESPACE": "BTV",
+        "PROXMOX_PBS_USERNAME": "btv@pbs!pve",
+        "PROXMOX_PBS_FINGERPRINT": ":".join(["5d"] * 31 + ["8D"]),
+    }
+    PBS_TOKEN = "0d6a2f4e-9b1c-4d3e-8f7a-1234567890ab"
+
+    def pbs_state(self, *, secrets: str = "--no-secrets", expected: int = 0) -> str:
+        environment = os.environ.copy()
+        environment.update(
+            {"APP_HA_CONFIG_TEST_MODE": "1", "APP_HA_CONFIG_DIR": str(self.config_dir)}
+        )
+        script = (
+            'source "$1"; load_proxmox_config "$2" >/dev/null || exit 1; '
+            "if config_pbs_configured; then echo configured; else echo absent; fi; "
+            'if config_require_pbs_token 2>/dev/null; then echo token; else echo no-token; fi'
+        )
+        completed = subprocess.run(
+            ["bash", "-c", script, "bash", str(CONFIG), secrets],
+            env=environment, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(completed.returncode, expected, msg=completed.stderr)
+        self.assertNotIn(self.PBS_TOKEN, completed.stdout + completed.stderr)
+        return completed.stdout.strip() if expected == 0 else completed.stderr
+
+    def test_pbs_settings_are_optional(self) -> None:
+        self.assertEqual(self.pbs_state(), "absent\nno-token")
+
+    def test_complete_pbs_settings_are_accepted_with_a_default_port(self) -> None:
+        self.append_cluster(*(f"{key}={value}" for key, value in self.PBS_SETTINGS.items()))
+        self.assertEqual(
+            self.loaded_values(*self.PBS_SETTINGS, "PROXMOX_PBS_SERVER_PORT"),
+            {**self.PBS_SETTINGS, "PROXMOX_PBS_SERVER_PORT": "8007"},
+        )
+        self.assertEqual(self.pbs_state(), "configured\nno-token")
+        self.append_cluster("PROXMOX_PBS_SERVER_PORT=18007")
+        self.assertEqual(
+            self.loaded_values("PROXMOX_PBS_SERVER_PORT"), {"PROXMOX_PBS_SERVER_PORT": "18007"}
+        )
+
+    def test_partial_pbs_settings_name_every_missing_key(self) -> None:
+        self.append_cluster("PROXMOX_PBS_SERVER_PORT=8007", "PROXMOX_PBS_DATASTORE=pbs")
+        failed = self.run_config("--check", "--no-secrets", expected=1)
+        missing = failed.stderr.split("missing or empty:", 1)[1].split()
+        self.assertEqual(
+            sorted(missing), sorted(set(self.PBS_SETTINGS) - {"PROXMOX_PBS_DATASTORE"})
+        )
+
+    def test_pbs_settings_are_strictly_validated(self) -> None:
+        original = self.cluster.read_text(encoding="utf-8")
+        accepted = {
+            "PROXMOX_PBS_SERVER_HOST": "pbs.example.com",
+            "PROXMOX_PBS_NAMESPACE": "clusters/btv",
+            "PROXMOX_PBS_USERNAME": "btv-2@pbs!pve_1",
+        }
+        rejected = {
+            "PROXMOX_PBS_SERVER_HOST": "300.1.2.3",
+            "PROXMOX_PBS_SERVER_PORT": "65536",
+            "PROXMOX_PBS_DATASTORE": "bad/store",
+            "PROXMOX_PBS_NAMESPACE": "a/b/c/d/e/f/g/h",
+            "PROXMOX_PBS_USERNAME": "btv@pbs",
+            "PROXMOX_PBS_FINGERPRINT": "5d:17:0f",
+        }
+        for key, value in accepted.items():
+            with self.subTest(key=key, value=value):
+                settings = {**self.PBS_SETTINGS, key: value}
+                self.cluster.write_text(
+                    original + "".join(f"{k}={v}\n" for k, v in settings.items()),
+                    encoding="utf-8",
+                )
+                self.run_config("--check", "--no-secrets")
+        for key, value in rejected.items():
+            with self.subTest(key=key, value=value):
+                settings = {**self.PBS_SETTINGS, key: value}
+                self.cluster.write_text(
+                    original + "".join(f"{k}={v}\n" for k, v in settings.items()),
+                    encoding="utf-8",
+                )
+                failed = self.run_config("--check", "--no-secrets", expected=1)
+                self.assertIn(key, failed.stderr)
+
+    def test_pbs_token_belongs_only_in_secrets_and_is_checked(self) -> None:
+        self.append_cluster(f"PROXMOX_PBS_TOKEN={self.PBS_TOKEN}")
+        failed = self.run_config("--check", "--no-secrets", expected=1)
+        self.assertIn("unknown or misplaced key PROXMOX_PBS_TOKEN", failed.stderr)
+        self.assertNotIn(self.PBS_TOKEN, failed.stderr)
+
+    def test_pbs_token_requires_pbs_settings_and_a_uuid(self) -> None:
+        base_secrets = self.secrets.read_text(encoding="utf-8")
+        # A template placeholder is harmless whether or not PBS is configured.
+        self.secrets.write_text(base_secrets + "PROXMOX_PBS_TOKEN=redacted\n", encoding="utf-8")
+        self.assertEqual(self.pbs_state(secrets="--require-secrets"), "absent\nno-token")
+        self.secrets.write_text(
+            base_secrets + f"PROXMOX_PBS_TOKEN={self.PBS_TOKEN}\n", encoding="utf-8"
+        )
+        self.assertIn(
+            "configures no PBS server", self.pbs_state(secrets="--require-secrets", expected=1)
+        )
+        self.append_cluster(*(f"{key}={value}" for key, value in self.PBS_SETTINGS.items()))
+        self.assertEqual(self.pbs_state(secrets="--require-secrets"), "configured\ntoken")
+        self.assertEqual(self.pbs_state(), "configured\nno-token")
+        self.secrets.write_text(base_secrets + "PROXMOX_PBS_TOKEN=not-a-uuid\n", encoding="utf-8")
+        self.assertIn("must be the PBS API token secret", self.pbs_state(
+            secrets="--require-secrets", expected=1
+        ))
+
+    def test_pbs_keys_do_not_change_the_effective_hash(self) -> None:
+        before = self.effective_hash()
+        self.append_cluster(*(f"{key}={value}" for key, value in self.PBS_SETTINGS.items()))
+        self.append_cluster("PROXMOX_PBS_SERVER_PORT=18007")
+        self.assertEqual(self.effective_hash(), before)
 
     def test_unknown_keys_and_unsafe_modes_fail_closed(self) -> None:
         with self.cluster.open("a", encoding="utf-8") as handle:

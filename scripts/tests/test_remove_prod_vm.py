@@ -73,6 +73,17 @@ class RemoveProductionVmTest(unittest.TestCase):
             text.index('registry_cmd release "$RESOURCE_NAME"'),
         )
 
+    def test_the_backup_job_goes_first_and_backups_stay(self) -> None:
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('BACKUP_JOB="bmac-${RESOURCE_NAME}"', text)
+        removal = text.index('pvesh delete "/cluster/backup/${BACKUP_JOB}"')
+        # After the typed confirmation, before anything else changes.
+        self.assertLess(text.index('--text "DESTROY ${RESOURCE_NAME}"'), removal)
+        self.assertLess(removal, text.index('log "Entering teardown state"'))
+        self.assertIn('bmac_ui_plan_item keep "PBS backups"', text)
+        # Nothing here may touch the restore points themselves.
+        self.assertNotIn("storage/bmac-pbs/content", text)
+
     def test_shared_source_cache_is_never_removed(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertIn(

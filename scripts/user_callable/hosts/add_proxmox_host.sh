@@ -28,6 +28,7 @@ RUNTIME_LIB_FILES=(
   cluster_registry.py process_deferred_cleanup.sh
   guest_network.sh egress_health.py egress_probe_targets.txt transfer_counter.py
   tunnel_config.py tunnel_sync.sh cloudflared_setup.sh app_ha_monitor.py
+  pbs_api.py
 )
 RPOOL_MIRROR_SOURCE="${SCRIPT_DIR}/../../host_runtime/rpool_mirror.sh"
 RPOOL_MIRROR_TOOL=/usr/local/sbin/app-ha-rpool-mirror

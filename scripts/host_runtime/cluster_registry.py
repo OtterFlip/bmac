@@ -2583,6 +2583,13 @@ def command_update(registry: Registry, args: argparse.Namespace) -> Any:
                 raise RegistryError("replication targets must be contained in placement")
             updated["proxmox"]["replication_targets"] = targets
             changed = True
+        for field, value in (("cores", args.cores), ("memory_mb", args.memory_mb)):
+            if value is None:
+                continue
+            if current["kind"] != "production":
+                raise RegistryError("only a production VM's vCPUs and RAM are recorded")
+            updated["spec"][field] = positive_spec_value(field, value)
+            changed = True
         if current["kind"] == "production" and (
             args.clear_volume or args.volume_id is not None
         ):
@@ -2683,12 +2690,21 @@ def command_update(registry: Registry, args: argparse.Namespace) -> Any:
         return updated
 
 
+def positive_spec_value(field: str, value: Any) -> int:
+    if type(value) is not int or value <= 0:
+        raise RegistryError(f"{field} must be a positive integer")
+    return value
+
+
 def command_record_owner(registry: Registry, args: argparse.Namespace) -> Any:
-    """Record the node an active production VM actually runs on.
+    """Record the node an active production VM actually runs on, and the
+    vCPUs and RAM it started with.
 
     HA keeps a failed-over VM where it restarted (failback is off), so the
-    owner and replication targets are rewritten to match. Does nothing while
-    an orchestration lease is held: the lease holder records ownership itself.
+    owner and replication targets are rewritten to match. A rollback or a
+    change made in the Proxmox web UI changes the VM's vCPUs and RAM, which
+    take effect when it starts. Does nothing while an orchestration lease is
+    held: the lease holder records these itself.
     """
 
     policy = registry.policy()
@@ -2718,11 +2734,27 @@ def command_record_owner(registry: Registry, args: argparse.Namespace) -> Any:
             targets = validate_nodes(flatten_nodes(args.replication_targets), policy, allow_empty=True)
             if node in targets or any(other not in current["placement"] for other in targets):
                 raise RegistryError("replication targets must be placement nodes other than the owner")
-        if current["owner_node"] == node and current["proxmox"]["replication_targets"] == targets:
+        spec = dict(current["spec"])
+        if args.cores is not None:
+            spec["cores"] = positive_spec_value("cores", args.cores)
+        if args.memory_mb is not None:
+            spec["memory_mb"] = positive_spec_value("memory_mb", args.memory_mb)
+        # A root disk grown in the Proxmox web UI. Disks never shrink, so a
+        # smaller size than recorded is ignored rather than recorded.
+        if args.disk_bytes is not None and args.disk_bytes > effective_disk_bytes(spec):
+            if args.disk_bytes % MIB != 0 or args.disk_bytes > MAX_DISK_BYTES:
+                raise RegistryError("disk bytes must be a whole number of MiB within the disk limit")
+            spec["disk_bytes"] = args.disk_bytes
+        if (
+            current["owner_node"] == node
+            and current["proxmox"]["replication_targets"] == targets
+            and current["spec"] == spec
+        ):
             return {**result, "reason": "already-recorded"}
         updated = copy.deepcopy(current)
         updated["owner_node"] = node
         updated["proxmox"]["replication_targets"] = targets
+        updated["spec"] = spec
         updated["updated_at"] = utc_now()
         updated["revision"] += 1
         validate_resource(updated, policy)
@@ -2735,6 +2767,12 @@ def command_record_owner(registry: Registry, args: argparse.Namespace) -> Any:
             "owner_node": node,
             "previous_owner_node": current["owner_node"],
             "replication_targets": targets,
+            "cores": spec["cores"],
+            "memory_mb": spec["memory_mb"],
+            "previous_cores": current["spec"]["cores"],
+            "previous_memory_mb": current["spec"]["memory_mb"],
+            "disk_bytes": effective_disk_bytes(spec),
+            "previous_disk_bytes": effective_disk_bytes(current["spec"]),
             "changed": True,
             "revision": updated["revision"],
         }
@@ -4419,6 +4457,8 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--staging-dns-base")
     update.add_argument("--ha-nodes", action="append")
     update.add_argument("--replication-targets", action="append")
+    update.add_argument("--cores", type=int, help="production only: its configured vCPUs")
+    update.add_argument("--memory-mb", type=int, help="production only: its configured RAM in MiB")
     volume = update.add_mutually_exclusive_group()
     volume.add_argument("--volume-id")
     volume.add_argument("--clear-volume", action="store_true")
@@ -4451,6 +4491,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="observed targets; default: placement minus --node",
     )
+    record_owner.add_argument("--cores", type=int, help="the vCPUs it started with")
+    record_owner.add_argument("--memory-mb", type=int, help="the RAM it started with, in MiB")
+    record_owner.add_argument("--disk-bytes", type=int,
+                              help="its root disk's size; recorded only when larger than recorded")
     record_owner.set_defaults(handler=command_record_owner)
 
     orchestration_get = subparsers.add_parser(

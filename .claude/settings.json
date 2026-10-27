@@ -5,6 +5,7 @@
       "Read(*.env)",
       "Read(*.key)",
       "Read(*.cer)",
+      "Read(pbs-master-public.pem)",
       "Read(cert.pem)",
       "Read(__pycache__/**)",
       "Read(artifacts/**)"

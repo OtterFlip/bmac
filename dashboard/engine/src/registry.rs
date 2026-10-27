@@ -32,6 +32,9 @@ pub enum ParamType {
     Integer,
     Path,
     Hostname,
+    /// A PBS VM snapshot: `vm/<VMID>/<UTC time>`, such as
+    /// `vm/100/2026-10-27T14:50:01Z`.
+    Snapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,6 +349,9 @@ fn validate_value(param: &Param, text: &str) -> std::result::Result<(), String> 
             ok.then_some(()).ok_or_else(|| "expected an absolute path".into())
         }
         ParamType::Hostname => is_hostname(text).then_some(()).ok_or_else(|| "expected a host name".into()),
+        ParamType::Snapshot => is_vm_snapshot(text)
+            .then_some(())
+            .ok_or_else(|| "expected a restore point like vm/100/2026-10-27T14:50:01Z".into()),
         ParamType::Flag | ParamType::FlagChoice => Ok(()),
     }
 }
@@ -389,6 +395,25 @@ pub fn is_staging_name(text: &str) -> bool {
     }
 }
 
+/// `vm/<VMID>/YYYY-MM-DDTHH:MM:SSZ`, the form PBS names a VM snapshot.
+pub fn is_vm_snapshot(text: &str) -> bool {
+    let mut parts = text.split('/');
+    let (Some("vm"), Some(vmid), Some(time), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let vmid_ok = (1..=9).contains(&vmid.len()) && vmid.bytes().all(|b| b.is_ascii_digit()) && !vmid.starts_with('0');
+    let time = time.as_bytes();
+    let time_ok = time.len() == 20
+        && time.iter().enumerate().all(|(i, b)| match i {
+            4 | 7 => *b == b'-',
+            10 => *b == b'T',
+            13 | 16 => *b == b':',
+            19 => *b == b'Z',
+            _ => b.is_ascii_digit(),
+        });
+    vmid_ok && time_ok
+}
+
 pub fn is_hostname(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= 253
@@ -408,6 +433,19 @@ mod tests {
 
     fn values(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn snapshot_values_are_strictly_the_pbs_form() {
+        assert!(is_vm_snapshot("vm/100/2026-10-27T14:50:01Z"));
+        assert!(is_vm_snapshot("vm/123456789/1999-01-01T00:00:00Z"));
+        for bad in [
+            "", "vm/100", "vm/100/2026-10-27T14:50:01", "ct/100/2026-10-27T14:50:01Z",
+            "vm/0100/2026-10-27T14:50:01Z", "vm/100/2026-10-27 14:50:01Z", "vm/100/2026-10-27T14:50:01Z/x",
+            "vm/100/../../etc", "-vm/100/2026-10-27T14:50:01Z", "vm/1234567890/2026-10-27T14:50:01Z",
+        ] {
+            assert!(!is_vm_snapshot(bad), "{bad}");
+        }
     }
 
     #[test]

@@ -29,14 +29,24 @@ RUNTIME_SOURCE_DIR="${REPO_ROOT}/scripts/host_runtime"
 HOOK_NAME=app-ha-guest-role-hook.sh
 # Every file this updater manages in ${INSTALL_ROOT}/lib.
 RUNTIME_FILES=(
-  cluster_registry.py process_deferred_cleanup.sh "$HOOK_NAME"
+  config.sh cluster_registry.py process_deferred_cleanup.sh "$HOOK_NAME"
   guest_network.sh egress_health.py egress_probe_targets.txt transfer_counter.py
   tunnel_config.py tunnel_sync.sh cloudflared_setup.sh app_ha_monitor.py
+  pbs_api.py
 )
 INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${INSTALL_ROOT}/lib/cluster_registry.py"
 REMOTE_TUNNEL_SYNC="${INSTALL_ROOT}/lib/tunnel_sync.sh"
 REMOTE_SNIPPET=""
+
+# config.sh comes from scripts/lib; every other runtime file from
+# scripts/host_runtime.
+runtime_source() {
+  case "$1" in
+    config.sh) printf '%s\n' "$CONFIG_LIB" ;;
+    *) printf '%s/%s\n' "$RUNTIME_SOURCE_DIR" "$1" ;;
+  esac
+}
 
 DRY_RUN=false
 ASSUME_YES=false
@@ -76,6 +86,7 @@ Usage: update_cluster_runtime.sh [--dry-run] [--yes] [--delete-obsolete-checks]
          [--skip-cloudflared]
 
 Update these runtime files on every configured, online Proxmox node:
+  /usr/local/lib/app-ha-proxmox/lib/config.sh
   /usr/local/lib/app-ha-proxmox/lib/cluster_registry.py
   /usr/local/lib/app-ha-proxmox/lib/process_deferred_cleanup.sh
   /usr/local/lib/app-ha-proxmox/lib/app-ha-guest-role-hook.sh
@@ -87,6 +98,7 @@ Update these runtime files on every configured, online Proxmox node:
   /usr/local/lib/app-ha-proxmox/lib/tunnel_sync.sh
   /usr/local/lib/app-ha-proxmox/lib/cloudflared_setup.sh
   /usr/local/lib/app-ha-proxmox/lib/app_ha_monitor.py
+  /usr/local/lib/app-ha-proxmox/lib/pbs_api.py
   local:snippets/app-ha-guest-role-hook.sh
 
 The script stages and validates the complete bundle on every node before
@@ -314,7 +326,7 @@ upgrade_cloudflared() {
 validate_local_bundle() {
   local name source
   for name in "${RUNTIME_FILES[@]}"; do
-    source="${RUNTIME_SOURCE_DIR}/${name}"
+    source="$(runtime_source "$name")"
     require_source "$source"
     case "$name" in
       *.sh) bash -n "$source" ;;
@@ -383,7 +395,7 @@ remote_hash() {
 expected_hashes() {
   local name
   for name in "${RUNTIME_FILES[@]}"; do
-    printf '%s=%s\n' "$name" "$(local_hash "${RUNTIME_SOURCE_DIR}/${name}")"
+    printf '%s=%s\n' "$name" "$(local_hash "$(runtime_source "$name")")"
   done
 }
 
@@ -395,7 +407,7 @@ show_hash_status() {
     outdated=()
     for name in "${RUNTIME_FILES[@]}"; do
       actual="$(remote_hash "$node" "${INSTALL_ROOT}/lib/${name}" 2>/dev/null || true)"
-      [[ "$actual" == "$(local_hash "${RUNTIME_SOURCE_DIR}/${name}")" ]] ||
+      [[ "$actual" == "$(local_hash "$(runtime_source "$name")")" ]] ||
         outdated+=("$name")
     done
     actual="$(remote_hash "$node" "$REMOTE_SNIPPET" 2>/dev/null || true)"
@@ -423,7 +435,7 @@ stage_node() {
   mox_ssh "$node" install -d -m 0700 "$REMOTE_STAGE"
   STAGED_NODES+=("$node")
   for name in "${RUNTIME_FILES[@]}"; do
-    copy_to_node "$node" "${RUNTIME_SOURCE_DIR}/${name}" "${REMOTE_STAGE}/${name}"
+    copy_to_node "$node" "$(runtime_source "$name")" "${REMOTE_STAGE}/${name}"
   done
   mapfile -t hashes < <(expected_hashes)
   # shellcheck disable=SC2016 # This script is evaluated by remote Bash.
@@ -473,6 +485,10 @@ for name in "$@"; do
 done
 install -m 0755 "$stage/$hook_name" "${snippet}.new"
 mv -f "${snippet}.new" "$snippet"
+# The lifecycle hook and the tunnel sync load the installed cluster.conf
+# through the installed config.sh; a parser that rejects it fails this
+# commit, which is then rolled back.
+"${install_root}/lib/config.sh" --check --no-secrets >/dev/null
 # The egress health service and the monitor agent run from the installed
 # files. The monitor unit exists only once monitoring was installed.
 systemctl try-restart app-ha-egress-health.service
@@ -521,7 +537,7 @@ verify_node() {
   local node="$1" name
   for name in "${RUNTIME_FILES[@]}"; do
     [[ "$(remote_hash "$node" "${INSTALL_ROOT}/lib/${name}")" == \
-      "$(local_hash "${RUNTIME_SOURCE_DIR}/${name}")" ]] ||
+      "$(local_hash "$(runtime_source "$name")")" ]] ||
       die "$node: ${name} hash differs after installation"
   done
   [[ "$(remote_hash "$node" "$REMOTE_SNIPPET")" == \

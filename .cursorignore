@@ -1,6 +1,7 @@
 *.env
 *.key
 *.cer
+pbs-master-public.pem
 secrets.env
 __pycache__/
 __pycache__/*

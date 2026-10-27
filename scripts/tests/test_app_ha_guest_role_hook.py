@@ -778,6 +778,24 @@ else:
         self.run_hook(100, "post-start")
         self.assertFalse(any("record-owner" in row for row in self.action_rows()))
 
+    def test_post_start_records_the_vcpus_ram_and_disk_it_started_with(self) -> None:
+        # Changed in the Proxmox web UI, or by a rollback, while stopped.
+        self.registry("update", "prod1", "--state", "active")
+        state = self.read_fake_state()
+        state["vms"]["100"]["config"].update(
+            cores="60", memory="current=32768",
+            scsi0="local-zfs:vm-100-disk-0,replicate=1,size=136G",
+        )
+        self.write_fake_state(state)
+        self.run_hook(100, "pre-start")
+        completed = self.run_hook(100, "post-start")
+        record = self.registry("get", "prod1")
+        self.assertEqual((record["spec"]["cores"], record["spec"]["memory_mb"]), (60, 32768))
+        self.assertIn("(60 vCPUs, 32768 MiB RAM)", completed.stderr)
+        record_owner = next(row for row in self.action_rows() if "record-owner" in row)
+        self.assertEqual(record_owner[-6:], ["--cores", "60", "--memory-mb", "32768", "--disk-bytes", str(136 * 2**30)])
+        self.assertEqual(record["spec"]["disk_bytes"], 136 * 2**30)
+
     def test_post_start_owner_errors_never_fail_the_hook(self) -> None:
         self.registry("update", "prod1", "--state", "active")
         (self.reservation_dir / "100.reservation").write_text(

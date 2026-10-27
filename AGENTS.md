@@ -5,6 +5,8 @@ SPDX-License-Identifier: GPL-3.0-only
 
 # Agent instructions
 
+Never commit any code in git.  Don't even stage changes.  Let the user handle commits.
+
 ## Running tests
 
 Run the unit tests with `dev/run_tests.py` from the repository root, not

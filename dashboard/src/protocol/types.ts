@@ -333,7 +333,8 @@ export type ParamType =
   | "guest"
   | "integer"
   | "path"
-  | "hostname";
+  | "hostname"
+  | "snapshot";
 
 export interface Param {
   id: string;
@@ -349,7 +350,7 @@ export interface Param {
   suggest?: "free_host_slots";
 }
 
-export type Category = "diagnostics" | "hosts" | "production" | "staging" | "storage" | "qdevice";
+export type Category = "diagnostics" | "hosts" | "production" | "staging" | "storage" | "qdevice" | "backups";
 
 export interface Workflow {
   id: string;

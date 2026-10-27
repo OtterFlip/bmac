@@ -1,6 +1,7 @@
 import type { MouseEvent, ReactNode } from "react";
 import {
   Activity,
+  Archive,
   Boxes,
   Database,
   FileCog,
@@ -33,6 +34,7 @@ const NAV: NavItem[] = [
   { id: "production", label: "Production VMs", icon: <Boxes /> },
   { id: "staging", label: "Staging VMs", icon: <FlaskConical /> },
   { id: "qdevice", label: "QDevice", icon: <Scale /> },
+  { id: "backups", label: "Backups", icon: <Archive /> },
   { id: "diagnostics", label: "Diagnostics", icon: <Stethoscope /> },
   { id: "operations", label: "Operations", icon: <History /> },
 ];

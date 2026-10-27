@@ -26,6 +26,7 @@ export type Page =
   | "staging"
   | "storage"
   | "qdevice"
+  | "backups"
   | "diagnostics"
   | "operations"
   | "config"

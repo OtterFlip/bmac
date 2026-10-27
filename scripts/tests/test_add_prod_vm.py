@@ -1123,6 +1123,16 @@ printf '%s\\n' "$ROOT_VOLUME"
                 self.assertIn(message, invalid.stderr)
 
     def test_dry_run_uses_live_reads_without_remote_mutation(self) -> None:
+        stdout = self.run_dry_run()
+        self.assertIn("Candidate VMID at query time: 100 (not reserved)", stdout)
+
+    def test_dry_run_skips_vmids_that_already_have_backups(self) -> None:
+        stdout = self.run_dry_run(backup_vmids=[100, 101, 103])
+        self.assertIn("Candidate VMID at query time: 102 (not reserved)", stdout)
+
+    def run_dry_run(self, backup_vmids: list[int] | None = None) -> str:
+        """A dry run against fake hosts; with backup_vmids, the cluster has
+        PBS storage bmac-pbs holding backups of those VMIDs."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config_dir = root / "config"
@@ -1251,6 +1261,13 @@ if "pvesh" in command:
         print("100")
     elif path == "/cluster/resources":
         print("[]")
+    elif path == "/storage/bmac-pbs":
+        if "FAKE_BACKUP_VMIDS" not in os.environ:
+            raise SystemExit(1)
+        print("{}")
+    elif path == "/nodes/mox1/storage/bmac-pbs/content":
+        print(json.dumps([{"content": "backup", "vmid": int(vmid)}
+                          for vmid in os.environ["FAKE_BACKUP_VMIDS"].split(",")]))
     else:
         raise SystemExit(f"unexpected pvesh path: {path}")
 elif any(value.endswith("/cluster_registry.py") for value in command):
@@ -1275,6 +1292,8 @@ else:
                     "FAKE_SSH_CALLS": str(calls),
                 }
             )
+            if backup_vmids is not None:
+                environment["FAKE_BACKUP_VMIDS"] = ",".join(str(vmid) for vmid in backup_vmids)
             completed = subprocess.run(
                 [str(SCRIPT), "--dry-run"],
                 input="\n\nexample.com\n" + "\n" * 10,
@@ -1307,6 +1326,7 @@ else:
             self.assertEqual(
                 sorted((config_dir / "artifacts").rglob("run-*")), [], "dry run leaked artifacts"
             )
+            return completed.stdout
 
     def test_live_mutations_are_guarded_and_no_destructive_rollback_exists(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")

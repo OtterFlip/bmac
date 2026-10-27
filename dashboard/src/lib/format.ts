@@ -67,6 +67,19 @@ export function dateTime(iso: string | null | undefined): string {
     : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+/** A full date and time in this workstation's time zone, such as "Oct 27, 2026, 10:04 AM MDT". */
+export function localDateTime(epochSeconds: number | null | undefined): string {
+  if (!epochSeconds) return "—";
+  return new Date(epochSeconds * 1000).toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
 export function percent(fraction: number | null | undefined, digits = 0): string {
   if (fraction === null || fraction === undefined || !Number.isFinite(fraction)) return "—";
   return `${(fraction * 100).toFixed(digits)}%`;
