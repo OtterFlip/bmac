@@ -334,11 +334,17 @@ collect_backup_linked_options() {
 }
 
 # The directory storage that holds every backup-linked staging VM's overlay,
-# on each host's root filesystem. Created once per cluster.
+# on each host's root filesystem. Created once per cluster; Proxmox creates
+# its directories by default (create-base-path, create-subdirs). The first
+# release passed the deprecated mkdir option, which is removed here.
 ensure_overlay_storage() {
   CURRENT_PHASE="checking the overlay storage"
   local storage
   if storage="$(pvesh_get "/storage/${OVERLAY_STORAGE_ID}" 2>/dev/null)"; then
+    if python3 -c 'import json, sys; sys.exit(0 if "mkdir" in json.loads(sys.argv[1]) else 1)' "$storage"; then
+      node_exec "$COORDINATOR" pvesm set "$OVERLAY_STORAGE_ID" --delete mkdir >/dev/null ||
+        warn "Could not remove the deprecated mkdir option from ${OVERLAY_STORAGE_ID}"
+    fi
     python3 - "$storage" "$OVERLAY_STORAGE_PATH" <<'PY' || die "Storage bmac-overlay exists but is not the directory storage BMAC expects; remove it and run again"
 import json
 import sys
@@ -352,7 +358,7 @@ PY
   fi
   log "Adding the overlay storage ${OVERLAY_STORAGE_ID} (${OVERLAY_STORAGE_PATH} on every host)"
   node_exec "$COORDINATOR" pvesm add dir "$OVERLAY_STORAGE_ID" --path "$OVERLAY_STORAGE_PATH" \
-    --content images --mkdir 1 >/dev/null ||
+    --content images >/dev/null ||
     die "Could not add the overlay storage ${OVERLAY_STORAGE_ID}"
 }
 

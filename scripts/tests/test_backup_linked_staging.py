@@ -123,7 +123,10 @@ if argv[:2] == ["pvesh", "get"]:
     if path == "/storage/bmac-overlay":
         if not state.get("overlay_storage"):
             sys.exit(2)
-        out({"storage": "bmac-overlay", "type": "dir", "path": "/var/lib/bmac-overlay", "content": "images"})
+        storage = {"storage": "bmac-overlay", "type": "dir", "path": "/var/lib/bmac-overlay", "content": "images"}
+        if state.get("overlay_mkdir"):
+            storage["mkdir"] = 1
+        out(storage)
     if path == "/cluster/resources":
         out([{"vmid": int(vmid), "type": "qemu", "node": vm["node"], "name": vm["config"]["name"],
               "status": vm["status"]} for vmid, vm in state["vms"].items()])
@@ -134,6 +137,11 @@ if argv[:2] == ["pvesh", "get"]:
 if argv[:3] == ["pvesm", "add", "dir"]:
     record()
     state["overlay_storage"] = True
+    save()
+    sys.exit(0)
+if argv[:2] == ["pvesm", "set"]:
+    record()
+    state.pop("overlay_mkdir", None)
     save()
     sys.exit(0)
 if argv[:2] == ["pvesm", "path"]:
@@ -303,6 +311,21 @@ class BackupLinkedStagingTest(unittest.TestCase):
         self.assertEqual(vm["config"]["tags"], "app-ha-staging;evictable;purpose-myapp")
         self.assertIn("restore point vm/100/2026-10-27T16:04:23Z", vm["config"]["description"])
         self.assertIn("Backup-linked staging VM created", completed.stdout)
+
+    def test_the_overlay_storage_never_uses_the_deprecated_mkdir_option(self) -> None:
+        self.run_workflow("--snapshot", SNAPSHOT, "--no-jump-ssh", "--link-down", "--no-start")
+        add = [call for call in self.load()["calls"] if call[1:3] == ["pvesm", "add"]][0]
+        self.assertNotIn("--mkdir", add)
+        # A storage the first release created loses it on the next run.
+        self.registry("update", "stage1prod1", "--state", "cleanup_pending")
+        state = self.load()
+        state["calls"] = []
+        state["overlay_mkdir"] = True
+        del state["vms"]["200"]
+        self.save(state)
+        self.run_workflow("--snapshot", SNAPSHOT, "--no-jump-ssh", "--link-down", "--no-start")
+        sets = [call for call in self.load()["calls"] if call[1:3] == ["pvesm", "set"]]
+        self.assertEqual(sets, [["mox1", "pvesm", "set", "bmac-overlay", "--delete", "mkdir"]])
 
     def test_a_failed_patch_removes_everything_it_made(self) -> None:
         state = self.load()

@@ -2,6 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { logs, type LogLine } from "@/state/logs";
+import { toast } from "@/state/toast";
 
 export interface TerminalHandle {
   clear(): void;
@@ -81,6 +82,30 @@ export const Terminal = forwardRef<
     t.loadAddon(fit);
     t.open(host.current);
     term.current = t;
+    // The log is drawn by the terminal, so the webview's own copy never sees
+    // its selection: Ctrl+C, Ctrl+Shift+C, or Cmd+C, or a right-click on a
+    // selection, copies it here.
+    const copySelection = () => {
+      const text = t.getSelection();
+      if (!text) return false;
+      navigator.clipboard.writeText(text).then(
+        () => toast.success("Copied"),
+        () => toast.error("Could not copy"),
+      );
+      return true;
+    };
+    t.attachCustomKeyEventHandler((event) => {
+      if (event.type !== "keydown" || event.key.toLowerCase() !== "c" || !(event.ctrlKey || event.metaKey)) return true;
+      return !copySelection();
+    });
+    const element = host.current;
+    const onContextMenu = (event: MouseEvent) => {
+      if (t.hasSelection()) {
+        event.preventDefault();
+        copySelection();
+      }
+    };
+    element.addEventListener("contextmenu", onContextMenu);
     const doFit = () => {
       try {
         fit.fit();
@@ -116,6 +141,7 @@ export const Terminal = forwardRef<
       if (buffer.viewportY < buffer.baseY) onUserScroll?.();
     });
     return () => {
+      element.removeEventListener("contextmenu", onContextMenu);
       unsubscribe();
       onScroll.dispose();
       observer.disconnect();
