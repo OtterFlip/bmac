@@ -200,7 +200,8 @@ choose_snapshot() {
     IFS=$'\x1f' read -r snapshot protected when <<<"$row"
     if [[ "$snapshot" == "$SNAPSHOT" ]]; then
       found=true
-      SNAPSHOT_TIME="$when"
+      # The time alone; the list shows the comment after it.
+      SNAPSHOT_TIME="${when%% · *}"
     fi
   done
   [[ "$found" == true ]] || die "$SNAPSHOT is not a BMAC restore point of $RESOURCE_NAME (VMID $VMID)"

@@ -30,13 +30,14 @@ INSTANT_PHASE=""
 BACKUP_DISK_BYTES=""
 REGISTERED_BYTES=""
 RESUMING=false
+COPY_DELAY_SECONDS=0
 
 usage() {
   cat <<'EOF'
 Usage: scripts/user_callable/backups/instant_restore_existing.sh [prodN] [--vm prodN]
          [--snapshot vm/VMID/TIME] [--cores N] [--memory-gib N]
          [--replication-minutes N] [--safety-backup | --no-safety-backup]
-         [--replication-timeout-seconds N] [--json]
+         [--replication-timeout-seconds N] [--copy-delay-seconds N] [--json]
 
 Return a production VM to one of its own restore points on PBS, down only
 until it boots again. As with Full Restore to Existing VM, everything written
@@ -65,6 +66,9 @@ resume; the restore point is the one it started from.
   --replication-timeout-seconds N
                             Wait for the initial sync of each replica.
                             Default: 3600.
+  --copy-delay-seconds N    Developer option: keep the VM running from PBS
+                            for N seconds (at most 3600) before its data is
+                            copied, to try it there.
 EOF
 }
 
@@ -77,6 +81,12 @@ parse_args() {
       --vm | --snapshot | --cores | --memory-gib | --replication-minutes | --replication-timeout-seconds)
         (($# >= 2)) || die "$1 needs a value"
         forwarded+=("$1" "$2")
+        shift 2
+        ;;
+      --copy-delay-seconds)
+        (($# >= 2)) || die "$1 needs a value"
+        [[ "$2" =~ ^[0-9]{1,4}$ ]] && (($2 <= 3600)) || die "--copy-delay-seconds must be 0 through 3600"
+        COPY_DELAY_SECONDS="$2"
         shift 2
         ;;
       --safety-backup | --no-safety-backup | -h | --help)
@@ -320,6 +330,11 @@ copy_and_switch() {
     die "Could not read the disk state of $RESOURCE_NAME"
   if [[ "$state" == backup ]]; then
     path="$(node_exec "$OWNER_NODE" pvesm path "$ROOT_VOLUME")" || die "Could not resolve $ROOT_VOLUME"
+    if ((COPY_DELAY_SECONDS > 0)); then
+      instant_copy_delay "$COPY_DELAY_SECONDS" "$RESOURCE_NAME"
+      [[ "$(node_exec "$OWNER_NODE" "$BACKUP_LINK_HELPER" status "$VMID")" == alive ]] ||
+        die "The PBS mapping of $RESOURCE_NAME died during the wait; run this again to map it again"
+    fi
     log "Copying the in-use data of $SNAPSHOT into $ROOT_VOLUME while $RESOURCE_NAME runs"
     # --skip-zero leaves zero chunks unwritten, so the zvol must read as
     # zeros first; it is not in use until the switch.

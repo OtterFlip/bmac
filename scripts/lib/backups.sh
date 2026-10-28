@@ -203,6 +203,22 @@ print(last)
 PY
 }
 
+# instant_copy_delay SECONDS NAME: the instant restores' developer option
+# --copy-delay-seconds. NAME keeps running from its overlay over PBS for
+# SECONDS before its data is copied, long enough to try it on PBS-backed
+# storage; normally the copy starts at once and takes under a minute.
+instant_copy_delay() {
+  local remaining="$1" step
+  ((remaining > 0)) || return 0
+  log "Waiting ${remaining}s before the copy (--copy-delay-seconds): $2 runs from its restore point on PBS"
+  while ((remaining > 0)); do
+    step=$((remaining < 60 ? remaining : 60))
+    sleep "$step"
+    remaining=$((remaining - step))
+    ((remaining == 0)) || info "${remaining}s until the copy starts"
+  done
+}
+
 # Add the overlay storage, or check the one there. Needs pvesh_get,
 # node_exec, COORDINATOR, log, warn, and die from the calling script.
 ensure_overlay_storage() {

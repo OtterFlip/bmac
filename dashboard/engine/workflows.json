@@ -746,7 +746,8 @@
           "choices": [
             { "value": "yes", "label": "Back up the current state first", "flag": "--safety-backup" },
             { "value": "no", "label": "No safety backup", "flag": "--no-safety-backup" }
-          ] }
+          ] },
+        { "id": "copy_delay_seconds", "label": "Copy delay (seconds, developer)", "type": "integer", "flag": "--copy-delay-seconds", "help": "Developer option: keep the VM running from its restore point on PBS this long (at most 3600) before its data is copied, to try it there.", "advanced": true }
       ]
     },
     {
@@ -778,7 +779,8 @@
       "params": [
         { "id": "snapshot", "label": "Restore point", "type": "snapshot", "flag": "--snapshot", "help": "Such as vm/100/2026-10-27T14:50:01Z; chosen from every restore point this cluster can decrypt when empty." },
         { "id": "cores", "label": "vCPUs", "type": "integer", "flag": "--cores", "help": "Default: the restore point's vCPUs.", "advanced": true },
-        { "id": "memory_gib", "label": "RAM (GiB)", "type": "integer", "flag": "--memory-gib", "help": "Default: the restore point's RAM.", "advanced": true }
+        { "id": "memory_gib", "label": "RAM (GiB)", "type": "integer", "flag": "--memory-gib", "help": "Default: the restore point's RAM.", "advanced": true },
+        { "id": "copy_delay_seconds", "label": "Copy delay (seconds, developer)", "type": "integer", "flag": "--copy-delay-seconds", "help": "Developer option: keep the VM running from its restore point on PBS this long (at most 3600) before its data is copied, to try it there.", "advanced": true }
       ]
     }
   ]

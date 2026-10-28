@@ -1212,6 +1212,11 @@ before its first boot. vCPU and RAM can be overridden on every restore.
       zvol without the guest's writes. Then the mapping, its record, and
       the overlay are removed, and networking, replication, HA, and ingress
       follow.
+    - Both instant restores take the developer option
+      `--copy-delay-seconds N` (at most 3600). The VM then runs from its
+      overlay over PBS for N seconds before the copy starts, so it can be
+      tried there; the mapping must still be alive afterwards. Normally the
+      copy starts as soon as the VM runs, and is done in under a minute.
     - `backup_link.sh` records each VM's restore point in
       `/var/lib/app-ha/backup-link/VMID.snapshot` until `forget`: a later
       map (after a dead mapping or a reboot) can only put the same restore

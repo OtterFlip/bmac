@@ -48,6 +48,7 @@ INSTANT=false
 INSTANT_OVERLAY=""
 INSTANT_PENDING=false
 INSTANT_ROUTED=false
+COPY_DELAY_SECONDS=0
 # What the restore point holds, from its notes and its backed-up VM config.
 BACKUP_NAME=""
 BACKUP_VMID=""
@@ -69,7 +70,7 @@ print(f"{value / 2**40:.2f} TiB" if value >= 2**40 else f"{value / 2**30:.1f} Gi
 usage() {
   cat <<'EOF'
 Usage: scripts/user_callable/backups/full_recovery.sh [--snapshot vm/VMID/TIME]
-         [--cores N] [--memory-gib N] [--instant] [--json]
+         [--cores N] [--memory-gib N] [--instant] [--copy-delay-seconds N] [--json]
 
 Create a new production VM from one of BMAC's restore points on PBS, for
 example on a rebuilt cluster. It is add_prod_vm.sh with the OS install
@@ -101,18 +102,22 @@ Rerun with the same purpose to resume after a failure.
   --snapshot vm/VMID/TIME   The restore point (chosen from a list when omitted).
   --cores N, --memory-gib N Default: the restore point's values.
   --instant                 Instant Restore to New Permanent VM.
+  --copy-delay-seconds N    Developer option, with --instant: keep the VM
+                            running from PBS for N seconds (at most 3600)
+                            before its data is copied, to try it there.
 EOF
 }
 
 parse_args() {
   while (($#)); do
     case "$1" in
-      --snapshot | --cores | --memory-gib)
+      --snapshot | --cores | --memory-gib | --copy-delay-seconds)
         (($# >= 2)) || die "$1 needs a value"
         case "$1" in
           --snapshot) SNAPSHOT="$2" ;;
           --cores) REQUESTED_CORES="$2" ;;
           --memory-gib) REQUESTED_MEMORY_GIB="$2" ;;
+          --copy-delay-seconds) COPY_DELAY_SECONDS="$2" ;;
         esac
         shift 2
         ;;
@@ -136,6 +141,9 @@ parse_args() {
     die "--cores must be a positive whole number"
   [[ -z "$REQUESTED_MEMORY_GIB" || "$REQUESTED_MEMORY_GIB" =~ ^[1-9][0-9]{0,5}$ ]] ||
     die "--memory-gib must be a positive whole number"
+  [[ "$COPY_DELAY_SECONDS" =~ ^[0-9]{1,4}$ ]] && ((COPY_DELAY_SECONDS <= 3600)) ||
+    die "--copy-delay-seconds must be 0 through 3600"
+  [[ "$COPY_DELAY_SECONDS" == 0 || "$INSTANT" == true ]] || die "--copy-delay-seconds is for --instant"
 }
 
 # add_prod_vm.sh's cleanup (which releases the orchestration lease) runs
@@ -899,6 +907,12 @@ instant_copy_and_switch() {
   if [[ "$state" == backup ]]; then
     path="$(node_exec "$OWNER_NODE" pvesm path "$ROOT_VOLUME")" || die "Could not resolve $ROOT_VOLUME"
     [[ "$path" =~ ^/dev/zvol/[A-Za-z0-9._/+:-]+$ ]] || die "Unexpected path for $ROOT_VOLUME: $path"
+    if ((COPY_DELAY_SECONDS > 0)); then
+      instant_copy_delay "$COPY_DELAY_SECONDS" "$RESOURCE_NAME"
+      [[ "$(node_exec "$OWNER_NODE" "$BACKUP_LINK_HELPER" status "$VMID")" == alive ]] ||
+        die "The PBS mapping of $RESOURCE_NAME died during the wait; rerun with purpose $PURPOSE_SLUG to map it again"
+    fi
+    renew_orchestration_lease
     log "Copying the in-use data of $SNAPSHOT into $ROOT_VOLUME while $RESOURCE_NAME runs"
     # --skip-zero leaves zero chunks unwritten, so the zvol must read as
     # zeros first; it is not in use until the switch.

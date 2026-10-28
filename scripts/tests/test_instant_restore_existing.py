@@ -204,6 +204,23 @@ class InstantRestoreExistingTest(unittest.TestCase):
         self.assertEqual(state["lease"], ["orchestration-acquire", "orchestration-release"])
         self.assertIn("prod1 is restored to 2026-10-27 10:04 MDT", completed.stdout)
 
+    def test_a_copy_delay_keeps_the_vm_on_pbs_first_and_the_comment_stays_out_of_the_time(self) -> None:
+        self.state["content"][0]["notes"] = rollback.NOTES + " | test comment"
+        self.save()
+        completed = self.run_script("prod1", "--snapshot", SNAPSHOT, "--no-safety-backup", "--copy-delay-seconds", "90",
+                                    answers="\n\n\nRESTORE prod1\n")
+        self.assertIn("Waiting 90s before the copy (--copy-delay-seconds): prod1 runs from its restore point on PBS",
+                      completed.stdout)
+        self.assertIn("30s until the copy starts", completed.stdout)
+        steps = self.mutations()
+        started = steps.index("ha-manager set vm:100 --state started")
+        # The mapping is checked after the wait, before the zvol is touched.
+        self.assertEqual(steps[started + 1:started + 3],
+                         ["backup_link.sh status 100", "blkdiscard -f /dev/zvol/rpool/data/vm-100-disk-1"])
+        self.assertIn("prod1 is restored to 2026-10-27 10:04 MDT\n", completed.stdout)
+        self.assertIn("AFTER 2026-10-27 10:04 MDT IS LOST", completed.stdout)
+        self.run_script("prod1", "--copy-delay-seconds", "3601", expected=1)
+
     def test_a_restore_stopped_after_the_free_resumes_from_its_overlay(self) -> None:
         # The run died during the copy, and the mapping died with its host.
         self.state["record"]["instant_restore"] = {"storage": "bmac-pbs", "snapshot": SNAPSHOT, "phase": "freed"}

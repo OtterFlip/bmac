@@ -19,7 +19,7 @@ parse_args() {
   local -a forwarded=(--instant)
   while (($#)); do
     case "$1" in
-      --snapshot | --cores | --memory-gib)
+      --snapshot | --cores | --memory-gib | --copy-delay-seconds)
         (($# >= 2)) || die "$1 needs a value"
         forwarded+=("$1" "$2")
         shift 2
