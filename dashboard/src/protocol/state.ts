@@ -358,5 +358,7 @@ export interface StateSources {
 
 export type SourceId = keyof StateSources;
 export const SOURCE_IDS: SourceId[] = ["list_hosts", "list_guests", "list_replication", "list_storage", "list_disks", "check_qdevice_access", "list_backups"];
+/** Read together as soon as the dashboard is ready, so every page has its state. */
+export const STARTUP_SOURCE_IDS: SourceId[] = ["list_backups", "list_replication", "list_guests", "list_disks", "list_storage", "list_hosts"];
 /** The sources read through a cluster member; check_qdevice_access is not one of them. */
 export const CLUSTER_SOURCE_IDS: SourceId[] = SOURCE_IDS.filter((id) => id !== "check_qdevice_access");

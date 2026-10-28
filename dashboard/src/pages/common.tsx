@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { BookOpen, ExternalLink, Eye, Play, ShieldAlert, Wrench } from "lucide-react";
 import { useStore, type SourceEntry } from "@/state/store";
 import { Button } from "@/components/ui/button";
@@ -111,6 +111,35 @@ export interface LinkTile {
   url: string;
 }
 
+/**
+ * A tile's title on one line. One too long for its tile fades out at the right
+ * edge, and while the tile is hovered or focused it glides left, at reading
+ * pace, until its end shows, then glides back. Titles that fit never move.
+ */
+function TileTitle({ children }: { children: string }) {
+  const box = useRef<HTMLSpanElement>(null);
+  const text = useRef<HTMLSpanElement>(null);
+  const [overflow, setOverflow] = useState(0);
+  useLayoutEffect(() => {
+    const measure = () => {
+      if (box.current && text.current) setOverflow(Math.max(0, Math.ceil(text.current.scrollWidth - box.current.clientWidth)));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined" || !box.current) return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(box.current);
+    return () => observer.disconnect();
+  }, [children]);
+  const style = overflow
+    ? ({ "--tile-shift": `-${overflow + 4}px`, "--tile-glide": `${Math.min(2600, Math.max(500, overflow * 14))}ms` } as CSSProperties)
+    : undefined;
+  return (
+    <span ref={box} className="tile-title min-w-0 flex-1 text-[13px] font-medium text-fg" data-overflow={overflow ? "" : undefined} style={style}>
+      <span ref={text}>{children}</span>
+    </span>
+  );
+}
+
 /** A tile listing the workflows for one category. Unsupported ones stay visible but disabled. */
 export function WorkflowTiles({ ids, links = [], className }: { ids: string[]; links?: LinkTile[]; className?: string }) {
   const workflows = useStore((s) => s.workflows);
@@ -127,7 +156,7 @@ export function WorkflowTiles({ ids, links = [], className }: { ids: string[]; l
               <span className="flex size-6 items-center justify-center rounded-md border border-accent/25 bg-accent/10 text-accent [&_svg]:size-3.5">
                 <BookOpen />
               </span>
-              <span className="flex-1 truncate text-[13px] font-medium text-fg">{l.title}</span>
+              <TileTitle>{l.title}</TileTitle>
               <ExternalLink className="size-3.5 text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100" />
             </div>
             <p className="line-clamp-2 text-[12px] leading-relaxed text-fg-subtle">{l.summary}</p>
@@ -155,7 +184,7 @@ export function WorkflowTiles({ ids, links = [], className }: { ids: string[]; l
               >
                 {w.mode === "read_only" ? <Eye /> : w.destructive ? <ShieldAlert /> : <Wrench />}
               </span>
-              <span className="flex-1 truncate text-[13px] font-medium text-fg">{w.title}</span>
+              <TileTitle>{w.title}</TileTitle>
               <Play className="size-3.5 text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100" />
             </div>
             <p className="line-clamp-2 text-[12px] leading-relaxed text-fg-subtle">{w.summary}</p>
@@ -166,12 +195,33 @@ export function WorkflowTiles({ ids, links = [], className }: { ids: string[]; l
   );
 }
 
-/** Standard table styling. */
-export function Table({ head, children, className }: { head: ReactNode[]; children: ReactNode; className?: string }) {
+/**
+ * Standard table styling. With maxRows, a table with more rows than that
+ * scrolls vertically, showing exactly maxRows of them under a header that
+ * stays in place.
+ */
+export function Table({ head, children, className, maxRows }: { head: ReactNode[]; children: ReactNode; className?: string; maxRows?: number }) {
+  const wrapper = useRef<HTMLDivElement>(null);
+  const [maxHeight, setMaxHeight] = useState<number>();
+  useLayoutEffect(() => {
+    const table = wrapper.current?.querySelector("table");
+    if (!maxRows || !table) return;
+    const measure = () => {
+      const rows = table.tBodies[0]?.rows ?? [];
+      if (rows.length <= maxRows) return setMaxHeight(undefined);
+      setMaxHeight(Math.ceil(rows[maxRows - 1].getBoundingClientRect().bottom - table.getBoundingClientRect().top));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(table);
+    return () => observer.disconnect();
+  }, [maxRows, children]);
+  const scrolls = maxHeight !== undefined;
   return (
-    <div className={cn("overflow-x-auto", className)}>
+    <div ref={wrapper} className={cn("overflow-x-auto", scrolls && "overflow-y-auto", className)} style={scrolls ? { maxHeight } : undefined}>
       <table className="w-full border-collapse text-[12.5px]">
-        <thead>
+        <thead className={cn(scrolls && "sticky top-0 z-[1] bg-surface shadow-[inset_0_-1px_0_var(--color-line)]")}>
           <tr className="border-b border-line">
             {head.map((h, i) => (
               <th key={i} className="h-9 px-3 text-left text-[11px] font-semibold uppercase tracking-[0.06em] whitespace-nowrap text-fg-subtle first:pl-4 last:pr-4">

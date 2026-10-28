@@ -15,7 +15,7 @@ import type {
   WorkflowInfo,
 } from "@/protocol/types";
 import { isTerminal } from "@/protocol/types";
-import { SOURCE_IDS, type SourceId, type StateSources } from "@/protocol/state";
+import { SOURCE_IDS, STARTUP_SOURCE_IDS, type SourceId, type StateSources } from "@/protocol/state";
 import { logs } from "./logs";
 import { toast } from "./toast";
 
@@ -206,7 +206,11 @@ export const useStore = create<State>((set, get) => ({
       const latestActive = active[active.length - 1];
       if (latestActive) set({ consoleRunId: latestActive.run_id });
       // Cluster views start empty and are read live; past runs' results are
-      // never shown as current state.
+      // never shown as current state. Every page's reads start at once once
+      // the configuration is complete, whichever page the app opens on: a
+      // checkout's app (pnpm app:dev) writes no settings.json, so it reports
+      // a first launch, and opens on Settings, every time.
+      if (config && configAttention(config).length === 0) get().refreshSources(STARTUP_SOURCE_IDS);
     } catch (error) {
       set({ bootError: errorMessage(error), ready: true });
     }

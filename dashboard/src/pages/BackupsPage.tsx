@@ -197,7 +197,7 @@ export function BackupsPage() {
               title="Restore points"
               subtitle={`${b.restore_points.length} made by BMAC${b.unmanaged_backups ? ` · ${b.unmanaged_backups} other backup${b.unmanaged_backups === 1 ? "" : "s"} not listed` : ""}`}
             />
-            <Table head={["Time", "VM", "Backup", "Data", "Protected", "Key", "Verified", ""]}>
+            <Table head={["Time", "VM", "Backup", "Data", "Protected", "Key", "Verified", ""]} maxRows={7}>
               {b.restore_points.map((point) => (
                 <tr key={point.volid}>
                   <td className="whitespace-nowrap">

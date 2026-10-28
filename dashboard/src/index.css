@@ -131,4 +131,37 @@
   .xterm-host .xterm-viewport {
     background-color: transparent !important;
   }
+
+  /* A workflow tile's title (TileTitle in pages/common.tsx). One that does
+     not fit fades out at the right edge; while its tile is hovered or
+     focused it glides left until its end shows, after a short pause so a
+     passing pointer doesn't set it moving, and glides back on leaving. */
+  .tile-title {
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .tile-title > span {
+    display: inline-block;
+    transition: transform 380ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .tile-title[data-overflow] {
+    mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+  }
+  .group:is(:hover, :focus-visible) .tile-title[data-overflow] {
+    mask-image: linear-gradient(to right, transparent, #000 14px);
+  }
+  .group:is(:hover, :focus-visible) .tile-title[data-overflow] > span {
+    transform: translateX(var(--tile-shift));
+    transition: transform var(--tile-glide) cubic-bezier(0.45, 0, 0.25, 1) 220ms;
+  }
+  /* Without motion, the whole title wraps instead. */
+  @media (prefers-reduced-motion: reduce) {
+    .group:is(:hover, :focus-visible) .tile-title[data-overflow] {
+      white-space: normal;
+      mask-image: none;
+    }
+    .group:is(:hover, :focus-visible) .tile-title[data-overflow] > span {
+      transform: none;
+    }
+  }
 }
