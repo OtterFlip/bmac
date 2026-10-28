@@ -1094,6 +1094,11 @@ before its first boot. vCPU and RAM can be overridden on every restore.
   are clones of its replicas. PVE cannot
   replicate over the replicas of a restored disk, so they must be removed
   first. The VM has no HA protection until the first full sync completes.
+  Last, it runs the monitoring sync. The restored disk brings back the
+  monitor agent's config as it was at the restore point, and its ping URL
+  can belong to an older check (seen on the cluster: the restored prod1
+  pinged a check outside the project, and its own check stayed down). The
+  sync writes the current URL.
 - **Full Restore to New VM** (`full_recovery.sh`) creates a new permanent
   production VM from a restore
   point, for example on a rebuilt cluster. `full_recovery.sh` sources
@@ -1255,7 +1260,9 @@ before its first boot. vCPU and RAM can be overridden on every restore.
       becomes `switched`, the mapping and overlay are removed, the zvol is
       grown back to the registered size (`qm resize`, online), replication
       is recreated with a full initial sync, and the marker is cleared. The
-      VM stays HA-managed and `active` throughout.
+      VM stays HA-managed and `active` throughout. Last, as in Full Restore
+      to Existing VM, the monitoring sync rewrites the restored agent's
+      config with its current check.
   - A production VM can be the source of a prod-linked staging VM only
     while it runs entirely on its replicated zvol, since the staging VM is a
     clone of that zvol's replica. `add_staging_vm.sh` refuses a source whose

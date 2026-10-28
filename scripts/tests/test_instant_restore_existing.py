@@ -90,6 +90,8 @@ if argv[:1] == ["test"]:
     sys.exit(0 if argv[1] == "-x" or state.get("overlay") else 1)
 if argv[:1] == ["blkdiscard"]:
     sys.exit(0)
+if argv[:1] == ["monitoring-sync"]:
+    sys.exit(0)
 '''
 
 FAKE = rollback.FAKE.replace(
@@ -100,7 +102,7 @@ FAKE = rollback.FAKE.replace(
 
 MUTATIONS = ("ha-manager set", "pvesr delete", "pvesr create-local-job", "pvesh create", "qm set", "qm resize",
              "blkdiscard", "bash -c", "pvesm free", LIB + "backup_link.sh", "python3 " + LIB + "instant_switch.py attach",
-             "python3 " + LIB + "instant_switch.py switch")
+             "python3 " + LIB + "instant_switch.py switch", "monitoring-sync")
 
 
 class InstantRestoreExistingTest(unittest.TestCase):
@@ -143,6 +145,7 @@ class InstantRestoreExistingTest(unittest.TestCase):
         mox_ssh() {{ {program} mox "$@"; }}
         node_exec() {{ {program} node "$@" </dev/null; }}
         sleep() {{ :; }}
+        monitoring_membership_sync() {{ {program} mox "$1" monitoring-sync; }}
         main {" ".join(shlex.quote(a) for a in arguments)}
         """
         environment = os.environ.copy()
@@ -196,6 +199,8 @@ class InstantRestoreExistingTest(unittest.TestCase):
             "qm resize 100 scsi0 1099511627776",
             "pvesr create-local-job 100-0 mox2 --schedule */15 --comment Production prod1 replica",
             "registry --owner-node mox1 --replication-targets mox2 --clear-instant-restore",
+            # The restored disk's monitor config may name an older check.
+            "monitoring-sync",
         ])
         state = self.load()
         self.assertNotIn("instant_restore", state["record"])
@@ -260,7 +265,7 @@ class InstantRestoreExistingTest(unittest.TestCase):
         self.run_script("prod1", answers="y\n")
         self.assertEqual([step.split(" --")[0] for step in self.mutations()], [
             "backup_link.sh unmap 100", "backup_link.sh forget 100", "pvesr create-local-job 100-0 mox2",
-            "registry"])
+            "registry", "monitoring-sync"])
 
     def test_a_resume_keeps_its_restore_point(self) -> None:
         self.state["record"]["instant_restore"] = {"storage": "bmac-pbs", "snapshot": SNAPSHOT, "phase": "freed"}

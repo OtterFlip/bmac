@@ -249,6 +249,7 @@ class RollbackRestoreTest(unittest.TestCase):
         # The real node_exec feeds its command on stdin, never the terminal's.
         node_exec() {{ {program} node "$@" </dev/null; }}
         sleep() {{ :; }}
+        monitoring_membership_sync() {{ printf 'monitoring-sync %s\\n' "$1" >>"$FAKE/monitoring"; }}
         main {" ".join(shlex.quote(a) for a in arguments)}
         """
         environment = os.environ.copy()
@@ -353,6 +354,8 @@ class RollbackRestoreTest(unittest.TestCase):
         self.assertEqual(state["jobs"], {"100-0": "mox2"})
         self.assertEqual(state["lease"], ["orchestration-acquire", "orchestration-release"])
         self.assertNotIn("resized", state)
+        # The restored disk's monitor config may name an older check.
+        self.assertEqual((self.fake / "monitoring").read_text(), "monitoring-sync mox1\n")
         # The snapshot was taken at 16:04 UTC: shown in the workstation's zone.
         self.assertIn("rolled back to 2026-10-27 10:04 MDT", completed.stdout)
 

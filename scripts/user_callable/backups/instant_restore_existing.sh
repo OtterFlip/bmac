@@ -514,6 +514,9 @@ main() {
   log "$RESOURCE_NAME is restored to ${SNAPSHOT_TIME}"
   info "It runs on $OWNER_NODE with ${CORES} vCPUs and ${MEMORY_GIB} GiB RAM; replication every ${REPLICATION_MINUTES} minutes is healthy again"
   [[ -z "$SAFETY_VOLID" ]] || info "The state before the restore is restore point ${SAFETY_VOLID#*:backup/}"
+  # The restored disk brings back the monitor agent's config of the restore
+  # point, whose ping URL may be an older check's; write the current one.
+  monitoring_membership_sync "$COORDINATOR"
   bmac_ui_result vm "$RESOURCE_NAME" vmid:int "$VMID" snapshot "$SNAPSHOT" node "$OWNER_NODE" \
     cores:int "$CORES" memory_gib:int "$MEMORY_GIB" safety_backup "${SAFETY_VOLID#*:backup/}" resumed:bool "$RESUMING"
 }
