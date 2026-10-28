@@ -177,6 +177,8 @@ LUKS_LSBLK = json.dumps(
                 **disk("/dev/zd0", None, 1099511627776),
                 "tran": None,
             },
+            # Empty network block devices, left by the loaded nbd module.
+            *({**disk(f"/dev/nbd{index}", None, 0), "tran": None} for index in range(2)),
         ]
     }
 )
@@ -400,7 +402,7 @@ class LayoutTest(unittest.TestCase):
         self.assertFalse(mappings["crypt-rpool-mirror2-1"]["in_pool"])
         self.assertTrue(mappings["crypt-rpool-mirror1-1"]["in_pool"])
 
-    def test_unassigned_disks_exclude_members_esps_and_zvols(self) -> None:
+    def test_unassigned_disks_exclude_members_esps_zvols_and_nbd_devices(self) -> None:
         layout = luks_layout()
         unassigned = {disk["disk"]: disk for disk in layout["unassigned_disks"]}
         self.assertEqual(set(unassigned), {"/dev/nvme6n1", "/dev/nvme7n1"})

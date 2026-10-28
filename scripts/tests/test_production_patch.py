@@ -175,6 +175,33 @@ class ProductionClonePatchTest(unittest.TestCase):
                       checks('--name stage1prod3 --owner-vmid 105', expected=1).stderr)
 
 
+    def test_the_nbd_module_is_unloaded_only_when_this_run_loaded_it_and_nothing_is_attached(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        sys_block = Path(temporary.name)
+
+        def unload(loaded: str, devices: dict[str, tuple[str, bool]]) -> str:
+            for name in sys_block.iterdir():
+                for item in name.iterdir():
+                    item.unlink()
+                name.rmdir()
+            for name, (size, attached) in devices.items():
+                (sys_block / name).mkdir()
+                (sys_block / name / "size").write_text(size + "\n")
+                if attached:
+                    (sys_block / name / "pid").write_text("4242\n")
+            body = (f"NBD_SYS_BLOCK={str(sys_block)!r}\nNBD_MODULE_LOADED={loaded}\nNBD_DEVICE=''\n"
+                    "modprobe() { echo \"modprobe $*\"; }\nunload_nbd_module\n")
+            return self.run_sourced(body).stdout
+
+        idle = {"nbd0": ("0", False), "nbd1": ("0", False)}
+        self.assertEqual(unload("true", idle), "modprobe -r nbd\n")
+        # Loaded before this run, by another patch or by hand: left alone.
+        self.assertEqual(unload("false", idle), "")
+        # Another overlay is still attached, or another qemu-nbd is connecting.
+        self.assertEqual(unload("true", {"nbd0": ("0", False), "nbd1": ("20971520", True)}), "")
+        self.assertEqual(unload("true", {"nbd0": ("0", True), "nbd1": ("0", False)}), "")
+
     def test_overlay_mode_arguments(self) -> None:
         """--qcow2 patches an overlay through qemu-nbd: a backup-linked staging
         VM's, or in production mode an instant-restored VM's own."""

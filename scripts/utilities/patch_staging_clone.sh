@@ -21,6 +21,8 @@ GUEST_TREE_HELPER="$SCRIPT_DIR/patch_staging_guest_tree.py"
 DEVICE=""
 QCOW2_FILE=""
 NBD_DEVICE=""
+# Whether this run loaded the nbd module, which it then unloads again.
+NBD_MODULE_LOADED=false
 RESOLVED_DEVICE=""
 VOLUME_ID=""
 STAGING_NAME=""
@@ -347,6 +349,7 @@ emergency_cleanup() {
   if [[ -n "$NBD_DEVICE" && "$MOUNTED" == false ]]; then
     disconnect_overlay || cleanup_failed=true
   fi
+  unload_nbd_module
   if [[ "$MOUNTED" == false ]]; then
     cleanup_work_dir ||
       printf 'WARNING: could not remove app-ha offline-patch workspace %s.\n' \
@@ -367,8 +370,10 @@ emergency_cleanup() {
 connect_overlay() {
   local device size
   fuser "$QCOW2_FILE" >/dev/null 2>&1 && die "The overlay is open in another process: $QCOW2_FILE"
-  [[ -e /sys/block/nbd0 ]] || modprobe nbd max_part=16 ||
-    die "Could not load the nbd kernel module"
+  if [[ ! -e /sys/block/nbd0 ]]; then
+    modprobe nbd max_part=16 || die "Could not load the nbd kernel module"
+    NBD_MODULE_LOADED=true
+  fi
   for device in /dev/nbd{0..15}; do
     [[ -b "$device" ]] || continue
     size="$(cat "/sys/block/${device#/dev/}/size" 2>/dev/null)" || continue
@@ -393,6 +398,25 @@ disconnect_overlay() {
     return 1
   }
   NBD_DEVICE=""
+}
+
+# Loading the nbd module creates /dev/nbd0-15, which stay as empty devices
+# until it is unloaded. Unload it only when this run loaded it and no nbd
+# device on the host is attached, by this run or anything else: every one
+# must be empty (size 0) with no qemu-nbd behind it (no pid). Patches on a
+# host are serialized by the offline-patch lock, which is held here, and the
+# kernel itself refuses to unload the module while any of its devices is
+# open, so an attachment is never cut off.
+unload_nbd_module() {
+  [[ "$NBD_MODULE_LOADED" == true && -z "$NBD_DEVICE" ]] || return 0
+  local block
+  for block in "${NBD_SYS_BLOCK:-/sys/block}"/nbd*; do
+    [[ -e "$block" ]] || continue
+    [[ "$(cat "$block/size" 2>/dev/null)" == 0 && ! -e "$block/pid" ]] || return 0
+  done
+  modprobe -r nbd 2>/dev/null ||
+    printf 'WARNING: could not unload the nbd kernel module; its empty /dev/nbd devices remain until it is.\n' >&2
+  NBD_MODULE_LOADED=false
 }
 
 map_and_locate_root() {
@@ -529,6 +553,7 @@ finish_offline_access() {
   fi
   if [[ -n "$NBD_DEVICE" ]]; then
     disconnect_overlay || die "The overlay stayed connected after the offline patch"
+    unload_nbd_module
   elif fuser "$DEVICE" >/dev/null 2>&1; then
     die "Staging zvol retained a host writer after offline patch"
   fi

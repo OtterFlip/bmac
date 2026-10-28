@@ -490,7 +490,10 @@ def build_layout(
         if device["type"] != "disk" or device["parent"] is not None:
             continue
         # zvols are block disks too; they belong to guests, not to the host.
-        if re.fullmatch(r"/dev/zd[0-9]+", kname):
+        # So are network block devices: the offline patcher attaches an
+        # overlay through /dev/nbdN, and loading the nbd module leaves empty
+        # ones behind.
+        if re.fullmatch(r"/dev/(?:zd|nbd)[0-9]+", kname):
             continue
         descendants = subtree(kname)
         reasons = []
