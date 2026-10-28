@@ -37,6 +37,7 @@ SOURCE_PURPOSE=""
 SNAPSHOT_NAME=""
 SNAPSHOT_SHARED_WITH=""
 SNAPSHOT_ALSO_RELEASING=""
+BACKUP_SNAPSHOT=""
 LIVE_PRESENT=0
 SSH_ALIAS=""
 declare -a SOURCE_PLACEMENT=()
@@ -176,7 +177,8 @@ for row in rows:
 print("  NAME                 SOURCE     NODE     STATE       SNAPSHOT                                 DOMAIN")
 for row in rows:
     placement = row.get("placement") or ["?"]
-    snapshot = snapshot_of(row) or "-"
+    backup = row.get("backup") or {}
+    snapshot = snapshot_of(row) or (f"restore point {backup['snapshot']}" if backup.get("snapshot") else "-")
     others = [
         name for name in users.get((row.get("source"), snapshot), [])
         if name != row["name"]
@@ -277,7 +279,13 @@ online = {
     if str(row.get("status", "")).lower() == "online"
     or row.get("online") in (1, True)
 }
-if set(source_placement) - online:
+# A backup-linked staging VM depends on no production snapshot or replica,
+# so only its own host must be online.
+backup = stage.get("backup")
+if backup is not None:
+    if stage_node not in online:
+        raise SystemExit("the staging VM's host must be online")
+elif set(source_placement) - online:
     raise SystemExit("every source production placement node must be online")
 
 vmid = int(stage["vmid"])
@@ -302,6 +310,24 @@ else:
 
 if any(row.get("sid") == f"vm:{vmid}" for row in ha):
     raise SystemExit("staging VM must not be a Proxmox HA resource")
+volume = stage.get("proxmox", {}).get("volume_id")
+if not isinstance(volume, str) or not volume:
+    raise SystemExit("staging clone volume is missing")
+owned_cleanup = [
+    row for row in cleanup if row.get("resource_id") == stage["id"]
+]
+if any(row.get("resource") != name for row in owned_cleanup):
+    raise SystemExit("deferred cleanup resource identity is inconsistent")
+if backup is not None:
+    values = (
+        stage["id"], stage["revision"], stage["state"], vmid, stage_node, volume,
+        "1" if live_present else "0", source["name"], source["vmid"], source.get("owner_node") or "",
+        source["purpose"]["slug"], "", ",".join(source_placement), "", stage["domains"]["primary"],
+        ",".join(sorted(online, key=lambda value: int(value[3:]))), "", "", backup["snapshot"],
+    )
+    for value in values:
+        sys.stdout.buffer.write(str(value).encode() + b"\0")
+    raise SystemExit(0)
 snapshot = stage.get("proxmox", {}).get("snapshot")
 if (
     not isinstance(snapshot, dict)
@@ -318,14 +344,6 @@ if (
     or len(source_volumes) != len(set(source_volumes))
 ):
     raise SystemExit("source snapshot volume inventory is invalid")
-volume = stage.get("proxmox", {}).get("volume_id")
-if not isinstance(volume, str) or not volume:
-    raise SystemExit("staging clone volume is missing")
-owned_cleanup = [
-    row for row in cleanup if row.get("resource_id") == stage["id"]
-]
-if any(row.get("resource") != name for row in owned_cleanup):
-    raise SystemExit("deferred cleanup resource identity is inconsistent")
 
 source_vmid = int(source["vmid"])
 source_live = [
@@ -377,12 +395,13 @@ values = (
     ",".join(sorted(online, key=lambda value: int(value[3:]))),
     ",".join(row["name"] for row in sharing if row.get("state") != "cleanup_pending"),
     ",".join(row["name"] for row in sharing if row.get("state") == "cleanup_pending"),
+    "",
 )
 for value in values:
     sys.stdout.buffer.write(str(value).encode() + b"\0")
 PY
   ) || die "Staging destruction preflight failed"
-  ((${#fields[@]} == 18)) || die "Could not parse destruction plan"
+  ((${#fields[@]} == 19)) || die "Could not parse destruction plan"
   RESOURCE_ID="${fields[0]}"
   RESOURCE_REVISION="${fields[1]}"
   RESOURCE_STATE="${fields[2]}"
@@ -401,6 +420,7 @@ PY
   IFS=',' read -r -a CLUSTER_NODES <<<"${fields[15]}"
   SNAPSHOT_SHARED_WITH="${fields[16]}"
   SNAPSHOT_ALSO_RELEASING="${fields[17]}"
+  BACKUP_SNAPSHOT="${fields[18]}"
 }
 
 snapshot_taken_label() {
@@ -437,7 +457,7 @@ validate_live_vm() {
   config="$(node_exec "$STAGING_NODE" qm config "$VMID")" || return 1
   python3 - "$config" "$RESOURCE_NAME" "$VMID" "$STAGING_VM_TAG" \
     "$EVICTABLE_VM_TAG" "${PURPOSE_TAG_PREFIX}${SOURCE_PURPOSE}" \
-    "$STAGING_VOLUME" "$STAGING_VM_STORAGE" "$GUEST_ROLE_HOOK_PATH" <<'PY'
+    "$STAGING_VOLUME" "$STAGING_VM_STORAGE" "$GUEST_ROLE_HOOK_PATH" "${BACKUP_SNAPSHOT:+backup}" <<'PY'
 import re
 import sys
 config = {}
@@ -445,7 +465,7 @@ for line in sys.argv[1].splitlines():
     if ": " in line:
         key, value = line.split(": ", 1)
         config[key] = value
-name, raw_vmid, staging_tag, evictable_tag, purpose_tag, volume, storage, hook = sys.argv[2:]
+name, raw_vmid, staging_tag, evictable_tag, purpose_tag, volume, storage, hook, link = sys.argv[2:]
 vmid = int(raw_vmid)
 tags = {value for value in re.split(r"[;,]", config.get("tags", "")) if value}
 if config.get("name") != name:
@@ -459,7 +479,10 @@ if config.get("hookscript") != hook:
 if config.get("scsi0", "").split(",", 1)[0] != volume:
     raise SystemExit("staging root volume differs from registry")
 efi = config.get("efidisk0", "").split(",", 1)[0]
-if not re.fullmatch(rf"{re.escape(storage)}:vm-{vmid}-disk-[1-9][0-9]*", efi):
+# A backup-linked VM's EFI disk is its first on the staging storage; a linked
+# clone's follows its clone.
+first = "[0-9]+" if link == "backup" else "[1-9][0-9]*"
+if not re.fullmatch(rf"{re.escape(storage)}:vm-{vmid}-disk-{first}", efi):
     raise SystemExit("staging EFI volume identity is invalid")
 disks = {
     key for key in config
@@ -475,6 +498,17 @@ validate_owned_volumes() {
   inventory="$(
     node_exec "$STAGING_NODE" pvesm list "$STAGING_VM_STORAGE" --vmid "$VMID"
   )" || return 1
+  # A backup-linked VM has only its EFI disk there; its root is the overlay.
+  if [[ -n "$BACKUP_SNAPSHOT" ]]; then
+    python3 - "$inventory" "$STAGING_VM_STORAGE" "$VMID" <<'PY'
+import re
+import sys
+observed = {line.split()[0] for line in sys.argv[1].splitlines()[1:] if line.split()}
+if len(observed) != 1 or not re.fullmatch(rf"{re.escape(sys.argv[2])}:vm-{sys.argv[3]}-disk-[0-9]+", next(iter(observed))):
+    raise SystemExit("a backup-linked staging VM must own exactly its EFI volume on the staging storage")
+PY
+    return
+  fi
   python3 - "$inventory" "$STAGING_VOLUME" "$STAGING_VM_STORAGE" "$VMID" <<'PY'
 import re
 import sys
@@ -571,6 +605,18 @@ queue_cleanup_plan() {
     --reason "operator requested complete staging VM destruction" \
     >/dev/null ||
     die "Could not queue staging VM destruction"
+  if [[ -n "$BACKUP_SNAPSHOT" ]]; then
+    registry_cmd defer-cleanup \
+      --resource "$RESOURCE_NAME" \
+      --node "$STAGING_NODE" \
+      --action destroy-overlay \
+      --target "$STAGING_VOLUME" \
+      --reason "operator requested backup-linked staging VM destruction" \
+      >/dev/null ||
+      die "Could not queue the overlay's destruction"
+    registry_update --state cleanup_pending
+    return 0
+  fi
   registry_cmd defer-cleanup \
     --resource "$RESOURCE_NAME" \
     --node "$STAGING_NODE" \
@@ -706,6 +752,73 @@ PY
   esac
 }
 
+# A backup-linked staging VM: its VM, overlay, and PBS mapping go; its
+# restore point stays on PBS.
+confirm_and_remove_backup_linked() {
+  log "Validated staging destruction plan"
+  info "Resource: $RESOURCE_NAME / VMID $VMID / state $RESOURCE_STATE (backup-linked)"
+  info "Restore point: $BACKUP_SNAPSHOT of $SOURCE_NAME (kept on PBS)"
+  info "Staging node/overlay: $STAGING_NODE / $STAGING_VOLUME"
+  info "FQDN: $STAGING_DOMAIN (its slot stays reserved for the next staging VM)"
+  info "Live VM present: $LIVE_PRESENT"
+  bmac_ui_plan_begin "Destroy $RESOURCE_NAME" "Validated against the live cluster; nothing has changed yet."
+  bmac_ui_plan_item remove "$RESOURCE_NAME" "VMID $VMID, state $RESOURCE_STATE, on $STAGING_NODE"
+  bmac_ui_plan_item remove "overlay" "$STAGING_VOLUME and its read-only PBS mapping"
+  bmac_ui_plan_item keep "restore point" "$BACKUP_SNAPSHOT of $SOURCE_NAME stays on PBS"
+  bmac_ui_plan_item keep "FQDN" "$STAGING_DOMAIN stays mapped to its slot for the next staging VM"
+  bmac_ui_plan_item keep "$SOURCE_NAME" "The production VM (VMID $SOURCE_VMID) is not changed"
+  BMAC_UI_DRY_RUN="$DRY_RUN" bmac_ui_plan_end
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry run complete; no state was changed"
+    bmac_ui_step_done
+    bmac_ui_next_step "Review the plan, then destroy $RESOURCE_NAME for real." \
+      --workflow remove_staging_vm --arg "resource=$RESOURCE_NAME" --arg dry_run=false
+    return 0
+  fi
+  printf '\nTHIS PERMANENTLY DESTROYS %s AND ITS OVERLAY.\n' "$RESOURCE_NAME"
+  local confirmation
+  if bmac_ui_is_json; then
+    bmac_ui_group_begin destroy "Destroy $RESOURCE_NAME?" \
+      "This permanently destroys $RESOURCE_NAME and everything written to it; its restore point stays on PBS."
+    bmac_ui_group_add SSH_ALIAS --id ssh_alias --label "Workstation SSH alias to remove after success" \
+      --default "$RESOURCE_NAME" --required --pattern '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'
+    bmac_ui_group_request
+    SSH_ALIAS="${SSH_ALIAS:-$RESOURCE_NAME}"
+    bmac_ui_confirm --id destroy --severity critical --title "Destroy $RESOURCE_NAME?" \
+      --message "This permanently destroys $RESOURCE_NAME and everything written to it; its restore point stays on PBS. Afterward the SSH alias $SSH_ALIAS is removed from this workstation." \
+      --confirm-label "Destroy $RESOURCE_NAME" --text "DESTROY ${RESOURCE_NAME}" &&
+      confirmation="DESTROY ${RESOURCE_NAME}" || confirmation=""
+  else
+    printf 'Type exactly: DESTROY %s\n> ' "$RESOURCE_NAME"
+    IFS= read -r confirmation
+  fi
+  [[ "$confirmation" == "DESTROY ${RESOURCE_NAME}" ]] ||
+    die "Destruction confirmation did not match"
+  bmac_ui_is_json ||
+    IFS= read -r -p \
+    "Workstation SSH alias to remove after success [${RESOURCE_NAME}]: " SSH_ALIAS
+  SSH_ALIAS="${SSH_ALIAS:-$RESOURCE_NAME}"
+  [[ "$SSH_ALIAS" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] ||
+    die "SSH alias is unsafe"
+
+  log "Committing durable cleanup"
+  case "$RESOURCE_STATE" in
+    active) registry_update --state stopping ;;
+    ready | stopping | stopped | failed) ;;
+    *) die "Unsupported staging destruction state: $RESOURCE_STATE" ;;
+  esac
+  queue_cleanup_plan
+  log "Waiting for the shared cleanup workers to remove the VM, overlay, and PBS mapping"
+  wait_for_durable_cleanup
+  remove_workstation_alias
+  log "Staging VM destruction complete"
+  info "Destroyed resource: $RESOURCE_NAME (former VMID $VMID)"
+  info "Removed the VM, its overlay and PBS mapping, and its registry metadata; $BACKUP_SNAPSHOT stays on PBS."
+  bmac_ui_step_done
+  bmac_ui_result destroyed "$RESOURCE_NAME" former_vmid "$VMID" source "$SOURCE_NAME" \
+    restore_point "$BACKUP_SNAPSHOT"
+}
+
 main() {
   parse_args "$@"
   [[ -f "$CONFIG_LIB" && ! -L "$CONFIG_LIB" ]] ||
@@ -747,6 +860,10 @@ main() {
     validate_live_vm || die "Live staging VM failed exact identity validation"
     validate_owned_volumes ||
       die "Staging VM-owned volume inventory failed validation"
+  fi
+  if [[ -n "$BACKUP_SNAPSHOT" ]]; then
+    confirm_and_remove_backup_linked
+    return 0
   fi
   verify_snapshot_and_clone false
 

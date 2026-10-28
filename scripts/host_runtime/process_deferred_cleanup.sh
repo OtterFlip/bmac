@@ -14,6 +14,7 @@ umask 077
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CONFIG_LIB="${SCRIPT_DIR}/config.sh"
 REGISTRY="${SCRIPT_DIR}/cluster_registry.py"
+BACKUP_LINK="${APP_HA_BACKUP_LINK:-${SCRIPT_DIR}/backup_link.sh}"
 TEST_MODE="${APP_HA_CLEANUP_TEST_MODE:-0}"
 MAX_SECONDS=120
 
@@ -250,12 +251,15 @@ if disk_keys not in (set(), {"efidisk0"}, {"scsi0", "efidisk0"}):
 if "scsi0" in disk_keys and config["scsi0"].split(",", 1)[0] != expected_volume:
     raise SystemExit("QEMU root disk differs from registry")
 if "efidisk0" in disk_keys:
-    storage = expected_volume.split(":", 1)[0]
+    # A backup-linked VM's EFI vars live on the staging storage (its first
+    # disk there), not on the overlay's directory storage; a linked clone's
+    # come after its clone, disk-0.
+    if "backup" in resource:
+        efi_pattern = rf"[A-Za-z0-9][A-Za-z0-9_.+-]{{0,63}}:vm-{resource['vmid']}-disk-[0-9]+"
+    else:
+        efi_pattern = rf"{re.escape(expected_volume.split(':', 1)[0])}:vm-{resource['vmid']}-disk-[1-9][0-9]*"
     efi_volume = config["efidisk0"].split(",", 1)[0]
-    if not re.fullmatch(
-        rf"{re.escape(storage)}:vm-{resource['vmid']}-disk-[1-9][0-9]*",
-        efi_volume,
-    ) or efi_volume == expected_volume:
+    if not re.fullmatch(efi_pattern, efi_volume) or efi_volume == expected_volume:
         raise SystemExit("QEMU EFI vars disk is not fresh VM-owned storage")
 PY
 }
@@ -274,16 +278,19 @@ volume = resource["proxmox"]["volume_id"]
 if volume is not None:
     print(volume)
     raise SystemExit(0)
+if "backup" in resource:
+    action = "destroy-overlay"
+    pattern = rf"[A-Za-z0-9][A-Za-z0-9_.+-]{{0,63}}:{resource['vmid']}/vm-{resource['vmid']}-disk-[0-9]+\.qcow2"
+else:
+    action = "destroy-volume"
+    pattern = rf"[A-Za-z0-9][A-Za-z0-9_.+-]{{0,63}}:vm-{resource['vmid']}-disk-[0-9]+"
 matches = [
     row["target"]
     for row in json.loads(sys.argv[3])
     if row["resource_id"] == resource["id"]
     and row["node"] == node
-    and row["action"] == "destroy-volume"
-    and re.fullmatch(
-        rf"[A-Za-z0-9][A-Za-z0-9_.+-]{{0,63}}:vm-{resource['vmid']}-disk-[0-9]+",
-        row["target"],
-    )
+    and row["action"] == action
+    and re.fullmatch(pattern, row["target"])
 ]
 if len(set(matches)) != 1:
     raise SystemExit("staging volume identity is absent or ambiguous")
@@ -291,9 +298,18 @@ print(matches[0])
 PY
 }
 
+is_backup_linked() {
+  python3 -c 'import json, sys; sys.exit(0 if "backup" in json.load(open(sys.argv[1])) else 1)' "$1"
+}
+
 validate_staging_volume_for_config_removal() {
   local resource_file="$1" volume="$2"
   local -a fields=() target_fields=() source_fields=()
+  # A backup-linked VM's disk is its own overlay, not a clone of production:
+  # destroying its config cannot touch anything but its own volumes.
+  if is_backup_linked "$resource_file"; then
+    return 0
+  fi
   mapfile -d '' -t fields < <(
     staging_storage_fields "$resource_file" "$volume"
   )
@@ -510,6 +526,105 @@ destroy_volume_action() {
   log "$cleanup_id: destroyed linked-clone volume for $name"
 }
 
+# destroy-overlay: the VM config is already gone (destroy-vm runs first, and
+# qm destroy --purge removes the overlay it referenced). Remove the mapping,
+# then any overlay file left behind.
+destroy_overlay_action() {
+  local cleanup_id="$1" target="$2" resource_file="$3"
+  local -a fields=()
+  mapfile -d '' -t fields < <(
+    python3 - "$resource_file" "$target" "$LOCAL_NODE" <<'PY'
+import json
+import re
+import sys
+
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+owner = row["owner_node"] or row["placement"][0]
+if row["kind"] != "staging" or "backup" not in row or owner != sys.argv[3]:
+    raise SystemExit("destroy-overlay cleanup identity differs from registry")
+if row["state"] != "cleanup_pending":
+    raise SystemExit("staging cleanup plan is not committed")
+volume = row["proxmox"]["volume_id"]
+if volume is not None and volume != sys.argv[2]:
+    raise SystemExit("cleanup overlay differs from registry")
+if not re.fullmatch(
+    rf"[A-Za-z0-9][A-Za-z0-9_.+-]{{0,63}}:{row['vmid']}/vm-{row['vmid']}-disk-[0-9]+\.qcow2", sys.argv[2]
+):
+    raise SystemExit("cleanup overlay does not belong to the staging VMID")
+for value in (row["vmid"], row["name"]):
+    sys.stdout.buffer.write(str(value).encode() + b"\0")
+PY
+  ) || return 75
+  ((${#fields[@]} == 2)) || return 75
+  local vmid="${fields[0]}" name="${fields[1]}" path
+  ! qm status "$vmid" >/dev/null 2>&1 || {
+    log "$cleanup_id: VM config $vmid still exists; retaining its overlay"
+    return 75
+  }
+  "$BACKUP_LINK" unmap "$vmid" || {
+    log "$cleanup_id: could not remove the PBS mapping of $name"
+    return 75
+  }
+  path="$(pvesm path "$target" 2>/dev/null)" || path=""
+  if [[ -n "$path" && -e "$path" ]]; then
+    volume_unreferenced_by_any_vm "$target" || {
+      log "$cleanup_id: another VM still references the overlay of $name"
+      return 75
+    }
+    pvesm free "$target" || return 75
+  fi
+  log "$cleanup_id: removed the overlay and PBS mapping of $name"
+}
+
+# A backup-linked staging VM whose mapping died (its process exited, or this
+# node rebooted) cannot read its disk: Proxmox keeps reporting it running
+# while its reads fail. Stop it and queue its eviction, as a production start
+# would.
+evict_dead_backup_links() {
+  local resources_file="${WORK_DIR}/backup-links.json" index name vmid state volume link_state
+  local -a fields=()
+  registry list --record-type resources >"$resources_file" || return 0
+  mapfile -d '' -t fields < <(
+    python3 - "$resources_file" "$LOCAL_NODE" <<'PY'
+import json
+import sys
+
+for row in json.load(open(sys.argv[1], encoding="utf-8")):
+    if (
+        row["kind"] == "staging"
+        and "backup" in row
+        and row["owner_node"] == sys.argv[2]
+        and row["state"] in {"stopped", "ready", "active", "stopping"}
+        and row["proxmox"]["volume_id"]
+    ):
+        for value in (row["name"], row["vmid"], row["state"], row["proxmox"]["volume_id"]):
+            sys.stdout.buffer.write(str(value).encode() + b"\0")
+PY
+  )
+  for ((index = 0; index + 3 < ${#fields[@]}; index += 4)); do
+    name="${fields[index]}"
+    vmid="${fields[index + 1]}"
+    state="${fields[index + 2]}"
+    volume="${fields[index + 3]}"
+    link_state="$("$BACKUP_LINK" status "$vmid" 2>/dev/null)" || link_state=unknown
+    [[ "$link_state" == dead || "$link_state" == absent ]] || continue
+    log "the PBS mapping of backup-linked staging VM $name is $link_state; evicting it"
+    if [[ "$(qm status "$vmid" 2>/dev/null)" == "status: running" ]]; then
+      run_with_lifecycle_lock qm stop "$vmid" --skiplock true --timeout 30 || {
+        log "could not stop $name; retrying on the next run"
+        continue
+      }
+    fi
+    [[ "$state" != active ]] || registry update "$name" --state stopping >/dev/null || continue
+    registry defer-cleanup --resource "$name" --node "$LOCAL_NODE" --action destroy-vm \
+      --target "vm:${vmid}" --reason "its PBS mapping is $link_state" >/dev/null || continue
+    registry defer-cleanup --resource "$name" --node "$LOCAL_NODE" --action destroy-overlay \
+      --target "$volume" --reason "its PBS mapping is $link_state" >/dev/null || continue
+    registry update "$name" --state cleanup_pending >/dev/null ||
+      log "could not mark $name cleanup_pending; retrying on the next run"
+  done
+}
+
 pending_local_payload_cleanup() {
   local resource_id="$1" cleanup_json
   cleanup_json="$(registry list --record-type cleanup)" || return 0
@@ -522,7 +637,7 @@ rows = json.loads(sys.argv[2])
 blocked = any(
     row["resource_id"] == resource_id
     and row["state"] == "pending"
-    and row["action"] in {"destroy-vm", "destroy-volume"}
+    and row["action"] in {"destroy-vm", "destroy-volume", "destroy-overlay"}
     for row in rows
 )
 raise SystemExit(0 if blocked else 1)
@@ -964,6 +1079,7 @@ import sys
 priority = {
     "destroy-vm": 10,
     "destroy-volume": 20,
+    "destroy-overlay": 20,
     "delete-snapshot": 30,
     "remove-replication": 40,
 }
@@ -1005,7 +1121,7 @@ PY
       continue
     fi
     status=0
-    if [[ "$action" == destroy-vm || "$action" == destroy-volume ]] &&
+    if [[ "$action" == destroy-vm || "$action" == destroy-volume || "$action" == destroy-overlay ]] &&
       production_start_pending; then
       log "$cleanup_id: a production start is pending on $LOCAL_NODE; deferring staging destruction"
       continue
@@ -1019,6 +1135,11 @@ PY
       destroy-volume)
         run_with_lifecycle_lock unless_production_start_pending \
           destroy_volume_action "$cleanup_id" "$target" "$resource_file" ||
+          status=$?
+        ;;
+      destroy-overlay)
+        run_with_lifecycle_lock unless_production_start_pending \
+          destroy_overlay_action "$cleanup_id" "$target" "$resource_file" ||
           status=$?
         ;;
       delete-snapshot)
@@ -1084,6 +1205,7 @@ main() {
   fi
   trap 'rm -rf -- "${WORK_DIR:-}"' EXIT
   DEADLINE=$((SECONDS + MAX_SECONDS))
+  evict_dead_backup_links
   process_records
   finalize_ready_resources
 }

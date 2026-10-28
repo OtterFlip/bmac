@@ -255,6 +255,65 @@ echo "RETURNED=$?"
         self.assertNotIn("zfs destroy -R", text)
         self.assertNotIn('qm delsnapshot "$SOURCE_VMID"', main)
 
+    BACKUP_LINKED = {
+        "id": "00000000-0000-4000-8000-000000000002", "revision": 7, "state": "active",
+        "kind": "staging", "name": "stage1prod1", "source": "prod1", "vmid": 200,
+        "placement": ["mox2"], "owner_node": "mox2", "domains": {"primary": "stage1prod1.example.com"},
+        "proxmox": {"volume_id": "bmac-overlay:200/vm-200-disk-1.qcow2", "snapshot": None},
+        "backup": {"storage": "bmac-pbs", "snapshot": "vm/100/2026-10-27T16:04:23Z"},
+    }
+    PRODUCTION = {"kind": "production", "name": "prod1", "vmid": 100, "placement": ["mox1", "mox2"],
+                  "owner_node": "mox1", "purpose": {"slug": "myapp"}}
+
+    def test_a_backup_linked_plan_needs_no_snapshot_replica_or_running_production(self) -> None:
+        # prod1 is down, mox1 is offline, and nothing replicates: none of it matters.
+        arguments = [json.dumps(value) for value in (
+            [self.PRODUCTION, self.BACKUP_LINKED],
+            [{"vmid": 200, "name": "stage1prod1", "type": "qemu", "node": "mox2", "status": "running"}],
+            [{"node": "mox1", "status": "offline"}, {"node": "mox2", "status": "online"}],
+            [], [], [],
+        )]
+        completed = self.run_sourced(
+            "RESOURCE_NAME=stage1prod1\nparse_and_validate_plan " + " ".join(shlex.quote(a) for a in arguments)
+            + '\nprintf "%s|%s|%s|%s\\n" "$BACKUP_SNAPSHOT" "$STAGING_VOLUME" "$STAGING_NODE" "$LIVE_PRESENT"\n')
+        self.assertEqual(completed.stdout.strip(),
+                         "vm/100/2026-10-27T16:04:23Z|bmac-overlay:200/vm-200-disk-1.qcow2|mox2|1")
+        # Its own host must be online, though.
+        arguments[2] = json.dumps([{"node": "mox1", "status": "online"}, {"node": "mox2", "status": "offline"}])
+        completed = self.run_sourced(
+            "RESOURCE_NAME=stage1prod1\nparse_and_validate_plan " + " ".join(shlex.quote(a) for a in arguments),
+            expected=1)
+        self.assertIn("the staging VM's host must be online", completed.stderr)
+
+    def test_a_backup_linked_cleanup_plan_destroys_the_vm_and_overlay_only(self) -> None:
+        completed = self.run_sourced("""
+            registry_cmd() { printf '%s\\n' "$*" >&2; }
+            registry_update() { printf 'update %s\\n' "$*" >&2; }
+            RESOURCE_NAME=stage1prod1 STAGING_NODE=mox2 VMID=200
+            STAGING_VOLUME=bmac-overlay:200/vm-200-disk-1.qcow2 BACKUP_SNAPSHOT=vm/100/2026-10-27T16:04:23Z
+            queue_cleanup_plan
+            """)
+        actions = [line.split("--action ")[1].split()[0] for line in completed.stderr.splitlines() if "--action" in line]
+        self.assertEqual(actions, ["destroy-vm", "destroy-overlay"])
+        self.assertIn("update --state cleanup_pending", completed.stderr)
+
+    def test_a_backup_linked_vm_has_its_efi_disk_first(self) -> None:
+        config = "\n".join((
+            "name: stage1prod1", "tags: app-ha-staging;evictable;purpose-myapp", "onboot: 0",
+            "hookscript: local:snippets/app-ha-guest-role-hook.sh",
+            "scsi0: bmac-overlay:200/vm-200-disk-1.qcow2,discard=on,iothread=1,ssd=1",
+            "efidisk0: local-zfs:vm-200-disk-0,efitype=4m,size=1M",
+        ))
+        body = f"""
+            node_exec() {{ printf '%s\\n' {shlex.quote(config)}; }}
+            RESOURCE_NAME=stage1prod1 VMID=200 STAGING_VM_TAG=app-ha-staging EVICTABLE_VM_TAG=evictable
+            PURPOSE_TAG_PREFIX=purpose- SOURCE_PURPOSE=myapp STAGING_VOLUME=bmac-overlay:200/vm-200-disk-1.qcow2
+            STAGING_VM_STORAGE=local-zfs GUEST_ROLE_HOOK_PATH=local:snippets/app-ha-guest-role-hook.sh
+            """
+        self.run_sourced(body + "BACKUP_SNAPSHOT=vm/100/2026-10-27T16:04:23Z\nvalidate_live_vm\n")
+        completed = self.run_sourced(body + "validate_live_vm\n", expected=1)
+        self.assertIn("staging EFI volume identity is invalid", completed.stderr)
+
     def test_managed_workstation_alias_removal_preserves_unrelated_config(
         self,
     ) -> None:

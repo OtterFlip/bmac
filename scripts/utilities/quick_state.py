@@ -794,6 +794,19 @@ def staging_snapshot(resource, resources):
     }
 
 
+def staging_restore_point(resource):
+    """A backup-linked staging VM's restore point, with the time in its name."""
+    backup = resource.get("backup")
+    if not isinstance(backup, dict) or not backup.get("snapshot"):
+        return None
+    snapshot = str(backup["snapshot"])
+    try:
+        created_at = calendar.timegm(time.strptime(snapshot.rsplit("/", 1)[-1], "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        created_at = None
+    return {"snapshot": snapshot, "storage": backup.get("storage"), "created_at": created_at}
+
+
 def snapshot_taken_text(epoch):
     if epoch is None:
         return "-"
@@ -886,6 +899,9 @@ def render_guests(report, args, ui):
                 "source": resource.get("source"),
                 "url": f"https://{common['domain']}" if common["domain"] else None,
                 "snapshot": staging_snapshot(resource, report.get("resources") or []),
+                # backup: its disk is an overlay over a restore point on PBS.
+                "link": "backup" if "backup" in resource else "prod",
+                "restore_point": staging_restore_point(resource),
             })
             staging.append(entry)
             if entry["registry_state"] in ("cleanup_pending", "failed"):
@@ -940,8 +956,9 @@ def render_guests(report, args, ui):
                 [
                     [row["name"], row["vmid"], row["source"], row["registry_state"],
                      row["live_status"], row["node"] or "-", row["ip"], row["url"] or "-",
-                     (row["snapshot"] or {}).get("name") or "-",
-                     snapshot_taken_text((row["snapshot"] or {}).get("created_at")),
+                     f"restore point {row['restore_point']['snapshot']}" if row["restore_point"]
+                     else (row["snapshot"] or {}).get("name") or "-",
+                     snapshot_taken_text((row["restore_point"] or row["snapshot"] or {}).get("created_at")),
                      ", ".join((row["snapshot"] or {}).get("shared_with") or []) or "-"]
                     for row in staging
                 ],

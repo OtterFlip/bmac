@@ -860,6 +860,73 @@ else:
         self.assertNotIn("200", state["vms"])
         self.assertNotIn("rpool/data/vm-200-disk-0", state["zfs"])
 
+    def add_backup_linked_staging(self, link: str, state: str = "active") -> None:
+        """stage1prod1 as a backup-linked staging VM whose PBS mapping is LINK."""
+        overlay = "bmac-overlay:200/vm-200-disk-1.qcow2"
+        self.registry(
+            "allocate-staging", "--source", "prod1", "--vmid", "200", "--placement", "mox1",
+            "--placement-limit", "5", "--backup-storage", "bmac-pbs",
+            "--backup-snapshot", "vm/100/2026-10-27T16:04:23Z",
+        )
+        self.registry("update", "stage1prod1", "--state", "cloning", "--owner-node", "mox1", "--volume-id", overlay)
+        for next_state in ("patching", "stopped", "ready", "active"):
+            self.registry("update", "stage1prod1", "--state", next_state)
+            if next_state == state:
+                break
+        fake = self.install_lib / "backup_link.sh"
+        fake.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "state = json.load(open(os.environ['FAKE_STATE']))\n"
+            "with open(os.environ['FAKE_ACTIONS'], 'a') as stream:\n"
+            "    stream.write(json.dumps(['backup_link.sh', *sys.argv[1:]]) + '\\n')\n"
+            "if sys.argv[1] == 'status':\n"
+            "    print(state.get('links', {}).get(sys.argv[2], 'absent'))\n"
+        )
+        fake.chmod(0o755)
+        fake_state = self.read_fake_state()
+        fake_state["links"] = {"200": link}
+        fake_state["vms"]["200"] = {
+            "node": "mox1",
+            "status": "running" if state == "active" else "stopped",
+            "config": {
+                "name": "stage1prod1",
+                "tags": "custom-staging;custom-evictable;purpose-myapp",
+                "template": "0",
+                "onboot": "0",
+                "scsi0": f"{overlay},discard=on,iothread=1,ssd=1",
+                "efidisk0": "local-zfs:vm-200-disk-0,efitype=4m,pre-enrolled-keys=1,size=1M",
+            },
+        }
+        self.write_fake_state(fake_state)
+
+    def test_production_evicts_a_backup_linked_vm_even_with_a_dead_mapping(self) -> None:
+        self.add_backup_linked_staging("dead")
+        self.run_hook(100, "pre-start")
+        self.assertEqual(self.read_fake_state()["vms"]["200"]["status"], "stopped")
+        cleanup = self.registry("list", "--record-type", "cleanup")
+        self.assertEqual(
+            sorted((row["node"], row["action"], row["target"]) for row in cleanup),
+            [("mox1", "destroy-overlay", "bmac-overlay:200/vm-200-disk-1.qcow2"),
+             ("mox1", "destroy-vm", "vm:200")],
+        )
+        self.assertEqual(self.registry("get", "stage1prod1")["state"], "cleanup_pending")
+        self.run_hook(100, "post-start")
+        self.run_worker()
+        self.assertNotIn("200", self.read_fake_state()["vms"])
+        self.assertIn(["backup_link.sh", "unmap", "200"], self.action_rows())
+        names = [row["name"] for row in self.registry("list", "--record-type", "resources")]
+        self.assertEqual(names, ["prod1"])
+
+    def test_a_backup_linked_vm_starts_only_with_a_live_mapping(self) -> None:
+        self.add_backup_linked_staging("dead", state="stopped")
+        completed = self.run_hook(200, "pre-start", expected=1)
+        self.assertIn("refusing to start stage1prod1: its PBS mapping is dead", completed.stderr)
+        state = self.read_fake_state()
+        state["links"]["200"] = "alive"
+        self.write_fake_state(state)
+        self.run_hook(200, "pre-start")
+
     def test_staging_refuses_a_production_reservation(self) -> None:
         self.run_hook(100, "pre-start")
         self.add_registered_staging()

@@ -255,6 +255,25 @@ class QuickStateTest(unittest.TestCase):
         self.assertIn(shared, text)
         self.assertIn("2026-10-10 04:00 UTC", text)
 
+    def test_backup_linked_staging_rows_show_their_restore_point(self) -> None:
+        report = json.loads(json.dumps(GUESTS_REPORT))
+        report["resources"].append(
+            {"kind": "staging", "index": 2, "name": "stage2prod1", "vmid": 202, "state": "active",
+             "ip": "10.1.0.52", "placement": ["mox2"], "source": "prod1",
+             "domains": {"primary": "stage2prod1.example.com"}, "proxmox": {"snapshot": None},
+             "backup": {"storage": "bmac-pbs", "snapshot": "vm/101/2026-10-27T16:04:23Z"}}
+        )
+        summary, _, _ = self.render_json("guests", report)
+        rows = {row["name"]: row for row in summary["staging"]}
+        self.assertEqual(rows["stage2prod1"]["link"], "backup")
+        self.assertEqual(rows["stage2prod1"]["restore_point"],
+                         {"snapshot": "vm/101/2026-10-27T16:04:23Z", "storage": "bmac-pbs", "created_at": 1793117063})
+        self.assertIsNone(rows["stage2prod1"]["snapshot"])
+        self.assertEqual((rows["stage1prod1"]["link"], rows["stage1prod1"]["restore_point"]), ("prod", None))
+        text = self.render_terminal("guests", report, "--kind-filter", "staging")
+        self.assertIn("restore point vm/101/2026-10-27T16:04:23Z", text)
+        self.assertIn("2026-10-27 16:04 UTC", text)
+
     def test_replication_filter_by_guest(self) -> None:
         summary, steps, _ = self.render_json("replication", GUESTS_REPORT, "--guest", "prod1")
         self.assertEqual([job["id"] for job in summary["jobs"]], ["101-0"])

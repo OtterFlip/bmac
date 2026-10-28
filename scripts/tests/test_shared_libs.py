@@ -650,7 +650,7 @@ class RegistryCliTest(unittest.TestCase):
         self.run_registry("record-owner", "prod1", "--node", "mox1", "--disk-bytes", str(grown_bytes + 1),
                           expected=1)
 
-        # A workflow holding the lease (Rollback Restore) records them by update.
+        # A workflow holding the lease (Full Restore to Existing VM) records them by update.
         updated, _ = self.run_registry("update", "prod1", "--cores", "8", "--memory-mb", "16384",
                                        "--replication-interval", "5")
         self.assertEqual((updated["spec"]["cores"], updated["spec"]["memory_mb"]), (8, 16384))

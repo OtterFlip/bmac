@@ -428,7 +428,7 @@ printf "valid\n"
 [[ "$cache_state" != valid ]] || CACHE_WAS_VALID=true
 
 # Its PBS backup job, if any. The backups themselves stay on PBS: the
-# cluster's token cannot delete them, and Full Recovery can restore them.
+# cluster's token cannot delete them, and Full Restore to New VM can restore them.
 BACKUP_JOB="bmac-${RESOURCE_NAME}"
 backup_jobs_json="$(pvesh_get /cluster/backup)" || die "Could not read the cluster's backup jobs"
 BACKUP_JOB_PRESENT="$(
@@ -456,7 +456,7 @@ bmac_ui_plan_item remove "HA" "State ${HA_STATE:-none}; rules ${HA_RULES[*]:-non
 bmac_ui_plan_item remove "replication" "${REPLICATION_JOBS[*]:-none}"
 if [[ "$BACKUP_JOB_PRESENT" == true ]]; then
   bmac_ui_plan_item remove "backup job" "$BACKUP_JOB, so no backup starts during or after the removal"
-  bmac_ui_plan_item keep "PBS backups" "$RESOURCE_NAME's restore points stay on PBS; Full Recovery can restore them"
+  bmac_ui_plan_item keep "PBS backups" "$RESOURCE_NAME's restore points stay on PBS; Full Restore to New VM can restore them"
 fi
 bmac_ui_plan_item remove "tunnel FQDNs" "Its FQDNs and its staging slots' FQDNs are removed from the Cloudflare Tunnel config"
 bmac_ui_plan_item remove "registry" "Resource $RESOURCE_ID metadata is archived and the allocation released"

@@ -3,7 +3,7 @@
 
 """Tests for the production mode of the offline guest patchers
 (scripts/utilities/patch_staging_guest_tree.py and patch_staging_clone.sh),
-which Full Recovery uses to give a restored VM its slot's identity."""
+which Full Restore to New VM uses to give a restored VM its slot's identity."""
 
 from __future__ import annotations
 
@@ -173,6 +173,35 @@ class ProductionClonePatchTest(unittest.TestCase):
                              expected=1).stderr)
         self.assertIn("are for production mode",
                       checks('--name stage1prod3 --owner-vmid 105', expected=1).stderr)
+
+
+    def test_overlay_mode_arguments(self) -> None:
+        """--qcow2 patches a backup-linked staging VM's overlay through qemu-nbd."""
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: [p.unlink() for p in directory.rglob("*") if p.is_file()])
+        overlay = directory / "images" / "901" / "vm-901-disk-1.qcow2"
+        overlay.parent.mkdir(parents=True)
+        overlay.write_bytes(b"QFI")
+        common = ('--address 10.213.0.111/24 --gateway 10.213.0.10 --mac 02:ab:00:00:01:01 '
+                  '--dns 1.1.1.1 --root-hash-file "$HASH" --name stage1prod1')
+
+        def checks(arguments: str, expected: int = 0) -> subprocess.CompletedProcess[str]:
+            body = (f"parse_args {common} {arguments}\n"
+                    + "eval \"$(declare -f validate_request | sed -e 's/((EUID == 0)) ||/true ||/')\"\n"
+                    + "validate_request\n")
+            return self.run_sourced(body, expected=expected)
+
+        checks(f"--qcow2 {overlay} --volume-id bmac-overlay:901/vm-901-disk-1.qcow2")
+        self.assertIn("Volume id must be the overlay's own",
+                      checks(f"--qcow2 {overlay} --volume-id bmac-overlay:902/vm-902-disk-1.qcow2", expected=1).stderr)
+        self.assertIn("Volume id must be the overlay's own",
+                      checks(f"--qcow2 {overlay} --volume-id local-zfs:vm-901-disk-1", expected=1).stderr)
+        self.assertIn("Give --device or --qcow2, not both",
+                      checks(f"--qcow2 {overlay} --device /dev/zvol/rpool/data/vm-901-disk-1 "
+                             "--volume-id bmac-overlay:901/vm-901-disk-1.qcow2", expected=1).stderr)
+        self.assertIn("must be an existing overlay file",
+                      checks(f"--qcow2 {directory}/missing/vm-901-disk-1.qcow2 "
+                             "--volume-id bmac-overlay:901/vm-901-disk-1.qcow2", expected=1).stderr)
 
 
 if __name__ == "__main__":

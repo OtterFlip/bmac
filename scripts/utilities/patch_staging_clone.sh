@@ -7,7 +7,9 @@
 # selected Proxmox node by add_staging_vm.sh and runs there as root. With
 # --mode production, full_recovery.sh uses it to give a restored production
 # VM's root disk the identity of its slot; that disk may belong to the
-# restored VM, which must be stopped.
+# restored VM, which must be stopped. With --qcow2, the disk is a
+# backup-linked staging VM's overlay, connected through qemu-nbd for the
+# patch and disconnected after it.
 
 set -Eeuo pipefail
 set +x
@@ -17,6 +19,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GUEST_TREE_HELPER="$SCRIPT_DIR/patch_staging_guest_tree.py"
 
 DEVICE=""
+QCOW2_FILE=""
+NBD_DEVICE=""
 RESOLVED_DEVICE=""
 VOLUME_ID=""
 STAGING_NAME=""
@@ -52,6 +56,8 @@ Usage: patch_staging_clone.sh --device /dev/zvol/... \
   --volume-id STORAGE:vm-N-disk-N --name stageNprodN \
   --address A.B.C.D/24 --gateway A.B.C.G --mac 02:... --dns CSV \
   --root-hash-file /run/... [--sanitizer /run/...]
+patch_staging_clone.sh --qcow2 /var/lib/.../vm-N-disk-N.qcow2 \
+  --volume-id STORAGE:N/vm-N-disk-N.qcow2 --name stageNprodN ... (as above)
 patch_staging_clone.sh --mode production --device /dev/zvol/... \
   --volume-id STORAGE:vm-N-disk-N --name prodN --owner-vmid N \
   --address A.B.C.D/24 --gateway A.B.C.G --mac 02:... --dns CSV \
@@ -78,13 +84,14 @@ parse_args() {
         ;;
       --device | --volume-id | --name | --address | --gateway | --mac | \
         --dns | --root-hash-file | --sanitizer | --mode | --authorized-keys-file | \
-        --owner-vmid)
+        --owner-vmid | --qcow2)
         (($# >= 2)) || die "$1 requires a value"
         case "$1" in
           --mode) MODE="$2" ;;
           --authorized-keys-file) AUTHORIZED_KEYS_FILE="$2" ;;
           --owner-vmid) OWNER_VMID="$2" ;;
           --device) DEVICE="$2" ;;
+          --qcow2) QCOW2_FILE="$2" ;;
           --volume-id) VOLUME_ID="$2" ;;
           --name) STAGING_NAME="$2" ;;
           --address) ADDRESS="$2" ;;
@@ -111,10 +118,22 @@ require_commands() {
 
 validate_request() {
   ((EUID == 0)) || die "Offline patching must run as root"
-  [[ "$DEVICE" =~ ^/dev/zvol/[A-Za-z0-9._/+:-]+$ ]] ||
-    die "Device must be a safe /dev/zvol path"
-  [[ "$VOLUME_ID" =~ ^[A-Za-z0-9._-]+:vm-[1-9][0-9]*-disk-[0-9]+$ ]] ||
-    die "Volume id must be a safe Proxmox VM disk id"
+  if [[ -n "$QCOW2_FILE" ]]; then
+    [[ -z "$DEVICE" ]] || die "Give --device or --qcow2, not both"
+    [[ "$MODE" == staging ]] || die "--qcow2 is for backup-linked staging VMs"
+    [[ "$QCOW2_FILE" =~ ^/[A-Za-z0-9._/+-]+/vm-[1-9][0-9]*-disk-[0-9]+\.qcow2$ &&
+      -f "$QCOW2_FILE" && ! -L "$QCOW2_FILE" ]] ||
+      die "--qcow2 must be an existing overlay file named vm-N-disk-N.qcow2"
+    [[ "$VOLUME_ID" =~ ^[A-Za-z0-9._-]+:([1-9][0-9]*)/vm-([1-9][0-9]*)-disk-[0-9]+\.qcow2$ &&
+      "${BASH_REMATCH[1]}" == "${BASH_REMATCH[2]}" &&
+      "$QCOW2_FILE" == */"${VOLUME_ID#*:}" ]] ||
+      die "Volume id must be the overlay's own STORAGE:N/vm-N-disk-N.qcow2"
+  else
+    [[ "$DEVICE" =~ ^/dev/zvol/[A-Za-z0-9._/+:-]+$ ]] ||
+      die "Device must be a safe /dev/zvol path"
+    [[ "$VOLUME_ID" =~ ^[A-Za-z0-9._-]+:vm-[1-9][0-9]*-disk-[0-9]+$ ]] ||
+      die "Volume id must be a safe Proxmox VM disk id"
+  fi
   case "$MODE" in
     staging)
       [[ "$STAGING_NAME" =~ ^stage[1-9][0-9]*prod[1-9][0-9]*$ ]] ||
@@ -182,6 +201,8 @@ PY
 assert_not_in_use() {
   local path
   for path in "$@"; do
+    # qemu-nbd holds its own device open; its partitions are still checked.
+    [[ -z "$NBD_DEVICE" || "$path" != "$NBD_DEVICE" ]] || continue
     if findmnt -rn -S "$path" >/dev/null 2>&1; then
       die "Block device is mounted on the host: $path"
     fi
@@ -321,6 +342,9 @@ emergency_cleanup() {
       cleanup_failed=true
     fi
   fi
+  if [[ -n "$NBD_DEVICE" && "$MOUNTED" == false ]]; then
+    disconnect_overlay || cleanup_failed=true
+  fi
   if [[ "$MOUNTED" == false ]]; then
     cleanup_work_dir ||
       printf 'WARNING: could not remove app-ha offline-patch workspace %s.\n' \
@@ -334,6 +358,39 @@ emergency_cleanup() {
     ((code == 0)) && code=1
   fi
   exit "$code"
+}
+
+# Connect the overlay to a free /dev/nbdN and use it as the device. qemu-nbd
+# refuses a file another process (a running VM) holds.
+connect_overlay() {
+  local device size
+  fuser "$QCOW2_FILE" >/dev/null 2>&1 && die "The overlay is open in another process: $QCOW2_FILE"
+  [[ -e /sys/block/nbd0 ]] || modprobe nbd max_part=16 ||
+    die "Could not load the nbd kernel module"
+  for device in /dev/nbd{0..15}; do
+    [[ -b "$device" ]] || continue
+    size="$(cat "/sys/block/${device#/dev/}/size" 2>/dev/null)" || continue
+    [[ "$size" == 0 ]] || continue
+    qemu-nbd --connect="$device" --format=qcow2 -- "$QCOW2_FILE" ||
+      die "qemu-nbd could not connect $QCOW2_FILE to $device"
+    NBD_DEVICE="$device"
+    DEVICE="$device"
+    udevadm settle
+    sleep 1
+    udevadm settle
+    return 0
+  done
+  die "No free /dev/nbd device for the overlay"
+}
+
+disconnect_overlay() {
+  [[ -n "$NBD_DEVICE" ]] || return 0
+  blockdev --flushbufs "$NBD_DEVICE" 2>/dev/null || true
+  qemu-nbd --disconnect "$NBD_DEVICE" >/dev/null || {
+    printf 'ERROR: could not disconnect %s from the overlay.\n' "$NBD_DEVICE" >&2
+    return 1
+  }
+  NBD_DEVICE=""
 }
 
 map_and_locate_root() {
@@ -468,7 +525,9 @@ finish_offline_access() {
   if findmnt -rn -S "$DEVICE" >/dev/null 2>&1; then
     die "Staging zvol remained mounted after offline patch"
   fi
-  if fuser "$DEVICE" >/dev/null 2>&1; then
+  if [[ -n "$NBD_DEVICE" ]]; then
+    disconnect_overlay || die "The overlay stayed connected after the offline patch"
+  elif fuser "$DEVICE" >/dev/null 2>&1; then
     die "Staging zvol retained a host writer after offline patch"
   fi
   cleanup_work_dir
@@ -491,6 +550,10 @@ main() {
   WORK_DIR="$(mktemp -d /run/app-ha-staging-offline.XXXXXX)"
   trap emergency_cleanup EXIT
 
+  if [[ -n "$QCOW2_FILE" ]]; then
+    require_commands qemu-nbd modprobe sleep
+    connect_overlay
+  fi
   map_and_locate_root
   patch_guest
   finish_offline_access

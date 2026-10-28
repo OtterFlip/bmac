@@ -3,11 +3,12 @@
 # Copyright (c) 2026 BEENTHERE VENTURES, INC.
 # SPDX-License-Identifier: GPL-3.0-only
 
-# Return a production VM to one of its own restore points on PBS. The VM keeps
-# its identity (VMID, name, MAC, address, tags, lifecycle hook), only its
-# disks and settings go back to the restore point. Proxmox cannot replicate
-# over the replicas of a restored disk, so replication is removed before the
-# restore and recreated after it, with a full initial sync.
+# Full Restore to Existing VM: return a production VM to one of its own
+# restore points on PBS. The VM keeps its identity (VMID, name, MAC, address,
+# tags, lifecycle hook), only its disks and settings go back to the restore
+# point. Proxmox cannot replicate over the replicas of a restored disk, so
+# replication is removed before the restore and recreated after it, with a
+# full initial sync.
 
 set -Eeuo pipefail
 set +x
@@ -297,7 +298,7 @@ confirm_rollback() {
   for job in "${REPLICATION_JOBS[@]}"; do
     info "Replication $job to ${REPLICATION_TARGET[$job]}: deleted with its replica, recreated every ${REPLICATION_MINUTES} minutes, full initial sync"
   done
-  bmac_ui_plan_begin "Roll back $RESOURCE_NAME" "Everything written to $RESOURCE_NAME after ${SNAPSHOT_TIME} is lost."
+  bmac_ui_plan_begin "Full restore of $RESOURCE_NAME" "Everything written to $RESOURCE_NAME after ${SNAPSHOT_TIME} is lost."
   [[ "$SAFETY_BACKUP" != true ]] || bmac_ui_plan_item create "safety backup" "A restore point of the current state, made first"
   bmac_ui_plan_item update "$RESOURCE_NAME" "Disks and settings restored from $SNAPSHOT; ${CORES} vCPUs, ${MEMORY_GIB} GiB RAM"
   for job in "${REPLICATION_JOBS[@]}"; do

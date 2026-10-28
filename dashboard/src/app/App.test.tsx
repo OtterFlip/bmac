@@ -12,7 +12,7 @@ describe("App", () => {
     expect(await screen.findByText("Quorate", {}, { timeout: 5000 })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /^Staging/ }));
-    await user.click(await screen.findByRole("button", { name: /New staging VM/ }));
+    await user.click(await screen.findByRole("button", { name: /New prod-linked staging VM/ }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText(/add_staging_vm\.sh/)).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: /Start dry run/ })).toBeInTheDocument();

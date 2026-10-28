@@ -27,6 +27,7 @@ fi
 
 CONFIG_LIB="${INSTALL_LIB}/config.sh"
 REGISTRY="${INSTALL_LIB}/cluster_registry.py"
+BACKUP_LINK="${INSTALL_LIB}/backup_link.sh"
 DEFERRED_CLEANUP_SERVICE=app-ha-deferred-cleanup.service
 RESERVATION_TTL_SECONDS=900
 
@@ -332,6 +333,56 @@ if stage["state"] not in {
 volume = stage["proxmox"]["volume_id"]
 if not isinstance(volume, str):
     raise SystemExit("registry staging volume identity is absent")
+disk_keys = {
+    key
+    for key in config
+    if re.fullmatch(
+        r"(?:(?:scsi|sata|virtio|ide|unused|efidisk|tpmstate)[0-9]+)",
+        key,
+    )
+}
+
+# A backup-linked staging VM: its disk is its own qcow2 overlay over a
+# restore point mapped from PBS, and nothing else depends on it. Its mapping
+# may be dead; eviction must still succeed, so it is not checked here.
+if "backup" in stage:
+    if stage["proxmox"]["snapshot"] is not None:
+        raise SystemExit("backup-linked staging VM claims a ZFS snapshot")
+    if not re.fullmatch(
+        rf"[A-Za-z0-9][A-Za-z0-9_.+-]{{0,63}}:{vmid}/vm-{vmid}-disk-[0-9]+\.qcow2",
+        volume,
+    ):
+        raise SystemExit("registry overlay volume does not belong to VMID")
+    if disk_keys not in ({"efidisk0"}, {"scsi0", "efidisk0"}):
+        raise SystemExit("live staging disk keys are not scsi0 and efidisk0")
+    if "scsi0" in disk_keys and config["scsi0"].split(",", 1)[0] != volume:
+        raise SystemExit("live staging root disk differs from registered overlay")
+    if not re.fullmatch(
+        rf"[A-Za-z0-9][A-Za-z0-9_.+-]{{0,63}}:vm-{vmid}-disk-[0-9]+",
+        config["efidisk0"].split(",", 1)[0],
+    ):
+        raise SystemExit("live staging EFI vars disk is not fresh VM-owned storage")
+    json.dump(
+        {
+            "resource_id": stage["id"],
+            "revision": stage["revision"],
+            "state": stage["state"],
+            "name": stage["name"],
+            "vmid": stage["vmid"],
+            "volume": volume,
+            "backup": True,
+            "snapshot": "",
+            "snapshot_guid": "",
+            "snapshot_nodes": [],
+            "source_name": stage["source"],
+            "source_vmid": 0,
+            "source_volume": "",
+        },
+        sys.stdout,
+        sort_keys=True,
+    )
+    raise SystemExit(0)
+
 if not re.fullmatch(
     rf"[A-Za-z0-9][A-Za-z0-9_.+-]{{0,63}}:vm-{vmid}-disk-0",
     volume,
@@ -415,9 +466,18 @@ json.dump(
 PY
 }
 
+is_backup_linked_candidate() {
+  python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("backup") else 1)' "$1"
+}
+
 validate_storage_dependency() {
   local metadata_file="$1" storage_file="$2"
   local -a fields=() clone_fields=() source_fields=()
+  # A backup-linked staging VM depends on no production volume or snapshot.
+  if is_backup_linked_candidate "$metadata_file"; then
+    : >"$storage_file"
+    return 0
+  fi
   mapfile -d '' -t fields < <(
     python3 - "$metadata_file" <<'PY'
 import json
@@ -524,14 +584,17 @@ for value in (
     row["source_vmid"],
     row["snapshot"],
     ",".join(row["snapshot_nodes"]),
+    "backup" if row.get("backup") else "clone",
 ):
     sys.stdout.buffer.write(str(value).encode() + b"\0")
 PY
   )
-  ((${#fields[@]} == 6)) || die "could not parse deferred cleanup identity"
+  ((${#fields[@]} == 7)) || die "could not parse deferred cleanup identity"
   local name="${fields[0]}" resource_id="${fields[1]}"
   local volume="${fields[2]}" source_vmid="${fields[3]}" snapshot="${fields[4]}"
-  IFS=',' read -r -a nodes <<<"${fields[5]}"
+  local link="${fields[6]}"
+  nodes=()
+  [[ -z "${fields[5]}" ]] || IFS=',' read -r -a nodes <<<"${fields[5]}"
   configured_text="$(list_configured_nodes)" ||
     die "could not validate configured nodes before queuing cleanup"
   mapfile -t configured_nodes <<<"$configured_text"
@@ -551,14 +614,26 @@ PY
     --reason "production start evicted the local staging VM config" \
     >/dev/null ||
     die "could not queue VM cleanup for $name"
-  registry defer-cleanup \
-    --resource "$name" \
-    --node "$LOCAL_NODE" \
-    --action destroy-volume \
-    --target "$volume" \
-    --reason "production start evicted the local staging linked clone" \
-    >/dev/null ||
-    die "could not queue volume cleanup for $name"
+  if [[ "$link" == backup ]]; then
+    # Its overlay and PBS mapping; nothing on other nodes.
+    registry defer-cleanup \
+      --resource "$name" \
+      --node "$LOCAL_NODE" \
+      --action destroy-overlay \
+      --target "$volume" \
+      --reason "production start evicted the local backup-linked staging VM" \
+      >/dev/null ||
+      die "could not queue overlay cleanup for $name"
+  else
+    registry defer-cleanup \
+      --resource "$name" \
+      --node "$LOCAL_NODE" \
+      --action destroy-volume \
+      --target "$volume" \
+      --reason "production start evicted the local staging linked clone" \
+      >/dev/null ||
+      die "could not queue volume cleanup for $name"
+  fi
 
   for node in "${nodes[@]}"; do
     array_contains "$node" "${configured_nodes[@]}" ||
@@ -773,6 +848,14 @@ staging_pre_start() {
     die "could not parse staging registry state"
   [[ "$stage_state" == ready || "$stage_state" == stopped ]] ||
     die "refusing to start staging in registry state $stage_state"
+  # A backup-linked VM reads its disk through its PBS mapping; without one
+  # it would boot into I/O errors.
+  if is_backup_linked_candidate "${WORK_DIR}/candidate-${VMID}.json"; then
+    local link_state
+    link_state="$("$BACKUP_LINK" status "$VMID" 2>/dev/null)" || link_state=unknown
+    [[ "$link_state" == alive ]] ||
+      die "refusing to start $name: its PBS mapping is $link_state; remove it and create a new backup-linked staging VM"
+  fi
   log "staging VM $VMID ($name) may start; no production is running or reserved on the host for this staging guest"
 }
 

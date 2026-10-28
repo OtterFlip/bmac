@@ -151,6 +151,7 @@ STATE_TRANSITIONS: dict[str, dict[str, set[str]]] = {
 RELEASE_STATES = {"reserved", "stopped", "failed", "cleanup_pending"}
 CLEANUP_ACTIONS = {
     "delete-snapshot",
+    "destroy-overlay",
     "destroy-vm",
     "destroy-volume",
     "remove-replication",
@@ -182,8 +183,14 @@ RESOURCE_KEYS = {
     "revision",
 }
 # Optional top-level resource fields; records written before a field existed
-# lack it.
-OPTIONAL_RESOURCE_KEYS = {"monitoring"}
+# lack it. "backup" marks a backup-linked staging VM: its disk is a qcow2
+# overlay over one of its source's restore points, mapped read-only from PBS,
+# instead of a ZFS clone of a production snapshot.
+OPTIONAL_RESOURCE_KEYS = {"monitoring", "backup"}
+BACKUP_KEYS = {"storage", "snapshot"}
+BACKUP_SNAPSHOT_RE = re.compile(
+    r"^vm/([1-9][0-9]{0,8})/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+)
 PROBE_KEYS = {"enabled", "path", "expected_status", "expected_text", "fqdns"}
 PROBE_TEXT_MAX = 200
 PROBE_PATH_RE = re.compile(r"^/[^\s\x00-\x1f\x7f]{0,199}$")
@@ -223,6 +230,10 @@ SNAPSHOT_CLEANUP_TARGET_RE = re.compile(
     r"^vm-([1-9][0-9]*)@([A-Za-z][A-Za-z0-9._-]{0,39})$"
 )
 REPLICATION_CLEANUP_TARGET_RE = re.compile(r"^([1-9][0-9]*)-([0-9]+)$")
+# A backup-linked staging VM's overlay on a directory storage.
+OVERLAY_VOLUME_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}:([1-9][0-9]*)/vm-\1-disk-([0-9]+)\.qcow2$"
+)
 
 
 class RegistryError(Exception):
@@ -409,6 +420,11 @@ def validate_cleanup_target(action: str, value: str) -> str:
                 "delete-snapshot cleanup target must be vm-VMID@SNAPSHOT"
             )
         validate_snapshot_name(match.group(2))
+    elif action == "destroy-overlay":
+        if not OVERLAY_VOLUME_RE.fullmatch(target):
+            raise RegistryError(
+                "destroy-overlay cleanup target must be STORAGE:VMID/vm-VMID-disk-N.qcow2"
+            )
     elif action == "remove-replication":
         if not REPLICATION_CLEANUP_TARGET_RE.fullmatch(target):
             raise RegistryError(
@@ -1510,7 +1526,36 @@ def validate_resource(resource: Any, policy: dict[str, Any]) -> None:
         if resource["kind"] != "production":
             raise RegistryError("only production resources have monitoring settings")
         validate_monitoring(resource["monitoring"], resource["domains"])
+    if "backup" in resource:
+        validate_backup_link(resource)
     reject_secret_material(resource, f"resource {resource['name']}")
+
+
+def validate_backup_link(resource: dict[str, Any]) -> None:
+    """A backup-linked staging VM: one restore point, no ZFS snapshot, and an
+    overlay volume once one is recorded."""
+
+    if resource["kind"] != "staging":
+        raise RegistryError("only staging resources can be backup-linked")
+    backup = resource["backup"]
+    if not isinstance(backup, dict):
+        raise RegistryError("backup link must be an object")
+    require_exact_keys(backup, BACKUP_KEYS, "backup link")
+    validate_safe_identifier(backup["storage"], "backup storage")
+    if ":" in backup["storage"] or "/" in backup["storage"]:
+        raise RegistryError("backup storage must be a PVE storage ID")
+    if not isinstance(backup["snapshot"], str) or not BACKUP_SNAPSHOT_RE.fullmatch(backup["snapshot"]):
+        raise RegistryError("backup snapshot must look like vm/VMID/YYYY-MM-DDTHH:MM:SSZ")
+    if resource["proxmox"]["snapshot"] is not None:
+        raise RegistryError("a backup-linked staging VM has no ZFS snapshot")
+    volume = resource["proxmox"]["volume_id"]
+    if volume is not None:
+        match = OVERLAY_VOLUME_RE.fullmatch(volume)
+        if match is None or int(match.group(1)) != resource["vmid"]:
+            raise RegistryError(
+                "a backup-linked staging VM's volume must be its own qcow2 overlay "
+                "(STORAGE:VMID/vm-VMID-disk-N.qcow2)"
+            )
 
 
 def _record_domains(domains: dict[str, Any]) -> list[str]:
@@ -2021,7 +2066,7 @@ def command_allocate_prod(registry: Registry, args: argparse.Namespace) -> Any:
             return {"created": False, "resource": existing}
         used_names = {record["name"] for record in resources}
         if args.index is not None:
-            # Full Recovery asks for the slot the restored VM had, so it keeps
+            # Full Restore to New VM asks for the slot the restored VM had, so it keeps
             # its name and address.
             if not 1 <= args.index <= policy["limits"]["max_production"]:
                 raise RegistryError(
@@ -2096,6 +2141,12 @@ def command_allocate_staging(registry: Registry, args: argparse.Namespace) -> An
             "placement": placement,
             "spec": spec,
         }
+        backup = None
+        if args.backup_snapshot is not None or args.backup_storage is not None:
+            if args.backup_snapshot is None or args.backup_storage is None:
+                raise RegistryError("--backup-snapshot and --backup-storage go together")
+            backup = {"storage": args.backup_storage, "snapshot": args.backup_snapshot}
+            request["backup"] = backup
         fingerprint = request_fingerprint(request)
         existing = find_idempotent_allocation(
             resources, allocation_id, fingerprint, "staging"
@@ -2163,6 +2214,8 @@ def command_allocate_staging(registry: Registry, args: argparse.Namespace) -> An
             allocation_id=allocation_id,
             fingerprint=fingerprint,
         )
+        if backup is not None:
+            resource["backup"] = backup
         validate_resource(resource, policy)
         validate_registry_invariants([*resources, resource])
         atomic_write_json(registry.resource_path(name), resource)
@@ -3225,7 +3278,8 @@ def command_finalize_staging_cleanup(
                 )
         if proxmox["volume_id"] is not None:
             owner = resource["owner_node"] or resource["placement"][0]
-            expected = (owner, "destroy-volume", proxmox["volume_id"])
+            action = "destroy-overlay" if "backup" in resource else "destroy-volume"
+            expected = (owner, action, proxmox["volume_id"])
             if expected not in completed_identities:
                 raise RegistryError(
                     "registered staging volume lacks completed destruction"
@@ -4388,6 +4442,8 @@ def build_parser() -> argparse.ArgumentParser:
     staging.add_argument("--placement", action="append", required=True)
     staging.add_argument("--placement-limit", type=int, required=True)
     staging.add_argument("--allocation-id")
+    staging.add_argument("--backup-storage", help="backup-linked: the PBS storage of the restore point")
+    staging.add_argument("--backup-snapshot", help="backup-linked: the restore point, vm/VMID/TIME")
     add_spec_arguments(staging)
     staging.set_defaults(handler=command_allocate_staging)
 

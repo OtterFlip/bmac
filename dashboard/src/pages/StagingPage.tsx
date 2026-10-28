@@ -1,5 +1,5 @@
-import { Camera, ExternalLink, FlaskConical, KeyRound, Link2, Plus, Trash2 } from "lucide-react";
-import type { StagingSnapshot } from "@/protocol/state";
+import { Archive, Camera, ExternalLink, FlaskConical, KeyRound, Link2, Plus, Trash2 } from "lucide-react";
+import type { StagingRestorePoint, StagingSnapshot } from "@/protocol/state";
 import { useStore } from "@/state/store";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -35,6 +35,23 @@ function SnapshotCell({ snapshot }: { snapshot: StagingSnapshot | null }) {
   );
 }
 
+function RestorePointCell({ point }: { point: StagingRestorePoint }) {
+  return (
+    <div className="min-w-0">
+      <div className="flex items-center gap-1 text-[12px] text-fg-muted" title={point.snapshot}>
+        <Archive className="size-3.5 shrink-0 text-fg-subtle" />
+        <span className="max-w-[220px] truncate font-mono">{point.snapshot}</span>
+      </div>
+      <div className="text-[11px] text-fg-subtle tabular-nums">
+        restore point, taken {point.created_at ? `${dateTime(new Date(point.created_at * 1000).toISOString())} · ${agoEpoch(point.created_at)}` : "unknown time"}
+      </div>
+      <Badge tone="info" className="mt-0.5" title="Its disk is read from this restore point on PBS, with its own writes kept on its host. It is evicted when a production VM starts on its host or its PBS mapping dies.">
+        backup-linked
+      </Badge>
+    </div>
+  );
+}
+
 export function StagingPage() {
   const guests = useSource("list_guests");
   const launchWorkflow = useStore((s) => s.launchWorkflow);
@@ -44,12 +61,12 @@ export function StagingPage() {
     <>
       <PageHeader
         title="Staging"
-        subtitle="Sanitized, disposable copies of production VMs"
+        subtitle="Sanitized, disposable copies of production VMs and their restore points"
         actions={
           <>
             <SourceRefresh ids={["list_guests"]} />
             <Button variant="primary" onClick={() => launchWorkflow("add_staging_vm")}>
-              <Plus /> New staging VM
+              <Plus /> New prod-linked staging VM
             </Button>
           </>
         }
@@ -58,7 +75,7 @@ export function StagingPage() {
         <AttentionBanner problems={g?.problems.filter((p) => p.startsWith("staging")) ?? []} />
         <Card className="mb-4">
           <CardHeader icon={<FlaskConical />} title="Staging VMs" subtitle={g ? `${g.staging.length} registered` : undefined} />
-          <Table head={["VM", "Status", "Copy of", "Snapshot", "Runs on", "Address", "Size", ""]}>
+          <Table head={["VM", "Status", "Copy of", "Snapshot or restore point", "Runs on", "Address", "Size", ""]}>
             {!g && guests.status === "loading" && <SkeletonRows cols={8} />}
             {g?.staging.map((vm) => (
               <tr key={vm.name}>
@@ -71,7 +88,7 @@ export function StagingPage() {
                   {vm.registry_state && vm.registry_state !== "active" && <Badge tone={vm.registry_state === "failed" ? "danger" : "warn"} className="ml-1">{vm.registry_state.replace(/_/g, " ")}</Badge>}
                 </td>
                 <td className="font-mono text-fg-muted">{vm.source ?? "—"}</td>
-                <td><SnapshotCell snapshot={vm.snapshot ?? null} /></td>
+                <td>{vm.restore_point ? <RestorePointCell point={vm.restore_point} /> : <SnapshotCell snapshot={vm.snapshot ?? null} />}</td>
                 <td className="font-mono text-fg-muted">{vm.node ?? "—"}</td>
                 <td>
                   {vm.url ? (
@@ -104,14 +121,14 @@ export function StagingPage() {
             <EmptyState
               icon={<FlaskConical />}
               title="No staging VMs"
-              body="A staging VM is a sanitized clone of a production VM. It's the safe place to try upgrades and data changes."
-              action={<Button onClick={() => launchWorkflow("add_staging_vm")}><Plus /> New staging VM</Button>}
+              body="A staging VM is a sanitized copy of a production VM, or of one of its restore points. It's the safe place to try upgrades and data changes, or to look at an earlier state."
+              action={<Button onClick={() => launchWorkflow("add_staging_vm")}><Plus /> New prod-linked staging VM</Button>}
             />
           )}
           {!g && guests.status !== "loading" && <EmptyState icon={<FlaskConical />} title="Guest state not loaded" body={guests.error ?? "Refresh to read the cluster."} />}
         </Card>
         <h2 className="mb-2.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-fg-subtle">Staging operations</h2>
-        <WorkflowTiles ids={["add_staging_vm", "setup_jump_ssh_access", "remove_staging_vm"]} />
+        <WorkflowTiles ids={["add_staging_vm", "add_backup_linked_staging_vm", "setup_jump_ssh_access", "remove_staging_vm"]} />
       </PageBody>
     </>
   );

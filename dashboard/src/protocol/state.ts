@@ -95,10 +95,21 @@ export interface StagingSnapshot {
   shared_with: string[];
 }
 
+/** A backup-linked staging VM's restore point on PBS. */
+export interface StagingRestorePoint {
+  snapshot: string;
+  storage: string | null;
+  /** Epoch seconds from the restore point's name; null if unreadable. */
+  created_at: number | null;
+}
+
 export interface StagingRow extends GuestCommon {
   source: string | null;
   url: string | null;
   snapshot: StagingSnapshot | null;
+  /** prod: a linked clone of a production snapshot; backup: an overlay over a restore point. */
+  link?: "prod" | "backup";
+  restore_point?: StagingRestorePoint | null;
 }
 
 export interface GuestsState {

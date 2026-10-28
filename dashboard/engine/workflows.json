@@ -357,8 +357,8 @@
     },
     {
       "id": "add_staging_vm",
-      "title": "Add staging VM",
-      "summary": "Create a production-derived linked-clone staging VM.",
+      "title": "Add prod-linked Staging VM",
+      "summary": "Create a staging VM as a linked clone of a production VM's current state.",
       "description": "Snapshots a production VM, waits for the snapshot to replicate to a standby host, and creates a stopped stageNprodN linked clone there with a new machine identity. When the production VM already has staging VMs, it lists them and offers to share one of their snapshots instead of taking a new one. Optionally starts it and sets up SSH. Start with a dry run.",
       "category": "staging",
       "script": "scripts/user_callable/guests/staging/add_staging_vm.sh",
@@ -376,10 +376,70 @@
       ]
     },
     {
+      "id": "add_backup_linked_staging_vm",
+      "title": "Instant Restore to Backup-Linked Staging VM",
+      "summary": "Boot one of a production VM's restore points as a staging VM within about a minute; its data stays on PBS.",
+      "description": "Creates a disposable staging VM in the production VM's lowest free staging slot (stageKprodN, its address and FQDN) from one of its restore points on PBS. The restore point is mapped read-only from PBS on a host of the production VM's placement where no production VM runs; a local copy-on-write overlay takes the VM's writes, and is patched offline with the slot's identity (hostname, network, machine-id, SSH host keys, staging root password, and an optional sanitizer) before the first boot. The restore point's data is never copied, so reads of data the VM has not changed come from PBS and are slower than local disk. It counts toward the host's staging quota, the production VM need not be running, and it is evicted like any staging VM when a production VM starts on its host, and also when its PBS mapping dies, for example when its host reboots. Remove it with Remove staging VM.",
+      "category": "staging",
+      "script": "scripts/user_callable/guests/staging/add_backup_linked_staging_vm.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "params": [
+        {
+          "id": "snapshot",
+          "label": "Restore point",
+          "type": "snapshot",
+          "flag": "--snapshot",
+          "help": "Such as vm/100/2026-10-27T14:50:01Z; chosen from the restore points of registered production VMs when empty."
+        },
+        {
+          "id": "sanitizer",
+          "label": "Sanitizer script",
+          "type": "path",
+          "flag": "--sanitizer",
+          "help": "Optional local Bash script run as root inside the VM before its networking starts."
+        },
+        {
+          "id": "node",
+          "label": "Host",
+          "type": "host",
+          "flag": "--node",
+          "help": "Chosen when more than one host is eligible.",
+          "advanced": true
+        },
+        {
+          "id": "cores",
+          "label": "vCPU cores",
+          "type": "integer",
+          "flag": "--cores",
+          "advanced": true
+        },
+        {
+          "id": "memory_gib",
+          "label": "Memory (GiB)",
+          "type": "integer",
+          "flag": "--memory-gib",
+          "advanced": true
+        },
+        {
+          "id": "start_timeout",
+          "label": "Start timeout (seconds)",
+          "type": "integer",
+          "flag": "--start-timeout-seconds",
+          "advanced": true,
+          "placeholder": "300"
+        }
+      ]
+    },
+    {
       "id": "remove_staging_vm",
       "title": "Remove staging VM",
-      "summary": "Destroy a staging VM, its clone, and its unshared source snapshot.",
-      "description": "Permanently removes a staging VM's route, VM and disks, and linked clone. Its source snapshot is deleted too unless another staging VM still shares it; a shared snapshot is deleted with the last staging VM using it. Production itself is never touched.",
+      "summary": "Destroy a staging VM with its clone or overlay; the production VM and its restore points are untouched.",
+      "description": "Permanently removes a staging VM's VM and disks. For a prod-linked staging VM, also its linked clone and its source snapshot unless another staging VM still shares it (a shared snapshot is deleted with the last staging VM using it). For a backup-linked staging VM, also its overlay and PBS mapping; its restore point stays on PBS. Production itself is never touched.",
       "category": "staging",
       "script": "scripts/user_callable/guests/staging/remove_staging_vm.sh",
       "mode": "mutating",
@@ -645,8 +705,8 @@
     },
     {
       "id": "rollback_restore",
-      "title": "Rollback Restore",
-      "summary": "Return a production VM to one of its own restore points; everything written since is lost.",
+      "title": "Full Restore to Existing VM",
+      "summary": "Return a production VM to one of its own restore points, down until the restore finishes; everything written since is lost.",
       "description": "Restores a production VM's disks and settings from one of its restore points on PBS, keeping its identity (VMID, name, MAC, address, tags, lifecycle hook) and, unless you choose others, its vCPUs and RAM. Offers a safety backup of the current state first. Stops the VM through HA, deletes its replication jobs and replicas, restores on the VM's host, starts it again through HA, and recreates replication with a full initial sync, during which the VM cannot fail over. Requires a typed confirmation.",
       "category": "backups",
       "script": "scripts/user_callable/backups/rollback_restore.sh",
@@ -668,7 +728,7 @@
     },
     {
       "id": "full_recovery",
-      "title": "Full Recovery",
+      "title": "Full Restore to New VM",
       "summary": "Create a new production VM from a restore point, for example on a rebuilt cluster.",
       "description": "Creates a production VM from one of BMAC's restore points on PBS: it gets the restore point's own slot (name and address) and VMID when they are free, otherwise new ones, and asks for the purpose, FQDN, aliases, placement, vCPUs and RAM (defaulting to the restore point's). The restore runs stopped; the root disk is patched offline with its hostname, network, this cluster's root password and administrator SSH keys, and, in a different slot, a new machine-id and SSH host keys. Then, as for a new production VM, the guest is verified and gets its networking, replication, HA, Cloudflare Tunnel routes, and monitoring. Rerun with the same purpose to resume.",
       "category": "backups",

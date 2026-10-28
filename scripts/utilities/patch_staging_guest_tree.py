@@ -7,7 +7,7 @@
 
 --mode staging (the default) gives a production clone a staging identity.
 --mode production gives a restored production VM the identity of its slot
-(Full Recovery): hostname, network, root password, and administrator keys,
+(Full Restore to New VM): hostname, network, root password, and administrator keys,
 and with --new-identity also a new machine-id and SSH host keys.
 """
 

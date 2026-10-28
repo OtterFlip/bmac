@@ -374,9 +374,16 @@ filesystem online. Deploy the updated registry with
 `scripts/user_callable/hosts/update_cluster_runtime.sh` before first use. See
 [`scripts/user_callable/guests/prod/README.md`](scripts/user_callable/guests/prod/README.md#online-root-disk-growth).
 
-### Creating or Removing a Production-Derived Staging VM
+### Creating or Removing a Staging VM
 
-Preview and then create a staging VM from a selected production VM:
+A staging VM is a disposable copy of a production VM in one of its staging
+slots (`stageKprodN`, with its own address and FQDN). There are two kinds; both
+count toward a host's staging quota, run only where no production VM runs, and
+are evicted when a production VM starts on their host.
+
+A **prod-linked staging VM** is a linked clone of a production VM's current
+state. Preview and then create one (the Staging page's **Add prod-linked
+Staging VM**):
 
 ```bash
 ./scripts/user_callable/guests/staging/add_staging_vm.sh --dry-run
@@ -388,8 +395,28 @@ The script selects an eligible standby placement host and creates a stopped
 application-specific data or configuration must be changed before guest
 networking starts. Review and start the guest when prompted.
 
-Destroy staging guests as soon as testing is complete so their snapshots do
-not continue pinning production pool space:
+A **backup-linked staging VM** boots one of a production VM's restore points
+on PBS within about a minute (**Instant Restore to Backup-Linked Staging VM**,
+on the Staging and Backups pages):
+
+```bash
+./scripts/user_callable/guests/staging/add_backup_linked_staging_vm.sh --snapshot vm/100/2026-10-27T16:04:23Z
+```
+
+Its disk is the restore point, mapped read-only from PBS on its host, with a
+local overlay that keeps its writes; it is patched with the slot's identity
+before it boots, and takes `--sanitizer` too. The restore point's data is
+never copied, so reads of data the VM has not changed come from PBS and are
+slower than local disk (tens of MB/s): it suits looking at an earlier state
+or testing against it, not load. The production VM need not be running. Its
+host's overlays live in the directory storage `bmac-overlay`
+(`/var/lib/bmac-overlay` on each host's root filesystem), which the first one
+creates. Besides a production start, it is also evicted when its PBS mapping
+dies, for example when its host reboots.
+
+Destroy staging guests as soon as testing is complete: a prod-linked one's
+snapshot keeps pinning production pool space, and a backup-linked one's
+overlay grows with what it writes. The same command removes both kinds:
 
 ```bash
 ./scripts/user_callable/guests/staging/remove_staging_vm.sh --dry-run stage1prod1
@@ -447,6 +474,15 @@ its retention policy first, following
   24 hours; **Back up now** makes one more backup straight away.
 - **Protect a restore point** keeps one however old it gets, for example
   before a risky change.
+- **Full Restore to Existing VM** returns a production VM to one of its
+  restore points, keeping its identity; it is down until the restore
+  finishes. A safety backup of its current state is offered first.
+- **Full Restore to New VM** creates a new production VM from a restore
+  point, for example on a rebuilt cluster, with a new identity when the
+  original still exists.
+- **Instant Restore to Backup-Linked Staging VM** boots a restore point as a
+  disposable staging VM within about a minute, without copying its data
+  (see [Creating or Removing a Staging VM](#creating-or-removing-a-staging-vm)).
 
 The page shows the PBS server's retention policy (read-only), each VM's
 schedule and newest backup, and every restore point BMAC made. With

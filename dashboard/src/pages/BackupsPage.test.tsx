@@ -26,7 +26,7 @@ describe("Backups page", () => {
     const guide = titles.findIndex((t) => t.includes("PBS Server Setup"));
     expect(guide).toBeGreaterThanOrEqual(0);
     expect(guide).toBeLessThan(titles.findIndex((t) => t.includes("Setup PBS")));
-    for (const title of ["Backup schedule", "Back up now", "Protect a restore point", "Rollback Restore", "Full Recovery"]) {
+    for (const title of ["Backup schedule", "Back up now", "Protect a restore point", "Full Restore to Existing VM", "Full Restore to New VM", "Instant Restore to Backup-Linked Staging VM"]) {
       expect(titles.some((t) => t.includes(title))).toBe(true);
     }
   }, 15000);

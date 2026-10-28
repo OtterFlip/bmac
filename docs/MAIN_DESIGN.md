@@ -904,8 +904,9 @@ the Dashboard's Backups page, under `scripts/user_callable/backups/`: Setup
 PBS (`setup_pbs.sh`), the backup list (`list_backups.sh`, the `backups` kind
 of `scripts/utilities/quick_state.py`), each VM's backup schedule
 (`manage_backup_schedule.sh`), Back up now (`backup_now.sh`), and
-restore-point protection (`protect_restore_point.sh`), Rollback Restore
-(`rollback_restore.sh`), and Full Recovery (`full_recovery.sh`). They share
+restore-point protection (`protect_restore_point.sh`), Full Restore to
+Existing VM (`rollback_restore.sh`), and Full Restore to New VM
+(`full_recovery.sh`). They share
 `scripts/lib/backups.sh`, and the host-side `scripts/host_runtime/pbs_api.py`
 reads the PBS account. `add_prod_vm.sh` skips VMIDs that have backups, and
 `remove_prod_vm.sh` removes the VM's backup job. Each host's monitor agent
@@ -917,10 +918,11 @@ The rest is still design, built in this order:
 1. Setup PBS, backup schedules, Back up now, the restore-point list,
    restore-point protection, backup-age monitoring, and the PBS server
    monitor (all built).
-2. Rollback Restore and Full Recovery, both as full (not live) restores
-   (built).
-3. Instant Restore - Permanent (PVE live restore) and Instant Restore - Test
-   (disposable test VMs read from PBS), each after testing on a real cluster.
+2. Full Restore to Existing VM and Full Restore to New VM (built).
+3. The instant restores, in this order: Instant Restore to Backup-Linked
+   Staging VM (built: `add_backup_linked_staging_vm.sh`), then Instant
+   Restore to New Permanent VM and Instant Restore to Existing VM (designed
+   and proven on the test cluster; not built).
 
 ### PBS server and per-cluster isolation
 
@@ -1002,7 +1004,7 @@ own work instead:
 - Once PBS is configured, production VMID allocation skips any VMID that
   already has a backup group, so a new VM never shares a group with an older
   one. That covers VMIDs reused after a VM is removed and a rebuilt cluster
-  whose VMIDs start again at 100. Full Recovery reuses the original VMID when
+  whose VMIDs start again at 100. Full Restore to New VM reuses the original VMID when
   it is free.
 
 The schedule is a single choice: back up every 1, 2, 3, 4, 6, 8, 12, or 24
@@ -1057,7 +1059,8 @@ rate limit does not apply. Backup jobs therefore set no bandwidth limit by
 default; the optional limit remains available.
 
 Removing a production VM removes its backup job. Its backups stay on PBS,
-since the token cannot delete them, and Full Recovery can restore them.
+since the token cannot delete them, and Full Restore to New VM can restore
+them.
 
 ### Restores
 
@@ -1067,7 +1070,8 @@ matches its MAC. Every restore therefore updates the registry before the VM
 first starts, and every restore that changes a guest's identity is patched
 before its first boot. vCPU and RAM can be overridden on every restore.
 
-- **Rollback Restore** returns an existing production VM to one of its own
+- **Full Restore to Existing VM** (`rollback_restore.sh`) returns an
+  existing production VM to one of its own
   restore points, keeping its identity. The workflow takes the orchestration
   lease, requires a typed confirmation, and offers a safety backup first
   (which counts toward `keep-last`). It then stops the VM through HA,
@@ -1088,7 +1092,8 @@ before its first boot. vCPU and RAM can be overridden on every restore.
   are clones of its replicas. PVE cannot
   replicate over the replicas of a restored disk, so they must be removed
   first. The VM has no HA protection until the first full sync completes.
-- **Full Recovery** creates a new permanent production VM from a restore
+- **Full Restore to New VM** (`full_recovery.sh`) creates a new permanent
+  production VM from a restore
   point, for example on a rebuilt cluster. `full_recovery.sh` sources
   `add_prod_vm.sh` and replaces only its OS install:
   - It lists every BMAC restore point this cluster's key can decrypt,
@@ -1129,16 +1134,74 @@ before its first boot. vCPU and RAM can be overridden on every restore.
     run `unstarted` → `installed-confirmed` → `guest-verified` →
     `network-finalized`; a rerun with the same purpose resumes from the phase
     reached. The new VM has no backup schedule until one is set.
-- **Instant Restore - Permanent** (later) is Rollback Restore using PVE's
-  live restore. The VM starts at once and its data streams from PBS into
-  `local-zfs` in the background. If PBS becomes unreachable mid-restore, the
-  VM is stopped and writes made since the restore began are lost.
-- **Instant Restore - Test** (later) creates a disposable test VM on a host
-  without running production VMs, inside the staging slots, quotas, and
-  compute defaults. `proxmox-backup-client map` exposes the snapshot's disk
-  read-only; a qcow2 overlay on the host holds the VM's writes, and its
-  identity is patched offline before first boot. The full disk is never
-  copied. A Backups-page tile deletes these VMs.
+- **The instant restores** (the backup-linked staging VM is built; the two
+  permanent ones are designed, not built) boot a VM from the restore
+  point within about a minute, before its data is copied, and patch its
+  identity before that first boot:
+  - `proxmox-backup-client map` exposes the restore point's disk as a
+    read-only loop device on the host (a FUSE file; every read is an HTTPS
+    request to PBS, served one at a time, about 38 MB/s for data). A qcow2
+    overlay on a host directory storage takes every write, and the overlay
+    is patched offline through `qemu-nbd` before the VM boots from it.
+  - **Instant Restore to Backup-Linked Staging VM** stops there. It is a
+    second kind of staging VM: same slots, quota, eviction by a starting
+    production VM, and cleanup, but its disk is that overlay, so the restore
+    point's data is never copied (a boot wrote 1.7 MB). The Staging page's
+    existing kind becomes the prod-linked staging VM. How it is built:
+    - Its registry record carries `backup` (`storage`, `snapshot`) and no
+      ZFS snapshot; its volume is its overlay,
+      `bmac-overlay:VMID/vm-VMID-disk-1.qcow2`, in a directory storage at
+      `/var/lib/bmac-overlay` that the first one creates. Its EFI disk is on
+      the staging storage. The production VM must be registered (its slot is
+      used) but need not run; the VM goes on a host of its placement, other
+      than its owner, where no production VM runs.
+    - `backup_link.sh` (host runtime) runs `proxmox-backup-client map` in
+      the systemd scope `bmac-backup-link-VMID.scope`, with the storage's
+      token in its environment, and points `/run/bmac-backup-link/VMID.img`
+      at the loop device; the overlay's backing file is that path, never a
+      loop number. The mapping is alive exactly while the scope is.
+      Unmapping removes only a loop device that still maps this VM's restore
+      point, since a dead mapping's loop number can be reused.
+    - `patch_staging_clone.sh --qcow2` connects the overlay to a free
+      `/dev/nbdN` with `qemu-nbd`, patches it as a staging clone (the
+      `qemu-nbd` process may hold the whole device, never a partition), and
+      disconnects it.
+    - The lifecycle hook evicts it like any staging VM without needing its
+      mapping, so a dead one never blocks a production start, and refuses to
+      start it unless its mapping is alive. Its cleanup plan is `destroy-vm`
+      then `destroy-overlay` (unmap, then free any overlay left), with no
+      snapshot deletion; `remove_staging_vm.sh` queues the same plan and
+      keeps the restore point.
+    - Every deferred-cleanup run (each 2 minutes, and 2 minutes after boot)
+      first evicts the host's backup-linked staging VMs whose mapping is
+      dead or absent: it stops them and queues their cleanup. That covers a
+      crashed client process and a host reboot.
+  - **Instant Restore to New Permanent VM** and **Instant Restore to
+    Existing VM** then copy only the in-use chunks into the VM's zvol with
+    `pbs-restore --skip-zero` while it runs (33 s for prod1's 1 TiB disk),
+    repoint the overlay's backing from the map to the zvol
+    (`blockdev-reopen`, safe because both hold the same data), commit the
+    overlay into the zvol (an active `block-commit`, which mirrors new
+    writes while it runs) and complete the job, which switches the disk to
+    the zvol with the VM online. The zvol's nodes are named as Proxmox would
+    name them, the config is pointed at the zvol, the map is removed, and the
+    zvol is grown back to the registered size if it was larger. Replication
+    and HA come back only after that, so the first sync holds everything the
+    VM wrote.
+  - For an existing VM, HA stops it, its replication and replicas are
+    removed, its zvol is freed in place with `blkdiscard` (it must read as
+    zeros, since `pbs-restore --skip-zero` does not write the zero chunks)
+    and set to the restore point's size, and the production lifecycle hook
+    accepts the VM running from the overlay until the switch.
+  - Until the switch the VM cannot fail over or migrate, and depends on PBS
+    and on the process holding the map: when that process dies, every read
+    of unchanged data and some writes fail while Proxmox still reports the
+    VM running. BMAC watches the map and stops the VM when it dies; a host
+    reboot evicts backup-linked staging VMs.
+  - Proxmox's own live restore is not used: pve-qemu's PBS block driver
+    reports no zero ranges, so its copy walks the whole disk (about 10
+    minutes per TiB however little data it holds), and the VM starts before
+    a new identity could be patched.
 
 Single files are restored with Proxmox's own File Restore, not through BMAC.
 

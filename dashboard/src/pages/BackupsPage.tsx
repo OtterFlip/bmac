@@ -1,4 +1,4 @@
-import { Archive, CalendarClock, CopyPlus, History, Lock, LockOpen, MessageSquare, Play, RotateCcw, ShieldCheck } from "lucide-react";
+import { Archive, CalendarClock, CopyPlus, History, Lock, LockOpen, MessageSquare, Play, RotateCcw, ShieldCheck, FlaskConical } from "lucide-react";
 import { useStore } from "@/state/store";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -245,7 +245,7 @@ export function BackupsPage() {
                         ...(point.name && point.key_matches && registered.get(point.name) === point.vmid
                           ? [
                               {
-                                label: `Roll back ${point.name} to this point…`,
+                                label: `Full Restore to ${point.name}…`,
                                 icon: <RotateCcw />,
                                 danger: true,
                                 onSelect: () => launchWorkflow("rollback_restore", { resource: point.name!, snapshot: snapshotOf(point) }),
@@ -256,10 +256,17 @@ export function BackupsPage() {
                         ...(point.key_matches
                           ? [
                               {
-                                label: "Full Recovery from this point…",
+                                label: "Full Restore to New VM…",
                                 icon: <CopyPlus />,
                                 onSelect: () => launchWorkflow("full_recovery", { snapshot: snapshotOf(point) }),
                               },
+                              ...(point.name && registered.get(point.name) === point.vmid
+                                ? [{
+                                    label: "Instant Restore to Backup-Linked Staging VM…",
+                                    icon: <FlaskConical />,
+                                    onSelect: () => launchWorkflow("add_backup_linked_staging_vm", { snapshot: snapshotOf(point) }),
+                                  }]
+                                : []),
                             ]
                           : []),
                         point.protected
@@ -290,7 +297,7 @@ export function BackupsPage() {
         <h2 className="mb-2.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-fg-subtle">Backup operations</h2>
         <WorkflowTiles
           links={[{ title: "PBS Server Setup", summary: "How the PBS server, its namespaces, tokens, and prune jobs are set up.", url: PBS_SETUP_URL }]}
-          ids={["setup_pbs", "manage_backup_schedule", "backup_now", "protect_restore_point", "rollback_restore", "full_recovery", "list_backups"]}
+          ids={["setup_pbs", "manage_backup_schedule", "backup_now", "protect_restore_point", "rollback_restore", "full_recovery", "add_backup_linked_staging_vm", "list_backups"]}
         />
       </PageBody>
     </>
