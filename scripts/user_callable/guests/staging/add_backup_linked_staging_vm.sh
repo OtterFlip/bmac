@@ -27,9 +27,7 @@ APP_HA_STAGING_VM_SOURCE_ONLY=1 source "${BACKUP_LINKED_SCRIPT_DIR}/add_staging_
 # shellcheck source=../../../lib/backups.sh
 source "${REPO_ROOT}/scripts/lib/backups.sh"
 
-OVERLAY_STORAGE_ID=bmac-overlay
-OVERLAY_STORAGE_PATH=/var/lib/bmac-overlay
-REMOTE_BACKUP_LINK="${REMOTE_INSTALL_ROOT}/lib/backup_link.sh"
+REMOTE_BACKUP_LINK="$BACKUP_LINK_HELPER"
 SNAPSHOT=""
 SNAPSHOT_TIME=""
 SNAPSHOT_BYTES=""
@@ -337,31 +335,6 @@ collect_backup_linked_options() {
 # on each host's root filesystem. Created once per cluster; Proxmox creates
 # its directories by default (create-base-path, create-subdirs). The first
 # release passed the deprecated mkdir option, which is removed here.
-ensure_overlay_storage() {
-  CURRENT_PHASE="checking the overlay storage"
-  local storage
-  if storage="$(pvesh_get "/storage/${OVERLAY_STORAGE_ID}" 2>/dev/null)"; then
-    if python3 -c 'import json, sys; sys.exit(0 if "mkdir" in json.loads(sys.argv[1]) else 1)' "$storage"; then
-      node_exec "$COORDINATOR" pvesm set "$OVERLAY_STORAGE_ID" --delete mkdir >/dev/null ||
-        warn "Could not remove the deprecated mkdir option from ${OVERLAY_STORAGE_ID}"
-    fi
-    python3 - "$storage" "$OVERLAY_STORAGE_PATH" <<'PY' || die "Storage bmac-overlay exists but is not the directory storage BMAC expects; remove it and run again"
-import json
-import sys
-
-row = json.loads(sys.argv[1])
-content = set(str(row.get("content", "")).split(","))
-if row.get("type") != "dir" or row.get("path") != sys.argv[2] or "images" not in content or row.get("shared"):
-    raise SystemExit(1)
-PY
-    return 0
-  fi
-  log "Adding the overlay storage ${OVERLAY_STORAGE_ID} (${OVERLAY_STORAGE_PATH} on every host)"
-  node_exec "$COORDINATOR" pvesm add dir "$OVERLAY_STORAGE_ID" --path "$OVERLAY_STORAGE_PATH" \
-    --content images >/dev/null ||
-    die "Could not add the overlay storage ${OVERLAY_STORAGE_ID}"
-}
-
 reserve_backup_linked() {
   CURRENT_PHASE="atomically reserving staging identity"
   query_next_vmid
@@ -604,6 +577,8 @@ rollback_backup_linked_creation() {
   fi
   if [[ "$MAPPED" == true ]]; then
     node_exec "$STAGING_NODE" "$REMOTE_BACKUP_LINK" unmap "$STAGING_VMID" >/dev/null 2>&1 || clean=false
+    [[ "$clean" == false ]] ||
+      node_exec "$STAGING_NODE" "$REMOTE_BACKUP_LINK" forget "$STAGING_VMID" >/dev/null 2>&1 || clean=false
   fi
   if [[ "$REGISTRY_RESERVED" == true ]]; then
     if [[ "$clean" == true ]] && rollback_registry && registry_cmd release "$STAGING_NAME" >/dev/null 2>&1; then

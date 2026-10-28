@@ -943,6 +943,8 @@ elif "qm guest exec" in payload and "lsblk" in payload:
         "exitcode": 0,
         "out-data": json.dumps(layout),
     }}))
+elif "pvesm path" in payload:
+    print("/dev/zvol/rpool/data/" + payload.split("pvesm path", 1)[1].split()[0].strip("'").split(":", 1)[1])
 elif "pvesm status" in payload:
     pass
 elif "uname -m" in payload:

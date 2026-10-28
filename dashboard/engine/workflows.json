@@ -741,6 +741,22 @@
         { "id": "cores", "label": "vCPUs", "type": "integer", "flag": "--cores", "help": "Default: the restore point's vCPUs.", "advanced": true },
         { "id": "memory_gib", "label": "RAM (GiB)", "type": "integer", "flag": "--memory-gib", "help": "Default: the restore point's RAM.", "advanced": true }
       ]
+    },
+    {
+      "id": "instant_recovery",
+      "title": "Instant Restore to New Permanent VM",
+      "summary": "Create a new production VM from a restore point that serves its FQDNs within minutes, while its disk is copied.",
+      "description": "Full Restore to New VM without the wait: the same slot, VMID, form, and identity patching, but the VM boots within minutes from its restore point mapped read-only from PBS, behind a local overlay that takes its writes, and its FQDNs are routed to it at once. Reads of data not yet copied come from PBS and are slower. Meanwhile only the restore point's in-use data is copied into the VM's own zvol; then the running disk is switched to the zvol without a restart, the overlay and mapping are removed, and the VM gets its final networking, replication, HA, and monitoring. Until that switch it cannot be the source of a prod-linked staging VM. Rerun with the same purpose to resume, also after a host reboot during the copy.",
+      "category": "backups",
+      "script": "scripts/user_callable/backups/instant_recovery.sh",
+      "mode": "mutating",
+      "destructive": false,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "snapshot", "label": "Restore point", "type": "snapshot", "flag": "--snapshot", "help": "Such as vm/100/2026-10-27T14:50:01Z; chosen from every restore point this cluster can decrypt when empty." },
+        { "id": "cores", "label": "vCPUs", "type": "integer", "flag": "--cores", "help": "Default: the restore point's vCPUs.", "advanced": true },
+        { "id": "memory_gib", "label": "RAM (GiB)", "type": "integer", "flag": "--memory-gib", "help": "Default: the restore point's RAM.", "advanced": true }
+      ]
     }
   ]
 }

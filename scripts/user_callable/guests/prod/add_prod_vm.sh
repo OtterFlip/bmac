@@ -40,6 +40,10 @@ OWNER_NODE=""
 REGISTERED_OWNER_NODE=""
 ROOT_VOLUME=""
 REGISTERED_ROOT_VOLUME=""
+# Set by full_recovery.sh's instant restore while scsi0 is still the qcow2
+# overlay it boots from: verify_vm_config then expects that overlay as scsi0,
+# and ROOT_VOLUME stays the registered zvol it will switch to.
+ROOT_OVERLAY_VOLUME=""
 ROOT_PASSWORD_HASH=""
 INSTALL_PHASE="unknown"
 FINAL_NETWORK_ENABLED=true
@@ -1342,6 +1346,47 @@ PY
   STARTUP_SHA256="${values[2]}"
 }
 
+# This run's lease owner: the workstation's short host name and this
+# process's PID, so a later run on the same workstation can tell whether the
+# lease's run is still going.
+lease_owner() {
+  local host
+  host="$(hostname -s 2>/dev/null || hostname)"
+  host="$(LC_ALL=C tr -c 'A-Za-z0-9_.\n-' '-' <<<"$host")"
+  printf '%s-%s\n' "${host:-workstation}" "$$"
+}
+
+# A run that crashed, or whose terminal was closed, keeps its lease until it
+# expires a day or more later. Offer to take it over: freely when the lease's
+# run was on this workstation and its process is gone, and otherwise only
+# with the resource name typed, since two runs at once could damage the VM.
+offer_lease_takeover() {
+  local owner="$1" expires="$2" pid host verdict severity=warning phrase="" answer
+  pid="${owner##*-}"
+  host="${owner%-*}"
+  warn "The orchestration lease of $RESOURCE_NAME is held by $owner until $expires"
+  if [[ "$host" == "$(lease_owner | sed 's/-[0-9]*$//')" && "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null; then
+    verdict="It belongs to a run on this workstation (process $pid) that is no longer running, so a failed run left it behind."
+  else
+    verdict="This workstation cannot tell whether that run ($owner) is still going. Take the lease over only if no other run for $RESOURCE_NAME is going on any workstation: two at once could damage the VM."
+    severity=destructive
+    phrase="$RESOURCE_NAME"
+  fi
+  info "$verdict"
+  if bmac_ui_is_json; then
+    bmac_ui_confirm --id lease-takeover --title "Take over the lease of $RESOURCE_NAME?" \
+      --message "$verdict" --severity "$severity" ${phrase:+--text "$phrase"} \
+      --detail "Held by $owner until $expires" --confirm-label "Take over the lease"
+    return
+  fi
+  if [[ -n "$phrase" ]]; then
+    IFS= read -r -p "Type $phrase to take over the lease: " answer
+    [[ "$answer" == "$phrase" ]]
+  else
+    prompt_yes "Take over the lease?"
+  fi
+}
+
 renew_orchestration_lease() {
   local initial_phase="unknown" lease_ttl result
   [[ "$NEW_RESOURCE" == false ]] || initial_phase="unstarted"
@@ -1352,17 +1397,29 @@ renew_orchestration_lease() {
   ((lease_ttl >= 86400)) || lease_ttl=86400
   ((lease_ttl <= 172800)) ||
     die "Configured operation timeouts exceed the maximum lease duration"
-  result="$(
+  local holder="" error="${RUN_DIR}/lease.err"
+  local -a takeover=()
+  while ! result="$(
     registry_cmd orchestration-acquire "$RESOURCE_NAME" \
       --nonce "$ORCHESTRATION_NONCE" \
-      --owner "${COORDINATOR}-$$" \
+      --owner "$(lease_owner)" "${takeover[@]}" \
       --ttl-seconds "$lease_ttl" \
       --initial-install-phase "$initial_phase" \
       --final-network-enabled "$network_choice" \
       --startup-sha256 "$STARTUP_SHA256" \
       --source-iso-sha256 "${PROD_GUEST_OS_ISO_SHA256,,}" \
-      --install-mode "$PROD_GUEST_OS_INSTALL_MODE"
-  )" || die "Could not acquire the cluster-wide lease for $RESOURCE_NAME"
+      --install-mode "$PROD_GUEST_OS_INSTALL_MODE" 2>"$error"
+  )"; do
+    holder="$(sed -n 's/.*orchestration lease is held by \([^ ]*\) until \([^ ]*\)$/\1 \2/p' "$error" | tail -n 1)"
+    # Only the first acquisition may take over: a renewal that loses its
+    # lease means another run took it, and this one must stop.
+    if [[ -z "$holder" || "$ORCHESTRATION_LEASE_ACQUIRED" == true || ${#takeover[@]} -gt 0 ]]; then
+      die "Could not acquire the cluster-wide lease for $RESOURCE_NAME: $(tr '\n' ' ' <"$error")"
+    fi
+    offer_lease_takeover "${holder%% *}" "${holder#* }" ||
+      die "The lease of $RESOURCE_NAME stays with ${holder%% *}; nothing was changed"
+    takeover=(--take-over-from "${holder%% *}")
+  done
   parse_orchestration_metadata "$result" ||
     die "Could not parse the durable install phase"
   ORCHESTRATION_LEASE_ACQUIRED=true
@@ -1740,7 +1797,7 @@ verify_vm_config() {
       "$PROD_VM_STORAGE" "$PROD_VM_BRIDGE" "$VM_MAC" "$HOOK_REF" \
       "$PRODUCTION_VM_TAG" "$PURPOSE_TAG" "$ISO_STORAGE_ID" "$ISO_FILENAME" \
       "$ROOT_VOLUME" "$(registered_disk_bytes)" "$INSTALL_PHASE" \
-      "$FINAL_NETWORK_ENABLED" >"$parsed_config" <<'PY'
+      "$FINAL_NETWORK_ENABLED" "$ROOT_OVERLAY_VOLUME" >"$parsed_config" <<'PY'
 import re
 import sys
 
@@ -1762,6 +1819,7 @@ import sys
     disk_bytes,
     install_phase,
     final_network_enabled,
+    overlay_volume,
 ) = sys.argv[1:]
 config = {}
 with open(path, encoding="utf-8") as stream:
@@ -1865,9 +1923,12 @@ if len(data_disks) != 1 or data_disks[0][0] != "scsi0":
     fail("production VM must have exactly one scsi0 data disk")
 disk_parts = data_disks[0][1].split(",")
 root_volume = disk_parts[0]
-if not root_volume.startswith(storage + ":"):
+if overlay_volume:
+    if root_volume != overlay_volume:
+        fail("root disk is not the instant restore's overlay")
+elif not root_volume.startswith(storage + ":"):
     fail("root disk is not on production storage")
-if registered_root_volume and root_volume != registered_root_volume:
+elif registered_root_volume and root_volume != registered_root_volume:
     fail("root disk volume identity differs from registry")
 disk_options = dict(part.split("=", 1) for part in disk_parts[1:] if "=" in part)
 if set(disk_options) != {"discard", "iothread", "replicate", "size", "ssd"}:
@@ -1906,7 +1967,7 @@ PY
   fi
   mapfile -d '' -t values <"$parsed_config"
   ((${#values[@]} == 2)) || die "Could not parse VM disk configuration"
-  ROOT_VOLUME="${values[0]}"
+  [[ -n "$ROOT_OVERLAY_VOLUME" ]] || ROOT_VOLUME="${values[0]}"
   validate_safe_id "root volume ID" "$ROOT_VOLUME"
   ATTACHED_ISO_VOLUME="${values[1]}"
   if [[ -n "$ATTACHED_ISO_VOLUME" ]]; then

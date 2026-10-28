@@ -176,17 +176,19 @@ class ProductionClonePatchTest(unittest.TestCase):
 
 
     def test_overlay_mode_arguments(self) -> None:
-        """--qcow2 patches a backup-linked staging VM's overlay through qemu-nbd."""
-        directory = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: [p.unlink() for p in directory.rglob("*") if p.is_file()])
+        """--qcow2 patches an overlay through qemu-nbd: a backup-linked staging
+        VM's, or in production mode an instant-restored VM's own."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name)
         overlay = directory / "images" / "901" / "vm-901-disk-1.qcow2"
         overlay.parent.mkdir(parents=True)
         overlay.write_bytes(b"QFI")
         common = ('--address 10.213.0.111/24 --gateway 10.213.0.10 --mac 02:ab:00:00:01:01 '
-                  '--dns 1.1.1.1 --root-hash-file "$HASH" --name stage1prod1')
+                  '--dns 1.1.1.1 --root-hash-file "$HASH"')
 
-        def checks(arguments: str, expected: int = 0) -> subprocess.CompletedProcess[str]:
-            body = (f"parse_args {common} {arguments}\n"
+        def checks(arguments: str, expected: int = 0, name: str = "--name stage1prod1") -> subprocess.CompletedProcess[str]:
+            body = (f"parse_args {common} {name} {arguments}\n"
                     + "eval \"$(declare -f validate_request | sed -e 's/((EUID == 0)) ||/true ||/')\"\n"
                     + "validate_request\n")
             return self.run_sourced(body, expected=expected)
@@ -202,6 +204,10 @@ class ProductionClonePatchTest(unittest.TestCase):
         self.assertIn("must be an existing overlay file",
                       checks(f"--qcow2 {directory}/missing/vm-901-disk-1.qcow2 "
                              "--volume-id bmac-overlay:901/vm-901-disk-1.qcow2", expected=1).stderr)
+        production = '--mode production --authorized-keys-file "$KEYS" --volume-id bmac-overlay:901/vm-901-disk-1.qcow2'
+        checks(f"--qcow2 {overlay} {production} --owner-vmid 901 --new-identity", name="--name prod3")
+        self.assertIn("--owner-vmid must be the VMID that owns the volume",
+                      checks(f"--qcow2 {overlay} {production} --owner-vmid 90", name="--name prod3", expected=1).stderr)
 
 
 if __name__ == "__main__":

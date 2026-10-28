@@ -480,6 +480,12 @@ its retention policy first, following
 - **Full Restore to New VM** creates a new production VM from a restore
   point, for example on a rebuilt cluster, with a new identity when the
   original still exists.
+- **Instant Restore to New Permanent VM** does the same as Full Restore to
+  New VM, but the VM serves its FQDNs within minutes, from the restore point
+  on PBS, while its data is copied to its own disk in the background. Then
+  its disk is switched over without a restart, and it gets replication and
+  HA. Until then, reads of data not yet copied are slower, it cannot fail
+  over, and it cannot be the source of a prod-linked staging VM.
 - **Instant Restore to Backup-Linked Staging VM** boots a restore point as a
   disposable staging VM within about a minute, without copying its data
   (see [Creating or Removing a Staging VM](#creating-or-removing-a-staging-vm)).

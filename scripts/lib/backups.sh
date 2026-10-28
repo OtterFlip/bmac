@@ -15,6 +15,12 @@ BACKUP_EVERY_HOURS=(1 2 3 4 6 8 12 24)
 BACKUP_DEFAULT_EVERY_HOURS=4
 BACKUP_REGISTRY=/usr/local/lib/app-ha-proxmox/lib/cluster_registry.py
 BACKUP_PBS_API=/usr/local/lib/app-ha-proxmox/lib/pbs_api.py
+BACKUP_LINK_HELPER=/usr/local/lib/app-ha-proxmox/lib/backup_link.sh
+INSTANT_SWITCH_HELPER=/usr/local/lib/app-ha-proxmox/lib/instant_switch.py
+# The directory storage, local to each host, holding the qcow2 overlays that
+# backup-linked and instant-restored VMs boot from.
+OVERLAY_STORAGE_ID=bmac-overlay
+OVERLAY_STORAGE_PATH=/var/lib/bmac-overlay
 
 backup_job_id() {
   printf '%s%s\n' "$BACKUP_JOB_PREFIX" "$1"
@@ -195,4 +201,31 @@ if progress:
     open(sys.argv[3], "w").write(f"{progress[0]}\t{progress[1]}\n")
 print(last)
 PY
+}
+
+# Add the overlay storage, or check the one there. Needs pvesh_get,
+# node_exec, COORDINATOR, log, warn, and die from the calling script.
+ensure_overlay_storage() {
+  CURRENT_PHASE="checking the overlay storage"
+  local storage
+  if storage="$(pvesh_get "/storage/${OVERLAY_STORAGE_ID}" 2>/dev/null)"; then
+    if python3 -c 'import json, sys; sys.exit(0 if "mkdir" in json.loads(sys.argv[1]) else 1)' "$storage"; then
+      node_exec "$COORDINATOR" pvesm set "$OVERLAY_STORAGE_ID" --delete mkdir >/dev/null ||
+        warn "Could not remove the deprecated mkdir option from ${OVERLAY_STORAGE_ID}"
+    fi
+    python3 - "$storage" "$OVERLAY_STORAGE_PATH" <<'PY' || die "Storage bmac-overlay exists but is not the directory storage BMAC expects; remove it and run again"
+import json
+import sys
+
+row = json.loads(sys.argv[1])
+content = set(str(row.get("content", "")).split(","))
+if row.get("type") != "dir" or row.get("path") != sys.argv[2] or "images" not in content or row.get("shared"):
+    raise SystemExit(1)
+PY
+    return 0
+  fi
+  log "Adding the overlay storage ${OVERLAY_STORAGE_ID} (${OVERLAY_STORAGE_PATH} on every host)"
+  node_exec "$COORDINATOR" pvesm add dir "$OVERLAY_STORAGE_ID" --path "$OVERLAY_STORAGE_PATH" \
+    --content images >/dev/null ||
+    die "Could not add the overlay storage ${OVERLAY_STORAGE_ID}"
 }

@@ -11,7 +11,12 @@
 #   backup_link.sh status VMID print alive, dead, or absent
 #   backup_link.sh create-overlay VMID VOLUME
 #                              create the VM's qcow2 overlay over its mapping
+#   backup_link.sh restore VMID ARCHIVE DEVICE [--skip-zero]
+#                              write one image of the VM's restore point (such
+#                              as drive-scsi0.img.fidx) to a /dev/zvol device
 #   backup_link.sh unmap VMID  remove the mapping, idempotently
+#   backup_link.sh forget VMID forget the VM's restore point (once its
+#                              overlay is gone)
 #
 # proxmox-backup-client map presents the disk image through FUSE on a loop
 # device, and serves it for as long as its process lives. That process runs
@@ -20,6 +25,10 @@
 # the loop device and is the overlay's backing file, so the overlay never
 # names a loop number. /run is emptied by a reboot, which ends every mapping;
 # the deferred-cleanup worker then evicts the VMs that used them.
+#
+# The restore point an overlay was made over is also recorded on disk
+# (/var/lib/app-ha/backup-link/VMID.snapshot), so a later map, after a dead
+# mapping or a reboot, can only ever put the same restore point under it.
 #
 # The connection settings and the token come from the PVE PBS storage, as
 # for pbs_api.py; the token is passed in the environment, never on a command
@@ -32,10 +41,14 @@ umask 077
 TEST_MODE="${APP_HA_BACKUP_LINK_TEST_MODE:-0}"
 if [[ "$TEST_MODE" == 1 ]]; then
   LINK_DIR="${APP_HA_BACKUP_LINK_DIR:?APP_HA_BACKUP_LINK_DIR is required in test mode}"
+  RECORD_DIR="${APP_HA_BACKUP_LINK_RECORD_DIR:?APP_HA_BACKUP_LINK_RECORD_DIR is required in test mode}"
+  ZVOL_DIR="${APP_HA_BACKUP_LINK_ZVOL_DIR:?APP_HA_BACKUP_LINK_ZVOL_DIR is required in test mode}"
   STORAGE_CFG="${APP_HA_STORAGE_CFG:?APP_HA_STORAGE_CFG is required in test mode}"
   STORAGE_PRIV="${APP_HA_STORAGE_PRIV:?APP_HA_STORAGE_PRIV is required in test mode}"
 else
   LINK_DIR=/run/bmac-backup-link
+  RECORD_DIR=/var/lib/app-ha/backup-link
+  ZVOL_DIR=/dev/zvol
   STORAGE_CFG=/etc/pve/storage.cfg
   STORAGE_PRIV=/etc/pve/priv/storage
 fi
@@ -47,7 +60,7 @@ die() {
 }
 
 usage() {
-  sed -n '7,16p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '7,21p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 require_vmid() {
@@ -56,7 +69,7 @@ require_vmid() {
 
 # A loop device; in test mode also a fake one under LINK_DIR.
 is_block() {
-  [[ -b "$1" ]] || [[ "$TEST_MODE" == 1 && -f "$1" && "$1" == "${LINK_DIR}"/fake-loop* ]]
+  [[ -b "$1" ]] || [[ "$TEST_MODE" == 1 && -f "$1" && ("$1" == "${LINK_DIR}"/fake-loop* || "$1" == "${ZVOL_DIR}"/*) ]]
 }
 
 scope_unit() {
@@ -137,7 +150,11 @@ command_map() {
   [[ "$snapshot" =~ $SNAPSHOT_RE ]] || die "SNAPSHOT must look like vm/100/2026-10-27T14:50:01Z"
   [[ "$storage" =~ ^[A-Za-z][A-Za-z0-9_.-]{0,63}$ ]] || die "invalid storage ID"
   link="$(link_path "$vmid")"
-  install -d -m 0700 "$LINK_DIR"
+  install -d -m 0700 "$LINK_DIR" "$RECORD_DIR"
+  local recorded
+  recorded="$(cat "${RECORD_DIR}/${vmid}.snapshot" 2>/dev/null)" || recorded=""
+  [[ -z "$recorded" || "$recorded" == "${storage} ${snapshot}" ]] ||
+    die "VM $vmid's overlay was made over ${recorded#* }, not $snapshot"
 
   case "$(state_of "$vmid")" in
     alive)
@@ -168,8 +185,37 @@ command_map() {
   loop="$(grep -oE '(/dev/loop|'"${LINK_DIR}"'/fake-loop)[0-9]+' <<<"$output" | head -n 1)"
   [[ -n "$loop" ]] && is_block "$loop" || die "mapping ${snapshot} produced no loop device: $(tr '\n' ' ' <<<"$output")"
   printf '%s\n' "$snapshot" >"${LINK_DIR}/${vmid}.snapshot"
+  printf '%s %s\n' "$storage" "$snapshot" >"${RECORD_DIR}/${vmid}.snapshot"
   ln -sfn "$loop" "$link"
   printf '%s\n' "$link"
+}
+
+# Write one image of the VM's recorded restore point to a zvol with
+# pbs-restore, the tool Proxmox's own restores use. With --skip-zero it
+# skips the zero chunks by their digest, without fetching or writing them;
+# that is only correct on a device that already reads as zeros.
+command_restore() {
+  local vmid="$1" archive="$2" device="$3" skip_zero="${4:-}" recorded storage snapshot
+  require_vmid "$vmid"
+  [[ "$archive" =~ ^drive-[a-z]+[0-9]+\.img\.fidx$ ]] || die "ARCHIVE must look like drive-scsi0.img.fidx"
+  [[ "${device#"${ZVOL_DIR}/"}" =~ ^[A-Za-z0-9._+:-]+(/[A-Za-z0-9._+:-]+)+$ && "$device" != *..* ]] &&
+    is_block "$device" || die "DEVICE must be a /dev/zvol block device"
+  [[ -z "$skip_zero" || "$skip_zero" == --skip-zero ]] || die "unknown option: $skip_zero"
+  recorded="$(cat "${RECORD_DIR}/${vmid}.snapshot" 2>/dev/null)" || die "VM $vmid has no recorded restore point"
+  storage="${recorded%% *}"
+  snapshot="${recorded#* }"
+  local -a settings=()
+  mapfile -t settings < <(storage_settings "$storage") || die "cannot read storage $storage"
+  ((${#settings[@]} == 3)) || die "cannot read storage $storage"
+  local key="${STORAGE_PRIV}/${storage}.enc"
+  local -a arguments=(--repository "${settings[0]}")
+  [[ -z "${settings[1]}" ]] || arguments+=(--ns "${settings[1]}")
+  arguments+=("$snapshot" "$archive" "$device" --format raw)
+  [[ ! -f "$key" ]] || arguments+=(--keyfile "$key")
+  [[ -z "$skip_zero" ]] || arguments+=(--skip-zero)
+  PBS_PASSWORD="$(cat "${STORAGE_PRIV}/${storage}.pw")" || die "cannot read the token of storage $storage"
+  export PBS_PASSWORD PBS_FINGERPRINT="${settings[2]}"
+  pbs-restore "${arguments[@]}" </dev/null >&2 || die "pbs-restore of $archive from $snapshot failed"
 }
 
 command_create_overlay() {
@@ -204,6 +250,12 @@ command_unmap() {
   [[ "$(state_of "$vmid")" == absent ]] || die "the mapping of VM $vmid is still present"
 }
 
+command_forget() {
+  require_vmid "$1"
+  [[ "$(state_of "$1")" == absent ]] || die "VM $1 still has a mapping; unmap it first"
+  rm -f -- "${RECORD_DIR}/${1}.snapshot"
+}
+
 main() {
   local command="${1:-}"
   shift || true
@@ -212,6 +264,8 @@ main() {
     status) (($# == 1)) || die "status needs VMID"; require_vmid "$1"; state_of "$1" ;;
     create-overlay) (($# == 2)) || die "create-overlay needs VMID VOLUME"; command_create_overlay "$@" ;;
     unmap) (($# == 1)) || die "unmap needs VMID"; command_unmap "$1" ;;
+    restore) (($# == 3 || $# == 4)) || die "restore needs VMID ARCHIVE DEVICE [--skip-zero]"; command_restore "$@" ;;
+    forget) (($# == 1)) || die "forget needs VMID"; command_forget "$1" ;;
     -h | --help) usage ;;
     *) usage >&2; exit 2 ;;
   esac

@@ -2919,10 +2919,14 @@ def command_orchestration_acquire(
                     "orchestration record belongs to an obsolete resource"
                 )
             lease = record["lease"]
+            # --take-over-from replaces an unexpired lease only when it is
+            # still the one the operator chose to take over, after its run
+            # failed without releasing it.
             if (
                 lease is not None
                 and lease["nonce"] != args.nonce
                 and parse_timestamp(lease["expires_at"]) > now
+                and lease["owner"] != args.take_over_from
             ):
                 raise RegistryError(
                     "resource orchestration lease is held by "
@@ -4588,6 +4592,10 @@ def build_parser() -> argparse.ArgumentParser:
     orchestration_acquire.add_argument("name")
     orchestration_acquire.add_argument("--nonce", required=True)
     orchestration_acquire.add_argument("--owner", required=True)
+    orchestration_acquire.add_argument(
+        "--take-over-from",
+        help="take over an unexpired lease held by this owner, left by a failed run",
+    )
     orchestration_acquire.add_argument(
         "--ttl-seconds", type=int, default=86400
     )

@@ -42,6 +42,7 @@ class UpdateClusterRuntimeTests(unittest.TestCase):
             "app_ha_monitor.py",
             "pbs_api.py",
             "backup_link.sh",
+            "instant_switch.py",
         ):
             self.assertIn(f"/usr/local/lib/app-ha-proxmox/lib/{name}", text)
             self.assertTrue((runtime / name).is_file(), name)

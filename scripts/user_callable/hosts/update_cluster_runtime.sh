@@ -32,7 +32,7 @@ RUNTIME_FILES=(
   config.sh cluster_registry.py process_deferred_cleanup.sh "$HOOK_NAME"
   guest_network.sh egress_health.py egress_probe_targets.txt transfer_counter.py
   tunnel_config.py tunnel_sync.sh cloudflared_setup.sh app_ha_monitor.py
-  pbs_api.py backup_link.sh
+  pbs_api.py backup_link.sh instant_switch.py
 )
 INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${INSTALL_ROOT}/lib/cluster_registry.py"
@@ -100,6 +100,7 @@ Update these runtime files on every configured, online Proxmox node:
   /usr/local/lib/app-ha-proxmox/lib/app_ha_monitor.py
   /usr/local/lib/app-ha-proxmox/lib/pbs_api.py
   /usr/local/lib/app-ha-proxmox/lib/backup_link.sh
+  /usr/local/lib/app-ha-proxmox/lib/instant_switch.py
   local:snippets/app-ha-guest-role-hook.sh
 
 The script stages and validates the complete bundle on every node before

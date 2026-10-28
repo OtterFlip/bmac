@@ -658,6 +658,27 @@ class RegistryCliTest(unittest.TestCase):
         self.run_registry("update", "prod1", "--replication-interval", "0", expected=1)
         self.run_registry("update", "prod1", "--memory-mb", "-1", expected=1)
 
+    def test_a_failed_runs_lease_can_be_taken_over_by_its_owner_name(self) -> None:
+        self.allocate_prod()
+
+        def acquire(nonce: str, owner: str, *extra: str, expected: int = 0):
+            return self.run_registry(
+                "orchestration-acquire", "prod1", "--nonce", nonce, "--owner", owner, *extra,
+                "--ttl-seconds", "600", "--initial-install-phase", "unstarted",
+                "--source-iso-sha256", "d" * 64, "--install-mode", "ubuntu-autoinstall", expected=expected,
+            )
+
+        acquire("a" * 32, "onyx-100")
+        _, refused = acquire("b" * 32, "onyx-200", expected=1)
+        self.assertRegex(refused.stderr, r"orchestration lease is held by onyx-100 until \S+$")
+        # Naming any other owner, such as a run that took it over meanwhile, takes nothing.
+        acquire("b" * 32, "onyx-200", "--take-over-from", "onyx-999", expected=1)
+        taken, _ = acquire("b" * 32, "onyx-200", "--take-over-from", "onyx-100")
+        self.assertEqual((taken["lease"]["nonce"], taken["lease"]["owner"]), ("b" * 32, "onyx-200"))
+        self.assertEqual(taken["install_phase"], "unstarted")
+        # The failed run's nonce no longer holds it.
+        self.run_registry("orchestration-release", "prod1", "--nonce", "a" * 32, expected=1)
+
     def test_production_orchestration_lease_and_install_sentinel(self) -> None:
         allocation = self.allocate_prod()
         resource = allocation["resource"]

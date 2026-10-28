@@ -1037,6 +1037,12 @@ if disk_keys != {"scsi0", "efidisk0"}:
     raise SystemExit("production source must have exactly scsi0 and efidisk0")
 volume = config["scsi0"].split(",", 1)[0]
 value = config["scsi0"]
+# A prod-linked staging VM is a clone of production's replicated zvol. An
+# instant-restored VM runs from a qcow2 overlay over its PBS backup until its
+# disk is switched to its zvol, so it cannot be a source before then.
+if volume.endswith(".qcow2") or volume.startswith("bmac-overlay:"):
+    raise SystemExit("production root disk is still an instant restore's overlay over its PBS backup; "
+                     "it can be a staging source once it has switched to its replicated zvol")
 if volume != registered_volume or not volume.startswith(storage + ":"):
     raise SystemExit("production root volume differs from registry/local-zfs")
 if "replicate=0" in value:
@@ -1058,6 +1064,13 @@ PY
   SOURCE_VOLUME="${SOURCE_VOLUMES[0]}"
   validate_safe_id "source root volume" "$SOURCE_VOLUME"
   validate_safe_id "source EFI volume" "${SOURCE_VOLUMES[1]}"
+  local volume path
+  for volume in "${SOURCE_VOLUMES[@]}"; do
+    path="$(node_exec "$SOURCE_OWNER" pvesm path "$volume")" ||
+      die "Could not resolve production volume $volume"
+    [[ "$path" =~ ^/dev/zvol/[A-Za-z0-9._/+:-]+$ ]] ||
+      die "Production volume $volume is not a ZFS zvol; a staging clone needs production on its replicated zvol"
+  done
   node_exec "$SOURCE_OWNER" qm agent "$SOURCE_VMID" ping >/dev/null ||
     die "Production QEMU guest agent is not responsive"
   layout_json="$(
@@ -2573,9 +2586,12 @@ remove_staging_vm_and_clone() {
     fi
   fi
   if [[ "$VM_MAY_EXIST" == true && -n "$STAGING_VMID" ]]; then
-    live_presence="$(
-      pvesh_get /cluster/resources --type vm 2>/dev/null |
-        python3 -c '
+    # The cluster's resource list drops a destroyed VM a moment later.
+    local deadline=$((SECONDS + 30))
+    while :; do
+      live_presence="$(
+        pvesh_get /cluster/resources --type vm 2>/dev/null |
+          python3 -c '
 import json
 import sys
 wanted = int(sys.argv[1])
@@ -2586,7 +2602,10 @@ print(
     else "absent"
 )
 ' "$STAGING_VMID"
-    )" || live_presence=""
+      )" || live_presence=""
+      [[ "$live_presence" != absent && "$ok" == true && SECONDS -lt deadline ]] || break
+      sleep 2
+    done
     if [[ "$live_presence" != absent ]]; then
       warn "Rollback could not prove staging VMID $STAGING_VMID is absent"
       ok=false

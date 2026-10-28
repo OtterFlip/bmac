@@ -262,7 +262,8 @@ class FullRecoveryTest(unittest.TestCase):
         self.assertTrue(any("zfs set volmode=full" in line for line in volmode), volmode)
         self.assertIn("node mox2 zfs inherit volmode rpool/data/vm-105-disk-1", calls)
         self.assertLess(calls.index(run), calls.index("node mox2 zfs inherit volmode rpool/data/vm-105-disk-1"))
-        self.assertEqual(calls[-1], "phase installed-confirmed")
+        # main advances the phase, after an instant restore has also attached its overlay.
+        self.assertFalse(any(line.startswith("phase ") for line in calls))
 
         failed = patch("false", 1)
         calls = self.recorded()
@@ -272,6 +273,219 @@ class FullRecoveryTest(unittest.TestCase):
         self.assertNotIn("phase installed-confirmed", calls)
 
 
+class FullRecoveryLeaseTest(FullRecoveryTest):
+    """A failed run releases its lease; one left behind can be taken over."""
+
+    def test_a_failed_run_still_runs_add_prod_vms_cleanup(self) -> None:
+        self.run_body("""
+            remove_remote_patch_bundle() { record bundle; }
+            add_prod_vm_cleanup() { record "add_prod_vm cleanup $?"; }
+            trap cleanup EXIT
+            exit 3
+            """, expected=3)
+        self.assertEqual(self.recorded(), ["bundle", "add_prod_vm cleanup 3"])
+
+    def acquire(self, owner: str, answer: str, acquired: str = "false", expected: int = 0):
+        return self.run_body(f"""
+            registry_cmd() {{
+              record registry "$@"
+              if [[ " $* " != *" --take-over-from "* ]]; then
+                printf 'ERROR: resource orchestration lease is held by %s until 2026-10-29T01:00:00+00:00\\n' "{owner}" >&2
+                return 1
+              fi
+              printf '%s\\n' '{{"install_phase": "unstarted", "final_network_enabled": true, "startup_sha256": null}}'
+            }}
+            RESOURCE_NAME=prod2; NEW_RESOURCE=false; FINAL_NETWORK_ENABLED=true; ORCHESTRATION_NONCE={"a" * 32}
+            ORCHESTRATION_LEASE_ACQUIRED={acquired}; STARTUP_SHA256=none; PROD_GUEST_OS_ISO_SHA256={"e" * 64}
+            PROD_GUEST_OS_INSTALL_MODE=ubuntu-autoinstall
+            INSTALL_TIMEOUT_SECONDS=3600; QGA_TIMEOUT_SECONDS=600; REPLICATION_TIMEOUT_SECONDS=3600
+            renew_orchestration_lease
+            echo "phase $INSTALL_PHASE"
+            """, stdin=answer, expected=expected)
+
+    def owner_here(self, pid: str) -> str:
+        host = subprocess.run(["bash", "-c", f"FULL_RECOVERY_SOURCE_ONLY=1 source {shlex.quote(str(SCRIPT))}; lease_owner"],
+                              capture_output=True, text=True, check=True).stdout.strip().rsplit("-", 1)[0]
+        return f"{host}-{pid}"
+
+    def test_a_lease_whose_run_ended_on_this_workstation_is_taken_over_on_yes(self) -> None:
+        dead = subprocess.run(["sh", "-c", "echo $$"], capture_output=True, text=True, check=True).stdout.strip()
+        owner = self.owner_here(dead)
+        completed = self.acquire(owner, "y\n")
+        self.assertIn("no longer running", completed.stdout + completed.stderr)
+        calls = [line for line in self.recorded() if line.startswith("registry")]
+        self.assertEqual(len(calls), 2)
+        self.assertIn(f"--take-over-from {owner}", calls[1])
+        self.assertIn("phase unstarted", completed.stdout)
+        completed = self.acquire(owner, "n\n", expected=1)
+        self.assertIn(f"stays with {owner}; nothing was changed", completed.stderr)
+
+    def test_a_lease_from_elsewhere_needs_the_resource_name_typed(self) -> None:
+        completed = self.acquire("mox1-4022659", "y\n", expected=1)
+        self.assertIn("cannot tell whether that run (mox1-4022659) is still going", completed.stdout + completed.stderr)
+        self.calls.write_text("")
+        self.acquire("mox1-4022659", "prod2\n")
+        self.assertIn("--take-over-from mox1-4022659", self.recorded()[-1])
+
+    def test_a_renewal_never_takes_a_lease_back(self) -> None:
+        completed = self.acquire(self.owner_here("1"), "y\n", acquired="true", expected=1)
+        self.assertIn("Could not acquire the cluster-wide lease for prod2: ERROR: resource orchestration lease is held by",
+                      completed.stderr)
+        self.assertEqual(len(self.recorded()), 1)
+
+
+class FullRecoveryInstantTest(FullRecoveryTest):
+    """--instant: the VM boots from an overlay over the mapped restore point,
+    its zvol is filled while it runs, and the running disk is switched."""
+
+    COMMON = """
+        BACKUP_LINK_HELPER=/lib/backup_link.sh; INSTANT_SWITCH_HELPER=/lib/instant_switch.py
+        VMID=105; RESOURCE_NAME=prod3; PURPOSE_SLUG=pinbinapp; PROD_VM_STORAGE=local-zfs
+        INITIAL_NODE=mox2; OWNER_NODE=mox2; SNAPSHOT=vm/100/2026-10-27T16:04:23Z
+        INSTANT_OVERLAY=bmac-overlay:105/vm-105-disk-1.qcow2; ROOT_VOLUME=local-zfs:vm-105-disk-1
+        PRIMARY_DOMAIN=pinbinapp.com; ALIAS_DOMAINS=(); REMOTE_TUNNEL_SYNC=/lib/tunnel_sync.sh
+        renew_orchestration_lease() { :; }
+        mox_ssh() { record ssh "$@"; }
+    """
+
+    def test_create_args_keep_the_restore_points_settings(self) -> None:
+        config = dict(line.split(": ", 1) for line in BACKUP_CONFIG.splitlines() if ": " in line and line[0] != "#")
+        (self.root / "backup-config.json").write_text(json.dumps({**config, "smbios1": "uuid=1111"}))
+        def args(new_identity: str) -> list[str]:
+            completed = self.run_body(f"""
+                PROD_VM_STORAGE=local-zfs; NEW_IDENTITY={new_identity}
+                instant_create_args | tr '\\0' '\\n'
+                """)
+            return completed.stdout.splitlines()
+        same = args("false")
+        self.assertEqual(same, ["--machine", "q35", "--bios", "ovmf", "--balloon", "0", "--ostype", "l26",
+                                "--scsihw", "virtio-scsi-single", "--agent", "enabled=1,fstrim_cloned_disks=1",
+                                "--smbios1", "uuid=1111",
+                                "--efidisk0", "local-zfs:1,efitype=4m,ms-cert=2023k,pre-enrolled-keys=1"])
+        new = args("true")
+        self.assertEqual(new.count("--smbios1"), 1)
+        self.assertRegex(new[new.index("--smbios1") + 1], r"^uuid=[0-9a-f-]{36}$")
+        self.assertNotIn("uuid=1111", new)
+
+    def test_prepare_builds_the_vm_around_a_patched_overlay(self) -> None:
+        completed = self.run_body(self.COMMON + """
+            # The new VM's name shows in the cluster's resource list only on the second look.
+            locate_vm() {
+              [[ -s "$RUN_DIR/created" ]] || return 1
+              [[ -s "$RUN_DIR/named" ]] || { echo yes >"$RUN_DIR/named"; return 4; }
+              OWNER_NODE=mox2; VM_LIVE_STATUS=stopped
+            }
+            sleep() { :; }
+            RESOURCE_STATE=reserved; REGISTERED_ROOT_VOLUME=""
+            node_exec() {
+              record node "$@"
+              case "$2 ${3:-}" in
+                "qm create") echo yes >"$RUN_DIR/created" ;;
+                "qm config") echo 'efidisk0: local-zfs:vm-105-disk-0,efitype=4m,size=1M' ;;
+                "pvesm path") echo /dev/zvol/rpool/data/vm-105-disk-0 ;;
+                "/lib/backup_link.sh create-overlay") echo /var/lib/bmac-overlay/images/105/vm-105-disk-1.qcow2 ;;
+              esac
+            }
+            instant_create_args() { printf -- '--bios\\0ovmf\\0'; }
+            ensure_overlay_storage() { record overlay-storage; }
+            apply_disk_allocation() { record allocation; }
+            ensure_registry_provisioning() { record provisioning "$ROOT_VOLUME"; }
+            refresh_resource() { :; }
+            patch_offline() { record patch "$@"; }
+            verify_vm_config() { record verify "$ROOT_OVERLAY_VOLUME" "$ROOT_VOLUME"; }
+            BACKUP_DISK_BYTES=$((32 * 1024 * 1024 * 1024)); VM_CORES=2; VM_MEMORY_MB=4096; PROD_VM_CPU_TYPE=host
+            VM_MAC=02:00:00:00:00:03; PROD_VM_BRIDGE=vmbr1; VM_TAGS="a;b"
+            instant_prepare_vm
+            echo "pending $INSTANT_PENDING"
+            """)
+        calls = [line for line in self.recorded() if not line.startswith("node mox2 test -x")]
+        self.assertEqual(calls, [
+            "node mox2 /lib/backup_link.sh unmap 105", "node mox2 /lib/backup_link.sh forget 105",
+            "overlay-storage",
+            "node mox2 qm create 105 --name prod3 --description Production guest (pinbinapp) --cores 2 --memory 4096 "
+            "--cpu host --net0 virtio=02:00:00:00:00:03,bridge=vmbr1,firewall=1 --tags a;b --onboot 0 --bios ovmf",
+            "node mox2 /lib/backup_link.sh map 105 vm/100/2026-10-27T16:04:23Z --storage bmac-pbs",
+            "node mox2 qm config 105",
+            "node mox2 pvesm path local-zfs:vm-105-disk-0",
+            # The EFI disk is not zero-filled, so its restore writes every chunk.
+            "node mox2 /lib/backup_link.sh restore 105 drive-efidisk0.img.fidx /dev/zvol/rpool/data/vm-105-disk-0",
+            "node mox2 pvesm alloc local-zfs 105 vm-105-disk-1 33554432",
+            "allocation", "provisioning local-zfs:vm-105-disk-1",
+            "node mox2 /lib/backup_link.sh create-overlay 105 bmac-overlay:105/vm-105-disk-1.qcow2",
+            "patch /var/lib/bmac-overlay/images/105/vm-105-disk-1.qcow2",
+            "node mox2 qm set 105 --scsi0 bmac-overlay:105/vm-105-disk-1.qcow2,discard=on,iothread=1,replicate=1,ssd=1 "
+            "--boot order=scsi0",
+            "verify bmac-overlay:105/vm-105-disk-1.qcow2 local-zfs:vm-105-disk-1",
+        ])
+        self.assertIn("pending true", completed.stdout)
+
+    def test_an_unpatched_earlier_attempt_is_removed_with_all_its_volumes(self) -> None:
+        self.run_body(self.COMMON + """
+            locate_vm() { OWNER_NODE=mox1; VM_LIVE_STATUS=stopped; }
+            node_exec() { record node "$@"; }
+            discard_partial_restore
+            """)
+        self.assertEqual(self.recorded(), [
+            "node mox1 qm destroy 105 --destroy-unreferenced-disks 1", "node mox1 test -x /lib/backup_link.sh",
+            "node mox1 /lib/backup_link.sh unmap 105", "node mox1 /lib/backup_link.sh forget 105"])
+        completed = self.run_body(self.COMMON + """
+            locate_vm() { OWNER_NODE=mox1; VM_LIVE_STATUS=running; }
+            discard_partial_restore
+            """, expected=1)
+        self.assertIn("an unpatched recovery must stay stopped", completed.stderr)
+
+    def copy(self, state: str, link: str = "alive", status: str = "running") -> list[str]:
+        self.calls.write_text("")
+        self.run_body(self.COMMON + f"""
+            locate_vm() {{ OWNER_NODE=mox2; VM_LIVE_STATUS={status}; }}
+            wait_for_qga() {{ :; }}
+            node_exec() {{
+              record node "$@"
+              case "$2 ${{3:-}}" in
+                "/lib/backup_link.sh status") echo {link} ;;
+                "python3 /lib/instant_switch.py") [[ "$4" != state ]] || echo {state} ;;
+                "pvesm path") [[ "$4" == local-zfs:* ]] && echo /dev/zvol/rpool/data/vm-105-disk-1 || echo /var/lib/bmac-overlay/images/105/vm-105-disk-1.qcow2 ;;
+              esac
+            }}
+            INSTANT_PENDING=true; ROOT_OVERLAY_VOLUME=$INSTANT_OVERLAY
+            instant_copy_and_switch
+            echo "pending $INSTANT_PENDING [$ROOT_OVERLAY_VOLUME]" >>"$CALLS"
+            """)
+        return self.recorded()
+
+    def test_copy_frees_the_zvol_copies_switches_and_removes_the_overlay(self) -> None:
+        self.assertEqual(self.copy("backup"), [
+            "node mox2 /lib/backup_link.sh status 105",
+            "ssh mox1 /lib/tunnel_sync.sh --all",
+            "node mox2 python3 /lib/instant_switch.py state 105 bmac-overlay:105/vm-105-disk-1.qcow2 local-zfs:vm-105-disk-1",
+            "node mox2 pvesm path local-zfs:vm-105-disk-1",
+            "node mox2 blkdiscard -f /dev/zvol/rpool/data/vm-105-disk-1",
+            "node mox2 /lib/backup_link.sh restore 105 drive-scsi0.img.fidx /dev/zvol/rpool/data/vm-105-disk-1 --skip-zero",
+            "node mox2 python3 /lib/instant_switch.py switch 105 bmac-overlay:105/vm-105-disk-1.qcow2 local-zfs:vm-105-disk-1",
+            "node mox2 test -x /lib/backup_link.sh",
+            "node mox2 /lib/backup_link.sh unmap 105", "node mox2 /lib/backup_link.sh forget 105",
+            "node mox2 pvesm path bmac-overlay:105/vm-105-disk-1.qcow2",
+            "node mox2 test -e /var/lib/bmac-overlay/images/105/vm-105-disk-1.qcow2",
+            "node mox2 pvesm free bmac-overlay:105/vm-105-disk-1.qcow2",
+            "pending false []",
+        ])
+
+    def test_a_zvol_the_overlay_already_reads_is_never_freed_or_copied_again(self) -> None:
+        calls = self.copy("target")
+        self.assertFalse(any("blkdiscard" in line or " restore " in line for line in calls), calls)
+        self.assertIn("node mox2 python3 /lib/instant_switch.py switch 105 bmac-overlay:105/vm-105-disk-1.qcow2 "
+                      "local-zfs:vm-105-disk-1", calls)
+
+    def test_a_dead_mapping_is_mapped_again_and_the_vm_restarted(self) -> None:
+        calls = self.copy("backup", link="dead")
+        self.assertEqual(calls[:3], [
+            "node mox2 /lib/backup_link.sh status 105", "node mox2 qm stop 105 --timeout 60",
+            "node mox2 /lib/backup_link.sh map 105 vm/100/2026-10-27T16:04:23Z --storage bmac-pbs"])
+        calls = self.copy("backup", status="stopped")
+        self.assertIn("node mox2 qm start 105", calls)
+        self.assertLess(calls.index("node mox2 qm start 105"), calls.index("ssh mox1 /lib/tunnel_sync.sh --all"))
+
+
 class FullRecoveryOrderTest(unittest.TestCase):
     def test_it_finishes_like_add_prod_vm(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")
@@ -279,6 +493,14 @@ class FullRecoveryOrderTest(unittest.TestCase):
         steps = ["restore_vm", "patch_offline", "verify_restored_guest", "apply_final_network_policy",
                  "ensure_replication_jobs", "ensure_ha_resource", "register_ingress_and_finalize",
                  "setup_workstation_jump_ssh", "monitoring_membership_sync"]
+        positions = [main.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_the_instant_switch_comes_before_networking_replication_and_ha(self) -> None:
+        text = SCRIPT.read_text(encoding="utf-8")
+        main = text[text.index("main() {"):]
+        steps = ["instant_prepare_vm", "verify_restored_guest", "instant_copy_and_switch",
+                 "apply_final_network_policy", "ensure_replication_jobs", "ensure_ha_resource"]
         positions = [main.index(step) for step in steps]
         self.assertEqual(positions, sorted(positions))
 

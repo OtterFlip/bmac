@@ -117,6 +117,8 @@ elif command == "backup_link.sh":
         record()
         state["links"].pop(args[1], None)
         save()
+    elif args[0] == "forget":
+        record()
     else:
         sys.exit(f"unexpected backup_link.sh {args}")
 elif command in ("logger", "findmnt", "fuser", "lsblk", "zfs", "pvesr", "flock-unused"):
@@ -213,8 +215,8 @@ class BackupLinkCleanupTest(unittest.TestCase):
         completed = self.run_worker()
         self.assertIn("the PBS mapping of backup-linked staging VM stage1prod1 is dead; evicting it", completed.stderr)
         actions = [" ".join(action[:2]) for action in self.load()["actions"]]
-        # Stopped first, its config destroyed (which removes the overlay), then its mapping removed.
-        self.assertEqual(actions, ["qm stop", "qm destroy", "backup_link.sh unmap"])
+        # Stopped first, its config destroyed (which removes the overlay), then its mapping and record removed.
+        self.assertEqual(actions, ["qm stop", "qm destroy", "backup_link.sh unmap", "backup_link.sh forget"])
         self.assertFalse(self.overlay_file.exists())
         self.assertEqual(self.names(), ["prod1"])
 
@@ -225,7 +227,7 @@ class BackupLinkCleanupTest(unittest.TestCase):
         self.save(state)
         self.run_worker()
         actions = [" ".join(action[:2]) for action in self.load()["actions"]]
-        self.assertEqual(actions, ["qm destroy", "backup_link.sh unmap"])
+        self.assertEqual(actions, ["qm destroy", "backup_link.sh unmap", "backup_link.sh forget"])
         self.assertEqual(self.names(), ["prod1"])
 
     def test_an_overlay_left_behind_is_freed(self) -> None:
@@ -236,7 +238,7 @@ class BackupLinkCleanupTest(unittest.TestCase):
         self.save(state)
         self.run_worker()
         actions = [" ".join(action[:2]) for action in self.load()["actions"]]
-        self.assertEqual(actions, ["qm stop", "qm destroy", "backup_link.sh unmap", "pvesm free"])
+        self.assertEqual(actions, ["qm stop", "qm destroy", "backup_link.sh unmap", "pvesm free", "backup_link.sh forget"])
         self.assertFalse(self.overlay_file.exists())
         self.assertEqual(self.names(), ["prod1"])
 

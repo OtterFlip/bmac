@@ -11,6 +11,14 @@
 # machine-id and SSH host keys), and add_prod_vm.sh's own steps verify the
 # guest and add networking, replication, HA, ingress, and monitoring. A rerun
 # with the same purpose resumes, as add_prod_vm.sh does.
+#
+# With --instant (Instant Restore to New Permanent VM) the VM runs within
+# about a minute instead of after the whole restore: it boots, patched, from a
+# qcow2 overlay over its restore point mapped read-only from PBS, while
+# pbs-restore writes the restore point into its zvol. instant_switch.py then
+# moves the running disk onto the zvol, and only after that do replication,
+# HA, and the hook come, as for any recovery. Any rerun resumes an instant
+# restore under way, with or without --instant.
 
 # This script sets many globals that the add_prod_vm.sh functions it sources
 # read.
@@ -35,6 +43,11 @@ REQUESTED_CORES=""
 REQUESTED_MEMORY_GIB=""
 REMOTE_RUN_DIR=""
 NEW_IDENTITY=false
+INSTANT=false
+# The instant restore's overlay, and whether scsi0 is still that overlay.
+INSTANT_OVERLAY=""
+INSTANT_PENDING=false
+INSTANT_ROUTED=false
 # What the restore point holds, from its notes and its backed-up VM config.
 BACKUP_NAME=""
 BACKUP_VMID=""
@@ -56,7 +69,7 @@ print(f"{value / 2**40:.2f} TiB" if value >= 2**40 else f"{value / 2**30:.1f} Gi
 usage() {
   cat <<'EOF'
 Usage: scripts/user_callable/backups/full_recovery.sh [--snapshot vm/VMID/TIME]
-         [--cores N] [--memory-gib N] [--json]
+         [--cores N] [--memory-gib N] [--instant] [--json]
 
 Create a new production VM from one of BMAC's restore points on PBS, for
 example on a rebuilt cluster. It is add_prod_vm.sh with the OS install
@@ -76,10 +89,18 @@ replaced by a restore:
   - The guest is then verified, and gets its final networking, replication,
     HA, Cloudflare Tunnel routes, and monitoring, as add_prod_vm.sh does.
 
+With --instant, the VM does not wait for the restore: it boots from the
+restore point mapped read-only from PBS, behind a local overlay patched with
+the same identity, and serves its FQDNs while its disk is copied in the
+background. Reads of data the copy has not reached yet are slower. Once the
+copy is done the VM's disk is switched to its own zvol while it runs, and it
+gets replication and HA.
+
 Rerun with the same purpose to resume after a failure.
 
   --snapshot vm/VMID/TIME   The restore point (chosen from a list when omitted).
   --cores N, --memory-gib N Default: the restore point's values.
+  --instant                 Instant Restore to New Permanent VM.
 EOF
 }
 
@@ -94,6 +115,10 @@ parse_args() {
           --memory-gib) REQUESTED_MEMORY_GIB="$2" ;;
         esac
         shift 2
+        ;;
+      --instant)
+        INSTANT=true
+        shift
         ;;
       -h | --help)
         usage
@@ -113,10 +138,13 @@ parse_args() {
     die "--memory-gib must be a positive whole number"
 }
 
-# add_prod_vm.sh's cleanup runs after the staged patch files are removed.
+# add_prod_vm.sh's cleanup (which releases the orchestration lease) runs
+# after the staged patch files are removed. Without set +e, restoring the
+# exit status for it would end this trap first.
 eval "add_prod_vm_cleanup() $(declare -f cleanup | tail -n +2)"
 cleanup() {
   local code=$?
+  set +e
   remove_remote_patch_bundle
   (exit "$code")
   add_prod_vm_cleanup
@@ -198,7 +226,7 @@ read_backup_config() {
   local config fields
   config="$(pvesh_get "/nodes/${COORDINATOR}/vzdump/extractconfig" --volume "${BACKUP_STORAGE_ID}:backup/${SNAPSHOT}")" ||
     die "Could not read the VM configuration stored in $SNAPSHOT"
-  fields="$(python3 - "$config" <<'PY'
+  fields="$(python3 - "$config" "${RUN_DIR}/backup-config.json" <<'PY'
 import json
 import re
 import sys
@@ -225,6 +253,8 @@ memory = config.get("memory", "").removeprefix("current=").split(",", 1)[0]
 cores = config.get("cores", "1")
 if not memory.isdigit() or not cores.isdigit():
     raise SystemExit("the restore point's vCPUs or RAM are unreadable")
+with open(sys.argv[2], "w", encoding="utf-8") as stream:
+    json.dump(config, stream)
 print(cores, memory, size)
 PY
   )" || die "$SNAPSHOT cannot be recovered as a BMAC production VM"
@@ -476,44 +506,70 @@ sys.exit(0 if json.loads(sys.argv[1]).get("allocation_id") == "recover-productio
 }
 
 confirm_recovery() {
-  local answer
+  local answer kind="Recover" message
+  [[ "$INSTANT" == false ]] || kind="Instantly restore"
   log "Plan"
   info "Restore $SNAPSHOT (${BACKUP_TIME}, $BACKUP_NAME) as $RESOURCE_NAME, VMID $VMID, on $INITIAL_NODE"
+  [[ "$INSTANT" == false ]] ||
+    info "Instant: it boots from the restore point mapped from PBS; its disk is copied while it runs, then switched to its own zvol"
   info "Identity: ${PROD_PRIVATE_IP}, MAC $VM_MAC, ${PRIMARY_DOMAIN}${ALIAS_DOMAINS[*]:+ and ${ALIAS_DOMAINS[*]}}"
   info "Compute: ${VM_CORES} vCPUs, ${VM_MEMORY_GIB} GiB RAM, $(size_text "$(registered_disk_bytes)") root disk ($DISK_ALLOCATION)"
   info "Placement: ${PLACEMENT_NODES[*]}; replication every $REPLICATION_MINUTES minutes"
-  bmac_ui_plan_begin "Recover $RESOURCE_NAME from $BACKUP_NAME's restore point"
+  bmac_ui_plan_begin "$kind $RESOURCE_NAME from $BACKUP_NAME's restore point"
   bmac_ui_plan_item create "$RESOURCE_NAME" "VMID $VMID restored from $SNAPSHOT on $INITIAL_NODE, ${VM_CORES} vCPUs, ${VM_MEMORY_GIB} GiB RAM"
+  [[ "$INSTANT" == false ]] ||
+    bmac_ui_plan_item create "instant boot" "Runs from $SNAPSHOT mapped read-only from PBS (slower reads of data not yet copied) until its disk is copied and switched to $PROD_VM_STORAGE while it runs"
   bmac_ui_plan_item update "guest identity" "Hostname $RESOURCE_NAME, ${PROD_PRIVATE_IP}, root password and SSH keys from this cluster's configuration$([[ "$NEW_IDENTITY" == true ]] && printf ', new machine-id and SSH host keys' || true)"
   bmac_ui_plan_item create "HA and replication" "Placement ${PLACEMENT_NODES[*]}"
   bmac_ui_plan_item create "tunnel FQDNs" "${PRIMARY_DOMAIN}${ALIAS_DOMAINS[*]:+, ${ALIAS_DOMAINS[*]}} and its staging slots"
   bmac_ui_plan_end
+  message="A new production VM is created from ${BACKUP_TIME}'s restore point of $BACKUP_NAME."
+  [[ "$INSTANT" == false ]] ||
+    message+=" It serves its FQDNs within minutes; replication and HA follow once its disk is copied."
   if bmac_ui_is_json; then
-    bmac_ui_confirm --id recover --title "Recover $RESOURCE_NAME?" \
-      --message "A new production VM is created from ${BACKUP_TIME}'s restore point of $BACKUP_NAME." \
-      --confirm-label "Recover $RESOURCE_NAME" || die "Cancelled; the registry slot stays reserved, rerun with purpose $PURPOSE_SLUG to continue"
+    bmac_ui_confirm --id recover --title "$kind $RESOURCE_NAME?" --message "$message" \
+      --confirm-label "$kind $RESOURCE_NAME" || die "Cancelled; the registry slot stays reserved, rerun with purpose $PURPOSE_SLUG to continue"
   else
-    read -r -p "Recover $RESOURCE_NAME? [y/N] " answer
+    read -r -p "$kind $RESOURCE_NAME? [y/N] " answer
     [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] ||
       die "Cancelled; the registry slot stays reserved, rerun with purpose $PURPOSE_SLUG to continue"
   fi
 }
 
+# Before a restore into the reserved VMID: an earlier attempt that was never
+# patched holds nothing of value. Its VM goes with every volume of its VMID
+# (an instant restore's zvol and overlay are not all in its config), and so
+# does an instant restore's mapping.
+discard_partial_restore() {
+  local node="$INITIAL_NODE"
+  if locate_vm; then
+    [[ "$VM_LIVE_STATUS" == stopped ]] || die "VM $VMID is $VM_LIVE_STATUS; an unpatched recovery must stay stopped"
+    node="$OWNER_NODE"
+    log "Removing VM $VMID, left by an earlier attempt that was never patched"
+    node_exec "$node" qm destroy "$VMID" --destroy-unreferenced-disks 1 >/dev/null ||
+      die "Could not remove VM $VMID of the earlier attempt"
+  else
+    [[ "$RESOURCE_STATE" == reserved || "$RESOURCE_STATE" == provisioning ]] ||
+      die "Registered $RESOURCE_STATE VM $VMID is missing; refusing to restore it again"
+  fi
+  if node_exec "$node" test -x "$BACKUP_LINK_HELPER"; then
+    { node_exec "$node" "$BACKUP_LINK_HELPER" unmap "$VMID" >/dev/null &&
+      node_exec "$node" "$BACKUP_LINK_HELPER" forget "$VMID" >/dev/null; } ||
+      die "Could not remove the PBS mapping of VM $VMID on $node"
+  fi
+}
+
 # Restore the VM stopped, with the registry's identity, into the reserved
-# VMID; a rerun before the patch restores again over the earlier attempt.
+# VMID; a rerun before the patch restores again in place of the earlier
+# attempt.
 restore_vm() {
   CURRENT_PHASE="restoring $SNAPSHOT"
   renew_orchestration_lease
-  local force=0 upid uuid config
-  if locate_vm; then
-    [[ "$VM_LIVE_STATUS" == stopped ]] || die "VM $VMID is $VM_LIVE_STATUS; an unpatched recovery must stay stopped"
-    force=1
-  else
-    [[ "$RESOURCE_STATE" == reserved ]] || die "Registered $RESOURCE_STATE VM $VMID is missing; refusing to restore it again"
-  fi
+  local upid uuid config
+  discard_partial_restore
   log "Restoring $SNAPSHOT as $RESOURCE_NAME on $INITIAL_NODE"
   upid="$(mox_ssh "$INITIAL_NODE" pvesh create "/nodes/${INITIAL_NODE}/qemu" --vmid "$VMID" \
-    --archive "${BACKUP_STORAGE_ID}:backup/${SNAPSHOT}" --storage "$PROD_VM_STORAGE" --force "$force" \
+    --archive "${BACKUP_STORAGE_ID}:backup/${SNAPSHOT}" --storage "$PROD_VM_STORAGE" --force 0 \
     --name "$RESOURCE_NAME" --cores "$VM_CORES" --memory "$VM_MEMORY_MB" --cpu "$PROD_VM_CPU_TYPE" \
     --net0 "virtio=${VM_MAC},bridge=${PROD_VM_BRIDGE},firewall=1" --tags "$VM_TAGS" --onboot 0 \
     --description "Production guest (${PURPOSE_SLUG})" \
@@ -521,7 +577,8 @@ restore_vm() {
   [[ -n "$upid" ]] || die "PVE did not start the restore: $(tr '\n' ' ' <"${RUN_DIR}/restore.err")"
   pve_task_follow "$INITIAL_NODE" "$upid" "$RUN_DIR" "$POLL_SECONDS" ||
     die "The restore failed: ${PVE_TASK_EXITSTATUS:-unknown status}"
-  locate_vm || die "The restored VM $VMID is missing"
+  # The cluster's resource list shows the restored VM's name a moment later.
+  wait_for_created_vm_identity >/dev/null || die "The restored VM $VMID is missing"
   # The backed-up hook would refuse every start before HA manages the VM;
   # apply_final_network_policy attaches it last, as for a new VM.
   config="$(node_exec "$OWNER_NODE" qm config "$VMID")" || die "Could not read the restored configuration"
@@ -565,8 +622,10 @@ remove_remote_patch_bundle() {
   REMOTE_RUN_DIR=""
 }
 
-# Give the restored root disk this slot's identity while the VM is stopped.
+# Give the restored root disk this slot's identity while the VM is stopped:
+# its zvol, or with OVERLAY_PATH an instant restore's overlay.
 patch_offline() {
+  local overlay_path="${1:-}"
   CURRENT_PHASE="patching the restored root disk offline"
   log "Patching $RESOURCE_NAME's identity into the restored disk"
   locate_vm >/dev/null || die "The restored VM disappeared"
@@ -584,18 +643,22 @@ patch_offline() {
   upload_to_owner "$keys_file" "${REMOTE_RUN_DIR}/authorized_keys" 0600
   rm -f -- "$hash_file" "$keys_file"
 
-  local path dataset volmode source
-  path="$(node_exec "$OWNER_NODE" pvesm path "$ROOT_VOLUME")" || die "Could not resolve $ROOT_VOLUME"
-  [[ "$path" =~ ^/dev/zvol/[A-Za-z0-9._/+:-]+$ ]] || die "Unexpected path for $ROOT_VOLUME: $path"
-  dataset="${path#/dev/zvol/}"
-  read -r volmode source < <(node_exec "$OWNER_NODE" zfs get -H -o value,source volmode "$dataset") ||
-    die "Could not read the volmode of $dataset"
-  # The patch needs the guest's partitions visible on the host.
-  node_exec "$OWNER_NODE" bash -c 'zfs set volmode=full "$1" && udevadm settle' bash "$dataset" ||
-    die "Could not expose the restored disk's partitions"
+  local path="" dataset="" volmode source
+  local -a disk=(--qcow2 "$overlay_path" --volume-id "$INSTANT_OVERLAY")
+  if [[ -z "$overlay_path" ]]; then
+    path="$(node_exec "$OWNER_NODE" pvesm path "$ROOT_VOLUME")" || die "Could not resolve $ROOT_VOLUME"
+    [[ "$path" =~ ^/dev/zvol/[A-Za-z0-9._/+:-]+$ ]] || die "Unexpected path for $ROOT_VOLUME: $path"
+    dataset="${path#/dev/zvol/}"
+    read -r volmode source < <(node_exec "$OWNER_NODE" zfs get -H -o value,source volmode "$dataset") ||
+      die "Could not read the volmode of $dataset"
+    # The patch needs the guest's partitions visible on the host.
+    node_exec "$OWNER_NODE" bash -c 'zfs set volmode=full "$1" && udevadm settle' bash "$dataset" ||
+      die "Could not expose the restored disk's partitions"
+    disk=(--device "$path" --volume-id "$ROOT_VOLUME")
+  fi
   local -a args=(
     "${REMOTE_RUN_DIR}/patch_staging_clone.sh" --mode production
-    --device "$path" --volume-id "$ROOT_VOLUME" --name "$RESOURCE_NAME" --owner-vmid "$VMID"
+    "${disk[@]}" --name "$RESOURCE_NAME" --owner-vmid "$VMID"
     --address "${PROD_PRIVATE_IP}/24" --gateway "$GUEST_GATEWAY" --mac "$VM_MAC"
     --dns "$(IFS=,; printf '%s' "${DNS_SERVERS[*]}")"
     --root-hash-file "${REMOTE_RUN_DIR}/root-password.hash"
@@ -604,14 +667,15 @@ patch_offline() {
   [[ "$NEW_IDENTITY" == false ]] || args+=(--new-identity)
   local status=0
   node_exec "$OWNER_NODE" bash "${args[@]}" || status=$?
-  if [[ "$source" == local ]]; then
+  if [[ -z "$dataset" ]]; then
+    :
+  elif [[ "$source" == local ]]; then
     node_exec "$OWNER_NODE" zfs set "volmode=${volmode}" "$dataset" || warn "Could not set $dataset back to volmode=$volmode"
   else
     node_exec "$OWNER_NODE" zfs inherit volmode "$dataset" || warn "Could not return $dataset to its inherited volmode"
   fi
   remove_remote_patch_bundle
   ((status == 0)) || die "The offline patch failed; the VM was not started"
-  set_install_phase installed-confirmed
   info "Patched: hostname, network, root password, and SSH keys$([[ "$NEW_IDENTITY" == true ]] && printf ', new machine-id and SSH host keys' || true)"
 }
 
@@ -700,6 +764,176 @@ GUEST
   info "Verified: root password, hostname $RESOURCE_NAME, ${PROD_PRIVATE_IP} on lan0, key-only root SSH"
 }
 
+# The qm create options an instant restore's VM takes from the restore
+# point's config, as a restore would keep them, NUL-separated. Its EFI disk
+# is new, on production storage; the restore point's EFI variables are
+# written into it next. A new identity gets a new SMBIOS UUID, as in
+# restore_vm.
+instant_create_args() {
+  python3 - "${RUN_DIR}/backup-config.json" "$PROD_VM_STORAGE" "$NEW_IDENTITY" <<'PY'
+import json
+import sys
+import uuid
+
+config = json.load(open(sys.argv[1], encoding="utf-8"))
+args = []
+for key in ("machine", "bios", "sockets", "balloon", "ostype", "scsihw", "agent", "vga", "tablet", "numa", "smbios1"):
+    if key in config:
+        args += [f"--{key}", config[key]]
+if sys.argv[3] == "true":
+    args = [value for index, value in enumerate(args) if "--smbios1" not in args[max(index - 1, 0):index + 1]]
+    args += ["--smbios1", f"uuid={uuid.uuid4()}"]
+options = [part for part in config["efidisk0"].split(",")[1:] if not part.startswith("size=")]
+args += ["--efidisk0", ",".join([f"{sys.argv[2]}:1", *options])]
+for value in args:
+    sys.stdout.buffer.write(value.encode() + b"\0")
+PY
+}
+
+# Instant restore, before the first boot: the VM with its restored EFI
+# variables, its empty zvol (the registry's root volume), and as scsi0 an
+# overlay over the mapped restore point with this slot's identity patched in.
+instant_prepare_vm() {
+  CURRENT_PHASE="preparing the instant restore"
+  renew_orchestration_lease
+  { node_exec "$INITIAL_NODE" test -x "$BACKUP_LINK_HELPER" &&
+    node_exec "$INITIAL_NODE" test -x "$INSTANT_SWITCH_HELPER"; } ||
+    die "$INITIAL_NODE lacks the instant-restore helpers; run update_cluster_runtime.sh first"
+  discard_partial_restore
+  ensure_overlay_storage
+  local -a create_args=()
+  mapfile -d '' -t create_args < <(instant_create_args)
+  ((${#create_args[@]} >= 2)) || die "Could not derive the VM's settings from $SNAPSHOT"
+  CURRENT_PHASE="creating the instant-restore VM"
+  log "Creating $RESOURCE_NAME (VMID $VMID) on $INITIAL_NODE for an instant restore of $SNAPSHOT"
+  node_exec "$INITIAL_NODE" qm create "$VMID" --name "$RESOURCE_NAME" \
+    --description "Production guest (${PURPOSE_SLUG})" --cores "$VM_CORES" --memory "$VM_MEMORY_MB" \
+    --cpu "$PROD_VM_CPU_TYPE" --net0 "virtio=${VM_MAC},bridge=${PROD_VM_BRIDGE},firewall=1" \
+    --tags "$VM_TAGS" --onboot 0 "${create_args[@]}" >/dev/null ||
+    die "Could not create VM $VMID"
+  # The cluster's resource list shows a new VM's name a moment later.
+  wait_for_created_vm_identity >/dev/null || die "The new VM $VMID is missing"
+
+  CURRENT_PHASE="mapping $SNAPSHOT and restoring its EFI variables"
+  log "Mapping $SNAPSHOT read-only from PBS on $OWNER_NODE"
+  node_exec "$OWNER_NODE" "$BACKUP_LINK_HELPER" map "$VMID" "$SNAPSHOT" --storage "$BACKUP_STORAGE_ID" >/dev/null ||
+    die "Could not map $SNAPSHOT from PBS"
+  local efi_volume efi_path overlay_path
+  efi_volume="$(node_exec "$OWNER_NODE" qm config "$VMID" | awk -F': ' '$1 == "efidisk0" {print $2}' | cut -d, -f1)"
+  efi_path="$(node_exec "$OWNER_NODE" pvesm path "$efi_volume")" || die "Could not resolve the EFI disk $efi_volume"
+  node_exec "$OWNER_NODE" "$BACKUP_LINK_HELPER" restore "$VMID" drive-efidisk0.img.fidx "$efi_path" ||
+    die "Could not restore the EFI variables of $SNAPSHOT"
+
+  CURRENT_PHASE="creating the root zvol and patching the overlay"
+  ROOT_VOLUME="${PROD_VM_STORAGE}:vm-${VMID}-disk-1"
+  [[ -z "$REGISTERED_ROOT_VOLUME" || "$REGISTERED_ROOT_VOLUME" == "$ROOT_VOLUME" ]] ||
+    die "The registry names $REGISTERED_ROOT_VOLUME as the root disk, not $ROOT_VOLUME"
+  node_exec "$OWNER_NODE" pvesm alloc "$PROD_VM_STORAGE" "$VMID" "vm-${VMID}-disk-1" \
+    "$((BACKUP_DISK_BYTES / 1024))" >/dev/null || die "Could not create $ROOT_VOLUME"
+  apply_disk_allocation
+  ensure_registry_provisioning
+  refresh_resource
+
+  overlay_path="$(node_exec "$OWNER_NODE" "$BACKUP_LINK_HELPER" create-overlay "$VMID" "$INSTANT_OVERLAY")" ||
+    die "Could not create the overlay $INSTANT_OVERLAY"
+  patch_offline "$overlay_path"
+  node_exec "$OWNER_NODE" qm set "$VMID" --scsi0 "${INSTANT_OVERLAY},discard=on,iothread=1,replicate=1,ssd=1" \
+    --boot order=scsi0 >/dev/null || die "Could not attach the overlay"
+  INSTANT_PENDING=true
+  ROOT_OVERLAY_VOLUME="$INSTANT_OVERLAY"
+  verify_vm_config
+}
+
+# On a resumed recovery: whether scsi0 is still an instant restore's overlay.
+instant_detect() {
+  local scsi0
+  scsi0="$(node_exec "$OWNER_NODE" qm config "$VMID" | awk -F': ' '$1 == "scsi0" {print $2}' | cut -d, -f1)"
+  [[ "$scsi0" == "$INSTANT_OVERLAY" ]] || return 0
+  INSTANT=true
+  INSTANT_PENDING=true
+  ROOT_OVERLAY_VOLUME="$INSTANT_OVERLAY"
+  info "Resuming the instant restore: $RESOURCE_NAME still runs on its overlay"
+}
+
+# Until the switch the VM reads its restore point through the mapping. After
+# a reboot of its host or a mapping process that died, the restore point is
+# mapped again (backup_link.sh only ever maps the one the overlay was made
+# over), and the VM, whose reads failed, is stopped to boot again.
+instant_ensure_mapping() {
+  local state
+  state="$(node_exec "$OWNER_NODE" "$BACKUP_LINK_HELPER" status "$VMID")" ||
+    die "Could not read the PBS mapping of $RESOURCE_NAME"
+  [[ "$state" != alive ]] || return 0
+  warn "The PBS mapping of $RESOURCE_NAME is $state; mapping its restore point again"
+  locate_vm >/dev/null || die "VM $VMID disappeared"
+  if [[ "$VM_LIVE_STATUS" != stopped ]]; then
+    node_exec "$OWNER_NODE" qm stop "$VMID" --timeout 60 >/dev/null || die "Could not stop $RESOURCE_NAME"
+  fi
+  node_exec "$OWNER_NODE" "$BACKUP_LINK_HELPER" map "$VMID" "$SNAPSHOT" --storage "$BACKUP_STORAGE_ID" >/dev/null ||
+    die "Could not map $SNAPSHOT again; it must be the restore point the recovery started from"
+}
+
+instant_switch_state() {
+  node_exec "$OWNER_NODE" python3 "$INSTANT_SWITCH_HELPER" state "$VMID" "$INSTANT_OVERLAY" "$ROOT_VOLUME"
+}
+
+# With the guest verified and serving: copy the restore point's in-use data
+# into the zvol, switch the running disk onto it, then drop the overlay.
+instant_copy_and_switch() {
+  CURRENT_PHASE="copying $SNAPSHOT into ${RESOURCE_NAME}'s own disk"
+  renew_orchestration_lease
+  instant_ensure_mapping
+  locate_vm >/dev/null || die "VM $VMID disappeared"
+  if [[ "$VM_LIVE_STATUS" != running ]]; then
+    node_exec "$OWNER_NODE" qm start "$VMID" || die "Could not start $RESOURCE_NAME"
+    wait_for_qga || die "QEMU guest agent did not become ready within ${QGA_TIMEOUT_SECONDS}s"
+  fi
+  if [[ "$INSTANT_ROUTED" == false ]]; then
+    info "Routing ${PRIMARY_DOMAIN}${ALIAS_DOMAINS[*]:+ and ${ALIAS_DOMAINS[*]}} to $RESOURCE_NAME while its disk is copied"
+    mox_ssh "$COORDINATOR" "$REMOTE_TUNNEL_SYNC" --all </dev/null ||
+      warn "Could not update the Cloudflare Tunnel config yet; it is updated again after the switch"
+    INSTANT_ROUTED=true
+  fi
+  local state path started
+  state="$(instant_switch_state)" || die "Could not read the disk state of $RESOURCE_NAME"
+  if [[ "$state" == backup ]]; then
+    path="$(node_exec "$OWNER_NODE" pvesm path "$ROOT_VOLUME")" || die "Could not resolve $ROOT_VOLUME"
+    [[ "$path" =~ ^/dev/zvol/[A-Za-z0-9._/+:-]+$ ]] || die "Unexpected path for $ROOT_VOLUME: $path"
+    log "Copying the in-use data of $SNAPSHOT into $ROOT_VOLUME while $RESOURCE_NAME runs"
+    # --skip-zero leaves zero chunks unwritten, so the zvol must read as
+    # zeros first; it is not in use until the switch.
+    # -f is needed once the zvol holds a partition table; its warning is noise.
+    node_exec "$OWNER_NODE" blkdiscard -f "$path" 2>"${RUN_DIR}/blkdiscard.err" ||
+      die "Could not free $ROOT_VOLUME before the copy: $(tr '\n' ' ' <"${RUN_DIR}/blkdiscard.err")"
+    started=$SECONDS
+    node_exec "$OWNER_NODE" "$BACKUP_LINK_HELPER" restore "$VMID" drive-scsi0.img.fidx "$path" --skip-zero ||
+      die "The copy of $SNAPSHOT failed; $RESOURCE_NAME keeps running on its overlay. Rerun with purpose $PURPOSE_SLUG to copy again"
+    info "Copied in $((SECONDS - started))s"
+    renew_orchestration_lease
+  fi
+  log "Switching ${RESOURCE_NAME}'s running disk to $ROOT_VOLUME"
+  node_exec "$OWNER_NODE" python3 "$INSTANT_SWITCH_HELPER" switch "$VMID" "$INSTANT_OVERLAY" "$ROOT_VOLUME" >/dev/null ||
+    die "The switch did not complete; $RESOURCE_NAME keeps running. Rerun with purpose $PURPOSE_SLUG to finish it"
+  INSTANT_PENDING=false
+  ROOT_OVERLAY_VOLUME=""
+  instant_remove_overlay
+  info "$RESOURCE_NAME now runs on $ROOT_VOLUME alone"
+}
+
+# Once scsi0 is the zvol: the mapping, its record, and the overlay go. Also
+# run on resume, after a switch whose cleanup was interrupted.
+instant_remove_overlay() {
+  local path
+  node_exec "$OWNER_NODE" test -x "$BACKUP_LINK_HELPER" || return 0
+  { node_exec "$OWNER_NODE" "$BACKUP_LINK_HELPER" unmap "$VMID" >/dev/null &&
+    node_exec "$OWNER_NODE" "$BACKUP_LINK_HELPER" forget "$VMID" >/dev/null; } ||
+    die "Could not remove the PBS mapping of $RESOURCE_NAME"
+  path="$(node_exec "$OWNER_NODE" pvesm path "$INSTANT_OVERLAY" 2>/dev/null)" || return 0
+  if node_exec "$OWNER_NODE" test -e "$path"; then
+    node_exec "$OWNER_NODE" pvesm free "$INSTANT_OVERLAY" >/dev/null || die "Could not remove the overlay $INSTANT_OVERLAY"
+  fi
+}
+
 main() {
   parse_args "$@"
   require_command_local awk
@@ -719,14 +953,30 @@ main() {
 
   acquire_orchestration_lease
   preflight_placement
+  INSTANT_OVERLAY="${OVERLAY_STORAGE_ID}:${VMID}/vm-${VMID}-disk-1.qcow2"
   if [[ "$INSTALL_PHASE" == unstarted || "$INSTALL_PHASE" == unknown ]]; then
-    restore_vm
-    patch_offline
+    if [[ "$INSTANT" == true ]]; then
+      instant_prepare_vm
+    else
+      restore_vm
+      patch_offline
+    fi
+    set_install_phase installed-confirmed
   else
     locate_vm >/dev/null || die "VM $VMID of the recovery being resumed is missing"
+    instant_detect
     verify_vm_config
   fi
-  [[ "$INSTALL_PHASE" != installed-confirmed ]] || verify_restored_guest
+  if [[ "$INSTALL_PHASE" == installed-confirmed ]]; then
+    [[ "$INSTANT_PENDING" == false ]] || instant_ensure_mapping
+    verify_restored_guest
+  fi
+  if [[ "$INSTANT_PENDING" == true ]]; then
+    instant_copy_and_switch
+    verify_vm_config
+  elif [[ "$INSTALL_PHASE" == guest-verified ]]; then
+    instant_remove_overlay
+  fi
   [[ "$INSTALL_PHASE" != guest-verified ]] || apply_final_network_policy
   ensure_replication_jobs
   ensure_ha_resource
@@ -743,7 +993,7 @@ main() {
   setup_workstation_jump_ssh
   monitoring_membership_sync "$COORDINATOR"
   bmac_ui_result vm "$RESOURCE_NAME" vmid:int "$VMID" snapshot "$SNAPSHOT" source "$BACKUP_NAME" \
-    new_identity:bool "$NEW_IDENTITY" fqdn "$PRIMARY_DOMAIN" node "$OWNER_NODE"
+    new_identity:bool "$NEW_IDENTITY" instant:bool "$INSTANT" fqdn "$PRIMARY_DOMAIN" node "$OWNER_NODE"
   bmac_ui_next_step "Schedule backups for $RESOURCE_NAME." --workflow manage_backup_schedule --arg "resource=$RESOURCE_NAME"
 }
 

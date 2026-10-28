@@ -7,9 +7,9 @@
 # selected Proxmox node by add_staging_vm.sh and runs there as root. With
 # --mode production, full_recovery.sh uses it to give a restored production
 # VM's root disk the identity of its slot; that disk may belong to the
-# restored VM, which must be stopped. With --qcow2, the disk is a
-# backup-linked staging VM's overlay, connected through qemu-nbd for the
-# patch and disconnected after it.
+# restored VM, which must be stopped. With --qcow2, the disk is the overlay
+# of a backup-linked staging VM or of an instant-restored production VM,
+# connected through qemu-nbd for the patch and disconnected after it.
 
 set -Eeuo pipefail
 set +x
@@ -62,6 +62,8 @@ patch_staging_clone.sh --mode production --device /dev/zvol/... \
   --volume-id STORAGE:vm-N-disk-N --name prodN --owner-vmid N \
   --address A.B.C.D/24 --gateway A.B.C.G --mac 02:... --dns CSV \
   --root-hash-file /run/... --authorized-keys-file /run/... [--new-identity]
+patch_staging_clone.sh --mode production --qcow2 /var/lib/.../vm-N-disk-N.qcow2 \
+  --volume-id STORAGE:N/vm-N-disk-N.qcow2 --name prodN --owner-vmid N ... (as above)
 
 The zvol must not be attached to any VM, mounted, or opened by any process;
 in production mode it may be attached only to the stopped VM --owner-vmid.
@@ -120,7 +122,6 @@ validate_request() {
   ((EUID == 0)) || die "Offline patching must run as root"
   if [[ -n "$QCOW2_FILE" ]]; then
     [[ -z "$DEVICE" ]] || die "Give --device or --qcow2, not both"
-    [[ "$MODE" == staging ]] || die "--qcow2 is for backup-linked staging VMs"
     [[ "$QCOW2_FILE" =~ ^/[A-Za-z0-9._/+-]+/vm-[1-9][0-9]*-disk-[0-9]+\.qcow2$ &&
       -f "$QCOW2_FILE" && ! -L "$QCOW2_FILE" ]] ||
       die "--qcow2 must be an existing overlay file named vm-N-disk-N.qcow2"
@@ -145,7 +146,8 @@ validate_request() {
       [[ "$STAGING_NAME" =~ ^prod[1-9][0-9]*$ ]] ||
         die "Production name must use the prodN formula"
       [[ -z "$SANITIZER_FILE" ]] || die "Production mode takes no sanitizer"
-      [[ "$OWNER_VMID" =~ ^[1-9][0-9]*$ && "$VOLUME_ID" == *":vm-${OWNER_VMID}-disk-"* ]] ||
+      [[ "$OWNER_VMID" =~ ^[1-9][0-9]*$ && ("$VOLUME_ID" == *":vm-${OWNER_VMID}-disk-"* ||
+        "$VOLUME_ID" == *":${OWNER_VMID}/vm-${OWNER_VMID}-disk-"*) ]] ||
         die "--owner-vmid must be the VMID that owns the volume"
       [[ -f "$AUTHORIZED_KEYS_FILE" && ! -L "$AUTHORIZED_KEYS_FILE" ]] ||
         die "Administrator keys must be a regular non-symlink file"

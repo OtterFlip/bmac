@@ -573,6 +573,7 @@ PY
     }
     pvesm free "$target" || return 75
   fi
+  "$BACKUP_LINK" forget "$vmid" || return 75
   log "$cleanup_id: removed the overlay and PBS mapping of $name"
 }
 

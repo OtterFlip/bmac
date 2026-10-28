@@ -920,9 +920,11 @@ The rest is still design, built in this order:
    monitor (all built).
 2. Full Restore to Existing VM and Full Restore to New VM (built).
 3. The instant restores, in this order: Instant Restore to Backup-Linked
-   Staging VM (built: `add_backup_linked_staging_vm.sh`), then Instant
-   Restore to New Permanent VM and Instant Restore to Existing VM (designed
-   and proven on the test cluster; not built).
+   Staging VM (built: `add_backup_linked_staging_vm.sh`), Instant Restore
+   to New Permanent VM (built, not yet run on the cluster:
+   `full_recovery.sh --instant`, also `instant_recovery.sh`), then Instant
+   Restore to Existing VM (designed and proven on the test cluster; not
+   built).
 
 ### PBS server and per-cluster isolation
 
@@ -1134,8 +1136,8 @@ before its first boot. vCPU and RAM can be overridden on every restore.
     run `unstarted` → `installed-confirmed` → `guest-verified` →
     `network-finalized`; a rerun with the same purpose resumes from the phase
     reached. The new VM has no backup schedule until one is set.
-- **The instant restores** (the backup-linked staging VM is built; the two
-  permanent ones are designed, not built) boot a VM from the restore
+- **The instant restores** (the backup-linked staging VM and the new
+  permanent VM are built; the existing-VM one is designed, not built) boot a VM from the restore
   point within about a minute, before its data is copied, and patch its
   identity before that first boot:
   - `proxmox-backup-client map` exposes the restore point's disk as a
@@ -1188,6 +1190,44 @@ before its first boot. vCPU and RAM can be overridden on every restore.
     zvol is grown back to the registered size if it was larger. Replication
     and HA come back only after that, so the first sync holds everything the
     VM wrote.
+  - How Instant Restore to New Permanent VM is built (`full_recovery.sh
+    --instant`; the same slot, form, and resume rules as Full Restore to
+    New VM):
+    - Before the first boot: `qm create` with the restore point's own
+      machine, firmware, and controller settings and this slot's name,
+      compute, NIC, and tags; the restore point is mapped and its EFI
+      variables written into the new EFI disk (`backup_link.sh restore`,
+      every chunk); the empty zvol `vm-VMID-disk-1` becomes the registry's
+      root volume; the overlay `bmac-overlay:VMID/vm-VMID-disk-1.qcow2` is
+      patched in production mode (`patch_staging_clone.sh --mode production
+      --qcow2`) and attached as scsi0 with the production disk options.
+      Then the phase is `installed-confirmed`.
+    - The guest is verified as for any recovery, the tunnel config is
+      updated so its FQDNs reach it, the zvol is freed (`blkdiscard`) and
+      filled (`pbs-restore --skip-zero`), and `instant_switch.py` (host
+      runtime) switches the disk. It names the zvol's nodes `f`/`e` plus
+      the first 30 hex digits of SHA-256 of `drive=scsi0,volid=VOLUME`, as
+      qemu-server 9 does, and refuses to start when the live overlay's
+      nodes are not named that way. scsi0 in the config changes only after
+      the commit completes, so a VM started from its config never boots a
+      zvol without the guest's writes. Then the mapping, its record, and
+      the overlay are removed, and networking, replication, HA, and ingress
+      follow.
+    - `backup_link.sh` records each VM's restore point in
+      `/var/lib/app-ha/backup-link/VMID.snapshot` until `forget`: a later
+      map (after a dead mapping or a reboot) can only put the same restore
+      point under the overlay.
+    - A rerun reads where it stopped from QEMU (`instant_switch.py state`):
+      a VM still over its mapping is copied again from a freed zvol; a VM
+      whose overlay already reads the zvol is never freed or copied again,
+      only committed; a dead mapping is mapped again and the VM restarted.
+      An attempt never patched is removed with every volume of its VMID.
+  - A production VM can be the source of a prod-linked staging VM only
+    while it runs entirely on its replicated zvol, since the staging VM is a
+    clone of that zvol's replica. `add_staging_vm.sh` refuses a source whose
+    root disk is an overlay or not a zvol. A new instant-restored VM is not
+    `active` before its switch anyway; Instant Restore to Existing VM must
+    keep the VM out of the sources until its switch too.
   - For an existing VM, HA stops it, its replication and replicas are
     removed, its zvol is freed in place with `blkdiscard` (it must read as
     zeros, since `pbs-restore --skip-zero` does not write the zero chunks)
@@ -3377,8 +3417,16 @@ decide whether it may continue.
 - An installer restart requires exact `WIPE`.
 - A missing non-empty or post-install VM is never recreated.
 - Unexpected identity or topology is never adopted.
-- A stale unexpired orchestration lease blocks a second creator until expiry
-  or legitimate owner release.
+- A run releases its lease when it exits, even after a failure. One that
+  crashed or was killed leaves it until expiry (a day or more). The next
+  creator (Add Prod VM, Full Restore to New VM, or Instant Restore to New
+  Permanent VM) then shows who holds it and offers to take it over
+  (`orchestration-acquire --take-over-from OWNER`, which succeeds only while
+  that owner still holds it). The owner is the workstation's short host
+  name and the run's PID. When the lease's run was on this workstation and
+  that process is gone, a yes is enough. Otherwise the resource name must be
+  typed, since two runs at once could damage the VM. A renewal never takes
+  a lease over: a run that lost its lease stops.
 
 ### Staging clone or snapshot failure
 
