@@ -185,9 +185,17 @@ RESOURCE_KEYS = {
 # Optional top-level resource fields; records written before a field existed
 # lack it. "backup" marks a backup-linked staging VM: its disk is a qcow2
 # overlay over one of its source's restore points, mapped read-only from PBS,
-# instead of a ZFS clone of a production snapshot.
-OPTIONAL_RESOURCE_KEYS = {"monitoring", "backup"}
+# instead of a ZFS clone of a production snapshot. "instant_restore" marks a
+# production VM under Instant Restore to Existing VM, from one of its own
+# restore points: until its phase is "switched" its disk may be a qcow2
+# overlay over that restore point, which the lifecycle hook then accepts, and
+# it is no source for prod-linked staging VMs. Its phases only go forward:
+# planned (nothing changed yet), freed (its zvol no longer holds its data),
+# switched (its disk is the zvol again).
+OPTIONAL_RESOURCE_KEYS = {"monitoring", "backup", "instant_restore"}
 BACKUP_KEYS = {"storage", "snapshot"}
+INSTANT_RESTORE_KEYS = {"storage", "snapshot", "phase"}
+INSTANT_RESTORE_PHASES = ("planned", "freed", "switched")
 BACKUP_SNAPSHOT_RE = re.compile(
     r"^vm/([1-9][0-9]{0,8})/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
 )
@@ -1528,7 +1536,29 @@ def validate_resource(resource: Any, policy: dict[str, Any]) -> None:
         validate_monitoring(resource["monitoring"], resource["domains"])
     if "backup" in resource:
         validate_backup_link(resource)
+    if "instant_restore" in resource:
+        validate_instant_restore(resource)
     reject_secret_material(resource, f"resource {resource['name']}")
+
+
+def validate_instant_restore(resource: dict[str, Any]) -> None:
+    """A production VM under Instant Restore to Existing VM, from one of its
+    own restore points."""
+
+    if resource["kind"] != "production":
+        raise RegistryError("only production resources have an instant restore")
+    restore = resource["instant_restore"]
+    if not isinstance(restore, dict):
+        raise RegistryError("instant restore must be an object")
+    require_exact_keys(restore, INSTANT_RESTORE_KEYS, "instant restore")
+    validate_safe_identifier(restore["storage"], "instant restore storage")
+    if ":" in restore["storage"] or "/" in restore["storage"]:
+        raise RegistryError("instant restore storage must be a PVE storage ID")
+    match = BACKUP_SNAPSHOT_RE.fullmatch(str(restore["snapshot"]))
+    if match is None or int(match.group(1)) != resource["vmid"]:
+        raise RegistryError("instant restore snapshot must be one of the VM's own, vm/VMID/YYYY-MM-DDTHH:MM:SSZ")
+    if restore["phase"] not in INSTANT_RESTORE_PHASES:
+        raise RegistryError("instant restore phase must be " + ", ".join(INSTANT_RESTORE_PHASES))
 
 
 def validate_backup_link(resource: dict[str, Any]) -> None:
@@ -2147,6 +2177,13 @@ def command_allocate_staging(registry: Registry, args: argparse.Namespace) -> An
                 raise RegistryError("--backup-snapshot and --backup-storage go together")
             backup = {"storage": args.backup_storage, "snapshot": args.backup_snapshot}
             request["backup"] = backup
+        elif "instant_restore" in source:
+            # A prod-linked staging VM clones the source's replicated zvol,
+            # which an instant restore has not finished filling.
+            raise RegistryError(
+                f"{source['name']} is under an instant restore; it can be a staging "
+                "source once it runs on its replicated zvol again"
+            )
         fingerprint = request_fingerprint(request)
         existing = find_idempotent_allocation(
             resources, allocation_id, fingerprint, "staging"
@@ -2560,6 +2597,9 @@ def command_update(registry: Registry, args: argparse.Namespace) -> Any:
             )
         updated = copy.deepcopy(current)
         changed = False
+        # Repeating an instant restore's start or phase, as a resumed run
+        # does, is no error.
+        instant_requested = False
 
         if args.state is not None and args.state != current["state"]:
             allowed = STATE_TRANSITIONS[current["kind"]].get(current["state"], set())
@@ -2661,6 +2701,65 @@ def command_update(registry: Registry, args: argparse.Namespace) -> Any:
                 positive_spec_value("replication interval", args.replication_interval)
             )
             changed = True
+        if args.clear_instant_restore:
+            instant_requested = True
+            restore = current.get("instant_restore")
+            if restore is not None:
+                # While freed, the VM's data is only in its overlay and on PBS.
+                if restore["phase"] == "freed":
+                    raise RegistryError(
+                        "the instant restore has freed the VM's zvol; finish it before clearing it"
+                    )
+                del updated["instant_restore"]
+                changed = True
+        elif (
+            args.instant_restore_storage is not None
+            or args.instant_restore_snapshot is not None
+            or args.instant_restore_phase is not None
+        ):
+            if current["kind"] != "production":
+                raise RegistryError("only production resources have an instant restore")
+            instant_requested = True
+            restore = copy.deepcopy(current.get("instant_restore"))
+            if restore is None:
+                if None in (args.instant_restore_storage, args.instant_restore_snapshot):
+                    raise RegistryError(
+                        "a new instant restore needs --instant-restore-storage and "
+                        "--instant-restore-snapshot"
+                    )
+                if any(
+                    record["kind"] == "staging"
+                    and record["source"] == current["name"]
+                    and "backup" not in record
+                    for record in resources
+                ):
+                    raise RegistryError(
+                        "cannot start an instant restore while prod-linked staging VMs exist"
+                    )
+                restore = {
+                    "storage": args.instant_restore_storage,
+                    "snapshot": args.instant_restore_snapshot,
+                    "phase": INSTANT_RESTORE_PHASES[0],
+                }
+            for key, value in (
+                ("storage", args.instant_restore_storage),
+                ("snapshot", args.instant_restore_snapshot),
+            ):
+                if value is not None and value != restore[key]:
+                    raise RegistryError(f"the instant restore under way has another {key}: {restore[key]}")
+            if args.instant_restore_phase is not None:
+                order = INSTANT_RESTORE_PHASES.index
+                if args.instant_restore_phase not in INSTANT_RESTORE_PHASES:
+                    raise RegistryError("unknown instant restore phase")
+                if order(args.instant_restore_phase) < order(restore["phase"]):
+                    raise RegistryError(
+                        f"instant restore phase cannot go back from {restore['phase']} "
+                        f"to {args.instant_restore_phase}"
+                    )
+                restore["phase"] = args.instant_restore_phase
+            if restore != current.get("instant_restore"):
+                updated["instant_restore"] = restore
+                changed = True
         if current["kind"] == "production" and (
             args.clear_volume or args.volume_id is not None
         ):
@@ -2749,6 +2848,8 @@ def command_update(registry: Registry, args: argparse.Namespace) -> Any:
             changed = True
 
         if not changed:
+            if instant_requested:
+                return current
             raise RegistryError("update did not specify any changes")
         updated["updated_at"] = utc_now()
         updated["revision"] += 1
@@ -4559,6 +4660,14 @@ def build_parser() -> argparse.ArgumentParser:
         help='replace production monitoring settings: {"probe": {...}}',
     )
     monitoring.add_argument("--clear-monitoring", action="store_true")
+    instant = update.add_mutually_exclusive_group()
+    instant.add_argument("--instant-restore-snapshot",
+                         help="production only: start or confirm an instant restore from this restore point")
+    instant.add_argument("--clear-instant-restore", action="store_true",
+                         help="production only: end the instant restore")
+    update.add_argument("--instant-restore-storage", help="the PBS storage of the instant restore's point")
+    update.add_argument("--instant-restore-phase", choices=INSTANT_RESTORE_PHASES,
+                        help="advance the instant restore to this phase")
     update.set_defaults(handler=command_update)
 
     record_owner = subparsers.add_parser(

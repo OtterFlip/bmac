@@ -16,6 +16,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)"
 # shellcheck source=../../../lib/ui_protocol.sh
 source "${REPO_ROOT}/scripts/lib/ui_protocol.sh"
+# shellcheck source=../../../lib/orchestration_lease.sh
+source "${REPO_ROOT}/scripts/lib/orchestration_lease.sh"
 CONFIG_LIB="${REPO_ROOT}/scripts/lib/config.sh"
 REMOTE_INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${REMOTE_INSTALL_ROOT}/lib/cluster_registry.py"
@@ -1346,47 +1348,6 @@ PY
   STARTUP_SHA256="${values[2]}"
 }
 
-# This run's lease owner: the workstation's short host name and this
-# process's PID, so a later run on the same workstation can tell whether the
-# lease's run is still going.
-lease_owner() {
-  local host
-  host="$(hostname -s 2>/dev/null || hostname)"
-  host="$(LC_ALL=C tr -c 'A-Za-z0-9_.\n-' '-' <<<"$host")"
-  printf '%s-%s\n' "${host:-workstation}" "$$"
-}
-
-# A run that crashed, or whose terminal was closed, keeps its lease until it
-# expires a day or more later. Offer to take it over: freely when the lease's
-# run was on this workstation and its process is gone, and otherwise only
-# with the resource name typed, since two runs at once could damage the VM.
-offer_lease_takeover() {
-  local owner="$1" expires="$2" pid host verdict severity=warning phrase="" answer
-  pid="${owner##*-}"
-  host="${owner%-*}"
-  warn "The orchestration lease of $RESOURCE_NAME is held by $owner until $expires"
-  if [[ "$host" == "$(lease_owner | sed 's/-[0-9]*$//')" && "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null; then
-    verdict="It belongs to a run on this workstation (process $pid) that is no longer running, so a failed run left it behind."
-  else
-    verdict="This workstation cannot tell whether that run ($owner) is still going. Take the lease over only if no other run for $RESOURCE_NAME is going on any workstation: two at once could damage the VM."
-    severity=destructive
-    phrase="$RESOURCE_NAME"
-  fi
-  info "$verdict"
-  if bmac_ui_is_json; then
-    bmac_ui_confirm --id lease-takeover --title "Take over the lease of $RESOURCE_NAME?" \
-      --message "$verdict" --severity "$severity" ${phrase:+--text "$phrase"} \
-      --detail "Held by $owner until $expires" --confirm-label "Take over the lease"
-    return
-  fi
-  if [[ -n "$phrase" ]]; then
-    IFS= read -r -p "Type $phrase to take over the lease: " answer
-    [[ "$answer" == "$phrase" ]]
-  else
-    prompt_yes "Take over the lease?"
-  fi
-}
-
 renew_orchestration_lease() {
   local initial_phase="unknown" lease_ttl result
   [[ "$NEW_RESOURCE" == false ]] || initial_phase="unstarted"
@@ -1410,13 +1371,13 @@ renew_orchestration_lease() {
       --source-iso-sha256 "${PROD_GUEST_OS_ISO_SHA256,,}" \
       --install-mode "$PROD_GUEST_OS_INSTALL_MODE" 2>"$error"
   )"; do
-    holder="$(sed -n 's/.*orchestration lease is held by \([^ ]*\) until \([^ ]*\)$/\1 \2/p' "$error" | tail -n 1)"
+    holder="$(lease_holder_from_error "$error")"
     # Only the first acquisition may take over: a renewal that loses its
     # lease means another run took it, and this one must stop.
     if [[ -z "$holder" || "$ORCHESTRATION_LEASE_ACQUIRED" == true || ${#takeover[@]} -gt 0 ]]; then
       die "Could not acquire the cluster-wide lease for $RESOURCE_NAME: $(tr '\n' ' ' <"$error")"
     fi
-    offer_lease_takeover "${holder%% *}" "${holder#* }" ||
+    offer_lease_takeover "$RESOURCE_NAME" "${holder%% *}" "${holder#* }" ||
       die "The lease of $RESOURCE_NAME stays with ${holder%% *}; nothing was changed"
     takeover=(--take-over-from "${holder%% *}")
   done

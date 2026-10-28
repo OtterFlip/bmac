@@ -727,6 +727,29 @@
       ]
     },
     {
+      "id": "instant_restore_existing",
+      "title": "Instant Restore to Existing VM",
+      "summary": "Return a production VM to one of its own restore points, down only until it boots again; everything written since is lost.",
+      "description": "Instant Restore to New Permanent VM's method for an existing production VM: it returns to one of its restore points, keeping its identity, its current settings, and, unless you choose others, its vCPUs and RAM, but is down only until it boots again, usually a minute or two. Offers a safety backup of the current state first. Stops the VM through HA, deletes its replication jobs and replicas, frees its disk, and starts it through HA from a local overlay over the restore point mapped read-only from PBS. Reads of data not yet copied are slower. Meanwhile the restore point's in-use data is copied into its own disk, the running disk is switched to it without a restart, the disk is grown back to its registered size, and replication is recreated with a full initial sync. Until then it cannot fail over and cannot be the source of a prod-linked staging VM. Run it again for the same VM to resume. Requires a typed confirmation.",
+      "category": "backups",
+      "script": "scripts/user_callable/backups/instant_restore_existing.sh",
+      "mode": "mutating",
+      "destructive": true,
+      "platforms": ["linux", "macos"],
+      "params": [
+        { "id": "resource", "label": "Production VM", "type": "production", "help": "Asked for when empty." },
+        { "id": "snapshot", "label": "Restore point", "type": "snapshot", "flag": "--snapshot", "help": "Such as vm/100/2026-10-27T14:50:01Z; chosen from the VM's restore points when empty. A resumed restore keeps the one it started from." },
+        { "id": "cores", "label": "vCPUs", "type": "integer", "flag": "--cores", "help": "Default: the VM's current vCPUs.", "advanced": true },
+        { "id": "memory_gib", "label": "RAM (GiB)", "type": "integer", "flag": "--memory-gib", "help": "Default: the VM's current RAM.", "advanced": true },
+        { "id": "replication_minutes", "label": "Replication interval (minutes)", "type": "integer", "flag": "--replication-minutes", "help": "For the recreated replication jobs. Default: the current schedule.", "advanced": true },
+        { "id": "safety_backup", "label": "Safety backup first", "type": "flag_choice", "help": "Asked for when empty.",
+          "choices": [
+            { "value": "yes", "label": "Back up the current state first", "flag": "--safety-backup" },
+            { "value": "no", "label": "No safety backup", "flag": "--no-safety-backup" }
+          ] }
+      ]
+    },
+    {
       "id": "full_recovery",
       "title": "Full Restore to New VM",
       "summary": "Create a new production VM from a restore point, for example on a rebuilt cluster.",

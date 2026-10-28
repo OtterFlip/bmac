@@ -198,8 +198,10 @@ class BackupLinkTest(unittest.TestCase):
         self.assertIn("VOLUME must be STORAGE:901/vm-901-disk-N.qcow2", completed.stderr)
 
     def test_the_restore_point_is_recorded_and_a_later_map_must_reuse_it(self) -> None:
+        self.assertEqual(self.helper("recorded", "901").stdout, "")
         self.helper("map", "901", SNAPSHOT)
         self.assertEqual((self.records / "901.snapshot").read_text(), f"bmac-pbs {SNAPSHOT}\n")
+        self.assertEqual(self.helper("recorded", "901").stdout, f"bmac-pbs {SNAPSHOT}\n")
         self.helper("unmap", "901")
         # The mapping is gone but the overlay may still exist: only the same point may go under it.
         completed = self.helper("map", "901", "vm/100/2026-10-26T10:00:00Z", expected=1)

@@ -15,6 +15,8 @@
 # shellcheck source=ui_protocol.sh
 declare -F bmac_ui_is_json >/dev/null ||
   source "$(dirname -- "${BASH_SOURCE[0]}")/ui_protocol.sh"
+# shellcheck source=orchestration_lease.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/orchestration_lease.sh"
 
 PROD_REMOTE_ROOT="/usr/local/lib/app-ha-proxmox"
 PROD_REMOTE_REGISTRY="${PROD_REMOTE_ROOT}/lib/cluster_registry.py"
@@ -646,15 +648,23 @@ PY
   local network startup iso mode
   read -r network startup iso mode <<<"$contract"
   LEASE_NONCE="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
-  registry_cmd orchestration-acquire "$RESOURCE_NAME" \
+  local holder error="${RUN_DIR}/lease.err"
+  local -a takeover=()
+  until registry_cmd orchestration-acquire "$RESOURCE_NAME" \
     --nonce "$LEASE_NONCE" \
-    --owner "${LEASE_OWNER_LABEL}-${COORDINATOR}-$$" \
+    --owner "$(lease_owner "$LEASE_OWNER_LABEL")" "${takeover[@]}" \
     --ttl-seconds 14400 \
     --final-network-enabled "$network" \
     --startup-sha256 "$startup" \
     --source-iso-sha256 "$iso" \
-    --install-mode "$mode" >/dev/null ||
-    die "Could not acquire the production orchestration lease (another operation may hold it)"
+    --install-mode "$mode" >/dev/null 2>"$error"; do
+    holder="$(lease_holder_from_error "$error")"
+    [[ -n "$holder" && ${#takeover[@]} -eq 0 ]] ||
+      die "Could not acquire the production orchestration lease: $(tr '\n' ' ' <"$error")"
+    offer_lease_takeover "$RESOURCE_NAME" "${holder%% *}" "${holder#* }" ||
+      die "The lease of $RESOURCE_NAME stays with ${holder%% *}; nothing was changed"
+    takeover=(--take-over-from "${holder%% *}")
+  done
   LEASE_ACQUIRED=true
 }
 

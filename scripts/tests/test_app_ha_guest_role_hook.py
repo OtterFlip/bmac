@@ -927,6 +927,61 @@ else:
         self.write_fake_state(state)
         self.run_hook(200, "pre-start")
 
+    def instant_restore(self, phase: str, scsi0: str, link: str, recorded: str) -> None:
+        """prod1 under Instant Restore to Existing VM in PHASE, its scsi0
+        SCSI0, its PBS mapping LINK, and backup_link.sh's record RECORDED."""
+        snapshot = "vm/100/2026-10-27T16:04:23Z"
+        self.registry("update", "prod1", "--instant-restore-storage", "bmac-pbs",
+                      "--instant-restore-snapshot", snapshot)
+        if phase != "planned":
+            self.registry("update", "prod1", "--instant-restore-phase", phase)
+        fake = self.install_lib / "backup_link.sh"
+        fake.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "state = json.load(open(os.environ['FAKE_STATE']))\n"
+            "if sys.argv[1] == 'status':\n"
+            "    print(state['links'].get(sys.argv[2], 'absent'))\n"
+            "elif sys.argv[1] == 'recorded':\n"
+            "    print(state['recorded'].get(sys.argv[2], ''))\n"
+        )
+        fake.chmod(0o755)
+        state = self.read_fake_state()
+        state["links"] = {"100": link}
+        state["recorded"] = {"100": recorded}
+        state["vms"]["100"]["config"]["scsi0"] = scsi0
+        self.write_fake_state(state)
+
+    def test_an_instant_restore_starts_only_from_its_own_overlay_and_live_mapping(self) -> None:
+        overlay = "bmac-overlay:100/vm-100-disk-1.qcow2,discard=on,iothread=1,replicate=1,size=128G,ssd=1"
+        point = "bmac-pbs vm/100/2026-10-27T16:04:23Z"
+        self.instant_restore("freed", overlay, "alive", point)
+        completed = self.run_hook(100, "pre-start")
+        self.assertIn("starts from its instant restore's overlay", completed.stderr + completed.stdout)
+        self.run_hook(100, "post-stop")
+        state = self.read_fake_state()
+        state["links"]["100"] = "dead"
+        self.write_fake_state(state)
+        self.assertIn("PBS mapping is not alive", self.run_hook(100, "pre-start", expected=1).stderr)
+        state["links"]["100"] = "alive"
+        state["recorded"]["100"] = "bmac-pbs vm/100/2026-10-26T10:00:00Z"
+        self.write_fake_state(state)
+        self.assertIn("not of its registered restore point", self.run_hook(100, "pre-start", expected=1).stderr)
+        # Its freed zvol never boots.
+        state["recorded"]["100"] = point
+        state["vms"]["100"]["config"]["scsi0"] = "local-zfs:vm-100-disk-0,replicate=1,size=128G"
+        self.write_fake_state(state)
+        self.assertIn("must start from its own overlay", self.run_hook(100, "pre-start", expected=1).stderr)
+        # Nor another VM's overlay.
+        state["vms"]["100"]["config"]["scsi0"] = "bmac-overlay:200/vm-200-disk-1.qcow2,size=128G"
+        self.write_fake_state(state)
+        self.assertIn("must start from its own overlay", self.run_hook(100, "pre-start", expected=1).stderr)
+
+    def test_an_overlay_needs_the_freed_phase(self) -> None:
+        self.instant_restore("planned", "bmac-overlay:100/vm-100-disk-1.qcow2,size=128G", "alive",
+                             "bmac-pbs vm/100/2026-10-27T16:04:23Z")
+        self.assertIn("root-volume identity differs", self.run_hook(100, "pre-start", expected=1).stderr)
+
     def test_staging_refuses_a_production_reservation(self) -> None:
         self.run_hook(100, "pre-start")
         self.add_registered_staging()

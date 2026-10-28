@@ -866,6 +866,8 @@ def render_guests(report, args, ui):
                 "purpose": (resource.get("purpose") or {}).get("slug"),
                 "aliases": domains.get("aliases") or [],
                 "owner_node": resource.get("owner_node"),
+                # Instant Restore to Existing VM under way: its restore point and phase.
+                "instant_restore": resource.get("instant_restore"),
                 "ha": {
                     "configured": sid in ha_config,
                     "requested_state": (ha_config.get(sid) or {}).get("state"),
@@ -887,6 +889,11 @@ def render_guests(report, args, ui):
                 problems.append(f"{name} is registered active but is {entry['live_status']}")
             if failing:
                 problems.append(f"{name} has {len(failing)} failing replication job(s)")
+            if entry["instant_restore"]:
+                problems.append(
+                    f"{name} is under an instant restore ({entry['instant_restore'].get('phase')}); if no run of "
+                    f"instant_restore_existing.sh is going, run it again for {name} to finish"
+                )
             if entry["registry_state"] == "active" and not entry["ha"]["configured"]:
                 problems.append(f"{name} has no HA resource")
             if entry["owner_node"] and entry["node"] and entry["owner_node"] != entry["node"]:

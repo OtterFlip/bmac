@@ -23,6 +23,12 @@ after a failure, `switch` picks up from what QEMU shows.
 
   instant_switch.py state VMID OVERLAY_VOLUME TARGET_VOLUME
   instant_switch.py switch VMID OVERLAY_VOLUME TARGET_VOLUME
+  instant_switch.py attach VMID OVERLAY_VOLUME TARGET_VOLUME
+
+`attach` is the start of Instant Restore to Existing VM: with the VM
+stopped, scsi0 in its config moves from its zvol to its overlay, keeping its
+options, with the zvol's size. `qm set` would keep the replaced zvol as an
+unusedN disk, whose later removal would destroy it.
 
 `state` prints one word:
   stopped   the VM is not running
@@ -32,8 +38,9 @@ after a failure, `switch` picks up from what QEMU shows.
             zvol must not be touched
   switched  it runs on the zvol alone
 
-`switch` prints `switched` once the config names the zvol. Exit status: 0 on
-success, 1 on failure, 2 for usage errors.
+`switch` prints `switched` once the config names the zvol, `attach` prints
+`attached` once it names the overlay. Exit status: 0 on success, 1 on
+failure, 2 for usage errors.
 """
 
 from __future__ import annotations
@@ -346,6 +353,16 @@ class Switch:
         if child(nodes.get(DEVICE, {}), "file") != self.target_fmt or node_path(nodes, self.target_fmt) != self.target_path:
             raise SwitchError(f"VM {self.vmid}'s {DEVICE} is not on {self.target_path}")
 
+    def attach(self) -> None:
+        drive = self.config()["scsi0"]
+        if drive_volume(drive) == self.overlay:
+            return
+        if is_running(self.vmid):
+            raise SwitchError(f"VM {self.vmid} must be stopped before its overlay is attached")
+        new = switched_drive(drive, self.overlay, device_size(self.target_path))
+        log(f"pointing scsi0 at {self.overlay}")
+        backend("set-scsi0", self.vmid, drive, new)
+
     def switch(self) -> None:
         state = self.state()
         if state == "stopped":
@@ -368,7 +385,7 @@ class Switch:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=("state", "switch"))
+    parser.add_argument("command", choices=("state", "switch", "attach"))
     parser.add_argument("vmid")
     parser.add_argument("overlay")
     parser.add_argument("target")
@@ -379,6 +396,9 @@ def main(argv: list[str] | None = None) -> int:
         switch = Switch(arguments.vmid, arguments.overlay, arguments.target)
         if arguments.command == "state":
             print(switch.state())
+        elif arguments.command == "attach":
+            switch.attach()
+            print("attached")
         else:
             switch.switch()
             print("switched")

@@ -674,7 +674,7 @@ PY
 }
 
 validate_production_authority() {
-  local name="$1" config_file="$2" ha_status
+  local name="$1" config_file="$2" ha_status instant=""
   vm_is_local_qemu "$VMID" ||
     die "production VM $VMID is not exactly one local QEMU guest"
   ha_status=0
@@ -685,7 +685,7 @@ validate_production_authority() {
     *) die "could not verify HA membership for production VM $VMID" ;;
   esac
   refresh_registry_resources
-  python3 - "$VMID" "$name" "$LOCAL_NODE" "$config_file" \
+  instant="$(python3 - "$VMID" "$name" "$LOCAL_NODE" "$config_file" \
     "${WORK_DIR}/resources.json" "$PRODUCTION_VM_TAG" "$STAGING_VM_TAG" \
     "$EVICTABLE_VM_TAG" "$PURPOSE_TAG_PREFIX" "$PROD_VM_BRIDGE" <<'PY'
 import json
@@ -740,9 +740,27 @@ for key, value in config.items():
     if re.fullmatch(r"(?:scsi|sata|virtio|ide)[0-9]+", key):
         if "media=cdrom" not in value:
             data_disks.append((key, value.split(",", 1)[0]))
-if data_disks != [("scsi0", prod["proxmox"]["volume_id"])]:
+# Under Instant Restore to Existing VM, once its zvol is freed, the VM boots
+# only from its own overlay over the registered restore point, never from
+# the freed zvol.
+restore = prod.get("instant_restore")
+if restore is not None and restore["phase"] == "freed":
+    if len(data_disks) != 1 or data_disks[0][0] != "scsi0" or not re.fullmatch(
+        rf"[A-Za-z0-9][A-Za-z0-9_.+-]{{0,63}}:{vmid}/vm-{vmid}-disk-[0-9]+\.qcow2", data_disks[0][1]
+    ):
+        raise SystemExit("production under an instant restore must start from its own overlay")
+    print(restore["storage"], restore["snapshot"])
+elif data_disks != [("scsi0", prod["proxmox"]["volume_id"])]:
     raise SystemExit("production root-volume identity differs from registry")
 PY
+  )" || die "production VM $VMID failed its registry authority check"
+  [[ -n "$instant" ]] || return 0
+  # Its overlay reads the restore point through the mapping.
+  [[ "$("$BACKUP_LINK" status "$VMID" 2>/dev/null)" == alive ]] ||
+    die "production VM $VMID runs from an instant restore's overlay, but its PBS mapping is not alive"
+  [[ "$("$BACKUP_LINK" recorded "$VMID" 2>/dev/null)" == "$instant" ]] ||
+    die "production VM $VMID's PBS mapping is not of its registered restore point"
+  log "production VM $VMID starts from its instant restore's overlay over ${instant#* }"
 }
 
 staging_candidate_name() {

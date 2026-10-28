@@ -226,6 +226,15 @@ class QuickStateTest(unittest.TestCase):
         self.assertIn("prod1 runs on mox2 but the registry owner is mox1", summary["problems"])
         self.assertIn(("reconcile_prod_vm_owner", {}), [(step["workflow"], step["args"]) for step in steps])
 
+    def test_an_instant_restore_under_way_is_shown(self) -> None:
+        restoring = json.loads(json.dumps(GUESTS_REPORT))
+        marker = {"storage": "bmac-pbs", "snapshot": "vm/100/2026-10-27T16:04:23Z", "phase": "freed"}
+        next(row for row in restoring["resources"] if row["name"] == "prod1")["instant_restore"] = marker
+        summary, _, _ = self.render_json("guests", restoring)
+        self.assertEqual(summary["production"][0]["instant_restore"], marker)
+        self.assertIn("prod1 is under an instant restore (freed); if no run of instant_restore_existing.sh is going, "
+                      "run it again for prod1 to finish", summary["problems"])
+
     def test_staging_rows_surface_their_snapshot_and_who_shares_it(self) -> None:
         shared = "stg-base-stage1prod1-261010T040000Z"
         report = json.loads(json.dumps(GUESTS_REPORT))

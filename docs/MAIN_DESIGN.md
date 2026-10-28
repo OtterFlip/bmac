@@ -922,9 +922,9 @@ The rest is still design, built in this order:
 3. The instant restores, in this order: Instant Restore to Backup-Linked
    Staging VM (built: `add_backup_linked_staging_vm.sh`), Instant Restore
    to New Permanent VM (built, not yet run on the cluster:
-   `full_recovery.sh --instant`, also `instant_recovery.sh`), then Instant
-   Restore to Existing VM (designed and proven on the test cluster; not
-   built).
+   `full_recovery.sh --instant`, also `instant_recovery.sh`; run on the
+   cluster), and Instant Restore to Existing VM (built, not yet run on the
+   cluster: `instant_restore_existing.sh`).
 
 ### PBS server and per-cluster isolation
 
@@ -1136,8 +1136,7 @@ before its first boot. vCPU and RAM can be overridden on every restore.
     run `unstarted` → `installed-confirmed` → `guest-verified` →
     `network-finalized`; a rerun with the same purpose resumes from the phase
     reached. The new VM has no backup schedule until one is set.
-- **The instant restores** (the backup-linked staging VM and the new
-  permanent VM are built; the existing-VM one is designed, not built) boot a VM from the restore
+- **The instant restores** (all three are built) boot a VM from the restore
   point within about a minute, before its data is copied, and patch its
   identity before that first boot:
   - `proxmox-backup-client map` exposes the restore point's disk as a
@@ -1222,12 +1221,42 @@ before its first boot. vCPU and RAM can be overridden on every restore.
       whose overlay already reads the zvol is never freed or copied again,
       only committed; a dead mapping is mapped again and the VM restarted.
       An attempt never patched is removed with every volume of its VMID.
+  - How Instant Restore to Existing VM is built
+    (`instant_restore_existing.sh`, which reuses Full Restore to Existing
+    VM's selection, safety backup, HA stop and start, and replication
+    removal):
+    - The registry record carries `instant_restore` (`storage`,
+      `snapshot`, `phase`) from the confirmation to the end. Its phase only
+      goes forward: `planned` (nothing changed yet; the marker may be
+      cleared), `freed` (the zvol no longer holds the VM's data; it cannot
+      be cleared), `switched`. The registry refuses a prod-linked staging
+      VM of a production VM with the marker, and refuses the marker while
+      one exists. A rerun of the script finds the marker and resumes from
+      its phase, always with its restore point.
+    - In `planned`, HA stops the VM and its replication jobs and replicas
+      are deleted. Then the phase becomes `freed`: the restore point is
+      mapped, its EFI variables written over the VM's, the zvol freed
+      (`blkdiscard`) and set to the restore point's disk size, and the
+      overlay `bmac-overlay:VMID/vm-VMID-disk-1.qcow2` attached by
+      `instant_switch.py attach`. That edits scsi0 under the config lock, since
+      `qm set` would keep the replaced zvol as an `unusedN` disk, whose
+      removal would destroy it. The restore point is the VM's own, so
+      nothing is patched; the VM keeps its current settings.
+    - HA starts the VM. While the phase is `freed`, the lifecycle hook
+      accepts a production start only from the VM's own overlay, only with
+      its mapping alive, and only of the registered restore point; it never
+      boots the freed zvol.
+    - The copy and switch are those of the new permanent VM. Then the phase
+      becomes `switched`, the mapping and overlay are removed, the zvol is
+      grown back to the registered size (`qm resize`, online), replication
+      is recreated with a full initial sync, and the marker is cleared. The
+      VM stays HA-managed and `active` throughout.
   - A production VM can be the source of a prod-linked staging VM only
     while it runs entirely on its replicated zvol, since the staging VM is a
     clone of that zvol's replica. `add_staging_vm.sh` refuses a source whose
-    root disk is an overlay or not a zvol. A new instant-restored VM is not
-    `active` before its switch anyway; Instant Restore to Existing VM must
-    keep the VM out of the sources until its switch too.
+    root disk is an overlay or not a zvol, or whose record carries
+    `instant_restore`. A new instant-restored VM is not `active` before
+    its switch anyway.
   - For an existing VM, HA stops it, its replication and replicas are
     removed, its zvol is freed in place with `blkdiscard` (it must read as
     zeros, since `pbs-restore --skip-zero` does not write the zero chunks)

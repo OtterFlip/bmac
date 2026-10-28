@@ -626,6 +626,8 @@ if len(matches) != 1 or matches[0].get("kind") != "production":
 row = matches[0]
 if row.get("state") != "active":
     raise SystemExit("source production resource must be active")
+if "instant_restore" in row:
+    raise SystemExit("source is under an instant restore; it can be a staging source once it runs on its replicated zvol again")
 placement = row.get("placement")
 if not isinstance(placement, list) or len(placement) < 2:
     raise SystemExit("source needs at least two HA placement nodes")

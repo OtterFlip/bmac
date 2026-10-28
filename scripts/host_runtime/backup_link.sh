@@ -9,6 +9,8 @@
 #                              map the restore point's scsi0 and print the
 #                              stable path an overlay uses as its backing file
 #   backup_link.sh status VMID print alive, dead, or absent
+#   backup_link.sh recorded VMID
+#                              print the recorded STORAGE SNAPSHOT, if any
 #   backup_link.sh create-overlay VMID VOLUME
 #                              create the VM's qcow2 overlay over its mapping
 #   backup_link.sh restore VMID ARCHIVE DEVICE [--skip-zero]
@@ -60,7 +62,7 @@ die() {
 }
 
 usage() {
-  sed -n '7,21p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '7,23p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 require_vmid() {
@@ -250,6 +252,11 @@ command_unmap() {
   [[ "$(state_of "$vmid")" == absent ]] || die "the mapping of VM $vmid is still present"
 }
 
+command_recorded() {
+  require_vmid "$1"
+  [[ ! -f "${RECORD_DIR}/${1}.snapshot" ]] || cat -- "${RECORD_DIR}/${1}.snapshot"
+}
+
 command_forget() {
   require_vmid "$1"
   [[ "$(state_of "$1")" == absent ]] || die "VM $1 still has a mapping; unmap it first"
@@ -266,6 +273,7 @@ main() {
     unmap) (($# == 1)) || die "unmap needs VMID"; command_unmap "$1" ;;
     restore) (($# == 3 || $# == 4)) || die "restore needs VMID ARCHIVE DEVICE [--skip-zero]"; command_restore "$@" ;;
     forget) (($# == 1)) || die "forget needs VMID"; command_forget "$1" ;;
+    recorded) (($# == 1)) || die "recorded needs VMID"; command_recorded "$1" ;;
     -h | --help) usage ;;
     *) usage >&2; exit 2 ;;
   esac

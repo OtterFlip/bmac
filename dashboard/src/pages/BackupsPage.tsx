@@ -250,6 +250,12 @@ export function BackupsPage() {
                                 danger: true,
                                 onSelect: () => launchWorkflow("rollback_restore", { resource: point.name!, snapshot: snapshotOf(point) }),
                               },
+                              {
+                                label: `Instant Restore to ${point.name}…`,
+                                icon: <Zap />,
+                                danger: true,
+                                onSelect: () => launchWorkflow("instant_restore_existing", { resource: point.name!, snapshot: snapshotOf(point) }),
+                              },
                               "separator" as const,
                             ]
                           : []),
@@ -302,7 +308,7 @@ export function BackupsPage() {
         <h2 className="mb-2.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-fg-subtle">Backup operations</h2>
         <WorkflowTiles
           links={[{ title: "PBS Server Setup", summary: "How the PBS server, its namespaces, tokens, and prune jobs are set up.", url: PBS_SETUP_URL }]}
-          ids={["setup_pbs", "manage_backup_schedule", "backup_now", "protect_restore_point", "rollback_restore", "full_recovery", "instant_recovery", "add_backup_linked_staging_vm", "list_backups"]}
+          ids={["setup_pbs", "manage_backup_schedule", "backup_now", "protect_restore_point", "rollback_restore", "instant_restore_existing", "full_recovery", "instant_recovery", "add_backup_linked_staging_vm", "list_backups"]}
         />
       </PageBody>
     </>

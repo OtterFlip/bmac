@@ -477,6 +477,13 @@ its retention policy first, following
 - **Full Restore to Existing VM** returns a production VM to one of its
   restore points, keeping its identity; it is down until the restore
   finishes. A safety backup of its current state is offered first.
+- **Instant Restore to Existing VM** does the same as Full Restore to
+  Existing VM, but the VM is down only until it boots again from the restore
+  point, usually a minute or two. Its data is copied back to its own disk
+  while it runs, its disk is switched over without a restart, and its
+  replication is recreated. Until then, reads of data not yet copied are
+  slower, it cannot fail over, and it cannot be the source of a prod-linked
+  staging VM. If it fails partway, run it again for the same VM to resume.
 - **Full Restore to New VM** creates a new production VM from a restore
   point, for example on a rebuilt cluster, with a new identity when the
   original still exists.

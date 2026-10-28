@@ -248,6 +248,21 @@ class InstantSwitchTest(unittest.TestCase):
         self.save(state)
         self.assertIn("neither the overlay nor the target", self.helper("state", expected=1).stderr)
 
+    def test_attach_points_a_stopped_vms_scsi0_at_its_overlay(self) -> None:
+        state = self.load()
+        state["status"] = "stopped"
+        state["config"]["scsi0"] = f"{TARGET},discard=on,iothread=1,replicate=1,size=40G,ssd=1"
+        self.save(state)
+        self.assertEqual(self.helper("attach").stdout.strip(), "attached")
+        # The zvol's size (the restore point's), and no unusedN entry.
+        self.assertEqual(self.load()["config"], {"scsi0": f"{OVERLAY},discard=on,iothread=1,replicate=1,size=32G,ssd=1"})
+        self.helper("attach")
+        state = self.load()
+        state["config"]["scsi0"] = f"{TARGET},size=32G"
+        state["status"] = "running"
+        self.save(state)
+        self.assertIn("must be stopped", self.helper("attach", expected=1).stderr)
+
     def test_switched_drive_keeps_options_and_sets_the_zvols_size(self) -> None:
         drive = f"{OVERLAY},discard=on,iothread=1,replicate=1,size=40G,ssd=1"
         self.assertEqual(instant_switch.switched_drive(drive, TARGET, SIZE),
