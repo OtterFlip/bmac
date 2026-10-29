@@ -8,7 +8,7 @@ You're not the only one who noticed that the public clouds aren't really necessa
 
 BMAC, at its heart, is a library of [user-callable scripts](./scripts/user_callable/).  However these scripts can also be called by a machine with the --json parameter, which changes how the scripts' inputs and outputs operate.  The BMAC Dashboard GUI performs the bulk of its work using this script library, called in machine mode.
 
-I vibe-coded BMAC with Claude Opus 5.5.  However my background informed this development - I'm also a CS grad and software engineer with over 30 years of professional experience developing mostly storage solutions, HA clustering software and disaster recovery software where my key focus was on the kernel drivers, but also extended up the stack.
+I vibe-coded BMAC with Claude Opus 5.5.  However my background informed this development - I'm a CS grad and software engineer with over 30 years of professional experience developing mostly storage solutions, HA clustering software and disaster recovery software where my key focus was on the kernel drivers, but also extended up the stack.
 
 ## Screenshots
 
