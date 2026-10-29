@@ -16,7 +16,7 @@ Screenshots of the BMAC Dashboard are [here](docs/DASHBOARD_SCREENSHOTS.md).
 
 ## Do I Have to Read All This Crap?
 
-No, it's here as reference - point your favorite chatbot at this page when you have questions about BMAC.  All you really need to do to use BMAC is to satisfy the [prereqs](#prereqs---what-you-need-to-use-bmac), then install the latest v2.0.0+ release's .deb file, which installs BMAC's client script engine, and its Dashboard GUI, then follow the guidance on the BMAC Dashboard GUI's Settings page.  It'll walk you through everything you need to do to get your cluster setup from scratch.
+No, it's here as reference - point your favorite chatbot at this page when you have questions about BMAC.  All you really need to do to use BMAC is to satisfy the [prereqs](#prereqs---what-you-need-to-use-bmac), then install the latest v2.1.0+ release's .deb file, which installs BMAC's client script engine, and its Dashboard GUI, then follow the guidance on the BMAC Dashboard GUI's Settings page.  It'll walk you through everything you need to do to get your cluster setup from scratch.
 
 ## Releases
 
@@ -50,6 +50,7 @@ BMAC release [v2.1.0](https://github.com/OtterFlip/bmac/releases/tag/v2.1.0) is 
 - 1 ultra-cheap VPS host with a public IP address, such as a $5/month Shared CPU Nanode 1GB VPS at Linode.  This node's sole purpose will be to play the role of a QDevice, to vote in your cluster quorum to break tie votes.  You'll set up this QDevice VPS using [these instructions](docs/QDEVICE_MANUAL_SETUP.md).
 - A developer workstation running a debian-based Linux distro (we made and tested this with x64 Ubuntu) to run BMAC's scripts.  This is required for the host setup scripts, but the prod/staging scripts usually work on macOS too, although macOS support at this time is in-flux so don't count on anything working on macOS, even for tagged releases.
 - A Tailscale account (the free account will work fine), setup like [this](#instructions-for-tailscale-setup).
+- A free Healthchecks.io account for monitoring.
 - A Cloudflare account, and your app's domain (ex: 'example.com') managed at Cloudflare, setup like [this](#instructions-for-cloudflare-setup). Public web traffic reaches your VMs through a Cloudflare Tunnel (free). A domain whose web app has an `/api/` needs Cloudflare Pro for bot protection that never challenges API calls.
 
 ## BMAC's Stack
