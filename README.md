@@ -28,6 +28,8 @@ BMAC release [v1.0.0](https://github.com/OtterFlip/bmac/releases/tag/v1.0.0) was
 
 BMAC release [v2.0.0](https://github.com/OtterFlip/bmac/releases/tag/v2.0.0) added the Dashboard GUI interface that exposes all of BMAC's functionality, so you don't need to call any of the scripts directly - although you can if you want to.  Install the dashboard and script engine with the release's .deb package on an x64 Debian-based distro.  v2.0.0 has breaking changes from v1.0.0, so there's no clean upgrade path between the two.  However given the short timeframe between these it's unlikely anyone is affected. This project has fairly low visibilty at present, so going to great lengths to preserve compatibility between these major versions isn't really necessary or a priority, at this time. That will change as usage grows.
 
+BMAC release [v2.1.0](https://github.com/OtterFlip/bmac/releases/tag/v2.1.0) is **NOT COMPATIBLE** with v2.0.0.  This release added monitors for proxmox hosts, the qdevice, prod VMs and the PBS backup appliance, integrated with Healthchecks.io.  This release also revamped the prod VM's internet ingress/egress to use Cloudflare tunnels which dramatically-simplified those mechanisms (this enabled us to remove HAProxy and VRRP+keepalived) which results in much faster creation and tear-down of staging VMs.  Finally the big new featured in v2.1.0 is support for integrted PBS bacups with 5 different restore options.   
+
 ## BMAC's Features
 
 - Grokable.  With moderate reading, BMAC can be understood without spending weeks to ramp up.  The complete design is [here](docs/MAIN_DESIGN.md).
