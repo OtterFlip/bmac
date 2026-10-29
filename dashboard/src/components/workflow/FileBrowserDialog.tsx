@@ -8,6 +8,25 @@ import { bytes, dateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { DirEntry, DirListing } from "@/protocol/types";
 
+/** Where the last browse left off, so the next one starts there. */
+const LAST_DIR_KEY = "bmac.fileBrowser.lastDirectory";
+
+function lastDirectory(): string | null {
+  try {
+    return localStorage.getItem(LAST_DIR_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberDirectory(path: string) {
+  try {
+    localStorage.setItem(LAST_DIR_KEY, path);
+  } catch {
+    // Not remembering is harmless; the next browse starts at home.
+  }
+}
+
 /**
  * The dashboard's own file chooser (no OS dialogs). It lists directory
  * entries through a narrow, read-only engine command and returns a path; it
@@ -38,12 +57,20 @@ export function FileBrowserDialog({
   const [showHidden, setShowHidden] = useState(false);
   const [filter, setFilter] = useState("");
 
-  const load = useCallback(async (path?: string | null) => {
+  const load = useCallback(async (path?: string | null, fallback = false) => {
     setLoading(true);
     setError(null);
     try {
-      const next = await api().browseDirectory(path);
+      let next: DirListing;
+      try {
+        next = await api().browseDirectory(path);
+      } catch (e) {
+        // A remembered folder may have been removed since; start at home.
+        if (!fallback) throw e;
+        next = await api().browseDirectory(null);
+      }
       setListing(next);
+      rememberDirectory(next.path);
       setPathInput(next.path);
       setSelected(null);
       setFilter("");
@@ -56,8 +83,9 @@ export function FileBrowserDialog({
 
   useEffect(() => {
     if (open) {
-      const start = initialPath ? (mode === "file" ? initialPath.replace(/\/[^/]*$/, "") || "/" : initialPath) : null;
-      void load(start);
+      // The field's current value wins; otherwise resume where the last browse was.
+      const start = initialPath ? (mode === "file" ? initialPath.replace(/\/[^/]*$/, "") || "/" : initialPath) : lastDirectory();
+      void load(start, !initialPath);
     }
   }, [open, initialPath, mode, load]);
 
