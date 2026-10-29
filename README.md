@@ -747,7 +747,7 @@ The PBS server isn't part of any cluster, so no BMAC workflow touches it. You ca
 
 It finds the disks from the pool itself, and it works the same whether PBS is a VM with passed-through disks ([`PBS_MANUAL_SETUP.md`](docs/PBS_MANUAL_SETUP.md) appendix A) or a physical machine. The details are in [`docs/MONITORING_AND_ALERTING.md`](docs/MONITORING_AND_ALERTING.md#64-pbs-server-role-pbs).
 
-1. **Create the check.** Use a Healthchecks project whose email goes to your alert address: a cluster's project or a separate one. The check counts toward that project's 20 checks. Run this on your workstation, from this repository's root, with the project's read-write API key. It keeps the check's ping URL in `PBS_PING_URL` for step 3 and prints it; run steps 1 to 3 in the same terminal:
+1. **Create the check.** Use a Healthchecks project whose email goes to your alert address: a cluster's project or a separate one. The check counts toward that project's 20 checks. Run this on your workstation (from this repository's root if you cloned it; see step 2 if you installed the .deb) with the project's read-write API key. It keeps the check's ping URL in `PBS_PING_URL` for step 3 and prints it; run steps 1 to 3 in the same terminal:
 
     ```bash
     export HC_API_KEY='<the project read-write API key>'
@@ -771,7 +771,15 @@ It finds the disks from the pool itself, and it works the same whether PBS is a 
     ssh pbs 'install -D -m 0755 /tmp/app_ha_monitor.py /usr/local/lib/app-ha-monitor/app_ha_monitor.py && rm /tmp/app_ha_monitor.py'
     ```
 
-    It needs Python 3.11 or newer (PBS 4 has 3.13) and `smartctl` (`apt install smartmontools` if it's missing). Repeat this step, then `systemctl restart app-ha-monitor`, when BMAC's agent changes.
+    If you installed BMAC from its .deb package instead of cloning this repository, the agent is at `/usr/lib/BMAC_Dashboard/scripts/host_runtime/app_ha_monitor.py`, so the `scp` line becomes:
+
+    ```bash
+    scp /usr/lib/BMAC_Dashboard/scripts/host_runtime/app_ha_monitor.py pbs:/tmp/
+    ```
+
+    Steps 1 and 3 only use `curl`, `python3`, and `ssh`, so they work from any directory.
+
+    It needs Python 3.11 or newer (PBS 4 has 3.13) and `smartctl` (`apt install smartmontools` if it's missing). Repeat this step, then `systemctl restart app-ha-monitor`, when BMAC's agent changes. After upgrading the BMAC package, copy the agent again from the path above.
 
 3. **Write its config.** First set `PBS_NAMESPACES` to the namespaces that should be receiving backups. Then paste the whole block, from the same terminal as step 1. It writes `/etc/app-ha-monitor/config.json` on the PBS server, readable only by root, and prints it:
 
