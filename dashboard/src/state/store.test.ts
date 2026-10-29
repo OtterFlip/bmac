@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { setBackend } from "@/lib/api";
 import { useStore } from "./store";
 
 describe("run selection", () => {
@@ -33,5 +34,25 @@ describe("cluster state sources", () => {
       status: "error",
       error: "No reachable mox jump host was found",
     });
+  });
+});
+
+describe("answering a request", () => {
+  const record = (event_count: number, pending_request: unknown) =>
+    ({ run_id: "r", status: "waiting_confirmation", event_count, pending_request }) as never;
+  const next = { type: "confirm", request_id: "req-2", title: "Next question?" };
+
+  it("keeps a question that arrived before the answer's reply", async () => {
+    useStore.setState({ records: { r: record(89, next) } });
+    setBackend({ respond: async () => record(88, null) } as never);
+    expect(await useStore.getState().respond("r", "req-1", { kind: "confirm", confirmed: true })).toBe(true);
+    expect(useStore.getState().records.r).toMatchObject({ event_count: 89, pending_request: next });
+  });
+
+  it("clears the answered request when no newer update arrived", async () => {
+    useStore.setState({ records: { r: record(88, { type: "confirm", request_id: "req-1", title: "First?" }) } });
+    setBackend({ respond: async () => record(88, null) } as never);
+    await useStore.getState().respond("r", "req-1", { kind: "confirm", confirmed: true });
+    expect(useStore.getState().records.r).toMatchObject({ event_count: 88, pending_request: null });
   });
 });

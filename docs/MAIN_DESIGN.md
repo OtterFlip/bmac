@@ -2248,11 +2248,13 @@ move; it is not a custom pmxcfs registry file.
 
 After changing the configuration parser (`config.sh`), the registry,
 deferred cleanup worker, lifecycle hook, the monitor agent
-(`app_ha_monitor.py`), or any of the networking runtime files
+(`app_ha_monitor.py`), any of the networking runtime files
 (`guest_network.sh`, `egress_health.py`, `egress_probe_targets.txt`,
 `transfer_counter.py`, `tunnel_config.py`, `tunnel_sync.sh`,
-`cloudflared_setup.sh`) in this checkout, update their installed copies
-before running a guest workflow:
+`cloudflared_setup.sh`), or the production VM autoinstall scripts
+(`build_ubuntu_autoinstall.py`, `prepare_prod_iso.sh`, which
+`add_prod_vm.sh` runs from `guests/prod/` on the host) in this checkout,
+update their installed copies before running a guest workflow:
 
 ```bash
 scripts/user_callable/hosts/update_cluster_runtime.sh --dry-run
@@ -2413,6 +2415,13 @@ The production VM is created stopped and outside HA with:
 Ubuntu uses direct storage layout, exactly one direct ext4 root, its fixed
 production slot address (`/24`) on interface `lan0`, `.10` gateway,
 configured DNS, OpenSSH, QGA, and no Tailscale.
+
+The root ext4 is tuned for the 16K `local-zfs` zvol block. Curtin starts
+partitions on 1 MiB boundaries, but it offers no mkfs options. So the first
+late-command sets the ext4 RAID stride and stripe width to one zvol block
+(`stride=4,stripe_width=4` with 4K ext4 blocks) before the guest first mounts
+the filesystem. This makes the allocator favor 16K-aligned extents, so 8K pages
+do not straddle two zvol blocks. The install fails if the hint cannot be set.
 
 An optional `startup.sh` is limited to 256 KiB, must begin with a shebang, and
 runs as root before `network-pre.target`. Its digest and presence are part of

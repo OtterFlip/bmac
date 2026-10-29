@@ -5,8 +5,8 @@
 
 # Safely update the shared app-ha runtime (registry, deferred cleanup worker,
 # QEMU lifecycle hook, guest networking, egress health, transfer counter,
-# Cloudflare Tunnel tools, and the monitor agent) on every configured Proxmox
-# node. With MONITORING_ENABLED=true it then brings monitoring to every node
+# Cloudflare Tunnel tools, the monitor agent, and the production VM ISO
+# builder) on every configured Proxmox node. With MONITORING_ENABLED=true it then brings monitoring to every node
 # of the cluster: it synchronizes the cluster's Healthchecks.io checks and
 # installs the monitor agent and its config on every host, the QDevice, and
 # every active production VM (scripts/lib/monitoring.sh). With monitoring
@@ -27,12 +27,15 @@ MONITORING_LIB="${REPO_ROOT}/scripts/lib/monitoring.sh"
 APT_LOCK_LIB="${REPO_ROOT}/scripts/lib/apt_lock_wait.sh"
 RUNTIME_SOURCE_DIR="${REPO_ROOT}/scripts/host_runtime"
 HOOK_NAME=app-ha-guest-role-hook.sh
-# Every file this updater manages in ${INSTALL_ROOT}/lib.
+# Every file this updater manages, relative to ${INSTALL_ROOT}. A file is
+# staged under its basename, so basenames must be unique.
 RUNTIME_FILES=(
-  config.sh cluster_registry.py process_deferred_cleanup.sh "$HOOK_NAME"
-  guest_network.sh egress_health.py egress_probe_targets.txt transfer_counter.py
-  tunnel_config.py tunnel_sync.sh cloudflared_setup.sh app_ha_monitor.py
-  pbs_api.py backup_link.sh instant_switch.py
+  lib/config.sh lib/cluster_registry.py lib/process_deferred_cleanup.sh
+  "lib/$HOOK_NAME" lib/guest_network.sh lib/egress_health.py
+  lib/egress_probe_targets.txt lib/transfer_counter.py lib/tunnel_config.py
+  lib/tunnel_sync.sh lib/cloudflared_setup.sh lib/app_ha_monitor.py
+  lib/pbs_api.py lib/backup_link.sh lib/instant_switch.py
+  guests/prod/build_ubuntu_autoinstall.py guests/prod/prepare_prod_iso.sh
 )
 INSTALL_ROOT="/usr/local/lib/app-ha-proxmox"
 REMOTE_REGISTRY="${INSTALL_ROOT}/lib/cluster_registry.py"
@@ -43,8 +46,8 @@ REMOTE_SNIPPET=""
 # scripts/host_runtime.
 runtime_source() {
   case "$1" in
-    config.sh) printf '%s\n' "$CONFIG_LIB" ;;
-    *) printf '%s/%s\n' "$RUNTIME_SOURCE_DIR" "$1" ;;
+    lib/config.sh) printf '%s\n' "$CONFIG_LIB" ;;
+    *) printf '%s/%s\n' "$RUNTIME_SOURCE_DIR" "${1##*/}" ;;
   esac
 }
 
@@ -101,6 +104,8 @@ Update these runtime files on every configured, online Proxmox node:
   /usr/local/lib/app-ha-proxmox/lib/pbs_api.py
   /usr/local/lib/app-ha-proxmox/lib/backup_link.sh
   /usr/local/lib/app-ha-proxmox/lib/instant_switch.py
+  /usr/local/lib/app-ha-proxmox/guests/prod/build_ubuntu_autoinstall.py
+  /usr/local/lib/app-ha-proxmox/guests/prod/prepare_prod_iso.sh
   local:snippets/app-ha-guest-role-hook.sh
 
 The script stages and validates the complete bundle on every node before
@@ -327,6 +332,8 @@ upgrade_cloudflared() {
 
 validate_local_bundle() {
   local name source
+  [[ -z "$(printf '%s\n' "${RUNTIME_FILES[@]##*/}" | sort | uniq -d)" ]] ||
+    die "Managed runtime files must have unique basenames"
   for name in "${RUNTIME_FILES[@]}"; do
     source="$(runtime_source "$name")"
     require_source "$source"
@@ -397,7 +404,7 @@ remote_hash() {
 expected_hashes() {
   local name
   for name in "${RUNTIME_FILES[@]}"; do
-    printf '%s=%s\n' "$name" "$(local_hash "$(runtime_source "$name")")"
+    printf '%s=%s\n' "${name##*/}" "$(local_hash "$(runtime_source "$name")")"
   done
 }
 
@@ -408,9 +415,9 @@ show_hash_status() {
   for node in "${CLUSTER_NODES[@]}"; do
     outdated=()
     for name in "${RUNTIME_FILES[@]}"; do
-      actual="$(remote_hash "$node" "${INSTALL_ROOT}/lib/${name}" 2>/dev/null || true)"
+      actual="$(remote_hash "$node" "${INSTALL_ROOT}/${name}" 2>/dev/null || true)"
       [[ "$actual" == "$(local_hash "$(runtime_source "$name")")" ]] ||
-        outdated+=("$name")
+        outdated+=("${name##*/}")
     done
     actual="$(remote_hash "$node" "$REMOTE_SNIPPET" 2>/dev/null || true)"
     [[ "$actual" == "$(local_hash "${RUNTIME_SOURCE_DIR}/${HOOK_NAME}")" ]] ||
@@ -437,7 +444,7 @@ stage_node() {
   mox_ssh "$node" install -d -m 0700 "$REMOTE_STAGE"
   STAGED_NODES+=("$node")
   for name in "${RUNTIME_FILES[@]}"; do
-    copy_to_node "$node" "$(runtime_source "$name")" "${REMOTE_STAGE}/${name}"
+    copy_to_node "$node" "$(runtime_source "$name")" "${REMOTE_STAGE}/${name##*/}"
   done
   mapfile -t hashes < <(expected_hashes)
   # shellcheck disable=SC2016 # This script is evaluated by remote Bash.
@@ -469,8 +476,9 @@ set -Eeuo pipefail
 stage="$1"; install_root="$2"; snippet="$3"; hook_name="$4"; shift 4
 [[ -f "$snippet" && ! -L "$snippet" ]]
 # Keep every current file (or note that it was absent) for rollback.
-for name in "$@"; do
-  installed="${install_root}/lib/${name}"
+for path in "$@"; do
+  [[ "$path" =~ ^(lib|guests/prod)/[A-Za-z0-9._-]+$ ]]
+  name="${path##*/}"; installed="${install_root}/${path}"
   if [[ -e "$installed" ]]; then
     [[ -f "$installed" && ! -L "$installed" ]]
     install -m "$(stat -c %a "$installed")" "$installed" "$stage/${name}.old"
@@ -480,8 +488,9 @@ for name in "$@"; do
 done
 install -m 0755 "$snippet" "$stage/${hook_name}.snippet.old"
 : >"$stage/committed"
-for name in "$@"; do
-  installed="${install_root}/lib/${name}"
+for path in "$@"; do
+  name="${path##*/}"; installed="${install_root}/${path}"
+  install -d -m 0755 "${installed%/*}"
   install -m "$(stat -c %a "$stage/$name")" "$stage/$name" "${installed}.new"
   mv -f "${installed}.new" "$installed"
 done
@@ -515,8 +524,9 @@ rollback_node() {
 set -Eeuo pipefail
 stage="$1"; install_root="$2"; snippet="$3"; hook_name="$4"; shift 4
 [[ -f "$stage/committed" ]]
-for name in "$@"; do
-  installed="${install_root}/lib/${name}"
+for path in "$@"; do
+  [[ "$path" =~ ^(lib|guests/prod)/[A-Za-z0-9._-]+$ ]]
+  name="${path##*/}"; installed="${install_root}/${path}"
   if [[ -f "$stage/${name}.absent" ]]; then
     rm -f "$installed"
   else
@@ -538,7 +548,7 @@ rm -f "$stage/committed"
 verify_node() {
   local node="$1" name
   for name in "${RUNTIME_FILES[@]}"; do
-    [[ "$(remote_hash "$node" "${INSTALL_ROOT}/lib/${name}")" == \
+    [[ "$(remote_hash "$node" "${INSTALL_ROOT}/${name}")" == \
       "$(local_hash "$(runtime_source "$name")")" ]] ||
       die "$node: ${name} hash differs after installation"
   done

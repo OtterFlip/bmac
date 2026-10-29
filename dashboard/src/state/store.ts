@@ -365,6 +365,10 @@ export const useStore = create<State>((set, get) => ({
 function onRecord(record: RunRecord) {
   const { records, sourceRuns } = useStore.getState();
   const previous = records[record.run_id];
+  // The record an answer returns can be older than an update that arrived
+  // first: the script may ask its next question before the answer's reply
+  // lands, and that reply would hide the new question.
+  if (previous && record.event_count < previous.event_count) return;
   useStore.setState((s) => ({ records: { ...s.records, [record.run_id]: record } }));
   const justFinished = isTerminal(record.status) && (!previous || !isTerminal(previous.status));
   if (!justFinished) return;

@@ -46,15 +46,43 @@ class UpdateClusterRuntimeTests(unittest.TestCase):
         ):
             self.assertIn(f"/usr/local/lib/app-ha-proxmox/lib/{name}", text)
             self.assertTrue((runtime / name).is_file(), name)
+        # The production VM ISO builder lives outside lib/, and add_prod_vm.sh
+        # runs the installed copy, so builder changes must ship here too.
+        files = text[text.index("RUNTIME_FILES=(") : text.index(")", text.index("RUNTIME_FILES=("))]
+        for name in ("build_ubuntu_autoinstall.py", "prepare_prod_iso.sh"):
+            self.assertIn(f"guests/prod/{name}", files.split())
+            self.assertIn(f"/usr/local/lib/app-ha-proxmox/guests/prod/{name}", text)
+            self.assertTrue((runtime / name).is_file(), name)
         self.assertIn("GUEST_ROLE_HOOK_PATH", text)
         self.assertNotIn("haproxy", text.lower())
+
+    def test_runtime_files_map_to_their_sources_and_unique_staged_names(self) -> None:
+        listed = subprocess.run(
+            ["bash", "-c", f'source {SCRIPT}; for name in "${{RUNTIME_FILES[@]}}"; do '
+             'printf "%s %s\\n" "$name" "$(runtime_source "$name")"; done'],
+            env={**os.environ, "APP_HA_RUNTIME_UPDATE_SOURCE_ONLY": "1"},
+            capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+        repo = SCRIPT.parent.parent.parent.parent
+        names = []
+        for line in listed:
+            path, source = line.split(" ", 1)
+            self.assertRegex(path, r"^(lib|guests/prod)/[A-Za-z0-9._-]+$")
+            self.assertEqual(Path(source).name, Path(path).name)
+            self.assertTrue(Path(source).is_file(), source)
+            names.append(Path(path).name)
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(
+            Path(dict(line.split(" ", 1) for line in listed)["lib/config.sh"]),
+            repo / "scripts" / "lib" / "config.sh",
+        )
 
     def test_config_parser_is_updated_and_must_accept_the_installed_cluster_conf(self) -> None:
         # The hook and tunnel sync parse the installed cluster.conf with the
         # installed config.sh, so a new cluster.conf key needs a new parser.
         text = SCRIPT.read_text(encoding="utf-8")
         files = text[text.index("RUNTIME_FILES=(") : text.index(")", text.index("RUNTIME_FILES=("))]
-        self.assertIn("config.sh", files.split())
+        self.assertIn("lib/config.sh", files.split())
         self.assertIn("/usr/local/lib/app-ha-proxmox/lib/config.sh", text)
         self.assertIn('config.sh) printf \'%s\\n\' "$CONFIG_LIB" ;;', text)
         self.assertTrue((SCRIPT.parent.parent.parent / "lib" / "config.sh").is_file())

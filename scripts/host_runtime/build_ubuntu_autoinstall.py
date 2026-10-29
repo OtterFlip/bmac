@@ -75,6 +75,24 @@ RemainAfterExit=yes
 [Install]
 WantedBy=network-pre.target
 """
+# Proxmox creates local-zfs zvols with 16K blocks. Recording one zvol block as
+# the ext4 RAID stride and stripe width makes mballoc favor 16K-aligned
+# extents, so guest writes (such as 8K database pages) do not straddle two
+# zvol blocks. Curtin's "direct" layout already starts partitions on 1 MiB
+# boundaries and offers no mkfs options, so this sets the same superblock
+# fields that mkfs.ext4 -E stride=4,stripe_width=4 would, before the guest
+# first mounts the filesystem. resize2fs, ZFS replication, staging clones and
+# PBS restores all carry the superblock along unchanged.
+ZVOL_BLOCK_BYTES = 16 * 1024
+ROOT_EXT4_STRIPE_COMMAND = (
+    'root_device="$(findmnt -n -o SOURCE /target)" && '
+    'block_size="$(tune2fs -l "$root_device" | sed -n "s/^Block size: *//p")" && '
+    '[ "$block_size" -gt 0 ] && '
+    f'[ $(({ZVOL_BLOCK_BYTES} % block_size)) -eq 0 ] && '
+    f'stride=$(({ZVOL_BLOCK_BYTES} / block_size)) && '
+    'tune2fs -E "stride=${stride},stripe_width=${stride}" "$root_device" && '
+    'tune2fs -l "$root_device" | grep -Eq "^RAID stripe width: +${stride}$"'
+)
 
 
 class BuildError(ValueError):
@@ -205,6 +223,7 @@ def build_user_data(request: dict[str, Any]) -> str:
         )
     )
     late_commands = [
+        ROOT_EXT4_STRIPE_COMMAND,
         "curtin in-target --target=/target -- "
         "systemctl enable qemu-guest-agent.service"
     ]

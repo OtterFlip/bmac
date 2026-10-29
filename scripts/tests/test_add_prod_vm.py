@@ -99,6 +99,59 @@ class AutoinstallBuilderTest(unittest.TestCase):
         self.assertIn("state_dir=/var/lib/production-startup", builder.STARTUP_RUNNER)
         self.assertIn('marker="${state_dir}/completed"', builder.STARTUP_RUNNER)
 
+    def test_root_ext4_stripe_hint_runs_first_in_late_commands(self) -> None:
+        rendered = builder.build_user_data(request_fixture())
+        autoinstall = json.loads(rendered.split("\n", 1)[1])["autoinstall"]
+        self.assertEqual(autoinstall["storage"], {"layout": {"name": "direct"}})
+        self.assertEqual(
+            autoinstall["late-commands"][0], builder.ROOT_EXT4_STRIPE_COMMAND
+        )
+
+    def test_root_ext4_stripe_hint_matches_16k_zvol_blocks(self) -> None:
+        mkfs = Path("/usr/sbin/mkfs.ext4")
+        tune2fs = Path("/usr/sbin/tune2fs")
+        if not mkfs.is_file() or not tune2fs.is_file():
+            self.skipTest("e2fsprogs is not installed")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            cases = {4096: "4", 1024: "16"}
+            for block_size, stride in cases.items():
+                with self.subTest(block_size=block_size):
+                    image = root / f"root-{block_size}.img"
+                    with image.open("wb") as stream:
+                        stream.truncate(64 * 1024 * 1024)
+                    subprocess.run(
+                        [str(mkfs), "-q", "-F", "-b", str(block_size), str(image)],
+                        check=True,
+                        stdin=subprocess.DEVNULL,
+                    )
+                    findmnt = bin_dir / "findmnt"
+                    findmnt.write_text(
+                        f"#!/bin/sh\nprintf '%s\\n' '{image}'\n", encoding="utf-8"
+                    )
+                    findmnt.chmod(0o755)
+                    env = dict(os.environ)
+                    env["PATH"] = f"{bin_dir}:{tune2fs.parent}:{env.get('PATH', '')}"
+                    subprocess.run(
+                        ["sh", "-c", builder.ROOT_EXT4_STRIPE_COMMAND],
+                        check=True,
+                        env=env,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                    )
+                    superblock = subprocess.run(
+                        [str(tune2fs), "-l", str(image)],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout
+                    self.assertRegex(superblock, rf"(?m)^RAID stride: +{stride}$")
+                    self.assertRegex(
+                        superblock, rf"(?m)^RAID stripe width: +{stride}$"
+                    )
+
     def test_request_rejects_wrong_network_hash_and_key_count(self) -> None:
         invalid = request_fixture()
         invalid["gateway"] = "10.213.1.1"

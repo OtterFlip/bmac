@@ -494,7 +494,7 @@
     {
       "id": "update_cluster_runtime",
       "title": "Update cluster runtime",
-      "summary": "Deploy this checkout's BMAC runtime helpers and hooks to every host.",
+      "summary": "Deploy this checkout's BMAC runtime helpers and hooks to every host, and inject monitor daemons.",
       "description": "Stages and validates the BMAC runtime bundle on every online host, installs it atomically, verifies it cluster-wide, and rolls back on failure, then upgrades cloudflared one host at a time without interrupting ingress. Updates BMAC code and cloudflared, not other Proxmox packages.",
       "category": "hosts",
       "script": "scripts/user_callable/hosts/update_cluster_runtime.sh",
