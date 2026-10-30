@@ -1027,6 +1027,66 @@ Flags:            Quorate Qdevice
             source,
         )
 
+    def test_proxy_lockfile_dropins_are_installed_idempotently_and_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            log = root / "systemctl.log"
+            (bin_dir / "systemctl").write_text(
+                f'#!/bin/sh\nprintf "%s\\n" "$*" >>{shlex.quote(str(log))}\n',
+                encoding="utf-8",
+            )
+            (bin_dir / "ss").write_text(
+                "#!/bin/sh\nprintf 'LISTEN 0 4096 *:port *:*\\n'\n", encoding="utf-8"
+            )
+            for tool in ("systemctl", "ss"):
+                (bin_dir / tool).chmod(0o755)
+            payload = root / "payload.sh"
+            body = f"""
+                remote_script() {{ cat >{shlex.quote(str(payload))}; }}
+                install_proxy_lockfile_dropins
+            """
+            self.run_bash(body)
+            script = payload.read_text(encoding="utf-8").replace(
+                "/etc/systemd/system", str(root / "systemd")
+            )
+            payload.write_text(script, encoding="utf-8")
+            env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+            for _ in range(2):
+                subprocess.run(["bash", str(payload)], check=True, env=env)
+
+            for svc in ("pveproxy", "spiceproxy"):
+                dropin = root / "systemd" / f"{svc}.service.d" / "lockfile.conf"
+                self.assertEqual(
+                    dropin.read_text(encoding="utf-8"),
+                    "[Service]\n"
+                    f'ExecStartPre=/bin/sh -c "touch /run/lock/{svc}.lck && '
+                    f'chown www-data:www-data /run/lock/{svc}.lck"\n',
+                )
+            calls = log.read_text(encoding="utf-8").splitlines()
+            # Only the first run changes the drop-ins and restarts the proxies.
+            self.assertEqual(calls.count("daemon-reload"), 1)
+            self.assertEqual(
+                calls.count("restart pveproxy.service spiceproxy.service"), 1
+            )
+
+        source = SCRIPT.read_text(encoding="utf-8")
+        bootstrap = source[source.index("bootstrap_host() {") : source.index("install_proxy_lockfile_dropins() {")]
+        self.assertIn("\n  install_proxy_lockfile_dropins\n}", bootstrap)
+        verify = source[source.index("final_verify() {") : source.index("\nmain() {")]
+        self.assertIn('[[ "$(stat -c %U:%G "/run/lock/${svc}.lck")" == www-data:www-data ]]', verify)
+
+    def test_runtime_scripts_never_reset_the_system_lock_directory_mode(self) -> None:
+        # install -d -m on an existing directory changes its mode; tightening
+        # /run/lock to 0755 keeps pveproxy from creating its lock file.
+        scripts = HOSTS_DIR.parents[1]
+        for path in [*scripts.glob("host_runtime/*.sh"), *scripts.glob("utilities/*.sh")]:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if "install -d" in line and ("LOCK_DIR" in line or "/run/lock" in line):
+                    self.assertRegex(line, r"\[\[ -d \S+ \]\] \|\| install -d", msg=str(path))
+
     def test_shared_passphrase_helper_writes_nonempty_marker(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn(

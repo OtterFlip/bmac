@@ -1193,7 +1193,10 @@ main() {
 
   require_file "$REGISTRY"
   require_commands flock findmnt fuser lsblk pvesh pvesm pvesr python3 qm zfs
-  install -d -m 0755 "$LOCK_DIR"
+  # Create only when missing: install -d -m resets an existing directory's
+  # mode, which would tighten the system's 1777 /run/lock to 0755 and keep
+  # www-data services (pveproxy, spiceproxy) from creating their lock files.
+  [[ -d "$LOCK_DIR" ]] || install -d -m 0755 "$LOCK_DIR"
   exec 9>"${LOCK_DIR}/app-ha-deferred-cleanup.lock"
   flock -n 9 || {
     log "another deferred-cleanup worker is active"

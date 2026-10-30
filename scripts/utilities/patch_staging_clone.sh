@@ -570,7 +570,10 @@ main() {
     bash blkid blockdev fdisk findmnt flock fuser grep install lsblk mktemp mount \
     pvesh python3 readlink rm rmdir stat sync udevadm umount wc
   validate_request
-  install -d -m 0755 /run/lock
+  # Create only when missing: install -d -m resets an existing directory's
+  # mode, which would tighten the system's 1777 /run/lock to 0755 and keep
+  # www-data services (pveproxy, spiceproxy) from creating their lock files.
+  [[ -d /run/lock ]] || install -d -m 0755 /run/lock
   exec 9>/run/lock/app-ha-staging-offline-patch.lock
   flock -w 300 9 ||
     die "Timed out waiting for exclusive staging offline-patch lock"

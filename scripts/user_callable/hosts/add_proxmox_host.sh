@@ -2223,6 +2223,52 @@ printf '%s\n' "${matches[0]}"
 EOF
 chmod 0755 /usr/local/sbin/app-ha-rpool-member-for-serial
 REMOTE
+
+  install_proxy_lockfile_dropins
+}
+
+# pveproxy and spiceproxy drop to www-data and then create their lock files in
+# /run/lock. They fail to start in a restart loop (web UI on 8006 refusing
+# connections) whenever /run/lock is 0755 root:root at service start. Earlier
+# runtime scripts tightened /run/lock that way with install -d -m 0755; this
+# also guards against anything else doing the same. Each drop-in pre-creates the
+# lock file as root before every start, survives package upgrades because apt
+# never touches /etc/systemd/system, and is harmless if the cause goes away.
+# touch keeps an existing lock file's inode. Diagnosed on mox1 2026-10-30; see
+# docs/pveproxy-lockfile-fix.md.
+install_proxy_lockfile_dropins() {
+  remote_script <<'REMOTE'
+set -Eeuo pipefail
+changed=false
+for svc in pveproxy spiceproxy; do
+  dropin="/etc/systemd/system/${svc}.service.d/lockfile.conf"
+  expected="[Service]
+ExecStartPre=/bin/sh -c \"touch /run/lock/${svc}.lck && chown www-data:www-data /run/lock/${svc}.lck\""
+  if [[ ! -f "$dropin" || "$(<"$dropin")" != "$expected" ]]; then
+    install -d -m 0755 "${dropin%/*}"
+    printf '%s\n' "$expected" >"${dropin}.tmp"
+    mv -f "${dropin}.tmp" "$dropin"
+    changed=true
+  fi
+done
+if [[ "$changed" == true ]]; then
+  systemctl daemon-reload
+fi
+if [[ "$changed" == true ]] ||
+   ! systemctl is-active --quiet pveproxy.service spiceproxy.service; then
+  systemctl restart pveproxy.service spiceproxy.service
+fi
+for _ in $(seq 1 30); do
+  if systemctl is-active --quiet pveproxy.service spiceproxy.service &&
+     [[ -n "$(ss -Htln 'sport = :8006')" && -n "$(ss -Htln 'sport = :3128')" ]]; then
+    exit 0
+  fi
+  sleep 1
+done
+printf 'pveproxy/spiceproxy are not healthy after installing their lock-file drop-ins\n' >&2
+systemctl --no-pager status pveproxy.service spiceproxy.service >&2 || true
+exit 1
+REMOTE
 }
 
 stage_luks_password_file() {
@@ -4347,6 +4393,14 @@ shift 4
 lib=/usr/local/lib/app-ha-proxmox/lib
 pveversion
 pvecm status
+# The web UI and SPICE proxies must be up with their www-data lock files; see
+# install_proxy_lockfile_dropins.
+systemctl is-active pveproxy.service spiceproxy.service
+for svc in pveproxy spiceproxy; do
+  grep -Fq "/run/lock/${svc}.lck" "/etc/systemd/system/${svc}.service.d/lockfile.conf"
+  [[ "$(stat -c %U:%G "/run/lock/${svc}.lck")" == www-data:www-data ]]
+done
+[[ -n "$(ss -Htln 'sport = :8006')" && -n "$(ss -Htln 'sport = :3128')" ]]
 zpool status -P rpool
 zpool status -x rpool | grep -F "pool 'rpool' is healthy"
 pool="$(zpool status -P rpool)"

@@ -1009,7 +1009,10 @@ main() {
     "$STAGING_VM_TAG" != "$EVICTABLE_VM_TAG" ]] ||
     die "production, staging, and evictable tags must be distinct"
 
-  install -d -m 0755 "$LOCK_DIR"
+  # Create only when missing: install -d -m resets an existing directory's
+  # mode, which would tighten the system's 1777 /run/lock to 0755 and keep
+  # www-data services (pveproxy, spiceproxy) from creating their lock files.
+  [[ -d "$LOCK_DIR" ]] || install -d -m 0755 "$LOCK_DIR"
   exec 9>"${LOCK_DIR}/app-ha-guest-role-hook.lock"
   flock -w 180 9 || die "timed out waiting for the guest lifecycle lock"
 
