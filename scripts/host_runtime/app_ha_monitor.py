@@ -67,7 +67,7 @@ import urllib.parse
 import urllib.request
 
 
-AGENT_VERSION = "2.1.0"
+AGENT_VERSION = "2.1.1"
 MIN_PYTHON = (3, 11)
 CONFIG_SCHEMA = 1
 STATE_SCHEMA = 1
