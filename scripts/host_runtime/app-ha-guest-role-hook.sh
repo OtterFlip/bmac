@@ -1012,6 +1012,8 @@ main() {
   # Create only when missing: install -d -m resets an existing directory's
   # mode, which would tighten the system's 1777 /run/lock to 0755 and keep
   # www-data services (pveproxy, spiceproxy) from creating their lock files.
+  # Resetting it that way took mox1's web UI down on 2026-10-30; see
+  # install_proxy_lockfile_dropins in add_proxmox_host.sh.
   [[ -d "$LOCK_DIR" ]] || install -d -m 0755 "$LOCK_DIR"
   exec 9>"${LOCK_DIR}/app-ha-guest-role-hook.lock"
   flock -w 180 9 || die "timed out waiting for the guest lifecycle lock"

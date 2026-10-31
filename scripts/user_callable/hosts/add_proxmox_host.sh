@@ -2227,15 +2227,27 @@ REMOTE
   install_proxy_lockfile_dropins
 }
 
-# pveproxy and spiceproxy drop to www-data and then create their lock files in
-# /run/lock. They fail to start in a restart loop (web UI on 8006 refusing
-# connections) whenever /run/lock is 0755 root:root at service start. Earlier
-# runtime scripts tightened /run/lock that way with install -d -m 0755; this
-# also guards against anything else doing the same. Each drop-in pre-creates the
-# lock file as root before every start, survives package upgrades because apt
-# never touches /etc/systemd/system, and is harmless if the cause goes away.
-# touch keeps an existing lock file's inode. Diagnosed on mox1 2026-10-30; see
-# docs/pveproxy-lockfile-fix.md.
+# pveproxy (web UI, 8006) and spiceproxy (3128) start as root (their units have
+# no User=), drop to www-data, and only then create their lock files in
+# /run/lock (/var/lock links to it). If /run/lock is 0755 root:root while a lock
+# file is missing, they loop on "unable to open lock file
+# '/var/lock/pveproxy.lck' - Permission denied" and the web UI refuses
+# connections. Our runtime scripts once tightened the system's 1777 /run/lock
+# that way with install -d -m 0755, which took mox1's web UI down on 2026-10-30.
+# That cause is fixed and guarded by
+# test_runtime_scripts_never_reset_the_system_lock_directory_mode, but keep
+# these drop-ins anyway: the same failure is reported on the Proxmox forum for
+# PVE 9 hosts, and it stays hidden on a host whose lock files already exist
+# until a reboot empties /run/lock.
+#
+# Each drop-in's ExecStartPre runs as root before every start (boot, manual
+# restart, and pve-manager's postinst restart during upgrades), so the lock
+# file exists with the right owner whatever /run/lock's mode is, and /run/lock
+# itself is never loosened. apt never touches /etc/systemd/system, so the
+# drop-ins survive upgrades that would overwrite edits to the packaged units.
+# touch keeps an existing lock file's inode, so a restarted proxy locks the same
+# file as its predecessor; install would replace it. The drop-ins stay harmless
+# if the cause is fixed upstream.
 install_proxy_lockfile_dropins() {
   remote_script <<'REMOTE'
 set -Eeuo pipefail
@@ -2254,6 +2266,7 @@ done
 if [[ "$changed" == true ]]; then
   systemctl daemon-reload
 fi
+# Also restart a proxy that is down, which recovers one already in the loop.
 if [[ "$changed" == true ]] ||
    ! systemctl is-active --quiet pveproxy.service spiceproxy.service; then
   systemctl restart pveproxy.service spiceproxy.service

@@ -2158,7 +2158,13 @@ resumable:
    and adds configured partitioned mirror vdevs. LUKS mode converts mirror 0,
    verifies the shared passphrase, installs `decrypt_keyctl`, refreshes boot
    metadata, and exports headers. Selected boot drills test each member and
-   the restored final state.
+   the restored final state. Bootstrap also installs systemd drop-ins that
+   create the `www-data` lock files for `pveproxy` and `spiceproxy` before
+   every start. Without them, the web UI fails to start whenever `/run/lock`
+   is `0755` and the lock files are missing (see
+   `install_proxy_lockfile_dropins`). Runtime scripts must create `/run/lock`
+   only if it is missing, because `install -d -m` on an existing directory
+   resets its mode.
 6. **Build the private plane.** It resolves public/private physical NICs by
    MAC, requires 10-Gbps carrier, creates `vmbr-private`, and stops for a
    provider-console/peer `PRIVATE VLAN VERIFIED` gate.
@@ -2194,6 +2200,7 @@ resumable:
     mirror membership and ZFS health in both modes; LUKS mode additionally
     checks encrypted mappers, crypttab/initramfs, and off-host headers. It
     also verifies no swap, boot state, private address, Tailscale, quorum,
+    `pveproxy` and `spiceproxy` listening with their `www-data` lock files,
     the host guard, `guest_network.sh verify`, egress health and transfer
     counter status, an active replica whose recent connections are all
     `protocol=http2` and never `quic`, `tunnel_sync.sh --check`, hooks, and
@@ -2219,6 +2226,8 @@ Important installed host-local paths and units include:
 /etc/app-ha/guest-network.env
 /etc/nftables.d/app-ha-guest-network.nft
 /etc/sysctl.d/91-app-ha-guest-network.conf
+/etc/systemd/system/pveproxy.service.d/lockfile.conf
+/etc/systemd/system/spiceproxy.service.d/lockfile.conf
 /etc/cloudflared/bmac-tunnel.json
 /etc/cloudflared/config.yml
 /var/lib/app-ha/egress-targets.json
